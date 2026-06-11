@@ -1,0 +1,173 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "GPT-OSS-120B"
+subtitle: "TensorRT-LLM recipes on Blackwell, split by traffic shape: high-concurrency short prompts or long-context P/D."
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/openai.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">OpenAI / TensorRT-LLM / GB200</p>
+<h2>TensorRT-LLM recipes on Blackwell, split by traffic shape: high-concurrency short prompts or long-context P/D.</h2>
+</div>
+</div>
+<p>Choose the aggregated WideEP target for short-prompt, high-concurrency traffic, or the disaggregated target for long-context generation with prefill/decode separation. Both run TensorRT-LLM on Blackwell (GB200) hardware.</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/gpt-oss-120b">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Primary target</span>
+<strong>TensorRT-LLM aggregated</strong>
+<p>WideEP aggregated serving on 4x GB200 for short-prompt, high-concurrency throughput.</p>
+<div className="dynamo-recommendation-facts">
+<div><span>Model</span><strong>openai/gpt-oss-120b</strong></div>
+<div><span>Traffic</span><strong>128 ISL / 1000 OSL, 3,600 total concurrency</strong></div>
+<div><span>Technique</span><strong>Aggregated serving; WideEP</strong></div>
+</div>
+</div>
+</div>
+
+## Recipe Targets
+
+<div id="recipe-targets"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr className="recommended">
+<td><strong>TensorRT-LLM aggregated</strong><span>WideEP TP4 on ARM64; short-prompt, long-output, high-concurrency throughput.</span></td>
+<td>TensorRT-LLM</td>
+<td>4x GB200</td>
+<td>128 ISL / 1000 OSL, 3,600 total concurrency</td>
+<td>Aggregated serving; WideEP</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><strong>TensorRT-LLM disaggregated</strong><span>Prefill/decode split (TP1 prefill + TP4 decode) for long-context generation.</span></td>
+<td>TensorRT-LLM</td>
+<td>5x GB200/B200</td>
+<td>8K ISL / 1K OSL, 1,536 total concurrency</td>
+<td>Disaggregated prefill/decode</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Prerequisites
+
+<div className="dynamo-prereq-grid">
+<div><span>Hardware</span><strong>Blackwell GPUs: GB200 (agg requires ARM64), GB200 or B200 (disagg)</strong></div>
+<div><span>Runtime</span><strong>TensorRT-LLM (nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0)</strong></div>
+<div><span>Platform</span><strong>Dynamo Platform installed on Kubernetes</strong></div>
+<div><span>Traffic</span><strong>Agg: 128 ISL / 1000 OSL at 900/GPU; Disagg: 8K ISL / 1K OSL at 256/GPU</strong></div>
+<div><span>Access</span><strong>HuggingFace token with access to the model</strong></div>
+<div><span>Setup assets</span><strong>model-cache/model-cache.yaml and model-download.yaml</strong></div>
+</div>
+
+<Warning>
+Update `storageClassName` in `model-cache/model-cache.yaml` and the container image tag in `deploy.yaml` to match your Dynamo release version before deploying. Also edit namespace, node selectors, and Hugging Face secrets for your cluster.
+</Warning>
+
+## Deployment Instructions
+
+<div id="deploy"></div>
+
+First prepare the namespace, HuggingFace token secret, and model cache (shared by both targets):
+
+```bash
+export NAMESPACE=dynamo-demo
+kubectl create namespace ${NAMESPACE}
+
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token-here" \
+  -n ${NAMESPACE}
+
+# Update storageClassName in model-cache/model-cache.yaml first!
+kubectl apply -f recipes/gpt-oss-120b/model-cache/ -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+```
+
+<h3 id="deploy-tensorrt-llm-aggregated">TensorRT-LLM aggregated</h3>
+
+WideEP aggregated serving for short-prompt, high-concurrency throughput.
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/deploy.yaml -n ${NAMESPACE}
+```
+
+<h3 id="deploy-tensorrt-llm-disaggregated">TensorRT-LLM disaggregated</h3>
+
+Prefill/decode split for long-context generation. Model loading takes roughly 15-30 minutes depending on storage speed:
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml -n ${NAMESPACE}
+kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/part-of=gpt-oss-disagg -w
+```
+
+## Smoke Test
+
+<div id="smoke-test"></div>
+
+Run a small request before starting the benchmark. The frontend service is `gpt-oss-agg-frontend` for the aggregated target and `gpt-oss-disagg-frontend` for the disaggregated target.
+
+```bash
+export NAMESPACE=dynamo-demo
+kubectl port-forward svc/gpt-oss-agg-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai/gpt-oss-120b","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+Each target ships a `perf.yaml` Kubernetes Job that waits for the model to come up, then runs AIPerf with that target's traffic shape and a request count of 10x total concurrency. The core AIPerf invocation it wraps:
+
+```bash
+aiperf profile \
+  --model openai/gpt-oss-120b \
+  --endpoint-type chat --endpoint /v1/chat/completions --streaming \
+  --url http://<frontend>:8000 \
+  --synthetic-input-tokens-mean <isl> --output-tokens-mean <osl> \
+  --extra-inputs ignore_eos:true \
+  --concurrency <total concurrency> --request-count <10 x concurrency>
+```
+
+<h3>TensorRT-LLM aggregated (ISL 128 / OSL 1000, 900 per GPU x 4 GPUs = 3,600 concurrency)</h3>
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/perf.yaml -n ${NAMESPACE}
+kubectl logs -f -l job-name=gpt-oss-120b-bench -n ${NAMESPACE}
+```
+
+<h3>TensorRT-LLM disaggregated (ISL 8192 / OSL 1024, 1,536 concurrency)</h3>
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/perf.yaml -n ${NAMESPACE}
+kubectl logs -f -l job-name=gpt-oss-120b-disagg-bench -n ${NAMESPACE}
+```
+
+## Notes
+
+- This recipe requires ARM64 (GB200) nodes for the aggregated target — it will not run on x86 Hopper/Ampere hardware. The disaggregated target accepts GB200 or B200.
+- Do not read the two targets as an aggregated-vs-disaggregated benchmark; their traffic shapes differ by design.
+- The disaggregated deployment uses 5 GPUs (1x TP1 prefill + 1x TP4 decode), while its `perf.yaml` computes total concurrency from a 6-GPU count (256 x 6 = 1,536); adjust `DEPLOYMENT_GPU_COUNT` if you want strict per-GPU normalization.
+- Disaggregated engine configs differ per role: prefill runs TP1 with `max_batch_size=64` and the overlap scheduler disabled; decode runs TP4 with `max_batch_size=1280` and the overlap scheduler enabled. KV transfer uses the UCX-based cache transceiver (`max_tokens_in_buffer=9216`).
+- The disaggregated target uses `W4A8_MXFP4_MXFP8` quantization via the `OVERRIDE_QUANT_ALGO` environment variable.
+
+## Source
+
+- Source README: [recipes/gpt-oss-120b/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/README.md)
+- Disaggregated README: [recipes/gpt-oss-120b/trtllm/disagg/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/README.md)
+- TensorRT-LLM aggregated: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/perf.yaml)
+- TensorRT-LLM disaggregated: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/perf.yaml)

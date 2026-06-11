@@ -49,6 +49,78 @@ navigation:
       - page: Glossary
         path: reference/glossary.md
 
+  # ==================== Recipes ====================
+  - section: Recipes
+    path: recipes/README.mdx
+    slug: recipes
+    contents:
+      - page: Kimi-K2.6
+        path: recipes/kimi-k2-6.mdx
+        slug: kimi-k2-6
+      - page: Nemotron 3 Ultra
+        path: recipes/nemotron-3-ultra.mdx
+        slug: nemotron-3-ultra
+      - page: Nemotron 3 Super
+        path: recipes/nemotron-3-super.mdx
+        slug: nemotron-3-super
+      - page: Qwen3.6-35B-A3B FP8
+        path: recipes/qwen3-6-35b.mdx
+        slug: qwen3-6-35b
+      - page: GLM-5 NVFP4
+        path: recipes/glm-5-nvfp4.mdx
+        slug: glm-5-nvfp4
+      - page: Kimi-K2.5 NVFP4
+        path: recipes/kimi-k2-5.mdx
+        slug: kimi-k2-5
+      - page: DeepSeek V3.2 NVFP4
+        path: recipes/deepseek-v3-2-nvfp4.mdx
+        slug: deepseek-v3-2-nvfp4
+      - page: Qwen3-VL-30B
+        path: recipes/qwen3-vl-30b.mdx
+        slug: qwen3-vl-30b
+      - page: GPT-OSS-120B
+        path: recipes/gpt-oss-120b.mdx
+        slug: gpt-oss-120b
+      - page: Qwen3-32B
+        path: recipes/qwen3-32b.mdx
+        slug: qwen3-32b
+      - page: Qwen3-235B-A22B FP8
+        path: recipes/qwen3-235b-a22b-fp8.mdx
+        slug: qwen3-235b-a22b-fp8
+      - page: Qwen3-32B FP8
+        path: recipes/qwen3-32b-fp8.mdx
+        slug: qwen3-32b-fp8
+      - page: Llama-3.3-70B FP8
+        path: recipes/llama-3-3-70b.mdx
+        slug: llama-3-3-70b
+
+  # ==================== Feature Benchmarks ====================
+  - section: Feature Benchmarks
+    path: benchmarks/README.mdx
+    slug: benchmarks
+    contents:
+      - page: Qwen3-32B KV Routing A/B
+        path: benchmarks/qwen3-32b-kv-routing.mdx
+        slug: qwen3-32b-kv-routing
+      - page: Kimi-K2.5 Feature Stack
+        path: benchmarks/kimi-k2-5-feature-stack.mdx
+        slug: kimi-k2-5-feature-stack
+      - page: Qwen3.6-35B Feature Stack
+        path: benchmarks/qwen3-6-35b-feature-stack.mdx
+        slug: qwen3-6-35b-feature-stack
+      - page: Qwen3-VL Embedding Cache
+        path: benchmarks/qwen3-vl-embedding-cache.mdx
+        slug: qwen3-vl-embedding-cache
+      - page: DeepSeek V3.2 WideEP Routing
+        path: benchmarks/deepseek-v3-2-wideep-routing.mdx
+        slug: deepseek-v3-2-wideep-routing
+      - page: Llama-3.3-70B Topology
+        path: benchmarks/llama-3-70b-topology.mdx
+        slug: llama-3-70b-topology
+      - page: KV Router A/B Testing
+        path: benchmarks/kv-router-ab-testing.md
+        slug: kv-router-ab-testing
+
   # ==================== Digest ====================
   - section: Digest
     path: digest/index.mdx
@@ -524,9 +596,6 @@ navigation:
         contents:
           - page: Speculative Decoding with vLLM
             path: features/speculative-decoding/speculative-decoding-vllm.md
-      # -- Benchmarks --
-      - page: KV Router A/B Testing
-        path: benchmarks/kv-router-ab-testing.md
       # -- Templates --
       - section: Templates
         path: templates/README.md

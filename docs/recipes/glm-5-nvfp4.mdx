@@ -1,0 +1,216 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "GLM-5 NVFP4"
+subtitle: "SGLang disaggregated long-output recipe with EAGLE speculative decoding on GB200."
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/zai-org.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">Z.AI / NVIDIA NVFP4 / SGLang / 20x GB200</p>
+<h2>SGLang disaggregated long-output recipe with EAGLE speculative decoding on GB200.</h2>
+</div>
+</div>
+<p>Disaggregated prefill/decode serving of nvidia/GLM-5-NVFP4 across 5 nodes of 4x GB200 (TP4 prefill, TP16/DP16/EP16 decode), with a checked-in AIPerf run and published result numbers. An AWS EFA variant carries inter-node KV transfer over EFA RDMA via NIXL LIBFABRIC.</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5-nvfp4">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Primary target</span>
+<strong>SGLang disaggregated prefill/decode</strong>
+<p>The benchmark-backed GLM-5 path; it stresses long output with a large decode rank group.</p>
+<div className="dynamo-recommendation-facts">
+<div><span>Model</span><strong>nvidia/GLM-5-NVFP4</strong></div>
+<div><span>Traffic</span><strong>1K ISL / 8K OSL, 512 concurrency</strong></div>
+<div><span>Technique</span><strong>Disaggregated prefill/decode; EAGLE MTP speculative decoding</strong></div>
+</div>
+</div>
+</div>
+
+## Recipe Targets
+
+<div id="recipe-targets"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr className="recommended">
+<td><strong>SGLang disaggregated prefill/decode</strong><span>5 nodes of 4x GB200: 1 prefill node (TP4) + 4 decode nodes (TP16/DP16/EP16). Uses the published runtime image.</span></td>
+<td>SGLang</td>
+<td>20x GB200 (5x 4-GPU nodes)</td>
+<td>1K ISL / 8K OSL, 512 concurrency</td>
+<td>Disaggregated prefill/decode; EAGLE MTP speculative decoding; FP8 KV cache</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><strong>SGLang disagg over AWS EFA</strong><span>Same topology on 5x p6e-gb200.36xlarge; KV transfer over EFA RDMA via NIXL LIBFABRIC. Requires building a custom container image from Dockerfile.efa before deploying.</span></td>
+<td>SGLang</td>
+<td>20x GB200 (5x p6e-gb200.36xlarge)</td>
+<td>1K ISL / 8K OSL, 512 concurrency</td>
+<td>Disaggregated prefill/decode; EAGLE MTP speculative decoding; EFA RDMA KV transfer</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml">perf.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa">Dockerfile.efa</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Prerequisites
+
+<div className="dynamo-prereq-grid">
+<div><span>Hardware</span><strong>5x 4xGB200 nodes in an NVL36 or NVL72 domain</strong></div>
+<div><span>Runtime</span><strong>nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13</strong></div>
+<div><span>Platform</span><strong>Dynamo Operator plus DRA / ComputeDomain support for MNNVL placement</strong></div>
+<div><span>Storage</span><strong>Shared RWX PVC for model weights and FlashInfer JIT artifacts</strong></div>
+<div><span>Traffic</span><strong>ISL=1000 / OSL=8192, 512 concurrency (32 per decode GPU)</strong></div>
+<div><span>Request volume</span><strong>1,536 requests (3x concurrency)</strong></div>
+</div>
+
+<Warning>
+The manifests use standard NVIDIA GPU Feature Discovery labels to select GB200 nodes and include common GPU/ARM tolerations. If your cluster uses different labels, taints, or storage classes, update `nodeSelector`, `tolerations`, and `storageClassName` before deploying. The EFA variant additionally requires AWS EFA driver 3.0.0g or newer and a custom-built container image.
+</Warning>
+
+## Deployment Instructions
+
+<div id="deploy"></div>
+
+First create the PVC, HuggingFace token secret, and download the model weights (shared by both targets):
+
+```bash
+export NAMESPACE=<your-namespace>
+kubectl create namespace ${NAMESPACE}
+
+# Edit model-cache.yaml first and set storageClassName to a RWX storage class.
+kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-cache.yaml -n ${NAMESPACE}
+
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=<your-hf-token> \
+  -n ${NAMESPACE}
+
+kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=complete job/model-download -n ${NAMESPACE} --timeout=3600s
+```
+
+If your cluster already provides a shared RWX cache PVC, skip `model-cache.yaml` and update `claimName: model-cache` in the download, deploy, and perf manifests, keeping the mount path as `/model-store`.
+
+<h3 id="deploy-sglang-disaggregated-prefill-decode">SGLang disaggregated prefill/decode</h3>
+
+Edit `sglang/disagg/deploy.yaml` and replace the `<your-namespace>` placeholder, then:
+
+```bash
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=glm5-sglang \
+  -n ${NAMESPACE} --timeout=7200s
+```
+
+First cold starts can take up to about an hour while the runtime loads weights and JIT-compiles FlashInfer/DeepGEMM kernels:
+
+```bash
+kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/part-of=glm5-sglang -w
+```
+
+<h3 id="deploy-sglang-disagg-efa">SGLang disagg over AWS EFA</h3>
+
+This variant requires building a custom container image first — it bakes a patched libfabric ([ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/pull/12019)) into the runtime so `fi_mr_reg` on CUDA VRAM succeeds on GB200's 64K-page arm64 kernel:
+
+```bash
+docker buildx build \
+  --platform linux/arm64 \
+  --build-arg ARCH=arm64 \
+  -t <your-registry>/sglang-dynamo-glm5-efa:latest \
+  -f recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa \
+  --push .
+```
+
+Then edit `sglang/disagg/efa/deploy.yaml` to replace `<your-namespace>` and the image placeholder, and:
+
+```bash
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
+kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/part-of=glm5-sglang-efa -w
+```
+
+After startup, verify the LIBFABRIC backend is actually carrying KV traffic (not silent TCP fallback) — the [EFA README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/README.md) includes three checks (NIXL backend log line, executable `libplugin_LIBFABRIC.so` mapping, and `nixl_num_failed_transfers_total` staying at 0).
+
+## Smoke Test
+
+<div id="smoke-test"></div>
+
+Run a small request before starting the benchmark. The frontend service is `glm5-sglang-frontend` for the standard target and `glm5-sglang-efa-frontend` for the EFA variant.
+
+```bash
+kubectl port-forward svc/glm5-sglang-frontend 8000:8000 -n ${NAMESPACE} &
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/GLM-5-NVFP4","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":128}'
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+Both targets ship a `perf.yaml` Kubernetes Job with the same workload shape: ISL=1000, OSL=8192, concurrency=512 (32 per decode GPU), 1,536 requests. The core AIPerf invocation it wraps:
+
+```bash
+aiperf profile \
+  --model nvidia/GLM-5-NVFP4 --tokenizer nvidia/GLM-5-NVFP4 \
+  --endpoint-type chat --endpoint /v1/chat/completions --streaming \
+  --url http://glm5-sglang-frontend:8000 \
+  --synthetic-input-tokens-mean 1000 --output-tokens-mean 8192 \
+  --extra-inputs max_tokens:8192 --extra-inputs min_tokens:8192 --extra-inputs ignore_eos:true \
+  --concurrency 512 --request-count 1536
+```
+
+<h3>SGLang disaggregated prefill/decode</h3>
+
+Edit `sglang/disagg/perf.yaml` to replace the namespace placeholder, then:
+
+```bash
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/perf.yaml
+kubectl logs -f -l job-name=glm5-disagg-bench -n ${NAMESPACE}
+```
+
+<h3>SGLang disagg over AWS EFA</h3>
+
+```bash
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml
+kubectl logs -f -l job-name=glm5-disagg-efa-bench -n ${NAMESPACE}
+```
+
+## Expected Performance
+
+Reference AIPerf run for the standard target (ISL=1k, OSL=8k, concurrency=512): 1,536 requests, 0 errors, 747.87s benchmark duration. This is a concurrency-burst benchmark, so TTFT includes queueing under 512 concurrent users.
+
+| Metric | Value |
+| --- | ---: |
+| Output throughput | 16,824 tokens/sec |
+| Request throughput | 2.05 requests/sec |
+| TTFT p50 | 15,423 ms |
+| ITL avg | 23.31 ms/token |
+| Tokens/user/sec avg | 43.39 |
+| Request errors | 0 |
+
+The EFA variant achieves parity at the same workload (measured on 5x p6e-gb200.36xlarge, EFA driver 3.0.0g): output throughput 19,131 tok/s, TTFT p50 621 ms, ITL avg 24.5 ms/token, 41.0 output tokens/user/sec. At long context (ISL=20k, OSL=2k, concurrency=64), the LIBFABRIC backend delivers 39% higher throughput and 56% lower TTFT p50 than the UCX default — full tables in the [EFA README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/README.md).
+
+## Notes
+
+- **EAGLE MTP speculative decoding** (~85-95% accept rate) is enabled by two env vars: `SGLANG_ENABLE_SPEC_V2=1` (EAGLEWorkerV2 with overlap scheduler) and `SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE=1` (quantizes the BF16 MTP layer to FP8 at load time, matching the base model's compute path).
+- **FP8 KV cache**: uses `--kv-cache-dtype fp8_e4m3` (the NSA backend auto-selects this on SM100/GB200), saving roughly 50% KV memory vs BF16.
+- **FlashInfer JIT cache**: the runtime image has no prebuilt `flashinfer-jit-cache` wheel, so the recipe sets `FLASHINFER_WORKSPACE_BASE=/model-store` to persist first-run JIT artifacts on the shared PVC for later pod starts.
+- Worker containers run as root because FlashInfer's bundled cubin package creates TRTLLM MoE symlinks inside its installed package directory during startup. The benchmark pod runs as a non-root user and pins Transformers v5 because `nvidia/GLM-5-NVFP4` declares `tokenizer_class=TokenizersBackend`.
+- The standard target sets `UCX_TLS=cuda_copy,cuda_ipc,tcp` for NIXL/UCX KV transfer; the EFA variant instead sets `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` and runs containers privileged so `fi_mr_reg` can pin VRAM for RDMA. Without the env var, SGLang silently falls back to TCP on kernel 6.8+.
+- The EFA variant is AWS-specific infrastructure (p6e-gb200.36xlarge with 4 EFA NICs per node) and requires the custom image build above — there is no prebuilt EFA image.
+- **Recovery caveat**: the decode side is one TP16 rank group spread across four nodes. Treat single decode-pod replacement as disruptive and validate full-group recovery before relying on individual decode pod restarts; in validation, deleting one decode worker left the graph NotReady through repeated rank-group reinitialization attempts.
+
+## Source
+
+- Source README: [recipes/glm-5-nvfp4/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/README.md)
+- SGLang disaggregated prefill/decode: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/perf.yaml)
+- EFA variant: [README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/README.md), [Dockerfile.efa](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa), [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml), and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml)

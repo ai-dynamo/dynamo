@@ -1,0 +1,183 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3.6-35B-A3B FP8"
+subtitle: "Dynamo frontend decoding plus embedding cache recipe for multimodal sliding-window reuse."
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">Qwen / Dynamo + vLLM / 1x H100 or GB200</p>
+<h2>Dynamo frontend decoding plus embedding cache recipe for multimodal sliding-window reuse.</h2>
+</div>
+</div>
+<p>Use the Dynamo frontend-decoding + embedding-cache target (dynamo-fd-ec) for repeated-image multimodal traffic. The vanilla vLLM serve and frontend-decoding-only arms are comparison configurations that live on the related Feature Benchmark page.</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Primary target</span>
+<strong>Dynamo FD + embedding cache (dynamo-fd-ec)</strong>
+<p>Frontend decoding plus an 8 GiB multimodal embedding cache: ~30% higher RPS than vanilla vLLM serve on both H100 and GB200.</p>
+<div className="dynamo-recommendation-facts">
+<div><span>Model</span><strong>Qwen/Qwen3.6-35B-A3B-FP8</strong></div>
+<div><span>Traffic</span><strong>30 users x 8 turns, 5-image sliding window (240 requests)</strong></div>
+<div><span>Technique</span><strong>Frontend decoding; Embedding cache (8 GiB)</strong></div>
+</div>
+</div>
+</div>
+
+## Recipe Targets
+
+<div id="recipe-targets"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr className="recommended">
+<td><strong>Dynamo FD + embedding cache</strong><span>Frontend decoding plus 8 GiB multimodal embedding cache.</span></td>
+<td>Dynamo + vLLM</td>
+<td>1x H100 or GB200</td>
+<td>30 users x 8 turns, 5-image sliding window</td>
+<td>Frontend decoding; Embedding cache</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Prerequisites
+
+<div className="dynamo-prereq-grid">
+<div><span>Hardware</span><strong>1x H100 or 1x GB200, selected via hw/h100.env or hw/gb200.env</strong></div>
+<div><span>Runtime</span><strong>vllm-runtime:1.2.0 (multi-arch; amd64 + arm64)</strong></div>
+<div><span>Dataset</span><strong>Generated sliding-window JSONL: 30 users x 8 turns, window 5, 2400x1080 base64 images</strong></div>
+<div><span>Traffic</span><strong>240 requests; 8K text tokens; max output 1024; concurrency 30</strong></div>
+<div><span>Storage</span><strong>shared-model-cache PVC (RWX) in the target namespace</strong></div>
+<div><span>Tooling</span><strong>envsubst on the driving machine; AIPerf pinned to a main SHA with PR 824 session ordering</strong></div>
+</div>
+
+This recipe is template-driven, and two setup steps are mandatory before first use:
+
+1. **Fill in your hostname.** Edit `hw/h100.env` or `hw/gb200.env` and replace the `<FILL-IN-...-HOSTNAME>` placeholder with a real `kubernetes.io/hostname` from your cluster. All configs pin to one node so runs are comparable:
+
+   ```bash
+   # H100
+   kubectl get nodes -L nvidia.com/gpu.product | awk '/H100/'
+   # GB200
+   kubectl get nodes -L kubernetes.io/arch -L nvidia.com/gpu.product | awk '/arm64/ && /GB200/'
+   ```
+
+2. **Install envsubst.** The deploy and perf YAMLs are templates resolved at apply time (`apt install gettext-base` on Ubuntu, `brew install gettext` on macOS). Applying the raw YAML files with `kubectl apply` directly will not work.
+
+<Warning>
+The `shared-model-cache` PVC (RWX, e.g. FSx Lustre) must exist in the namespace before running; create it out-of-band if your cluster does not pre-provision it. No Hugging Face token is needed — `Qwen/Qwen3.6-35B-A3B-FP8` is public. GB200 nodes additionally need the `kubernetes.io/arch=arm64:NoSchedule` toleration, which `hw/gb200.env` already carries.
+</Warning>
+
+## Deployment Instructions
+
+<div id="deploy"></div>
+
+<h3 id="deploy-dynamo-fd-embedding-cache">Dynamo FD + embedding cache</h3>
+
+`run-benchmark.sh` sources `hw/${HW}.env`, resolves the templates via `envsubst`, and runs prep (PVC check, model download, dataset generation), deploy, bench, retrieve, and clean:
+
+```bash
+cd recipes/qwen3.6-35b
+export NAMESPACE=your-namespace
+export HW=gb200   # or h100
+
+# Full pipeline for the recommended target
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec
+
+# Or step-by-step (pvc/download/dataset are config-agnostic prep)
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec --step download
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec --step dataset
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec --step deploy
+```
+
+The deploy step applies `deploy/dynamo-fd-ec.yaml` — a DynamoGraphDeployment named `qwen36-dynamo-fd-ec` running `dynamo.vllm` with `--frontend-decoding`, `--multimodal-embedding-cache-capacity-gb 8`, and `--mm-processor-cache-gb 30` on TP=1.
+
+## Smoke Test
+
+<div id="smoke-test"></div>
+
+The Dynamo operator creates the `qwen36-dynamo-fd-ec-frontend` service for this deployment.
+
+```bash
+export NAMESPACE=your-namespace
+kubectl port-forward svc/qwen36-dynamo-fd-ec-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3.6-35B-A3B-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+<h3>Dynamo FD + embedding cache</h3>
+
+The shared `perf.yaml` at the recipe root wraps this AIPerf run. It is one template for all configs — `run-benchmark.sh` exports `${BENCH_POD}`, `${BENCH_FRONTEND}`, and `${BENCH_RUN_LABEL}` per config and resolves it with `envsubst`, so launch it through the script rather than applying the file directly:
+
+```bash
+aiperf profile --model Qwen/Qwen3.6-35B-A3B-FP8 --input-file 30u_8t_5w_8000word_base64.jsonl --custom-dataset-type single_turn --url http://qwen36-dynamo-fd-ec-frontend:8000 --streaming --request-count 240 --concurrency 30 --request-rate-mode constant --warmup-request-count 2 --extra-inputs max_tokens:1024 --extra-inputs min_tokens:1024 --extra-inputs ignore_eos:true
+```
+
+```bash
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec --step bench
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec --step retrieve
+```
+
+The retrieve step copies `profile_export_aiperf.json` to `~/workspace/dynamo-tmp/logs/<MM-DD>/qwen36-fp8-${HW}/dynamo-fd-ec/`; throughput, TTFT, and ITL read directly from that file. `run-all-benchmarks.sh` runs all three comparison configs sequentially if you want to reproduce the full Feature Benchmark.
+
+## Expected Performance
+
+Measured with the shared sliding-window workload (concurrency 30, `max_tokens=1024`); deltas are versus the vanilla `vllm serve` baseline on the same pinned node:
+
+**H100**
+
+| Metric | dynamo-fd-ec | Delta vs vllm-serve |
+| --- | ---: | ---: |
+| RPS | 0.933 | +29.8% |
+| TTFT avg | 6,100.92 ms | -66.4% |
+| TTFT p50 | 2,369.01 ms | -87.4% |
+| ITL | 24.56 ms | +15.4% |
+
+**GB200**
+
+| Metric | dynamo-fd-ec | Delta vs vllm-serve |
+| --- | ---: | ---: |
+| RPS | 1.236 | +31.5% |
+| TTFT avg | 8,478.29 ms | -43.3% |
+| TTFT p50 | 8,323.53 ms | -45.9% |
+| ITL | 15.22 ms | -1.0% |
+
+ITL stays roughly flat because the embedding cache shortens the prefill path (skipping the vision encoder for repeated images), not decode. The full three-way table including the frontend-decoding-only arm is on the related Feature Benchmark page.
+
+## Related Feature Benchmarks
+
+- [Qwen3.6 frontend decoding and embedding cache feature stack](../benchmarks/qwen3-6-35b-feature-stack.mdx)
+
+## Notes
+
+- The source intentionally drives everything through `run-benchmark.sh` because one shared `perf.yaml` is parameterized by benchmark pod, frontend service, run label, and hardware env file.
+- AIPerf installs from source pinned to a `main` SHA that includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824); the dataset writes `session_id=user_<N>` per row, and PR 824 makes `single_turn` mode honor that ordering so prefix-cache hits across a user's 8 turns are real. The pin lives in `perf.yaml` (`AIPERF_GIT_REF`).
+- Frontend decoding does CPU-side image decode and base64 parsing, so the Frontend gets more CPU (4-8 cores) than a typical frontend pod.
+- The related Feature Benchmark includes the vanilla `vllm serve` (`vllm-serve`) and frontend-decoding-only (`dynamo-fd`) arms used to isolate each technique; they are not recipe targets.
+- All resources carry a `qwen36-` prefix and `app.kubernetes.io/name: qwen3.6-35b` labels for easy discovery in shared namespaces.
+
+## Source
+
+- Source README: [recipes/qwen3.6-35b/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/README.md)
+- Dynamo FD + embedding cache: [deploy/dynamo-fd-ec.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml) and shared [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/perf.yaml)
+- Drivers and setup: [run-benchmark.sh](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/run-benchmark.sh), [run-all-benchmarks.sh](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/run-all-benchmarks.sh), [data-gen-job.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/data-gen-job.yaml), [hw/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b/hw), and [model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/model-cache/model-download.yaml)

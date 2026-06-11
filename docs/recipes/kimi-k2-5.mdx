@@ -1,0 +1,167 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Kimi-K2.5 NVFP4"
+subtitle: "TensorRT-LLM recipe for long-context agentic coding with KV routing, Eagle3, and KV offload."
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">Moonshot / NVIDIA / TRT-LLM / 24x GB200</p>
+<h2>TensorRT-LLM recipe for long-context agentic coding with KV routing, Eagle3, and KV offload.</h2>
+</div>
+</div>
+<p>Use the disaggregated Eagle + KV-router + KV-offload target for KV-reuse-heavy agentic coding traffic. The related feature benchmark shows the full feature-stack comparison that selected this target.</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Primary target</span>
+<strong>Disagg + Eagle + KV router + offload</strong>
+<p>Best benchmarked point for throughput and interactivity on KV-reuse-heavy traffic.</p>
+<div className="dynamo-recommendation-facts">
+<div><span>Model</span><strong>nvidia/Kimi-K2.5-NVFP4</strong></div>
+<div><span>Traffic</span><strong>Agentic coding trace, 1 hour replay</strong></div>
+<div><span>Technique</span><strong>Disaggregated prefill/decode; KV-aware routing; Eagle speculative decoding; KV cache offload</strong></div>
+</div>
+</div>
+</div>
+
+## Recipe Targets
+
+<div id="recipe-targets"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr className="recommended">
+<td><strong>Disagg + Eagle + KV router + offload</strong><span>Best benchmarked point for throughput and interactivity on KV-reuse-heavy traffic.</span></td>
+<td>TRT-LLM</td>
+<td>24x GB200</td>
+<td>Agentic coding trace, 1 hour replay</td>
+<td>Disaggregated prefill/decode; KV-aware routing; Eagle speculative decoding; KV cache offload</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Prerequisites
+
+<div className="dynamo-prereq-grid">
+<div><span>Hardware</span><strong>6x GB200 nodes / 24 GPUs with MNNVL</strong></div>
+<div><span>Runtime</span><strong>TensorRT-LLM Dynamo runtime</strong></div>
+<div><span>Dataset</span><strong>AIPerf agentic coding trace</strong></div>
+<div><span>Traffic</span><strong>1-hour Mooncake-format replay</strong></div>
+<div><span>Goodput target</span><strong>TTFT 5s / ITL 10ms</strong></div>
+<div><span>Model assets</span><strong>nvidia/Kimi-K2.5-NVFP4 plus nvidia/Kimi-K2.5-Thinking-Eagle3 head</strong></div>
+</div>
+
+A HuggingFace token with access to `nvidia/Kimi-K2.5-NVFP4` and `nvidia/Kimi-K2.5-Thinking-Eagle3` is required (`kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}`), plus a Dynamo TRT-LLM runtime image (v1.1.1 or later) that supports Kimi-K2.5 + Eagle3.
+
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests. The checked-in manifests intentionally ship with a non-resolvable TensorRT-LLM runtime image tag — set the `image:` fields in `deploy.yaml` to your runtime image before applying.
+</Warning>
+
+## Deployment Instructions
+
+<div id="deploy"></div>
+
+<h3 id="deploy-disagg-eagle-kv-router-offload">Disagg + Eagle + KV router + offload</h3>
+
+Best benchmarked point for throughput and interactivity on KV-reuse-heavy traffic.
+
+```bash
+export NAMESPACE=your-namespace
+
+# 1. Storage — edit storageClassName in model-cache.yaml first (kubectl get storageclass).
+kubectl apply -f recipes/kimi-k2.5/model-cache/model-cache.yaml -n ${NAMESPACE}
+
+# 2. ComputeDomain — required so the DRA scheduler can co-locate worker pods across MNNVL-connected nodes.
+kubectl apply -f recipes/kimi-k2.5/model-cache/compute-domain.yaml -n ${NAMESPACE}
+
+# 3. Download model + Eagle3 head.
+kubectl apply -f recipes/kimi-k2.5/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+
+# 4. Deploy (sized for the full 24 GPUs).
+kubectl apply -f recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=kimi-k25-disagg-kv-eagle \
+  -n ${NAMESPACE} --timeout=1800s
+```
+
+
+## Smoke Test
+
+<div id="smoke-test"></div>
+
+Run a small request before starting the benchmark. Replace the service name if your deployment exposes a different frontend.
+
+```bash
+export NAMESPACE=your-namespace
+kubectl port-forward svc/kimi-k25-disagg-kv-eagle-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/Kimi-K2.5-NVFP4","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+<h3>Disagg + Eagle + KV router + offload</h3>
+
+The checked-in `perf.yaml` wraps this AIPerf run. Use the manifest for the Kubernetes job, and keep this command visible so the traffic shape is understandable.
+
+```bash
+aiperf profile -m nvidia/Kimi-K2.5-NVFP4 --tokenizer nvidia/Kimi-K2.5-NVFP4 --tokenizer-trust-remote-code \
+  --input-file /model-cache/traces/agent_trace_data/dataset.jsonl --custom-dataset-type mooncake_trace \
+  --url http://kimi-k25-disagg-kv-eagle-frontend:8000 --streaming --extra-inputs ignore_eos:true \
+  --concurrency 32 --benchmark-duration 3600 --goodput "time_to_first_token:5000 inter_token_latency:10"
+```
+
+The trace is a Mooncake-style agentic coding workload (~200K-token context window, multi-turn sessions with a layered prefix-cache model); it can be generated by following the [dataset instructions in the AIPerf repository](https://github.com/ai-dynamo/aiperf/blob/1ecc2eac988eedc0e3a79b4c2d1063bfc295a014/src/aiperf/dataset/agentic_code_gen/datasets/1k_sessions_200k_ctx/manifest.json). Copy it onto the PVC before applying the benchmark Job:
+
+```bash
+# Use any pod that mounts the model-cache PVC at /model-cache as a helper.
+kubectl exec -n ${NAMESPACE} <helper-pod> -- mkdir -p /model-cache/traces/agent_trace_data
+kubectl cp <local_trace.jsonl> ${NAMESPACE}/<helper-pod>:/model-cache/traces/agent_trace_data/dataset.jsonl
+
+kubectl apply -f recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml -n ${NAMESPACE}
+```
+
+
+## Expected Performance
+
+| Recipe | tok/s/user avg | tok/s/GPU |
+| --- | ---: | ---: |
+| Disagg + Eagle + KV routing + offload | ~130 | ~5,400 |
+
+The feature benchmark page keeps the full ladder of comparison arms that led to this recipe.
+
+## Related Feature Benchmarks
+
+- [Kimi-K2.5 feature-stack benchmark](../benchmarks/kimi-k2-5-feature-stack.mdx)
+
+
+## Notes
+
+- An experimental TokenSpeed-based aggregated variant exists under [recipes/kimi-k2.5/tokenspeed/agg/nvidia/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/tokenspeed/agg/nvidia). It requires a local image build (no public Dynamo+TokenSpeed image yet), uses raw Kubernetes primitives instead of a DynamoGraphDeployment, and is text-only — it is not a recipe target.
+- The aggregated TRT-LLM configurations (agg + Eagle + KV router, agg + Eagle + round-robin, agg + round-robin) are benchmark comparison arms, kept on the feature benchmark page. Run one configuration at a time — each is sized for the full 24-GPU cluster.
+- The deploy manifest does not pin a TensorRT-LLM runtime image — set the `image:` fields to a Dynamo TRT-LLM runtime (v1.1.1 or later) before applying.
+
+## Source
+
+- Source README: [recipes/kimi-k2.5/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/README.md)
+- Disagg + Eagle + KV router + offload: [recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml) and [recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml)
+- Setup assets: [recipes/kimi-k2.5/model-cache/model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/model-cache/model-cache.yaml), [recipes/kimi-k2.5/model-cache/compute-domain.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/model-cache/compute-domain.yaml), and [recipes/kimi-k2.5/model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/model-cache/model-download.yaml)

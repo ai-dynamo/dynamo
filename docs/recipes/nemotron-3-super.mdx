@@ -1,0 +1,219 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Nemotron-3-Super"
+subtitle: "Aggregated vLLM serving for NVIDIA's 120B hybrid Mamba/Attention/MoE with MTP speculative decoding — NVFP4 on B200, FP8 on H200."
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">NVIDIA / vLLM / 8x B200 · 8x H200</p>
+<h2>Aggregated vLLM serving for NVIDIA's 120B hybrid Mamba/Attention/MoE with MTP speculative decoding — NVFP4 on B200, FP8 on H200.</h2>
+</div>
+</div>
+<p>Four aggregated targets cover two GPU SKUs and two traffic shapes: B200 serves the NVFP4 checkpoint (<code>nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4</code>) and H200 serves the FP8 checkpoint (<code>nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8</code>), each tuned separately for chat and agentic workloads with MTP speculative decoding (DL=3) and KV-aware routing.</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-targets">Recipe targets</a>
+<a href="#deploy">Deploy</a>
+<a href="#smoke-test">Smoke test</a>
+<a href="#benchmark">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-super">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Primary target</span>
+<strong>B200 chat</strong>
+<p>NVFP4 + FP8 KV on 2x TP4 B200 workers with MTP spec dec and DeepEP high-throughput all-to-all.</p>
+<div className="dynamo-recommendation-facts">
+<div><span>Model</span><strong>nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4</strong></div>
+<div><span>Traffic</span><strong>8K/1K chat Mooncake trace replay</strong></div>
+<div><span>Technique</span><strong>Aggregated TP4 + EP; MTP (DL=3); KV-aware routing</strong></div>
+</div>
+</div>
+</div>
+
+## Recipe Targets
+
+<div id="recipe-targets"></div>
+
+Every deployment runs two 4-GPU worker replicas (8 GPUs total) behind a KV-aware router. All targets share one AIPerf trace-replay Job, [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/perf/perf.yaml) — retarget it per variant by editing its env block.
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table dynamo-recipe-target-table">
+<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
+<tbody><tr className="recommended">
+<td><strong>B200 chat</strong><span>NVFP4 + FP8 KV; DeepEP high-throughput all-to-all. Recommended B200 target for chat traffic.</span></td>
+<td>vLLM 0.21.0</td>
+<td>8x B200 (2x TP4 workers)</td>
+<td>8K/1K chat Mooncake trace</td>
+<td>Aggregated TP4 + EP; MTP (DL=3); KV-aware routing</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/vllm/agg-b200-chat/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/perf/perf.yaml">perf.yaml</a></td>
+</tr><tr className="recommended">
+<td><strong>B200 agentic</strong><span>NVFP4 + FP8 KV; DeepEP low-latency all-to-all. Recommended B200 target for long-input agentic traffic.</span></td>
+<td>vLLM 0.21.0</td>
+<td>8x B200 (2x TP4 workers)</td>
+<td>64K/400 agentic Mooncake trace</td>
+<td>Aggregated TP4 + EP; MTP (DL=3); KV-aware routing</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/vllm/agg-b200-agentic/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/perf/perf.yaml">perf.yaml</a></td>
+</tr><tr className="recommended">
+<td><strong>H200 chat</strong><span>FP8 + FP8 KV; FlashInfer NVLink one-sided all-to-all. Recommended H200 target for chat traffic.</span></td>
+<td>vLLM 0.21.0</td>
+<td>8x H200 (2x TP4 workers)</td>
+<td>8K/1K chat Mooncake trace</td>
+<td>Aggregated TP4 + EP; MTP (DL=3); KV-aware routing</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/vllm/agg-h200-chat/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/perf/perf.yaml">perf.yaml</a></td>
+</tr><tr className="recommended">
+<td><strong>H200 agentic</strong><span>FP8 + FP8 KV; DeepEP high-throughput all-to-all. Recommended H200 target for long-input agentic traffic.</span></td>
+<td>vLLM 0.21.0</td>
+<td>8x H200 (2x TP4 workers)</td>
+<td>64K/400 agentic Mooncake trace</td>
+<td>Aggregated TP4 + EP; MTP (DL=3); KV-aware routing</td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/vllm/agg-h200-agentic/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/perf/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Prerequisites
+
+<div className="dynamo-prereq-grid">
+<div><span>Hardware</span><strong>8x B200 or 8x H200 (two 4-GPU worker replicas)</strong></div>
+<div><span>Runtime</span><strong>nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-super-dev.1 (vLLM 0.21.0)</strong></div>
+<div><span>Dataset</span><strong>Bundled Mooncake-format JSONL traces (15%, 30%, full)</strong></div>
+<div><span>Traffic</span><strong>Chat 8K/1K and agentic 64K/400 trace replays</strong></div>
+<div><span>Scheduler</span><strong>Namespace labeled kai.scheduler/enabled=true</strong></div>
+<div><span>Setup assets</span><strong>model-cache/model-cache.yaml, model-download.yaml, model-download-fp8.yaml</strong></div>
+</div>
+
+You need the Dynamo Platform installed on the target cluster (DGD CRDs registered with `nvidia.com/v1beta1` served) and a Hugging Face token secret named `hf-token-secret` with access to the NVFP4 (B200) and/or FP8 (H200) checkpoints.
+
+<Warning>
+Label the namespace for KAI before deploying — without `kai.scheduler/enabled=true`, pods sit `SchedulingGated` indefinitely because KAI's `pod-grouper` filters by namespace label. Also edit storage class, image tags, and other cluster-specific settings before applying these manifests.
+</Warning>
+
+## Deployment Instructions
+
+<div id="deploy"></div>
+
+Create the namespace with the KAI label, the model-cache PVC, and download the checkpoint for your SKU:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl label namespace ${NAMESPACE} kai.scheduler/enabled=true
+
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  -n ${NAMESPACE}
+
+# Edit storageClassName in model-cache.yaml first (kubectl get storageclass)
+kubectl apply -f recipes/nemotron-3-super/model-cache/model-cache.yaml -n ${NAMESPACE}
+
+# B200 — NVFP4 checkpoint (~80 GB)
+kubectl apply -f recipes/nemotron-3-super/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=1800s
+
+# H200 — FP8 checkpoint (~120 GB)
+kubectl apply -f recipes/nemotron-3-super/model-cache/model-download-fp8.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download-fp8 -n ${NAMESPACE} --timeout=3600s
+```
+
+Downloading both checkpoints lands ~200 GB on the PVC — the default size in `model-cache.yaml` — so bump `storage:` before downloading both.
+
+### B200 and H200 × chat/agentic
+
+Pick the SKU and use-case variant and apply. The DGD is named `nemotron-3-super-<sku>-<usecase>`:
+
+```bash
+SKU=b200       # or h200
+USECASE=chat   # or agentic
+
+kubectl apply -f recipes/nemotron-3-super/vllm/agg-${SKU}-${USECASE}/deploy.yaml -n ${NAMESPACE}
+kubectl get dgd nemotron-3-super-${SKU}-${USECASE} -n ${NAMESPACE} -w
+```
+
+First-time boot per worker takes about 6–9 minutes (image pull + vLLM engine init + Inductor + CUDA graph capture up to size 512).
+
+## Smoke Test
+
+<div id="smoke-test"></div>
+
+Each DGD exposes a frontend service named `nemotron-3-super-<sku>-<usecase>-frontend`. B200 serves the NVFP4 model id; H200 serves the FP8 model id:
+
+```bash
+kubectl port-forward svc/nemotron-3-super-${SKU}-${USECASE}-frontend 8000:8000 -n ${NAMESPACE}
+
+MODEL_ID=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4   # or -FP8 for H200
+
+curl http://localhost:8000/v1/models
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"${MODEL_ID}\",
+       \"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],
+       \"max_tokens\":64,
+       \"chat_template_kwargs\":{\"enable_thinking\":false}}"
+```
+
+## Benchmark Instructions
+
+<div id="benchmark"></div>
+
+A single AIPerf trace-replay Job, `perf/perf.yaml`, covers all four targets. Edit `ENDPOINT`, `TRACE_FILE`, `TARGET_MODEL`, and `CONCURRENCY` in the Job env block per variant (`TARGET_MODEL` is NVFP4 for B200, FP8 for H200). The Job runs this AIPerf Mooncake trace replay:
+
+```bash
+aiperf profile \
+  -m nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+  --tokenizer nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+  --tokenizer-trust-remote-code \
+  --input-file /model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --prompt-input-tokens-block-size 512 \
+  --url http://nemotron-3-super-b200-chat-frontend:8000 \
+  --streaming --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --concurrency 24 --random-seed 42 \
+  --export-http-trace
+```
+
+Stage the bundled traces on the `model-cache` PVC under `/model-cache/traces/` (see the [perf README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/perf/README.md) for the helper-pod workflow), then run the Job:
+
+```bash
+kubectl apply -f recipes/nemotron-3-super/perf/perf.yaml -n ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} -l job-name=nemotron-3-super-bench -f
+kubectl wait --for=condition=Complete job/nemotron-3-super-bench -n ${NAMESPACE} --timeout=7200s
+```
+
+Artifacts land on the PVC under `/model-cache/perf/<epoch>_nemotron-3-super-bench/`. For concurrency sweeps, delete the worker pods between runs so residual KV/prefix-cache state does not skew results (Dynamo workers are PodClique pods — `kubectl rollout restart deployment` is a silent no-op).
+
+## Expected Performance
+
+All rows replay the 15% trace subsets with two worker replicas per deployment:
+
+| Recipe               | SKU  | Worker replicas | Concurrency | User output tok/s | System output tok/s/GPU |
+|----------------------|------|-----------------|-------------|-------------------|-------------------------|
+| Chat (15% subset)    | B200 | 2               | 128         | 61.25             | 844.5                   |
+| Agentic (15% subset) | B200 | 2               | 192         | 63.16             | 1388.4                  |
+| Chat (15% subset)    | H200 | 2               | 64          | 56.07             | 404.6                   |
+| Agentic (15% subset) | H200 | 2               | 128         | 62.94             | 851.0                   |
+
+## Notes
+
+- The namespace must carry the `kai.scheduler/enabled=true` label before deploying; without it, pods stay `SchedulingGated` indefinitely.
+- B200 chat and agentic ship with MTP spec dec ON by default (DL=3, `moe_backend=triton`, stripped `compilation-config`, `MAX_NUM_BATCHED_TOKENS=65536`). To turn MTP off, remove the `- --speculative-config=$(SPECULATIVE_CONFIG)` line from worker args; with the freed memory headroom you can bump `MAX_NUM_BATCHED_TOKENS` to `"131072"` and switch `COMPILATION_CONFIG` to the `compilation-config-fused` ConfigMap key for better throughput.
+- For a fixed-AL synthetic MTP run on H200, point the `SPECULATIVE_CONFIG` env at the `speculative-config-synthetic` ConfigMap key before deploying.
+- Known issue: some 400 HTTP errors raised by the workers on invalid inputs surface as 500 through the Dynamo frontend (the proxy does not always preserve the worker's original status code).
+- Reasoning is controlled per request via `chat_template_kwargs` (`enable_thinking: true|false`); tool calling and function calling with JSON arguments are supported.
+- The recipe runs on a dedicated runtime image (`vllm-runtime:1.3.0-nemotron-super-dev.1`, vLLM 0.21.0).
+
+## Source
+
+- Source README: [recipes/nemotron-3-super/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/README.md)
+- Benchmark workflow: [recipes/nemotron-3-super/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/perf/README.md) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/perf/perf.yaml)
+- B200 chat: [vllm/agg-b200-chat/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/vllm/agg-b200-chat/deploy.yaml)
+- B200 agentic: [vllm/agg-b200-agentic/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/vllm/agg-b200-agentic/deploy.yaml)
+- H200 chat: [vllm/agg-h200-chat/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/vllm/agg-h200-chat/deploy.yaml)
+- H200 agentic: [vllm/agg-h200-agentic/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super/vllm/agg-h200-agentic/deploy.yaml)
+- Model cache setup: [model-cache/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-super/model-cache) (`model-cache.yaml`, `model-download.yaml`, `model-download-fp8.yaml`)

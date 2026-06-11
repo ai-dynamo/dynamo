@@ -1,0 +1,1060 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Machine-readable catalog for the Dynamo Recipes docs surface.
+# This file is the stable contract for humans, validation automation, and
+# agentic harnesses: what recipes exist, how to deploy and benchmark them,
+# how they were validated, and what performance to expect.
+#
+# Schema (v1):
+#   recipes[]:
+#     id                  stable slug; matches the page slug in docs/index.yml
+#     title               display title
+#     page                docs-relative path to the rendered MDX page
+#     provider            model provider key used by landing-page filters
+#     model               {name, hf_id, precision}
+#     status              validated | experimental
+#     targets[]           deployable recipe targets (recommended targets only;
+#                         benchmark control arms live in benchmarks.yaml)
+#       id                target slug
+#       recommended       true for the primary target(s)
+#       hardware          {gpu, count}
+#       runtime           {framework, image?}
+#       topology          aggregated | disaggregated
+#       techniques        list of serving-technique keys
+#       workload          {type, traffic, sla?}
+#       deploy            {asset: repo-relative path}
+#       benchmark         {tool, asset} — omitted when no benchmark exists
+#       expected_performance {available, summary?}
+#     related_benchmarks  ids in docs/benchmarks/_catalog/benchmarks.yaml
+#     maintainer          named maintainer (null = unassigned; tracked as a gap)
+#     gaps                known contribution-standard gaps, tracked here so the
+#                         rendered pages stay customer-facing
+schema_version: 1
+recipes:
+- id: kimi-k2-6
+  title: Kimi-K2.6
+  page: recipes/kimi-k2-6.mdx
+  provider: moonshot
+  model:
+    name: Kimi-K2.6
+    hf_id: moonshotai/Kimi-K2.6
+    precision: NVFP4 + FP8 KV (B200) / native INT4 (H200)
+  status: validated
+  targets:
+  - id: agg-b200-chat
+    recommended: true
+    hardware:
+      gpu: B200
+      count: 4
+    runtime:
+      framework: vLLM 0.21.0
+    topology: aggregated
+    techniques:
+    - kv-routing
+    - eagle3-mla-spec-dec
+    - lmcache-cpu-offload
+    - flashinfer-trtllm-moe
+    - tokenspeed-mla-attention
+    - nccl-symmetric-allreduce
+    workload:
+      type: chat
+      traffic: Mooncake chat trace 8k_1k_70kv, 70% KV reuse
+      sla: 50 user output tok/s
+    deploy:
+      asset: recipes/kimi-k2.6/vllm/agg-b200-chat/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/kimi-k2.6/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 49.86 tok/s/user, 107.8 tok/s/GPU at c=48 (15% trace subset, 4 replicas)
+  - id: agg-h200-chat
+    recommended: false
+    hardware:
+      gpu: H200
+      count: 8
+    runtime:
+      framework: vLLM 0.21.0
+    topology: aggregated
+    techniques:
+    - kv-routing
+    - eagle3-mla-spec-dec
+    - lmcache-cpu-offload
+    - marlin-moe
+    - flash-attn-mla
+    workload:
+      type: chat
+      traffic: Mooncake chat trace 8k_1k_70kv, 70% KV reuse
+      sla: 50 user output tok/s
+    deploy:
+      asset: recipes/kimi-k2.6/vllm/agg-h200-chat/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/kimi-k2.6/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 54.86 tok/s/user, 38.7 tok/s/GPU at c=32 (15% subset)
+  - id: agg-b200-agentic
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 4
+    runtime:
+      framework: vLLM 0.21.0
+    topology: aggregated
+    techniques:
+    - kv-routing
+    - eagle3-mla-spec-dec
+    - lmcache-cpu-offload
+    - flashinfer-trtllm-moe
+    - tokenspeed-mla-attention
+    workload:
+      type: agentic
+      traffic: Mooncake agentic trace 64k_400_90kv, 64K median ISL, 90% KV reuse
+      sla: 50 user output tok/s
+    deploy:
+      asset: recipes/kimi-k2.6/vllm/agg-b200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/kimi-k2.6/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 55.50 tok/s/user, 166.5 tok/s/GPU at c=64 (15% subset)
+  - id: agg-h200-agentic
+    recommended: false
+    hardware:
+      gpu: H200
+      count: 8
+    runtime:
+      framework: vLLM 0.21.0
+    topology: aggregated
+    techniques:
+    - kv-routing
+    - eagle3-mla-spec-dec
+    - lmcache-cpu-offload
+    - marlin-moe
+    - flash-attn-mla
+    workload:
+      type: agentic
+      traffic: Mooncake agentic trace 64k_400_90kv, 64K median ISL, 90% KV reuse
+      sla: 50 user output tok/s
+    deploy:
+      asset: recipes/kimi-k2.6/vllm/agg-h200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/kimi-k2.6/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 56.06 tok/s/user, 66.5 tok/s/GPU at c=48 (15% subset)
+  related_benchmarks: []
+  maintainer: null
+  gaps:
+  - no feature benchmark page exists for kimi-k2.6 (traces + KV-routing/offload claims in README would support one)
+  - performance results are from 15% trace subsets only
+  - 'source inconsistency: README chat optimization target says median ISL 1K but chat trace filename is 8k_1k_70kv'
+  - 'source inconsistency: README claims H200 MARLIN MoE + FLASH_ATTN_MLA but deploy.yaml sets engine defaults'
+  - perf.yaml runs single concurrency; sweeps need manual worker restarts
+  - maintainer unknown
+- id: nemotron-3-ultra
+  title: Nemotron-3-Ultra
+  page: recipes/nemotron-3-ultra.mdx
+  provider: nvidia
+  model:
+    name: Nemotron-3-Ultra-550B-A55B
+    hf_id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    precision: NVFP4 + FP8
+  status: experimental
+  targets:
+  - id: agg-b200-chat-mtp
+    recommended: true
+    hardware:
+      gpu: B200
+      count: 4
+    runtime:
+      framework: vLLM
+    topology: aggregated
+    techniques:
+    - tp4
+    - expert-parallel
+    - mtp-spec-dec
+    - kv-aware-routing
+    workload:
+      type: chat
+      traffic: 8K/1K chat Moontrace replay (70% KV reuse shape), reference concurrency 18
+    deploy:
+      asset: recipes/nemotron-3-ultra/vllm/agg-b200-chat-mtp/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-ultra/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 52.0 tok/s/user, 201.4 tok/s/GPU @ c18 (15% raw Moontrace replay)
+  - id: agg-b200-agentic-mtp
+    recommended: true
+    hardware:
+      gpu: B200
+      count: 4
+    runtime:
+      framework: vLLM
+    topology: aggregated
+    techniques:
+    - tp4
+    - expert-parallel
+    - mtp-spec-dec
+    - kv-aware-routing
+    workload:
+      type: agentic
+      traffic: 64K/400 agentic Moontrace replay (90% KV reuse shape), reference concurrency 20
+    deploy:
+      asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-mtp/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-ultra/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 80.6 tok/s/user, 310.8 tok/s/GPU @ c20 (15% raw Moontrace replay)
+  - id: agg-h200-chat-mtp
+    recommended: true
+    hardware:
+      gpu: H200
+      count: 8
+    runtime:
+      framework: vLLM
+    topology: aggregated
+    techniques:
+    - tp8
+    - expert-parallel
+    - mtp-spec-dec
+    - kv-aware-routing
+    workload:
+      type: chat
+      traffic: 8K/1K chat Moontrace replay, reference concurrency 10
+    deploy:
+      asset: recipes/nemotron-3-ultra/vllm/agg-h200-chat-mtp/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-ultra/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 58.7 tok/s/user, 46.8 tok/s/GPU @ c10 (300-sample replay evidence)
+  - id: agg-h200-agentic-mtp
+    recommended: true
+    hardware:
+      gpu: H200
+      count: 8
+    runtime:
+      framework: vLLM
+    topology: aggregated
+    techniques:
+    - tp8
+    - expert-parallel
+    - mtp-spec-dec
+    - kv-aware-routing
+    workload:
+      type: agentic
+      traffic: 64K/400 agentic Moontrace replay, reference concurrency 8
+    deploy:
+      asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-mtp/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-ultra/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 53.2 tok/s/user, 27.4 tok/s/GPU @ c8 (300-sample replay evidence)
+  - id: disagg-b200-agentic
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 8
+    runtime:
+      framework: vLLM
+    topology: disaggregated
+    techniques:
+    - 1p1d
+    - tp4-per-role
+    - kv-aware-routing
+    - pd-kv-transfer
+    workload:
+      type: agentic
+      traffic: 64K/400 agentic Moontrace replay, reference concurrency 32
+    deploy:
+      asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-ultra/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 61.6 tok/s/user, 231.1 tok/s/GPU @ c32, no MTP (15% raw Moontrace replay)
+  related_benchmarks: []
+  maintainer: null
+  gaps:
+  - no related Feature Benchmark page exists for this model
+  - no SLA/goodput target in source (perf.yaml has no goodput flags)
+  - 'status tension: recipes/README.md lists Ultra as benchmarked, but runtime image is Day-0 dev (1.3.0-nemotron-ultra-dev.1);
+    page marks experimental'
+  - single shared perf.yaml serves all targets (env-block retargeting)
+  - maintainer unknown
+- id: nemotron-3-super
+  title: Nemotron-3-Super
+  page: recipes/nemotron-3-super.mdx
+  provider: nvidia
+  model:
+    name: Nemotron-3-Super-120B-A12B
+    hf_id: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 (B200) / -FP8 (H200)
+    precision: NVFP4 (B200) / FP8 (H200), FP8 KV
+  status: validated
+  targets:
+  - id: agg-b200-chat
+    recommended: true
+    hardware:
+      gpu: B200
+      count: 8
+    runtime:
+      framework: vLLM 0.21.0
+    topology: aggregated
+    techniques:
+    - tp4
+    - expert-parallel
+    - mtp-spec-dec-dl3
+    - kv-aware-routing
+    - deepep-high-throughput
+    workload:
+      type: chat
+      traffic: 8K/1K chat Mooncake trace replay (15% subset @ c128)
+    deploy:
+      asset: recipes/nemotron-3-super/vllm/agg-b200-chat/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-super/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 61.25 tok/s/user, 844.5 tok/s/GPU @ c128, 2 replicas
+  - id: agg-b200-agentic
+    recommended: true
+    hardware:
+      gpu: B200
+      count: 8
+    runtime:
+      framework: vLLM 0.21.0
+    topology: aggregated
+    techniques:
+    - tp4
+    - expert-parallel
+    - mtp-spec-dec-dl3
+    - kv-aware-routing
+    - deepep-low-latency
+    workload:
+      type: agentic
+      traffic: 64K/400 agentic Mooncake trace replay (15% subset @ c192)
+    deploy:
+      asset: recipes/nemotron-3-super/vllm/agg-b200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-super/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 63.16 tok/s/user, 1388.4 tok/s/GPU @ c192, 2 replicas
+  - id: agg-h200-chat
+    recommended: true
+    hardware:
+      gpu: H200
+      count: 8
+    runtime:
+      framework: vLLM 0.21.0
+    topology: aggregated
+    techniques:
+    - tp4
+    - expert-parallel
+    - mtp-spec-dec-dl3
+    - kv-aware-routing
+    - flashinfer-nvlink-one-sided
+    workload:
+      type: chat
+      traffic: 8K/1K chat Mooncake trace replay (15% subset @ c64)
+    deploy:
+      asset: recipes/nemotron-3-super/vllm/agg-h200-chat/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-super/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 56.07 tok/s/user, 404.6 tok/s/GPU @ c64, 2 replicas
+  - id: agg-h200-agentic
+    recommended: true
+    hardware:
+      gpu: H200
+      count: 8
+    runtime:
+      framework: vLLM 0.21.0
+    topology: aggregated
+    techniques:
+    - tp4
+    - expert-parallel
+    - mtp-spec-dec-dl3
+    - kv-aware-routing
+    - deepep-high-throughput
+    workload:
+      type: agentic
+      traffic: 64K/400 agentic Mooncake trace replay (15% subset @ c128)
+    deploy:
+      asset: recipes/nemotron-3-super/vllm/agg-h200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/nemotron-3-super/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 62.94 tok/s/user, 851.0 tok/s/GPU @ c128, 2 replicas
+  related_benchmarks: []
+  maintainer: null
+  gaps:
+  - no related Feature Benchmark page exists for this model
+  - no SLA/goodput target in source
+  - source perf table concurrencies don't match perf.yaml default (c24)
+  - single shared perf.yaml serves all four targets
+  - maintainer unknown
+- id: qwen3-6-35b
+  title: Qwen3.6-35B-A3B FP8
+  page: recipes/qwen3-6-35b.mdx
+  provider: qwen
+  model:
+    name: Qwen3.6-35B-A3B
+    hf_id: Qwen/Qwen3.6-35B-A3B-FP8
+    precision: FP8
+  status: validated
+  targets:
+  - id: dynamo-fd-ec
+    recommended: true
+    hardware:
+      gpu: H100 or GB200
+      count: 1
+    runtime:
+      framework: dynamo+vllm
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    topology: aggregated
+    techniques:
+    - frontend-decoding
+    - embedding-cache-8gib
+    - prefix-caching
+    - multimodal
+    workload:
+      type: multimodal-sliding-window
+      traffic: 240 requests (30 users x 8 turns, window 5), 2400x1080 base64 images, 8K text tokens, max_tokens 1024, concurrency
+        30
+    deploy:
+      asset: recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.6-35b/perf.yaml
+    expected_performance:
+      available: true
+      summary: 'vs vanilla vllm serve: H100 +29.8% RPS / -87.4% TTFT p50; GB200 +31.5% RPS / -45.9% TTFT p50; ITL roughly
+        flat'
+  related_benchmarks:
+  - qwen3-6-35b-feature-stack
+  maintainer: null
+  gaps:
+  - maintainer unknown
+  - results live in legacy docs/benchmarks/embedding_cache.md, not in recipe README
+  - deploy/perf YAMLs are envsubst templates; no direct kubectl-apply path (routes via run-benchmark.sh)
+  - duplicate legacy page docs/benchmarks/embedding_cache.md overlaps qwen3-6-35b-feature-stack.mdx
+- id: glm-5-nvfp4
+  title: GLM-5 NVFP4
+  page: recipes/glm-5-nvfp4.mdx
+  provider: zai
+  model:
+    name: GLM-5
+    hf_id: nvidia/GLM-5-NVFP4
+    precision: NVFP4 (FP8 KV cache, FP8 MTP layer at load)
+  status: validated
+  targets:
+  - id: sglang-disagg
+    recommended: true
+    hardware:
+      gpu: GB200
+      count: 20
+    runtime:
+      framework: sglang
+      image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13
+    topology: disaggregated
+    techniques:
+    - disagg-pd
+    - eagle-mtp-spec-dec
+    - fp8-kv-cache
+    - mnnvl-computedomain
+    - nixl-ucx
+    workload:
+      type: static-synthetic
+      traffic: ISL 1000 / OSL 8192, 512 concurrency (32/decode GPU), 1536 requests
+    deploy:
+      asset: recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/glm-5-nvfp4/sglang/disagg/perf.yaml
+    expected_performance:
+      available: true
+      summary: 16,824 tok/s output, 2.05 req/s, TTFT p50 15,423 ms, ITL avg 23.31 ms/token, 43.39 tok/user/s, 0 errors over
+        1,536 requests / 747.87 s
+  - id: sglang-disagg-efa
+    recommended: false
+    hardware:
+      gpu: GB200
+      count: 20
+    runtime:
+      framework: sglang
+      image: custom build from recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa (patched libfabric, no prebuilt image)
+    topology: disaggregated
+    techniques:
+    - disagg-pd
+    - eagle-mtp-spec-dec
+    - fp8-kv-cache
+    - efa-rdma
+    - nixl-libfabric
+    workload:
+      type: static-synthetic
+      traffic: ISL 1000 / OSL 8192, 512 concurrency, 1536 requests (identical to non-EFA)
+    deploy:
+      asset: recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml
+    expected_performance:
+      available: true
+      summary: 'parity with non-EFA: 19,131 tok/s output, TTFT p50 621 ms, ITL avg 24.5 ms/token; at ISL 20k/OSL 2k LIBFABRIC
+        is +39% throughput / -56% TTFT p50 vs UCX'
+  related_benchmarks: []
+  maintainer: null
+  gaps:
+  - prototype had wrong model id (zai-org/...) — corrected to nvidia/GLM-5-NVFP4
+  - EFA variant has no prebuilt container image — custom Dockerfile.efa build required
+  - EFA README's non-EFA comparison numbers are approximate; page cites exact baseline table from main README
+  - no related feature benchmark exists
+  - maintainer unknown
+- id: kimi-k2-5
+  title: Kimi-K2.5 NVFP4
+  page: recipes/kimi-k2-5.mdx
+  provider: moonshot
+  model:
+    name: Kimi-K2.5
+    hf_id: nvidia/Kimi-K2.5-NVFP4
+    precision: NVFP4
+  status: validated
+  targets:
+  - id: disagg-eagle-kv-router
+    recommended: true
+    hardware:
+      gpu: GB200
+      count: 24
+    runtime:
+      framework: TensorRT-LLM
+    topology: disaggregated
+    techniques:
+    - kv-routing
+    - eagle3-spec-dec
+    - kv-cache-offload
+    - disaggregated-prefill-decode
+    workload:
+      type: agentic-coding
+      traffic: Mooncake-format agentic coding trace, ~200K ctx, 1-hour replay, c=32
+      sla: goodput TTFT 5000ms / ITL 10ms
+    deploy:
+      asset: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml
+    expected_performance:
+      available: true
+      summary: ~130 tok/s/user avg, ~5,400 tok/s/GPU (Pareto winner of 4-arm comparison)
+  related_benchmarks:
+  - kimi-k2-5-feature-stack
+  maintainer: null
+  gaps:
+  - deploy.yaml ships non-resolvable image tag <IMAGE_TAG>; README says v1.1.1~
+  - expected performance numbers are README approximations; no raw artifacts checked in (Pareto plot is GitHub user-attachment,
+    not repo asset)
+  - trace dataset not checked in; generated from AIPerf repo manifest (pinned commit)
+  - maintainer unknown
+- id: deepseek-v3-2-nvfp4
+  title: DeepSeek V3.2 NVFP4
+  page: recipes/deepseek-v3-2-nvfp4.mdx
+  provider: deepseek
+  model:
+    name: DeepSeek-V3.2
+    hf_id: nvidia/DeepSeek-V3.2-NVFP4
+    precision: NVFP4
+  status: validated
+  targets:
+  - id: disagg-kv-router
+    recommended: true
+    hardware:
+      gpu: GB200
+      count: 32
+    runtime:
+      framework: trtllm
+      image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+    topology: disaggregated
+    techniques:
+    - kv-aware-routing
+    - wideep
+    - attention-dp
+    - fp8-kv-cache
+    - chunked-prefill
+    workload:
+      type: trace-replay
+      traffic: 'Mooncake-based synthetic coding trace: 10,000 requests, ~39.2K avg / 109K max ISL, 344 avg OSL, 44.1% KV block
+        hit rate, fixed-schedule'
+      sla: goodput TTFT 20s / ITL 50ms
+    deploy:
+      asset: recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml
+    expected_performance:
+      available: false
+      summary: Source README has metric framing and demo video, no numeric result table
+  related_benchmarks:
+  - deepseek-v3-2-wideep-routing
+  maintainer: null
+  gaps:
+  - maintainer unknown
+  - no numeric results in source (video only); Expected Performance omitted
+  - trace file not checked in; synthesize via datagen + kubectl cp to PVC
+  - 'perf.yaml hardcodes namespace: your-namespace; helper-pod name unspecified in trace-copy step'
+- id: qwen3-vl-30b
+  title: Qwen3-VL-30B
+  page: recipes/qwen3-vl-30b.mdx
+  provider: qwen
+  model:
+    name: Qwen3-VL-30B-A3B-Instruct
+    hf_id: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+    precision: FP8
+  status: validated
+  targets:
+  - id: agg-embedding-cache
+    recommended: true
+    hardware:
+      gpu: GB200
+      count: 1
+    runtime:
+      framework: vllm
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    topology: aggregated
+    techniques:
+    - embedding-cache
+    - prefix-caching
+    - multimodal
+    workload:
+      type: multimodal-synthetic
+      traffic: 1,000 requests, 1 image each, 200-image pool (80% reuse), 400 text tokens, max_tokens 150, concurrency 64
+    deploy:
+      asset: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml
+    expected_performance:
+      available: true
+      summary: 'Cache ON vs OFF: +16.4% output TPS (3,575.6 vs 3,072.3 tok/s), -27.7% TTFT avg, -8.8% ITL avg, -13.4% request
+        latency'
+  related_benchmarks:
+  - qwen3-vl-embedding-cache
+  maintainer: null
+  gaps:
+  - maintainer unknown
+  - exact measured cache hit rate not in source (LRU eviction makes it uncontrollable)
+- id: gpt-oss-120b
+  title: GPT-OSS-120B
+  page: recipes/gpt-oss-120b.mdx
+  provider: openai
+  model:
+    name: GPT-OSS-120B
+    hf_id: openai/gpt-oss-120b
+    precision: W4A8_MXFP4_MXFP8 (disagg, via OVERRIDE_QUANT_ALGO)
+  status: validated
+  targets:
+  - id: trtllm-agg
+    recommended: true
+    hardware:
+      gpu: GB200
+      count: 4
+    runtime:
+      framework: trtllm
+      image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+    topology: aggregated
+    techniques:
+    - wideep
+    - tp4
+    - arm64
+    workload:
+      type: static-synthetic
+      traffic: ISL 128 / OSL 1000, 3600 total concurrency (900/GPU), 10x request count
+    deploy:
+      asset: recipes/gpt-oss-120b/trtllm/agg/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/gpt-oss-120b/trtllm/agg/perf.yaml
+    expected_performance:
+      available: false
+  - id: trtllm-disagg
+    recommended: false
+    hardware:
+      gpu: GB200/B200
+      count: 5
+    runtime:
+      framework: trtllm
+      image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+    topology: disaggregated
+    techniques:
+    - disagg-pd
+    - tp1-prefill
+    - tp4-decode
+    - ucx-kv-transfer
+    - w4a8-mxfp4-mxfp8
+    workload:
+      type: static-synthetic
+      traffic: ISL 8192 / OSL 1024, 1536 total concurrency (perf.yaml computes 256/GPU x 6)
+    deploy:
+      asset: recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/gpt-oss-120b/trtllm/disagg/perf.yaml
+    expected_performance:
+      available: false
+  related_benchmarks: []
+  maintainer: null
+  gaps:
+  - no expected performance numbers in source for either target — section omitted
+  - disagg perf.yaml computes concurrency from DEPLOYMENT_GPU_COUNT=6 while deploy topology is 5 GPUs — noted on page
+  - no related feature benchmark exists
+  - maintainer unknown
+- id: qwen3-32b
+  title: Qwen3-32B
+  page: recipes/qwen3-32b.mdx
+  provider: qwen
+  model:
+    name: Qwen3-32B
+    hf_id: Qwen/Qwen3-32B
+    precision: BF16
+  status: validated
+  targets:
+  - id: vllm-disagg-kv-router
+    recommended: true
+    hardware:
+      gpu: H200
+      count: 16
+    runtime:
+      framework: vllm
+    topology: disaggregated
+    techniques:
+    - disaggregated-prefill-decode
+    - kv-aware-routing
+    workload:
+      type: trace-replay
+      traffic: 'Mooncake conversation trace: 12,031 reqs, 12K avg ISL, 343 avg OSL, fixed schedule'
+      sla: goodput TTFT 2000ms / ITL 25ms
+    deploy:
+      asset: recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml
+    expected_performance:
+      available: false
+      summary: Source README gives directional TTFT/ITL claims and a results video only
+  - id: vllm-agg-kvbm
+    recommended: false
+    hardware:
+      gpu: H200 or B200
+      count: 1
+    runtime:
+      framework: vllm
+    topology: aggregated
+    techniques:
+    - kvbm-host-memory-offload
+    workload:
+      type: deployment-only
+      traffic: Long/repeated prompts with prefix reuse
+    deploy:
+      asset: recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml
+    expected_performance:
+      available: false
+      summary: No checked-in benchmark for this target
+  related_benchmarks:
+  - qwen3-32b-kv-routing
+  maintainer: null
+  gaps:
+  - No expected performance numbers in source README (directional claims + video only); Expected Performance omitted
+  - agg-kvbm target lacks perf.yaml; Benchmark subsection omitted for it
+  - maintainer unknown
+- id: qwen3-235b-a22b-fp8
+  title: Qwen3-235B-A22B FP8
+  page: recipes/qwen3-235b-a22b-fp8.mdx
+  provider: qwen
+  model:
+    name: Qwen3-235B-A22B (MoE, ~22B active)
+    hf_id: Qwen/Qwen3-235B-A22B-FP8
+    precision: FP8
+  status: validated
+  targets:
+  - id: trtllm-agg-hopper
+    recommended: false
+    hardware:
+      gpu: H100/H200
+      count: 16
+    runtime:
+      framework: trtllm
+    topology: aggregated
+    techniques:
+    - expert-parallel
+    - kv-aware-routing
+    - chunked-prefill
+    - moe-backend-cutlass
+    workload:
+      type: static-generation
+      traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
+    deploy:
+      asset: recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml
+    expected_performance:
+      available: false
+  - id: trtllm-agg-blackwell
+    recommended: true
+    hardware:
+      gpu: B100/B200
+      count: 16
+    runtime:
+      framework: trtllm
+    topology: aggregated
+    techniques:
+    - expert-parallel
+    - kv-aware-routing
+    - chunked-prefill
+    - moe-backend-deepgemm
+    workload:
+      type: static-generation
+      traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
+    deploy:
+      asset: recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml
+    expected_performance:
+      available: false
+  - id: trtllm-disagg-hopper
+    recommended: false
+    hardware:
+      gpu: H100/H200
+      count: 16
+    runtime:
+      framework: trtllm
+    topology: disaggregated
+    techniques:
+    - disaggregated-prefill-decode
+    - expert-parallel
+    - kv-aware-routing
+    - moe-backend-cutlass
+    workload:
+      type: static-generation
+      traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
+    deploy:
+      asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml
+    expected_performance:
+      available: false
+  - id: trtllm-disagg-blackwell
+    recommended: false
+    hardware:
+      gpu: B100/B200
+      count: 16
+    runtime:
+      framework: trtllm
+    topology: disaggregated
+    techniques:
+    - disaggregated-prefill-decode
+    - expert-parallel
+    - kv-aware-routing
+    - moe-backend-deepgemm
+    workload:
+      type: static-generation
+      traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
+    deploy:
+      asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml
+    expected_performance:
+      available: false
+  related_benchmarks: []
+  maintainer: null
+  gaps:
+  - No expected performance numbers in source (perf.yamls exist, no published results); section omitted
+  - No related feature benchmark page exists
+  - maintainer unknown
+- id: qwen3-32b-fp8
+  title: Qwen3-32B FP8
+  page: recipes/qwen3-32b-fp8.mdx
+  provider: qwen
+  model:
+    name: Qwen3-32B-FP8
+    hf_id: Qwen/Qwen3-32B-FP8
+    precision: FP8
+  status: validated
+  targets:
+  - id: trtllm-agg
+    recommended: true
+    hardware:
+      gpu: H100/H200/A100
+      count: 2
+    runtime:
+      framework: trtllm
+    topology: aggregated
+    techniques:
+    - cuda-graphs
+    - fp8-kv-cache
+    workload:
+      type: static-generation
+      traffic: 4K ISL / 500 OSL synthetic, concurrency 4, 40 requests
+    deploy:
+      asset: recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-32b-fp8/trtllm/agg/perf.yaml
+    expected_performance:
+      available: false
+  - id: trtllm-disagg
+    recommended: false
+    hardware:
+      gpu: H100/H200/A100
+      count: 8
+    runtime:
+      framework: trtllm
+    topology: disaggregated
+    techniques:
+    - disaggregated-prefill-decode
+    - fp8-kv-cache
+    workload:
+      type: static-generation
+      traffic: 4K ISL / 500 OSL synthetic, concurrency 48, 480 requests
+    deploy:
+      asset: recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-32b-fp8/trtllm/disagg/perf.yaml
+    expected_performance:
+      available: false
+  - id: vllm-disagg
+    recommended: false
+    hardware:
+      gpu: H100/H200/A100, single node
+      count: 8
+    runtime:
+      framework: vllm
+    topology: disaggregated
+    techniques:
+    - disaggregated-prefill-decode
+    - nixl-kv-transfer
+    workload:
+      type: static-generation
+      traffic: 2K ISL / 500 OSL synthetic, concurrency 8, 80 requests
+    deploy:
+      asset: recipes/qwen3-32b-fp8/vllm/disagg/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3-32b-fp8/vllm/disagg/perf.yaml
+    expected_performance:
+      available: false
+  related_benchmarks: []
+  maintainer: null
+  gaps:
+  - No expected performance numbers in source; section omitted
+  - No related feature benchmark page exists
+  - TRT-LLM (4K ISL) and vLLM (2K ISL) targets use unnormalized traffic shapes
+  - maintainer unknown
+- id: llama-3-3-70b
+  title: Llama-3.3-70B FP8
+  page: recipes/llama-3-3-70b.mdx
+  provider: meta
+  model:
+    name: Llama-3.3-70B-Instruct
+    hf_id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
+    precision: FP8-dynamic
+  status: validated
+  targets:
+  - id: vllm-agg
+    recommended: false
+    hardware:
+      gpu: H100/H200
+      count: 4
+    runtime:
+      framework: vllm
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    topology: aggregated
+    techniques:
+    - tp4
+    workload:
+      type: static-synthetic
+      traffic: ISL 8192 / OSL 1024, 64 total concurrency (16/GPU), 10x request count
+    deploy:
+      asset: recipes/llama-3-70b/vllm/agg/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/llama-3-70b/vllm/agg/perf.yaml
+    expected_performance:
+      available: false
+      summary: no published numbers; topology comparison on benchmark page
+  - id: vllm-disagg-single-node
+    recommended: true
+    hardware:
+      gpu: H100/H200
+      count: 8
+    runtime:
+      framework: vllm
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    topology: disaggregated
+    techniques:
+    - disagg-pd
+    - 2x-tp2-prefill
+    - tp4-decode
+    - nixl
+    workload:
+      type: static-synthetic
+      traffic: ISL 8192 / OSL 1024, 128 total concurrency (16/GPU)
+    deploy:
+      asset: recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml
+    expected_performance:
+      available: false
+  - id: vllm-disagg-multi-node
+    recommended: false
+    hardware:
+      gpu: H100/H200
+      count: 16
+    runtime:
+      framework: vllm
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    topology: disaggregated
+    techniques:
+    - disagg-pd
+    - tp8-prefill
+    - tp8-decode
+    - nixl
+    workload:
+      type: static-synthetic
+      traffic: ISL 8192 / OSL 1024, 256 total concurrency (16/GPU)
+    deploy:
+      asset: recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml
+    expected_performance:
+      available: false
+  related_benchmarks:
+  - llama-3-70b-topology
+  maintainer: null
+  gaps:
+  - no expected performance numbers in source — section omitted
+  - maintainer unknown

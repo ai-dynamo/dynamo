@@ -1,0 +1,127 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3-VL Embedding Cache A/B"
+subtitle: "How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?"
+---
+
+<div className="dynamo-benchmark-hero">
+<div>
+<p className="dynamo-recipe-eyebrow">Simple A/B test</p>
+<h2>Multimodal embedding cache</h2>
+<p>How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?</p>
+<div className="dynamo-hero-actions">
+<a href="#arms">Compared arms</a>
+<a href="#results">Results</a>
+<a href="#reproduce">Reproduce</a>
+<a href="/dynamo/dev/recipes/qwen3-vl-30b">Related recipe</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b">Source</a>
+</div>
+</div>
+<div className="dynamo-benchmark-facts">
+<div><span>Model</span><strong>Qwen/Qwen3-VL-30B-A3B-Instruct-FP8</strong></div>
+<div><span>Traffic</span><strong>1,000 single-turn multimodal requests, 1 image each from a 200-image pool (80% image reuse), 400 text tokens, concurrency 64</strong></div>
+<div><span>Metric focus</span><strong>Output TPS, TTFT, ITL, and request latency</strong></div>
+</div>
+</div>
+
+## Benchmark Question
+
+How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?
+
+Both arms use the same `deploy.yaml` — the only delta is the `DYN_MULTIMODAL_EMBEDDING_CACHE_GB` environment variable (10 GB for cache ON, 0 for cache OFF). With an image pool of 200 across 1,000 requests, the first 200 requests see unique images and the remaining 800 hit images the engine has already encoded, so a cache hit skips the vision encoder on the prefill path.
+
+<div className="dynamo-comparison-brief">
+<div>
+<span>Held constant</span>
+<strong>Model, vLLM runtime, one aggregated GB200 replica, generated dataset, request count, concurrency, and forced 150-token outputs.</strong>
+</div>
+<div>
+<span>How to use this</span>
+<strong>Inspect the performance claim here, then open the related recipe for the deployment target.</strong>
+</div>
+</div>
+
+## Compared Arms
+
+<div id="arms"></div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Arm</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role treatment">Treatment</em></td>
+<td><strong>Embedding cache ON</strong><span>DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10 (deploy.yaml default)</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>Embedding cache OFF</strong><span>Set DYN_MULTIMODAL_EMBEDDING_CACHE_GB=0 in deploy.yaml and CACHE_MODE=cache_off in perf.yaml</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Results
+
+<div id="results"></div>
+
+Enabling the embedding cache on a single aggregated GB200 replica with the vLLM backend delivers an average improvement of **+16% throughput, -28% TTFT, and -13% request latency**:
+
+| Metric | Cache ON | Cache OFF | Delta |
+| --- | ---: | ---: | ---: |
+| Output TPS (tok/s) | 3,575.6 | 3,072.3 | +16.4% |
+| TTFT avg (ms) | 526.0 | 727.5 | -27.7% |
+| TTFT p50 (ms) | 356.8 | 510.8 | -30.1% |
+| ITL avg (ms) | 14.1 | 15.5 | -8.8% |
+| Request latency avg (ms) | 2,630.0 | 3,035.7 | -13.4% |
+
+## Reproduce
+
+<div id="reproduce"></div>
+
+A dataset-generation job creates the synthetic multimodal dataset (`qwen3_vl_1000req_1img_pool200.jsonl`: 1,000 requests, 1 image per request, 200-image pool, 400 text tokens per request) on the `perf-cache` PVC. The `perf.yaml` then wraps this AIPerf command:
+
+```bash
+aiperf profile --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+  --input-file /perf-cache/datasets/qwen3_vl_1000req_1img_pool200.jsonl \
+  --custom-dataset-type single_turn \
+  --url http://qwen3-vl-agg-frontend:8000 --streaming \
+  --request-count 1000 --concurrency 64 --warmup-request-count 3 \
+  --extra-inputs max_tokens:150 --extra-inputs min_tokens:150 \
+  --extra-inputs ignore_eos:true
+```
+
+Run each arm in sequence — redeploy with the toggled cache setting between runs:
+
+```bash
+export NAMESPACE=your-namespace
+
+# One-time prep: storage, model download, dataset generation
+kubectl apply -f recipes/qwen3-vl-30b/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3-vl-30b/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+kubectl apply -f recipes/qwen3-vl-30b/data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-vl-30b-generate-datasets -n ${NAMESPACE} --timeout=3600s
+
+# Cache ON (deploy.yaml default), then benchmark
+kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg -n ${NAMESPACE} --timeout=900s
+kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml -n ${NAMESPACE}
+
+# Cache OFF: set DYN_MULTIMODAL_EMBEDDING_CACHE_GB=0 in deploy.yaml and
+# CACHE_MODE=cache_off in perf.yaml, then re-apply both.
+```
+
+The helper script `recipes/qwen3-vl-30b/vllm/agg-embedding-cache/run-benchmark.sh` automates the cache-on/cache-off runs. AIPerf artifacts land under `/perf-cache/artifacts/qwen3_vl_30b_embedding_cache/agg/<cache_mode>`.
+
+## Benchmark notes
+
+- Exact cache hit rates cannot be pinned via the dataset because of LRU eviction; shrinking the image pool relative to request count (or growing the cache) raises the hit probability.
+- The aggregated embedding cache uses vLLM's native `ec_both` ECConnector role, supported in vLLM 0.17+ with no patches — see [multimodal vLLM docs](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache).
+- Replace the `storageClassName` and `image:` placeholders in the YAML files before running.
+
+## Related Recipe
+
+The cache-ON arm is the promoted deployment target: [Qwen3-VL-30B](../recipes/qwen3-vl-30b.mdx). The cache-OFF configuration is the same manifest with the cache disabled, kept as the benchmark control.
