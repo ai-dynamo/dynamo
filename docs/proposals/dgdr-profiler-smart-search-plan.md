@@ -277,7 +277,7 @@ class SearchSpace(BaseModel):
     prefillMaxNumBatchedTokens: list[int] = [8192, 16384, 32768]
     prefillMaxNumSeqs: list[int] = [1, 2, 4, 8]
     # pinned
-    prefillBlockSize: int = 16                     # KV block / page size
+    prefillBlockSize: int = 64                     # KV block / page size
     prefillGpuMemoryUtilization: float = 0.9       # KV memory budget fraction
     prefillEnablePrefixCaching: bool = True
 
@@ -285,7 +285,7 @@ class SearchSpace(BaseModel):
     decodeMaxNumBatchedTokens: list[int] = [8192]
     decodeMaxNumSeqs: list[int] = [256, 512, 1024]
     # pinned
-    decodeBlockSize: int = 16
+    decodeBlockSize: int = 64
     decodeGpuMemoryUtilization: float = 0.9
     decodeEnablePrefixCaching: bool = False        # forced off for decode workers
 
@@ -293,7 +293,7 @@ class SearchSpace(BaseModel):
     aggMaxNumBatchedTokens: list[int] = [8192, 16384, 32768]
     aggMaxNumSeqs: list[int] = [256, 512, 1024]
     # pinned
-    aggBlockSize: int = 16
+    aggBlockSize: int = 64
     aggGpuMemoryUtilization: float = 0.9
     aggEnablePrefixCaching: bool = True
 
