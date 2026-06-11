@@ -1790,3 +1790,225 @@ async fn tool_choice_matrix_immediate_jail_reasoning_only_first_chunk() {
     );
     assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
 }
+
+// ---------------------------------------------------------------------------
+// Parser debug mode: raw completion captured alongside parsed output.
+//
+// These compose the parser-debug taps around the REAL reasoning parser exactly
+// as `postprocessor_parsing_stream` wires them, and assert the emitted records
+// via a capturing sink (no log capture, no process-env mutation). The env-off
+// passthrough case (f) is covered by every other test in this file: when the
+// taps are absent the stream is byte-identical, which those fixtures pin.
+// ---------------------------------------------------------------------------
+
+use dynamo_llm::preprocessor::parser_debug::{
+    ParserDebugRecord, RawAccumulator, tap_parsed_collecting, tap_raw,
+};
+use std::sync::Mutex as StdMutex;
+
+#[tokio::test]
+async fn parser_debug_reasoning_raw_retained() {
+    // RAW tap is placed BEFORE the reasoning parser, which rewrites delta.content
+    // in place. The record must show the original `<think>` markup in `raw` even
+    // though the parser stripped it from `content` and moved it to reasoning.
+    let chunk = mock_content_chunk("<think>plan</think>answer");
+
+    let raw = RawAccumulator::new();
+    let sink = Arc::new(StdMutex::new(Vec::<ParserDebugRecord>::new()));
+    let sink_w = sink.clone();
+
+    let entry = tap_raw(stream::iter(vec![Annotated::from_data(chunk)]), raw.clone());
+    let reasoned =
+        OpenAIPreprocessor::parse_reasoning_content_from_stream(entry, "qwen".to_string(), false);
+    let exit = tap_parsed_collecting(
+        reasoned,
+        raw,
+        Some("qwen".to_string()),
+        None,
+        move |records| *sink_w.lock().unwrap() = records,
+    );
+    let _: Vec<_> = exit.collect().await;
+
+    let records = sink.lock().unwrap().clone();
+    assert_eq!(records.len(), 1, "one record for the single choice");
+    let r = &records[0];
+    assert!(
+        r.raw.contains("<think>"),
+        "raw must retain the original markup the parser stripped; got {:?}",
+        r.raw
+    );
+    assert_eq!(r.raw, "<think>plan</think>answer");
+    assert!(
+        !r.content.contains("<think>"),
+        "parsed content must have the think markup stripped; got {:?}",
+        r.content
+    );
+    assert!(
+        r.reasoning_content.contains("plan"),
+        "reasoning_content should hold the think body; got {:?}",
+        r.reasoning_content
+    );
+    assert_eq!(r.reasoning_parser, "qwen");
+    assert_eq!(r.stream_id, "test-id");
+}
+
+#[tokio::test]
+async fn parser_debug_split_marker_destruction_preserves_raw() {
+    // Destroyed-evidence repro: nemotron force-reasoning + qwen3_coder jail.
+    // A chunk boundary splits `</think>` at the lone `<`; the reasoning parser
+    // fails to reassemble it and swallows the ENTIRE tool call into
+    // reasoning_content — tool_calls empty, content empty, finish=Stop. The
+    // evidence (and the chunking needed to reproduce) exists only in the
+    // parser-debug record: raw shows `<function=terminal>` intact, raw_chunks
+    // shows the exact split. The same bytes unsplit parse fine (control below),
+    // so the boundaries are the repro-critical information.
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("qwen3_coder"));
+    let request = request_with_terminal_tool();
+
+    let chunks = [
+        "<think>pick a command<",
+        "/think>\n<tool_call>\n<",
+        "function=terminal>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>",
+    ];
+
+    let raw = RawAccumulator::new();
+    let sink = Arc::new(StdMutex::new(Vec::<ParserDebugRecord>::new()));
+    let sink_w = sink.clone();
+
+    let input = chunks
+        .iter()
+        .map(|c| Annotated::from_data(mock_content_chunk(c)))
+        .chain(std::iter::once(Annotated::from_data(mock_final_chunk())))
+        .collect::<Vec<_>>();
+    let entry = tap_raw(stream::iter(input), raw.clone());
+    let piped = preprocessor
+        .postprocessor_parsing_stream(entry, &request, false, false)
+        .expect("pipeline should build");
+    let exit = tap_parsed_collecting(
+        piped,
+        raw,
+        Some("nemotron_v3".to_string()),
+        Some("qwen3_coder".to_string()),
+        move |records| *sink_w.lock().unwrap() = records,
+    );
+    let _: Vec<_> = exit.collect().await;
+
+    let records = sink.lock().unwrap().clone();
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    // The destruction: no tool call extracted, nothing in content.
+    assert_eq!(r.tool_call_count, 0, "split marker destroys the tool call");
+    assert_eq!(r.content, "");
+    // The evidence: raw retains the full markup the parsers destroyed...
+    assert!(
+        r.raw.contains("<function=terminal>"),
+        "raw must prove the model emitted the function tag; got {:?}",
+        r.raw
+    );
+    // ...and raw_chunks retains the exact chunking needed to REPRODUCE the bug
+    // (the same bytes in one chunk parse fine — see the control test).
+    assert_eq!(r.raw_chunks.len(), 3);
+    assert!(r.raw_chunks[0].ends_with('<') && r.raw_chunks[1].ends_with('<'));
+}
+
+#[tokio::test]
+async fn parser_debug_unsplit_control_parses_clean() {
+    // Control for the split-marker repro: identical bytes in ONE chunk parse
+    // cleanly (reasoning extracted, calls=1 terminal). Proves the failure above
+    // is purely chunk-boundary-dependent — why raw_chunks must keep boundaries.
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("qwen3_coder"));
+    let request = request_with_terminal_tool();
+
+    let text = "<think>pick a command</think>\n<tool_call>\n<function=terminal>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>";
+
+    let raw = RawAccumulator::new();
+    let sink = Arc::new(StdMutex::new(Vec::<ParserDebugRecord>::new()));
+    let sink_w = sink.clone();
+
+    let input = vec![
+        Annotated::from_data(mock_content_chunk(text)),
+        Annotated::from_data(mock_final_chunk()),
+    ];
+    let entry = tap_raw(stream::iter(input), raw.clone());
+    let piped = preprocessor
+        .postprocessor_parsing_stream(entry, &request, false, false)
+        .expect("pipeline should build");
+    let exit = tap_parsed_collecting(
+        piped,
+        raw,
+        Some("nemotron_v3".to_string()),
+        Some("qwen3_coder".to_string()),
+        move |records| *sink_w.lock().unwrap() = records,
+    );
+    let _: Vec<_> = exit.collect().await;
+
+    let records = sink.lock().unwrap().clone();
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    assert_eq!(r.tool_call_count, 1, "unsplit input must parse the call");
+    assert_eq!(r.tool_call_names, vec!["terminal"]);
+    assert_eq!(r.reasoning_content, "pick a command");
+    assert_eq!(r.finish_reason, "ToolCalls");
+}
+
+#[tokio::test]
+async fn parser_debug_jail_strip_preserves_raw() {
+    // Malformed-generation shape: the `<function=...>` line is
+    // missing entirely, so no parser can extract a call (no tool name). The
+    // qwen3_coder jail STRIPS the whole block — content empty, calls=0 — which
+    // destroys all evidence of what the model emitted. The parser-debug record
+    // is then the only artifact showing the malformed markup.
+    let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
+    let request = request_with_terminal_tool();
+
+    let leaked = "<tool_call>\n<parameter=command>\nls -la\n</parameter>\n</tool_call>";
+
+    let raw = RawAccumulator::new();
+    let sink = Arc::new(StdMutex::new(Vec::<ParserDebugRecord>::new()));
+    let sink_w = sink.clone();
+
+    let input = vec![
+        Annotated::from_data(mock_content_chunk(leaked)),
+        Annotated::from_data(mock_final_chunk()),
+    ];
+    let entry = tap_raw(stream::iter(input), raw.clone());
+    let piped = preprocessor
+        .postprocessor_parsing_stream(entry, &request, false, false)
+        .expect("pipeline should build");
+    let exit = tap_parsed_collecting(
+        piped,
+        raw,
+        None,
+        Some("qwen3_coder".to_string()),
+        move |records| *sink_w.lock().unwrap() = records,
+    );
+    let _: Vec<_> = exit.collect().await;
+
+    let records = sink.lock().unwrap().clone();
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    assert_eq!(r.tool_call_count, 0);
+    assert_eq!(
+        r.content, "",
+        "jail strips the unparseable block — evidence gone"
+    );
+    assert!(
+        r.raw.contains("<tool_call>") && !r.raw.contains("<function="),
+        "raw is the only record: markup present, function tag missing; got {:?}",
+        r.raw
+    );
+}
+
+fn request_with_terminal_tool() -> NvCreateChatCompletionRequest {
+    let mut request: NvCreateChatCompletionRequest =
+        serde_json::from_str(REQUEST_JSON).expect("request should parse");
+    request.inner.tools = Some(
+        serde_json::from_value(serde_json::json!([
+            {"type":"function","function":{"name":"terminal","description":"run a command",
+             "parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}
+        ]))
+        .unwrap(),
+    );
+    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Auto);
+    request
+}

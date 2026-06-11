@@ -105,6 +105,51 @@ output, before any tool-call parser touched it. That is the key piece for
 triage: it tells us what the model actually produced, separately from what
 the parser made of it.
 
+## Parser debug mode
+
+When a parse failure shows up on only a small percentage of requests, the
+decisive artifact is one raw model completion next to its parsed output.
+Setting `DYN_PARSER_DEBUG=1` makes the frontend emit exactly that: one
+structured log event per choice at stream end, pairing the raw pre-parse
+completion text with the parsed `reasoning_content`, `content`, and
+`tool_calls`.
+
+> **Opt-in only.** Raw completions carry user data, so this mode is off by
+> default. Enable it only in environments where logging request content is
+> acceptable.
+
+Run the frontend with both flags set (JSONL makes the event queryable):
+
+```bash
+DYN_PARSER_DEBUG=1 DYN_LOGGING_JSONL=true python -m dynamo.frontend ...
+```
+
+Each event carries `stream_id`, `choice_index`, `reasoning_parser`,
+`tool_parser`, `raw`, `raw_chunks`, `reasoning_content`, `content`,
+`tool_call_count`, `tool_call_names`, and `finish_reason` as separate
+fields. `raw` is the full pre-parse completion text; `raw_chunks` is the
+same text split exactly as the stream deltas arrived -- streaming parse
+failures are often chunk-boundary-dependent, so the boundaries are what
+lets you replay and reproduce the failure.
+
+A real failure shape: the model emits a well-formed tool call, but a
+delta boundary splits the closing `</think>` marker and the reasoning
+parser swallows the entire tool call into `reasoning_content` --
+`tool_calls` stays empty and `finish_reason` is `stop`. The event shows
+`raw` containing the intact `<function=...>` markup the parsers
+destroyed, and `raw_chunks` shows the exact split needed to reproduce:
+
+```json
+{"target":"parser_debug","fields":{"stream_id":"chatcmpl-abc","choice_index":0,"reasoning_parser":"nemotron_v3","tool_parser":"qwen3_coder","raw":"<think>pick a command</think>\n<tool_call>\n<function=terminal>...","raw_chunks":"[\"<think>pick a command<\", \"/think>\\n<tool_call>\\n<\", \"function=terminal>...\"]","reasoning_content":"pick a command</think>\n<tool_call>\n<function=terminal>...","content":"","tool_call_count":0,"tool_call_names":"[]","finish_reason":"Stop"}}
+```
+
+One grep over the frontend log surfaces every request where parsing
+produced no tool calls despite tool-call-shaped raw text:
+
+```bash
+grep '"target":"parser_debug"' frontend.jsonl | jq 'select(.fields.tool_call_count == 0)'
+```
+
 ## What to include when reporting an issue
 
 Share these four things in the bug report or issue thread:
