@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from vllm.sampling_params import SamplingParams
 
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
@@ -27,6 +28,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import build_sampling_params
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -903,11 +905,6 @@ def test_build_sampling_params_maps_max_thinking_tokens():
 def test_build_sampling_params_applies_nvext_routed_experts_prompt_start():
     """routed_experts_prompt_start rides nvext (not sampling_options) and is
     applied onto SamplingParams so vLLM trims routing engine-side."""
-    import pytest
-    from vllm.sampling_params import SamplingParams
-
-    from dynamo.vllm.handlers import build_sampling_params
-
     if not hasattr(SamplingParams(), "routed_experts_prompt_start"):
         pytest.skip("installed vLLM has no routed_experts_prompt_start support")
 

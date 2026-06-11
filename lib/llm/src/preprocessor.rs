@@ -3325,7 +3325,8 @@ mod tests {
             "bad_words_token_ids": [[12, 13]],
             "nvext": {
                 "cache_salt": "step_7",
-                "extra_fields": ["completion_token_ids"]
+                "extra_fields": ["completion_token_ids"],
+                "routed_experts_prompt_start": 5
             }
         }))
         .unwrap();
@@ -3333,6 +3334,7 @@ mod tests {
         let extra_args = OpenAIPreprocessor::backend_extra_args(&request).unwrap();
 
         assert_eq!(extra_args["nvext"]["cache_salt"], "step_7");
+        assert_eq!(extra_args["nvext"]["routed_experts_prompt_start"], 5);
         assert_eq!(
             extra_args["nvext"]["extra_fields"],
             serde_json::json!(["completion_token_ids"])
