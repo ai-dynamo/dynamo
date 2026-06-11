@@ -23,7 +23,7 @@ use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
 use crate::request_template::RequestTemplate;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
@@ -331,6 +331,17 @@ impl HttpService {
         self.run_inner(cancel_token, None).await
     }
 
+    async fn warmup(&self) -> Result<()> {
+        if self.state.flags.get(&EndpointType::Responses) {
+            self.state
+                .responses_context_store()
+                .warmup()
+                .await
+                .context("failed to initialize stateful Responses store")?;
+        }
+        Ok(())
+    }
+
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
     /// port-allocation gap for tests that need to know the bound port up front. Not
     /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
@@ -370,6 +381,7 @@ impl HttpService {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
+        self.warmup().await?;
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
@@ -870,5 +882,36 @@ mod tests {
 
         // Clean up
         handle.abort();
+    }
+
+    #[cfg(feature = "stateful-responses-redb")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn responses_store_init_failure_fails_startup() {
+        const STORE_URL_ENV: &str = "DYN_STATEFUL_RESPONSES_STORE_URL";
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let store_url = format!("redb:{}", db_dir.path().display());
+
+        temp_env::async_with_vars([(STORE_URL_ENV, Some(store_url.as_str()))], async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("failed to bind ephemeral port");
+            let service = HttpService::builder()
+                .port(listener.local_addr().unwrap().port())
+                .build()
+                .unwrap();
+
+            let err = service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .expect_err("bad redb store should fail before serving");
+            assert!(
+                err.to_string()
+                    .contains("failed to initialize stateful Responses store"),
+                "{err:#}"
+            );
+        })
+        .await;
     }
 }
