@@ -29,7 +29,7 @@ use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
-use super::{PrefillTokenDeltas, WorkerLoadProjection};
+use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
     WorkerWithDpRank,
@@ -569,11 +569,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-        Option<FxHashMap<WorkerWithDpRank, usize>>,
-    ) {
+    ) -> PotentialLoadMaps {
         self.potential_blocks_and_tokens_at::<INCLUDE_ACTIVE_REQUESTS>(
             token_sequence,
             prefill_token_deltas,
@@ -586,11 +582,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-        Option<FxHashMap<WorkerWithDpRank, usize>>,
-    ) {
+    ) -> PotentialLoadMaps {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 

@@ -41,6 +41,12 @@ impl WorkerLoadProjection {
     }
 }
 
+pub type PotentialLoadMaps = (
+    FxHashMap<WorkerWithDpRank, usize>,
+    FxHashMap<WorkerWithDpRank, usize>,
+    Option<FxHashMap<WorkerWithDpRank, usize>>,
+);
+
 /// Reusable snapshot of a worker's currently tracked execution state.
 ///
 /// `active_blocks` is the worker's unique active decode load in blocks.
@@ -166,11 +172,7 @@ impl PromptRegistry {
         matched_depth: &FxHashMap<WorkerWithDpRank, usize>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-        Option<FxHashMap<WorkerWithDpRank, usize>>,
-    ) {
+    ) -> PotentialLoadMaps {
         let mut potential_blocks =
             FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
         let mut potential_tokens =
@@ -201,11 +203,7 @@ impl PromptRegistry {
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-        Option<FxHashMap<WorkerWithDpRank, usize>>,
-    ) {
+    ) -> PotentialLoadMaps {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         self.project_loads_from_membership::<INCLUDE_ACTIVE_REQUESTS>(
