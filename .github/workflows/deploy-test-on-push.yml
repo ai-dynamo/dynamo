@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       kube_context:
-        description: 'kubectl context to target (e.g. dynamo-aws-dev-02 or azure-ci). Defaults to kubeconfig current-context.'
+        description: 'kubectl context to target (e.g. nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02 or azure-ci). Defaults to kubeconfig current-context.'
         required: false
         default: ''
       operator_tag:
@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Set kubectl context
         shell: bash
-        run: kubectl config use-context "${{ inputs.kube_context || 'dynamo-aws-dev-02' }}"
+        run: kubectl config use-context "${{ inputs.kube_context || 'nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02' }}"
       - name: Setup vCluster and operator
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Set kubectl context
         shell: bash
-        run: kubectl config use-context "${{ inputs.kube_context || 'dynamo-aws-dev-02' }}"
+        run: kubectl config use-context "${{ inputs.kube_context || 'nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02' }}"
       - name: Teardown vCluster
         if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
         uses: ./.github/actions/teardown-dynamo-operator
