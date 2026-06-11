@@ -45,7 +45,10 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: 'et_time", "arguments": {"timezone": "EST"}}'
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
       sglang:
         calls:
         - name: get_weather

@@ -332,6 +332,11 @@ impl ChoiceJailState {
             return;
         }
 
+        if let Some(continuation) = jail_stream.markerless_json_continuation(content) {
+            self.begin_jail(continuation, None);
+            return;
+        }
+
         if let MatchResult::Partial {
             prefix, partial, ..
         } = jail_stream.marker_matcher.process_chunk(content, "")
@@ -1010,9 +1015,73 @@ impl JailedStream {
 
         // Path 2: Check for tool call start pattern
         let tool_call_match = self.tool_call_parser.is_some()
+            && (!self.marker_requires_configured_start_token()
+                || self.has_configured_start_token(content))
             && detect_tool_call_start(content, self.tool_call_parser.as_deref()).unwrap_or(false);
 
         sequence_match || tool_call_match
+    }
+
+    fn marker_requires_configured_start_token(&self) -> bool {
+        let Some(parser_name) = self.tool_call_parser.as_deref() else {
+            return false;
+        };
+        let parser_map = get_tool_parser_map();
+        matches!(
+            parser_map
+                .get(parser_name)
+                .map(|config| &config.parser_config),
+            Some(ParserConfig::Json(config))
+                if config.tool_call_end_tokens.iter().any(|token| token.is_empty())
+                    && config.tool_call_start_tokens.iter().any(|token| !token.is_empty())
+        )
+    }
+
+    fn has_configured_start_token(&self, content: &str) -> bool {
+        let Some(parser_name) = self.tool_call_parser.as_deref() else {
+            return false;
+        };
+        let parser_map = get_tool_parser_map();
+        let Some(ParserConfig::Json(config)) = parser_map
+            .get(parser_name)
+            .map(|config| &config.parser_config)
+        else {
+            return false;
+        };
+
+        config
+            .tool_call_start_tokens
+            .iter()
+            .any(|token| !token.is_empty() && content.contains(token))
+    }
+
+    fn markerless_json_continuation(&self, content: &str) -> Option<String> {
+        if !self.marker_requires_configured_start_token() {
+            return None;
+        }
+
+        let Some(parser_name) = self.tool_call_parser.as_deref() else {
+            return None;
+        };
+        let parser_map = get_tool_parser_map();
+        let Some(ParserConfig::Json(config)) = parser_map
+            .get(parser_name)
+            .map(|config| &config.parser_config)
+        else {
+            return None;
+        };
+        let start_token = config
+            .tool_call_start_tokens
+            .iter()
+            .find(|token| !token.is_empty())?;
+
+        let trimmed = content.trim_start();
+        let candidate = trimmed.strip_prefix(';').unwrap_or(trimmed).trim_start();
+        if candidate.starts_with('{') || candidate.starts_with('[') {
+            Some(format!("{start_token}{candidate}"))
+        } else {
+            None
+        }
     }
 
     fn prefix_before_first_tool_call_marker<'a>(&self, content: &'a str) -> Option<&'a str> {
@@ -1084,16 +1153,16 @@ impl JailedStream {
         )
     }
 
-    fn marker_json_completion_base(&self, accumulated_content: &str) -> usize {
+    fn marker_json_completion_base(&self, accumulated_content: &str) -> Option<usize> {
         let Some(parser_name) = self.tool_call_parser.as_deref() else {
-            return 0;
+            return None;
         };
         let parser_map = get_tool_parser_map();
         let Some(ParserConfig::Json(config)) = parser_map
             .get(parser_name)
             .map(|config| &config.parser_config)
         else {
-            return 0;
+            return None;
         };
 
         config
@@ -1106,7 +1175,6 @@ impl JailedStream {
                     .map(|pos| pos + token.len())
             })
             .min()
-            .unwrap_or(0)
     }
 
     async fn parse_marker_tool_calls(
@@ -1154,16 +1222,27 @@ impl JailedStream {
                         .await;
 
                     if Self::marker_parse_has_tool_calls(&parse_result) {
-                        let split_pos = self
-                            .tool_call_parser
-                            .as_deref()
-                            .and_then(|parser| {
+                        let parser_split_pos =
+                            self.tool_call_parser.as_deref().and_then(|parser| {
                                 find_tool_call_end_position(accumulated_content, Some(parser))
-                            })
+                            });
+                        let split_pos = parser_split_pos
+                            .map(|pos| pos.max(end_pos))
                             .unwrap_or(end_pos);
+                        let marker_parse_result = if split_pos < accumulated_content.len() {
+                            Some(
+                                self.parse_marker_tool_calls(
+                                    &accumulated_content[..split_pos],
+                                    false,
+                                )
+                                .await,
+                            )
+                        } else {
+                            Some(parse_result)
+                        };
                         return JailCompletion::Complete(CompletedJail {
                             split_pos,
-                            marker_parse_result: Some(parse_result),
+                            marker_parse_result,
                         });
                     }
 
@@ -1175,8 +1254,9 @@ impl JailedStream {
                     });
                 }
 
-                if self.marker_can_complete_with_json_depth() {
-                    let json_base = self.marker_json_completion_base(accumulated_content);
+                if self.marker_can_complete_with_json_depth()
+                    && let Some(json_base) = self.marker_json_completion_base(accumulated_content)
+                {
                     let Some(split_pos) = progress
                         .json
                         .complete_end_from(accumulated_content, json_base)
