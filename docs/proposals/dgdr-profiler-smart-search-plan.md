@@ -59,9 +59,9 @@ The optimization goal is user-owned and always `Pinned`; it is never a search di
 
 - `optimization_target` defines what "better" means: `throughput`, `e2e_latency`, `goodput`, or `goodput_per_gpu`.
 - SLA targets (`ttft_ms`+`itl_ms`, or `e2e_ms`) are user constraints. `goodput` and `goodput_per_gpu` require an SLA target; `throughput` and `e2e_latency` may run without one.
-- `gpu_budget` bounds the GPU footprint every candidate may use.
+- The GPU budget (`gpu_budget`) is the deployment `budget` knob, not part of this structure; it is applied as a feasibility constraint in the gate below.
 
-The goal is captured by a single structure, extracted from the DGDR spec (objective + SLA + budget) and never mutated by the search. Field names follow the DGDR-aligned lowerCamelCase convention used by `replay_optimize.specs`:
+The goal is captured by a single structure, extracted from the DGDR spec (objective + SLA) and never mutated by the search. Field names follow the DGDR-aligned lowerCamelCase convention used by `replay_optimize.specs`:
 
 ```python
 class OptimizationTarget(str, Enum):
@@ -80,11 +80,10 @@ class SLATarget(BaseModel):
 
 
 class OptimizationGoal(BaseModel):
-    """User-owned objective + feasibility constraints. Pinned; never searched."""
+    """User-owned objective and SLA. Pinned; never searched."""
     model_config = ConfigDict(extra="forbid")
     target: OptimizationTarget = OptimizationTarget.THROUGHPUT
     sla: SLATarget | None = None  # required for goodput / goodput_per_gpu
-    gpuBudget: int                # max GPUs any single candidate may use
 
     @model_validator(mode="after")
     def _require_sla_for_goodput(self) -> "OptimizationGoal":
