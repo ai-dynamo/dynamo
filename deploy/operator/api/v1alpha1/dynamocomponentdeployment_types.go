@@ -21,6 +21,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -78,7 +79,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// GPUs/devices, and any runtime-specific resources.
 	Resources *Resources `json:"resources,omitempty"`
 	// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-	// with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md
+	// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
 	// for migration guidance. This field will be removed in a future API version.
 	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
@@ -131,10 +132,35 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
+	// FrontendSidecar configures an auto-generated frontend sidecar container.
+	// When specified, the operator injects a fully configured frontend container
+	// with all standard Dynamo environment variables, health probes, and ports.
+	// This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
+	// +optional
+	FrontendSidecar *FrontendSidecarSpec `json:"frontendSidecar,omitempty"`
+
 	// Checkpoint configures container checkpointing for this service.
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
 	// +optional
 	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
+
+	// TopologyConstraint for this service. packDomain is required.
+	// When both this and spec.topologyConstraint.packDomain are set, packDomain
+	// must be narrower than or equal to the spec-level packDomain.
+	// +optional
+	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
+
+	// Failover configures GMS (GPU Memory Service) failover for this service.
+	// For intraPod mode: the main container is cloned into two engine containers (active + standby).
+	// For interPod mode: the operator creates a dedicated GMS weight server pod and
+	// multiple engine pods per rank that share GPUs via DRA resource claims.
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
 type MultinodeSpec struct {
@@ -207,6 +233,7 @@ type DynamoComponentDeploymentStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoComponentDeployment is deprecated; use nvidia.com/v1beta1 DynamoComponentDeployment"
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
@@ -237,8 +264,10 @@ func init() {
 }
 
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
-	ready, reason := s.Status.IsReady()
-	return ready, reason
+	if s.Status.ObservedGeneration < s.Generation {
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", s.Generation, s.Status.ObservedGeneration)
+	}
+	return s.Status.IsReady()
 }
 
 // GetState returns "ready" or "not_ready" based on conditions
@@ -319,6 +348,59 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 	return 1
 }
 
+// IsInterPodGMSEnabled reports whether the inter-pod GMS layout is requested
+// (dedicated GMS weight-server pod per rank + engine pods, sharing GPUs via
+// DRA). This is a layout-only signal and does NOT imply failover is enabled;
+// callers deciding whether to add shadow engine pods or apply failover-group
+// cascade labels must additionally consult IsInterPodFailoverEnabled().
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
+	return s.GPUMemoryService != nil && s.GPUMemoryService.Enabled &&
+		s.GPUMemoryService.Mode == GMSModeInterPod
+}
+
+// IsInterPodFailoverEnabled reports whether failover with hot-spare shadow
+// engine pods is configured for the inter-pod GMS layout. When true, the
+// service also implies IsInterPodGMSEnabled() (the layout invariant is
+// enforced by admission). Use this to gate shadow-pod expansion and
+// failover-cascade labels; use IsInterPodGMSEnabled() for layout-only
+// decisions (weight-server PCLQ, DRA claims, Grove pathway gating, etc.).
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodFailoverEnabled() bool {
+	return s.Failover != nil && s.Failover.Enabled && s.Failover.Mode == GMSModeInterPod
+}
+
+// GetNumShadows returns the number of shadow engine replicas configured for
+// inter-pod GMS failover. It returns 0 when inter-pod failover is disabled
+// (including the standalone inter-pod GMS layout and intra-pod failover).
+// Defaults to 1 if inter-pod failover is enabled but NumShadows is unset or <1.
+//
+// Callers that iterate "engine roles" must gate on IsInterPodFailoverEnabled()
+// first — treating a 0 return as "just the primary" is a bug, because the
+// primary is still modeled as a regular single-pod service in that case.
+func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {
+	if !s.IsInterPodFailoverEnabled() {
+		return 0
+	}
+	if s.Failover.NumShadows < 1 {
+		return 1
+	}
+	return s.Failover.NumShadows
+}
+
+// GetTotalEnginePods returns the total number of engine pods (primary +
+// shadows) for the inter-pod GMS layout. Returns 1 for the standalone
+// inter-pod layout (no failover) — a single engine pod paired with a
+// dedicated weight-server pod — and N+1 when inter-pod failover is enabled.
+// Returns 1 for non-inter-pod layouts as a sizing convenience.
+//
+// Callers that iterate "engine roles" must gate on IsInterPodGMSEnabled()
+// first — the 1 return for non-inter-pod services is a convenience for sizing
+// math, NOT a signal that there is a "primary role" to iterate over; the
+// non-inter-pod path models the service as a single clique, not as primary +
+// shadows.
+func (s *DynamoComponentDeploymentSharedSpec) GetTotalEnginePods() int32 {
+	return s.GetNumShadows() + 1
+}
+
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 	for _, ownerRef := range s.ObjectMeta.OwnerReferences {
 		if ownerRef.Kind == "DynamoGraphDeployment" {
@@ -344,7 +426,11 @@ func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName st
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
 	}
-	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
+	// The dynamo namespace is used as the first segment of endpoint paths
+	// (e.g. "namespace.component.endpoint"). Dots in resource names (from model
+	// version strings like "Qwen3-0.6B") would break that parsing, so replace them.
+	sanitized := strings.ReplaceAll(dgdName, ".", "-")
+	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
 }
 
 // ModelReference identifies a model served by this component
@@ -356,6 +442,31 @@ type ModelReference struct {
 	// Revision is the model revision/version (optional)
 	// +optional
 	Revision string `json:"revision,omitempty"`
+}
+
+// FrontendSidecarSpec configures the auto-generated frontend sidecar container.
+// The operator uses these fields together with built-in frontend defaults (command, probes, ports,
+// and Dynamo env vars) to produce a fully configured sidecar container.
+type FrontendSidecarSpec struct {
+	// Image is the container image for the frontend sidecar.
+	// +kubebuilder:validation:Required
+	Image string `json:"image"`
+
+	// Args overrides the default frontend arguments. When specified, these replace
+	// the default ["-m", "dynamo.frontend"] entirely.
+	// For example, ["-m", "dynamo.frontend", "--router-mode", "direct"] for GAIE deployments.
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// EnvFromSecret references a Secret whose key/value pairs will be exposed as
+	// environment variables in the frontend sidecar container.
+	// +optional
+	EnvFromSecret *string `json:"envFromSecret,omitempty"`
+
+	// Envs defines additional environment variables for the frontend sidecar.
+	// These are merged with (and can override) the auto-generated Dynamo env vars.
+	// +optional
+	Envs []corev1.EnvVar `json:"envs,omitempty"`
 }
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.

@@ -8,7 +8,7 @@ use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
 use crate::config::environment_names::runtime::system as env_system;
-use crate::logging::make_request_span;
+use crate::logging::make_system_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
 use axum::{
@@ -216,15 +216,26 @@ pub async fn spawn_system_status_server(
             );
     }
 
+    // Self-hosted MDC files. Always mounted; empty registry → 404.
+    // Suffix segment scopes per-registration (LoRA slug, or `_base`)
+    // so detaching one registration doesn't wipe another's entries.
+    app = app.route(
+        "/v1/metadata/{model_slug}/{model_suffix}/{*filename}",
+        get({
+            let state = Arc::clone(&server_state);
+            move |path| metadata_file_handler(State(state), path)
+        }),
+    );
+
     let app = app
         .fallback(|| async {
             tracing::info!("[fallback handler] called");
             (StatusCode::NOT_FOUND, "Route not found").into_response()
         })
-        .layer(TraceLayer::new_for_http().make_span_with(make_request_span));
+        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
 
     let address = format!("{}:{}", host, port);
-    tracing::info!("[spawn_system_status_server] binding to: {}", address);
+    tracing::info!("[spawn_system_status_server] binding to: {address}");
 
     let listener = match TcpListener::bind(&address).await {
         Ok(listener) => {
@@ -250,7 +261,7 @@ pub async fn spawn_system_status_server(
             .with_graceful_shutdown(observer.cancelled_owned())
             .await
         {
-            tracing::error!("System status server error: {}", e);
+            tracing::error!("System status server error: {e}");
         }
     });
 
@@ -297,7 +308,7 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let response = match state.drt().metrics().prometheus_expfmt() {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!("Failed to get metrics from registry: {}", e);
+            tracing::error!("Failed to get metrics from registry: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get metrics".to_string(),
@@ -334,7 +345,7 @@ async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
             (StatusCode::OK, json).into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to serialize metadata: {}", e);
+            tracing::error!("Failed to serialize metadata: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to serialize metadata".to_string(),
@@ -406,7 +417,7 @@ async fn unload_lora_handler(
         .strip_prefix('/')
         .unwrap_or(&lora_name)
         .to_string();
-    tracing::info!("Unloading LoRA: {}", lora_name);
+    tracing::info!("Unloading LoRA: {lora_name}");
 
     // Call the unload_lora endpoint for each available backend
     match call_lora_endpoint(
@@ -427,7 +438,7 @@ async fn unload_lora_handler(
                 );
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
             } else {
-                tracing::info!("LoRA unloaded successfully: {}", lora_name);
+                tracing::info!("LoRA unloaded successfully: {lora_name}");
                 (StatusCode::OK, Json(response))
             }
         }
@@ -460,7 +471,7 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
             (StatusCode::OK, Json(response))
         }
         Err(e) => {
-            tracing::error!("Failed to list LoRAs: {}", e);
+            tracing::error!("Failed to list LoRAs: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(LoraResponse {
@@ -476,6 +487,45 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
     }
 }
 
+/// `GET /v1/metadata/{slug}/{suffix}/{filename}` — 404 on miss,
+/// 500 on read error, raw bytes on hit. Consumer blake3-verifies.
+async fn metadata_file_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Path((model_slug, model_suffix, filename)): Path<(String, String, String)>,
+) -> impl IntoResponse {
+    let path = match state
+        .drt()
+        .metadata_artifacts()
+        .get(&model_slug, &model_suffix, &filename)
+    {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                model_slug,
+                model_suffix,
+                filename,
+                "metadata artifact not registered for self-host"
+            );
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+    };
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (StatusCode::OK, bytes).into_response(),
+        Err(err) => {
+            tracing::error!(
+                model_slug,
+                model_suffix,
+                filename,
+                path = %path.display(),
+                %err,
+                "failed to read self-hosted metadata file"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response()
+        }
+    }
+}
+
 /// Helper function to call a LoRA management endpoint locally via in-process registry
 ///
 /// This function ONLY uses the local endpoint registry for direct in-process calls.
@@ -487,7 +537,7 @@ async fn call_lora_endpoint(
 ) -> anyhow::Result<LoraResponse> {
     use crate::engine::AsyncEngine;
 
-    tracing::debug!("Calling local endpoint: '{}'", endpoint_name);
+    tracing::debug!("Calling local endpoint: '{endpoint_name}'");
 
     // Get the endpoint from the local registry (in-process call only)
     let local_registry = drt.local_endpoint_registry();
@@ -558,7 +608,7 @@ async fn engine_route_handler(
     Path(path): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    tracing::trace!("Engine route request to /engine/{}", path);
+    tracing::trace!("Engine route request to /engine/{path}");
 
     // Parse body as JSON (empty object for GET/empty body)
     let body_json: serde_json::Value = if body.is_empty() {
@@ -567,7 +617,7 @@ async fn engine_route_handler(
         match serde_json::from_slice(&body) {
             Ok(json) => json,
             Err(e) => {
-                tracing::warn!("Invalid JSON in request body: {}", e);
+                tracing::warn!("Invalid JSON in request body: {e}");
                 return (
                     StatusCode::BAD_REQUEST,
                     json!({
@@ -585,7 +635,7 @@ async fn engine_route_handler(
     let callback = match state.drt().engine_routes().get(&path) {
         Some(cb) => cb,
         None => {
-            tracing::debug!("Route /engine/{} not found", path);
+            tracing::debug!("Route /engine/{path} not found");
             return (
                 StatusCode::NOT_FOUND,
                 json!({
@@ -601,7 +651,7 @@ async fn engine_route_handler(
     // Call callback (it's async, so await it)
     match callback(body_json).await {
         Ok(response) => {
-            tracing::trace!("Engine route handler succeeded for /engine/{}", path);
+            tracing::trace!("Engine route handler succeeded for /engine/{path}");
             (StatusCode::OK, response.to_string()).into_response()
         }
         Err(e) => {
@@ -1032,7 +1082,7 @@ mod integration_tests {
                     }
                 }
 
-                tracing::info!("Health endpoint test results: {}/200 requests succeeded", success_count);
+                tracing::info!("Health endpoint test results: {success_count}/200 requests succeeded");
                 if !failures.is_empty() {
                     tracing::warn!("Failed requests: {}", failures.len());
                 }
@@ -1147,6 +1197,7 @@ mod integration_tests {
                             namespace: "test_namespace".to_string(),
                             instance_id: 1,
                             transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                            device_type: None,
                         },
                         health_check_payload.clone(),
                     );

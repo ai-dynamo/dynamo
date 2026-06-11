@@ -7,7 +7,6 @@ from typing import Callable, Optional
 import numpy as np
 
 from dynamo.profiler.utils.aiperf import get_prefill_ttft
-from dynamo.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from dynamo.profiler.utils.plot import plot_prefill_interpolation
 
 logger = logging.getLogger(__name__)
@@ -82,15 +81,15 @@ def _profile_prefill_helper(
 
 
 def profile_prefill(
-    work_dir,
-    model_name,
-    tokenizer,
-    url,
-    num_gpus,
-    max_context_length,
-    interpolation_granularity,
+    work_dir: str,
+    model_name: str,
+    tokenizer: str,
+    url: str,
+    num_gpus: int,
+    max_context_length: int,
+    interpolation_granularity: int,
     attention_dp_size: int = 1,
-):
+) -> None:
     def get_ttft(isl):
         ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}"
         return get_prefill_ttft(
@@ -109,31 +108,4 @@ def profile_prefill(
         interpolation_granularity,
         get_ttft,
         attention_dp_size=attention_dp_size,
-    )
-
-
-def profile_prefill_aiconfigurator(
-    work_dir,
-    num_gpus,
-    max_context_length,
-    interpolation_granularity,
-    ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
-    **model_config_kwargs,
-):
-    def get_ttft(isl):
-        perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
-            isl,
-            **model_config_kwargs,
-        )
-
-        ttft = perf_dict["context_latency"]
-        logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
-        return ttft
-
-    return _profile_prefill_helper(
-        work_dir,
-        num_gpus,
-        max_context_length,
-        interpolation_granularity,
-        get_ttft,
     )

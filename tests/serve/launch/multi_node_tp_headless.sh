@@ -12,6 +12,12 @@ trap 'echo "Cleaning up..."; kill 0' EXIT
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
+KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
+GPU_MEM_ARGS=""
+if [[ -n "$KV_BYTES" ]]; then
+    GPU_MEM_ARGS="--kv-cache-memory-bytes $KV_BYTES --gpu-memory-utilization 0.01"
+fi
+
 echo "Starting Dynamo frontend..."
 python3 -m dynamo.frontend &
 
@@ -22,7 +28,8 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
   --nnodes 2 \
   --node-rank 0 \
   --master-addr 127.0.0.1 \
-  --enforce-eager &
+  --enforce-eager \
+  $GPU_MEM_ARGS &
 
 echo "Starting dynamo.vllm headless worker (TP=2, nnodes=2, node-rank=1, GPU 1)..."
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
@@ -32,6 +39,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
   --node-rank 1 \
   --master-addr 127.0.0.1 \
   --enforce-eager \
+  $GPU_MEM_ARGS \
   --headless &
 
 wait

@@ -4,8 +4,6 @@
 
 # Kubernetes and async dependencies
 aiofiles>=0.8.0
-# Benchmarking dependencies for Dynamo
-genai-perf==0.0.15
 httpx>=0.24.0
 kubernetes-asyncio>=24.0.0
 

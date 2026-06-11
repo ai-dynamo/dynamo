@@ -1,0 +1,218 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use dynamo_tokens::SequenceHash;
+use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
+
+use super::config::RouterConfigOverride;
+use super::filter::RoutingEligibility;
+use crate::protocols::{
+    DpRank, RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
+};
+use crate::sequences::WorkerLoadProjection;
+
+pub type OverloadedWorkerProvider =
+    Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TierOverlapBlocks {
+    #[serde(default)]
+    pub device: FxHashMap<WorkerWithDpRank, usize>,
+    #[serde(default)]
+    pub host_pinned: FxHashMap<WorkerWithDpRank, usize>,
+    #[serde(default)]
+    pub disk: FxHashMap<WorkerWithDpRank, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PotentialLoad {
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
+    pub potential_prefill_tokens: usize,
+    pub potential_decode_blocks: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KvSchedulerError {
+    #[error("no endpoints available to route work")]
+    NoEndpoints,
+
+    #[error(
+        "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+    )]
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
+
+    #[error("all eligible workers are overloaded")]
+    AllEligibleWorkersOverloaded,
+
+    #[error("pinned worker {worker_id} is overloaded")]
+    PinnedWorkerOverloaded { worker_id: WorkerId },
+
+    #[error("pinned worker {worker_id} is not in allowed worker set")]
+    PinnedWorkerNotAllowed { worker_id: WorkerId },
+
+    #[error("endpoint subscriber shutdown")]
+    SubscriberShutdown,
+
+    #[error("failed to book scheduler state: {0}")]
+    BookingFailed(String),
+
+    #[error("failed to initialize event publisher: {0}")]
+    InitFailed(String),
+}
+
+impl KvSchedulerError {
+    pub fn is_overload(&self) -> bool {
+        matches!(
+            self,
+            Self::Backpressure { .. }
+                | Self::AllEligibleWorkersOverloaded
+                | Self::PinnedWorkerOverloaded { .. }
+        )
+    }
+}
+
+#[derive(Debug)]
+pub struct SchedulingResponse {
+    pub best_worker: WorkerWithDpRank,
+    pub effective_overlap_blocks: f64,
+    pub cached_tokens: usize,
+}
+
+pub struct SchedulingRequest {
+    // Request identity and payload.
+    pub maybe_request_id: Option<String>,
+    pub token_seq: Option<Vec<SequenceHash>>,
+    pub isl_tokens: usize,
+    pub lora_name: Option<String>,
+    pub expected_output_tokens: Option<u32>,
+
+    // Routing constraints and request-level config.
+    pub pinned_worker: Option<WorkerWithDpRank>,
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+    pub routing_constraints: RoutingConstraints,
+    pub router_config_override: Option<RouterConfigOverride>,
+    pub track_prefill_tokens: bool,
+    pub priority_jump: f64,
+
+    // Overlap and cache signals.
+    pub tier_overlap_blocks: TierOverlapBlocks,
+    pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
+    pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+    pub shared_cache_hits: Option<SharedCacheHits>,
+
+    // Load state computed during admission.
+    pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+
+    // Scheduling side effects and lifecycle controls.
+    pub update_states: bool,
+    pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
+}
+
+#[derive(Clone, Copy)]
+pub struct SchedulingContext<'a, C> {
+    request: &'a SchedulingRequest,
+    eligibility: RoutingEligibility<'a>,
+    workers: &'a HashMap<WorkerId, C>,
+}
+
+impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
+    pub fn new(request: &'a SchedulingRequest, workers: &'a HashMap<WorkerId, C>) -> Self {
+        Self {
+            request,
+            eligibility: request.eligibility(),
+            workers,
+        }
+    }
+
+    pub fn request(&self) -> &'a SchedulingRequest {
+        self.request
+    }
+
+    pub fn best_effective_prefill_tokens(&self) -> usize {
+        let cached_tokens = match self.eligibility.pinned_worker() {
+            Some(worker) => self.request.effective_cached_tokens_for(worker),
+            None => self
+                .request
+                .effective_cached_tokens
+                .iter()
+                .filter(|(worker, _)| {
+                    self.workers.get(&worker.worker_id).is_some_and(|config| {
+                        self.eligibility.allows_worker(worker.worker_id, config)
+                    })
+                })
+                .map(|(_, cached_tokens)| *cached_tokens)
+                .max()
+                .unwrap_or(0),
+        };
+
+        self.request.isl_tokens.saturating_sub(cached_tokens)
+    }
+}
+
+impl SchedulingRequest {
+    #[inline]
+    pub fn eligibility(&self) -> RoutingEligibility<'_> {
+        self.eligibility_with_overloaded(None)
+    }
+
+    #[inline]
+    pub fn eligibility_with_overloaded<'a>(
+        &'a self,
+        overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
+    ) -> RoutingEligibility<'a> {
+        RoutingEligibility::new(
+            self.allowed_worker_ids.as_ref(),
+            overloaded_worker_ids,
+            self.pinned_worker,
+            &self.routing_constraints,
+        )
+    }
+
+    pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
+        self.effective_cached_tokens
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
+        self.effective_overlap_blocks
+            .get(&worker)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    pub fn worker_load_for(&self, worker: WorkerWithDpRank) -> WorkerLoadProjection {
+        self.worker_loads.get(&worker).copied().unwrap_or_default()
+    }
+
+    pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
+        self.isl_tokens.div_ceil(block_size as usize) as u64
+    }
+
+    pub(crate) fn response_is_closed(&self) -> bool {
+        self.resp_tx.as_ref().is_none_or(|tx| tx.is_closed())
+    }
+
+    pub fn respond(&mut self, result: Result<SchedulingResponse, KvSchedulerError>) -> bool {
+        let Some(tx) = self.resp_tx.take() else {
+            tracing::error!("respond called multiple times on same request");
+            return false;
+        };
+        if tx.send(result).is_err() {
+            tracing::debug!("requestor dropped scheduling response");
+            return false;
+        }
+        true
+    }
+}

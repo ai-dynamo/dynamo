@@ -50,13 +50,13 @@ Frontend (standard)      MM Router Worker (this)        TRT-LLM Worker (standard
 
 ```bash
 # 1. Start etcd and NATS
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 
 # 2. Start TRT-LLM worker(s)
 python -m dynamo.trtllm \
     --model Qwen/Qwen2-VL-2B-Instruct \
     --namespace default \
-    --component trtllm \
+    --component backend \
     --endpoint generate \
     --modality multimodal \
     --publish-events-and-metrics &
@@ -68,7 +68,7 @@ python -m examples.backends.trtllm.mm_router_worker \
     --namespace default \
     --component mm_router \
     --endpoint generate \
-    --downstream-component trtllm \
+    --downstream-component backend \
     --downstream-endpoint generate &
 
 # 4. Start Frontend
@@ -105,7 +105,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `--namespace` | `default` | Dynamo namespace |
 | `--component` | `mm_router` | This worker's component name |
 | `--endpoint` | `generate` | This worker's endpoint name |
-| `--downstream-component` | `trtllm` | TRT-LLM workers' component name |
+| `--downstream-component` | `backend` | TRT-LLM workers' component name |
 | `--downstream-endpoint` | `generate` | TRT-LLM workers' endpoint name |
 
 ## How It Works
@@ -154,7 +154,7 @@ This is included in `mm_routing_info` so KvRouter can compute MM-aware overlap.
 
 ## Dependencies
 
-- `tensorrt_llm >= 1.2.0rc6` - For `apply_mm_hashes()` and `default_multimodal_input_loader()`. Earlier versions may not include multimodal hash support in KV events.
+- `tensorrt_llm >= 1.3.0rc5` - Required for the current `apply_mm_hashes()` tuple return contract (`(mm_hashes_by_modality, uuids)`), used by this worker's routing hash extraction path.
 - `transformers` - For `AutoProcessor`
 - `dynamo` - For runtime and KvRouter
 

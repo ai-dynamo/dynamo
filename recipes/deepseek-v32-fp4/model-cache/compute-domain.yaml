@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: your-compute-domain
+  namespace: your-namespace
+spec:
+  # 0 = on-demand allocation (nodes assigned when pods request them via resourceClaims).
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: your-compute-domain-channel

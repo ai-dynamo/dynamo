@@ -12,8 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,60 +22,84 @@ import (
 
 type GroveMultinodeDeployer struct {
 	MultinodeDeployer
+	// IsInterPodGMS is true when this deployer produces pod specs for an
+	// engine PCLQ that uses the inter-pod GMS *layout* (one engine pod per
+	// rank, per shadow, with a dedicated GMS weight server pod). It is a
+	// layout/topology flag — not a failover policy flag — and governs how
+	// hostnames, node ranks, and per-pod wiring are computed. Today this
+	// layout is only produced when inter-pod GMS failover is enabled, but
+	// the deployer itself should not encode that assumption.
+	IsInterPodGMS bool
+	Rank          int32 // explicit node rank (used when IsInterPodGMS is true)
 }
 
 func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
-	return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-0.$(GROVE_HEADLESS_SERVICE)", strings.ToLower(serviceName), commonconsts.GroveRoleSuffixLeader)
+	if d.IsInterPodGMS {
+		// GMS: each PCLQ has multiple replicas; pods at the same index across
+		// ranks form a communication group, so use the dynamic pod index.
+		return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
+			strings.ToLower(serviceName), commonconsts.GroveRoleSuffixLeader)
+	}
+	return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-0.$(GROVE_HEADLESS_SERVICE)",
+		strings.ToLower(serviceName), commonconsts.GroveRoleSuffixLeader)
 }
 
 func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
-	// This requires shell expansion for arithmetic expression
+	if d.IsInterPodGMS {
+		return fmt.Sprintf("%d", d.Rank), false
+	}
 	return "$((GROVE_PCLQ_POD_INDEX + 1))", true
 }
 
 func (d *GroveMultinodeDeployer) NeedsDNSWait() bool {
-	// Grove doesn't need DNS wait - it handles startup coordination differently
 	return false
 }
 
 func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes int32) []string {
 	hostnames := make([]string, 0, numberOfNodes)
-	leaderHostname := d.GetLeaderHostname(serviceName)
-	hostnames = append(hostnames, leaderHostname)
-	// Add worker hostnames
-	for i := int32(0); i < numberOfNodes-1; i++ {
-		workerHostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d.$(GROVE_HEADLESS_SERVICE)",
-			strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, i)
-		hostnames = append(hostnames, workerHostname)
+	hostnames = append(hostnames, d.GetLeaderHostname(serviceName))
+
+	if d.IsInterPodGMS {
+		for rank := int32(1); rank < numberOfNodes; rank++ {
+			hostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
+				strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, rank)
+			hostnames = append(hostnames, hostname)
+		}
+	} else {
+		for i := int32(0); i < numberOfNodes-1; i++ {
+			hostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d.$(GROVE_HEADLESS_SERVICE)",
+				strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, i)
+			hostnames = append(hostnames, hostname)
+		}
 	}
 	return hostnames
 }
 
 // GetComponentReadinessAndServiceReplicaStatuses determines if all Grove components are ready
-// and returns the service replica statuses for each component.
+// and returns the replica statuses for each component.
 // - PodCliques: spec.replicas == status.readyReplicas
 // - PodCliqueScalingGroups: spec.replicas == status.availableReplicas
-func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
+func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *v1beta1.DynamoGraphDeployment) (bool, string, map[string]v1beta1.ComponentReplicaStatus) {
 	logger := log.FromContext(ctx)
 	var notReadyComponents []string
 
-	serviceStatuses := make(map[string]v1alpha1.ServiceReplicaStatus, len(dgd.Spec.Services))
+	componentStatuses := make(map[string]v1beta1.ComponentReplicaStatus, len(dgd.Spec.Components))
 
-	for serviceName, component := range dgd.Spec.Services {
-		isMultinode := component.GetNumberOfNodes() > 1
-		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		componentName := component.ComponentName
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		resourceName := fmt.Sprintf("%s-0-%s", PCSNameForDGD(dgd.Name, dgd.Spec.Components), strings.ToLower(componentName))
 
-		if isMultinode {
-			// Check PodCliqueScalingGroup: spec.replicas == status.availableReplicas
-			ok, reason, serviceStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
-			serviceStatuses[serviceName] = serviceStatus
+		if usesPCSG {
+			ok, reason, componentStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
+			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("pcsg/%s: %s", resourceName, reason))
 			}
 		} else {
-			// Check PodClique: spec.replicas == status.readyReplicas
-			ok, reason, serviceStatus := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
-			serviceStatuses[serviceName] = serviceStatus
+			ok, reason, componentStatus := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
+			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("podclique/%s: %s", resourceName, reason))
 			}
@@ -84,26 +107,26 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 	}
 
 	if len(notReadyComponents) > 0 {
-		return false, strings.Join(notReadyComponents, "; "), serviceStatuses
+		return false, strings.Join(notReadyComponents, "; "), componentStatuses
 	}
 
-	return true, "", serviceStatuses
+	return true, "", componentStatuses
 }
 
 // CheckPodCliqueReady determines if a Grove PodClique is fully ready and available.
 // It checks various status fields to ensure all replicas are available and the PodClique
 // configuration has been fully applied. This is the PodClique equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
+func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus) {
 	podClique := &grovev1alpha1.PodClique{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodClique not found", "resourceName", resourceName)
-			return false, "resource not found", v1alpha1.ServiceReplicaStatus{}
+			return false, "resource not found", v1beta1.ComponentReplicaStatus{}
 		}
 		logger.V(1).Info("Failed to get PodClique", "error", err, "resourceName", resourceName)
-		return false, fmt.Sprintf("get error: %v", err), v1alpha1.ServiceReplicaStatus{}
+		return false, fmt.Sprintf("get error: %v", err), v1beta1.ComponentReplicaStatus{}
 	}
 
 	desiredReplicas := podClique.Spec.Replicas
@@ -123,9 +146,8 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		"replicas", replicas,
 	)
 
-	serviceStatus := v1alpha1.ServiceReplicaStatus{
-		ComponentKind:   v1alpha1.ComponentKindPodClique,
-		ComponentName:   resourceName,
+	serviceStatus := v1beta1.ComponentReplicaStatus{
+		ComponentKind:   v1beta1.ComponentKindPodClique,
 		ComponentNames:  []string{resourceName},
 		Replicas:        podClique.Status.Replicas,
 		UpdatedReplicas: podClique.Status.UpdatedReplicas,
@@ -168,16 +190,16 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 // It checks various status fields to ensure all replicas are available and the PodClique
 // configuration has been fully applied. This is the PodCliqueScalingGroup equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
+func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus) {
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodCliqueScalingGroup not found", "resourceName", resourceName)
-			return false, "resource not found", v1alpha1.ServiceReplicaStatus{}
+			return false, "resource not found", v1beta1.ComponentReplicaStatus{}
 		}
 		logger.V(1).Info("Failed to get PodCliqueScalingGroup", "error", err, "resourceName", resourceName)
-		return false, fmt.Sprintf("get error: %v", err), v1alpha1.ServiceReplicaStatus{}
+		return false, fmt.Sprintf("get error: %v", err), v1beta1.ComponentReplicaStatus{}
 	}
 
 	desiredReplicas := pcsg.Spec.Replicas
@@ -197,9 +219,8 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		"replicas", replicas,
 	)
 
-	serviceStatus := v1alpha1.ServiceReplicaStatus{
-		ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-		ComponentName:     resourceName,
+	serviceStatus := v1beta1.ComponentReplicaStatus{
+		ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 		ComponentNames:    []string{resourceName},
 		Replicas:          pcsg.Status.Replicas,
 		UpdatedReplicas:   pcsg.Status.UpdatedReplicas,
@@ -237,6 +258,28 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	}
 
 	return true, "", serviceStatus
+}
+
+// specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint
+// to a Grove TopologyConstraint, extracting only the PackDomain.
+func specToGroveTopologyConstraint(tc *v1beta1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil || tc.PackDomain == "" {
+		return nil
+	}
+	return &grovev1alpha1.TopologyConstraint{
+		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	}
+}
+
+// toGroveTopologyConstraint converts a service-level TopologyConstraint
+// to a Grove TopologyConstraint.
+func toGroveTopologyConstraint(tc *v1beta1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil || tc.PackDomain == "" {
+		return nil
+	}
+	return &grovev1alpha1.TopologyConstraint{
+		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	}
 }
 
 // resolveKaiSchedulerQueueName extracts the queue name from annotations or returns default

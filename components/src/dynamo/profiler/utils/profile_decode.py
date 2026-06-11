@@ -8,7 +8,6 @@ import numpy as np
 
 from dynamo.profiler.utils.aiperf import get_decode_itl_and_thpt_per_gpu
 from dynamo.profiler.utils.defaults import DECODE_MAX_CONCURRENCY
-from dynamo.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from dynamo.profiler.utils.plot import plot_decode_3d_surface
 
 logger = logging.getLogger(__name__)
@@ -22,7 +21,9 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def get_num_request_range(attn_dp_size, engine_max_concurrency, granularity):
+def get_num_request_range(
+    attn_dp_size: int, engine_max_concurrency: int, granularity: int
+) -> list[int]:
     # for MoE models with attn-dp, we want the num_request to be a multiple of attn_dp_size
     # so that we can make sure the request is sent to the same dp rank as the warmup request
     # this is guaranteed because the dp scheduler is scheduling round-robin
@@ -102,16 +103,16 @@ def _profile_decode_helper(
 
 
 def profile_decode(
-    work_dir,
-    model_name,
-    tokenizer,
-    url,
-    num_gpus,
-    max_kv_tokens,
-    max_context_length,
-    interpolation_granularity,
-    attention_dp_size,
-):
+    work_dir: str,
+    model_name: str,
+    tokenizer: str,
+    url: str,
+    num_gpus: int,
+    max_kv_tokens: int,
+    max_context_length: int,
+    interpolation_granularity: int,
+    attention_dp_size: int,
+) -> None:
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
         ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}_osl{osl}_n{num_request}"
         return get_decode_itl_and_thpt_per_gpu(
@@ -125,37 +126,6 @@ def profile_decode(
             num_gpus=num_gpus,
             attention_dp_size=attention_dp_size,
         )
-
-    return _profile_decode_helper(
-        work_dir,
-        num_gpus,
-        max_kv_tokens,
-        max_context_length,
-        interpolation_granularity,
-        get_itl_and_thpt_per_gpu,
-        attention_dp_size,
-    )
-
-
-def profile_decode_aiconfigurator(
-    work_dir,
-    num_gpus,
-    max_kv_tokens,
-    max_context_length,
-    interpolation_granularity,
-    ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
-    attention_dp_size,
-    **model_config_kwargs,
-):
-    def get_itl_and_thpt_per_gpu(isl, osl, num_request):
-        perf_dict = ai_configurator_perf_estimator.estimate_perf(
-            isl,
-            osl,
-            num_request,
-            mode="decode",
-            **model_config_kwargs,
-        )
-        return perf_dict["tpot"], perf_dict["tokens/s/gpu"]
 
     return _profile_decode_helper(
         work_dir,

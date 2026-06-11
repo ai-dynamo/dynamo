@@ -1,0 +1,61 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Socket read/write latencies (transport-agnostic: traces sendmsg/recvmsg).
+// Works for both TCP and NATS since both go through kernel sockets.
+//
+// Usage: sudo bpftrace transport_latency.bt
+//        sudo bpftrace -p <PID> transport_latency.bt
+
+tracepoint:syscalls:sys_enter_sendmsg,
+tracepoint:syscalls:sys_enter_sendto,
+tracepoint:syscalls:sys_enter_write
+/comm == "tokio-runtime-w" || comm == "dynamo-frontend"/
+{
+    @send_start[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_sendmsg,
+tracepoint:syscalls:sys_exit_sendto,
+tracepoint:syscalls:sys_exit_write
+/@send_start[tid]/
+{
+    $delta = nsecs - @send_start[tid];
+    @send_latency_us = hist($delta / 1000);
+    delete(@send_start[tid]);
+}
+
+tracepoint:syscalls:sys_enter_recvmsg,
+tracepoint:syscalls:sys_enter_recvfrom,
+tracepoint:syscalls:sys_enter_read
+/comm == "tokio-runtime-w" || comm == "dynamo-frontend"/
+{
+    @recv_start[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_recvmsg,
+tracepoint:syscalls:sys_exit_recvfrom,
+tracepoint:syscalls:sys_exit_read
+/@recv_start[tid]/
+{
+    $delta = nsecs - @recv_start[tid];
+    @recv_latency_us = hist($delta / 1000);
+    delete(@recv_start[tid]);
+}
+
+interval:s:5
+{
+    printf("\n--- Send Latency (us) ---\n");
+    print(@send_latency_us);
+    printf("\n--- Recv Latency (us) ---\n");
+    print(@recv_latency_us);
+    clear(@send_latency_us);
+    clear(@recv_latency_us);
+}
+
+END
+{
+    clear(@send_start);
+    clear(@recv_start);
+}

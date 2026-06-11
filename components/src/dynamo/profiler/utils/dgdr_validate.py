@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 
-from dynamo.planner.utils.planner_config import PlannerPreDeploymentSweepMode
+from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
@@ -39,7 +39,7 @@ from dynamo.profiler.utils.profile_common import is_planner_enabled
 logger = logging.getLogger(__name__)
 
 
-def validate_dgdr_for_profiler(
+def valid_dgdr_spec(
     dgdr: DynamoGraphDeploymentRequestSpec,
 ) -> DynamoGraphDeploymentRequestSpec:
     """Validate and normalise a DGDR spec for the profiler.
@@ -63,7 +63,7 @@ def validate_dgdr_for_profiler(
     _validate_required_fields(dgdr)
     _validate_workload(dgdr.workload)
     _validate_sla(dgdr.sla)
-    _validate_features(dgdr)
+    _validate_parallelization_sweeping_mode(dgdr)
     return dgdr
 
 
@@ -124,52 +124,41 @@ def _validate_sla(sla: SLASpec) -> None:
         )
 
 
-def run_gate_checks(
+def _validate_parallelization_sweeping_mode(
     dgdr: DynamoGraphDeploymentRequestSpec,
-    aic_supported: bool,
-    search_strategy: SearchStrategy,
-    backend: str,
 ) -> None:
-    """Raise ValueError or log warnings for unsupported combos.
-
-    Must be called after ``validate_dgdr_for_profiler``.
-    """
-    if is_planner_enabled(dgdr) and not aic_supported:
-        model = dgdr.model
-        system = dgdr.hardware.gpuSku.lower()
-        planner_cfg = dgdr.features.planner
-        if planner_cfg.enable_throughput_scaling:
-            raise ValueError(
-                "Throughput-based planner scaling requires AIC support, but "
-                f"{model} on {system}/{backend} is not supported by AIC. "
-                "Use a supported model/hardware/backend combination or disable throughput scaling."
-            )
-        if (
-            planner_cfg.pre_deployment_sweeping_mode
-            == PlannerPreDeploymentSweepMode.Rapid
-        ):
-            logger.warning(
-                "Planner pre-deployment sweeping mode is 'rapid' but AIC does not support "
-                "%s on %s/%s. Falling back to 'none' (no pre-deployment sweeping).",
-                model,
-                system,
-                backend,
-            )
-            planner_cfg.pre_deployment_sweeping_mode = (
-                PlannerPreDeploymentSweepMode.None_
-            )
-
-    if search_strategy == SearchStrategy.THOROUGH and backend == "auto":
+    # do not support auto backend selection for real GPU sweeping
+    if dgdr.searchStrategy == SearchStrategy.THOROUGH and dgdr.backend == "auto":
         raise ValueError(
             "THOROUGH search strategy does not support 'auto' backend. "
             "Please specify a concrete backend (trtllm, vllm, sglang)."
         )
 
 
-def _validate_features(dgdr: DynamoGraphDeploymentRequestSpec) -> None:
+def validate_dgdr_dynamo_features(
+    dgdr: DynamoGraphDeploymentRequestSpec, aic_supported: bool
+) -> None:
     """Cross-field validation for features."""
     if not dgdr.features:
         return
+
+    # Planner
+    if is_planner_enabled(dgdr):
+        planner_cfg = dgdr.features.planner
+        if (
+            planner_cfg.enable_throughput_scaling
+            and planner_cfg.pre_deployment_sweeping_mode
+            == PlannerPreDeploymentSweepMode.Rapid
+            and not aic_supported
+        ):
+            logger.warning(
+                "AIC does not support %s on %s and %s; planner will use the "
+                "Rust perf shim fallback regression when native AIC estimates "
+                "are unavailable.",
+                dgdr.model,
+                dgdr.hardware.gpuSku.lower(),
+                dgdr.backend,
+            )
 
     # Mocker requires pre-deployment sweeping
     if dgdr.features.mocker and dgdr.features.mocker.enabled and dgdr.features.planner:

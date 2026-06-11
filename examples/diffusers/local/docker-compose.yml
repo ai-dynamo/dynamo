@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Worker count is controlled by COMPOSE_PROFILES (1-8).
+# COMPOSE_PROFILES=4 starts backend-0..backend-3 on GPUs 0..3.
+
+x-backend-base: &backend-base
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    args:
+      TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-10.0 10.0a}
+      MAX_JOBS: ${MAX_JOBS:-4}
+  image: dynamo-fastvideo-diffusers:latest
+  restart: on-failure
+  command: python worker.py
+  environment:
+    - DYN_DISCOVERY_BACKEND=file
+    - DYN_FILE_KV=/tmp/dynamo-discovery
+    - LD_LIBRARY_PATH=
+    - TORCHINDUCTOR_CACHE_DIR=/cache/torchinductor
+    - TRITON_CACHE_DIR=/cache/triton
+  volumes:
+    - dynamo-discovery:/tmp/dynamo-discovery
+    - huggingface-cache:/root/.cache/huggingface
+  ipc: host
+  shm_size: 8g
+  ulimits:
+    memlock: -1
+    stack: 67108864
+  depends_on:
+    - frontend
+
+services:
+  frontend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-10.0 10.0a}
+        MAX_JOBS: ${MAX_JOBS:-4}
+    image: dynamo-fastvideo-diffusers:latest
+    restart: on-failure
+    command: >
+      python -m dynamo.frontend
+        --http-port 8000
+        --discovery-backend file
+    environment:
+      - DYN_FILE_KV=/tmp/dynamo-discovery
+    volumes:
+      - dynamo-discovery:/tmp/dynamo-discovery
+    ports:
+      - "8000:8000"
+
+  backend-0:
+    <<: *backend-base
+    profiles: ["1", "2", "3", "4", "5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["0"], capabilities: [gpu] }
+
+  backend-1:
+    <<: *backend-base
+    profiles: ["2", "3", "4", "5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["1"], capabilities: [gpu] }
+
+  backend-2:
+    <<: *backend-base
+    profiles: ["3", "4", "5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["2"], capabilities: [gpu] }
+
+  backend-3:
+    <<: *backend-base
+    profiles: ["4", "5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["3"], capabilities: [gpu] }
+
+  backend-4:
+    <<: *backend-base
+    profiles: ["5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["4"], capabilities: [gpu] }
+
+  backend-5:
+    <<: *backend-base
+    profiles: ["6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["5"], capabilities: [gpu] }
+
+  backend-6:
+    <<: *backend-base
+    profiles: ["7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["6"], capabilities: [gpu] }
+
+  backend-7:
+    <<: *backend-base
+    profiles: ["8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["7"], capabilities: [gpu] }
+
+volumes:
+  dynamo-discovery:
+  huggingface-cache:

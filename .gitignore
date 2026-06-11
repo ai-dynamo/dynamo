@@ -5,6 +5,8 @@
 issues/
 plans/
 *rendered.Dockerfile
+rendered.*.Dockerfile
+.metrics_parity_*/
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
@@ -35,8 +37,15 @@ CMakeCache.txt
 *.vcxproj
 *.vcxproj.filters
 *_pb2.py
+*_pb2_grpc.py
 *_pb2.pyi
+# Planner plugin framework: stubs are checked in so test/build environments
+# don't need grpcio-tools or a protoc step just to import the module.
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.py
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2_grpc.py
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.pyi
 *.svg
+!docs/assets/**/*.svg
 
 *pytest_report.md
 *pytest_report.xml
@@ -64,6 +73,7 @@ server/
 # Replay/Snapshot test artifacts
 *.new
 lib/llm/tests/data/sample-models/models--meta-llama--Llama-3.1-70B-Instruct/
+lib/llm/tests/data/sample-models/models--openai--gpt-oss-120b/
 
 **/*backups*
 
@@ -107,13 +117,18 @@ TensorRT-LLM
 # The Linux kernel generates core dump files when a process crashes (receives signals
 # like SIGSEGV, SIGABRT, SIGBUS, etc.). The Linux container's /proc/sys/kernel/core_pattern
 # determines the filename (typically core or core.<pid>)
-core
+/core
+core.*
 
 # Ruler Generated Files
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
 /.cursor
-/.claude
+/.claude/*
+!/.claude/skills
+/.agents/*
+!/.agents/skills
+/.codex
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -137,3 +152,6 @@ package-lock.json
 # macOS
 .DS_Store
 **/.DS_Store
+
+# HuggingFace hub cache downloaded by tests (never commit; committed fixtures use plain dir names)
+lib/llm/tests/data/sample-models/models--*/

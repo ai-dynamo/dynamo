@@ -7,6 +7,7 @@ Implementation of vLLM KV cache manager protocol.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -30,6 +31,39 @@ if TYPE_CHECKING:
 # )
 
 from kvbm.vllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
+
+
+@dataclass
+class KvTensorLayout:
+    """Semantic description of the KV cache tensor layout.
+
+    Python derives this from VllmConfig (which has the model architecture)
+    so that Rust does not need to guess from raw tensor shapes.
+
+    For MLA models, outer_dim and inner_dim are set explicitly because Rust's
+    shape-based inference cannot distinguish the fused KV latent axis from the
+    block/page axis.  For standard attention the fields are None, which tells
+    Rust to fall back to its own contiguity-based inference (already correct).
+    """
+
+    outer_dim: Optional[int]  # None = let Rust detect; 1 for MLA
+    inner_dim: Optional[int]  # None = let Rust detect; head_size for MLA
+
+    @classmethod
+    def from_vllm_config(
+        cls, vllm_config: "VllmConfig", shape: "torch.Size", use_mla: bool = False
+    ) -> "KvTensorLayout":
+        if use_mla:
+            # MLA tensors are 3D: [num_blocks, page_size, head_size]
+            # No outer_dim axis — K and V are fused into a single latent.
+            return cls(outer_dim=1, inner_dim=shape[-1])
+        else:
+            # Standard attention: Rust already infers outer_dim and inner_dim
+            # correctly from tensor strides/contiguity.  Don't guess here —
+            # the block dimension can be at position 0 or 1 depending on the
+            # attention backend, so shape[1] is not reliably outer_dim.
+            return cls(outer_dim=None, inner_dim=None)
+
 
 DistributedRuntime = None
 if is_dyn_runtime_enabled():
@@ -103,11 +137,17 @@ class KvConnectorWorker:
                 "Hybrid models with different KV cache shapes are not supported yet."
             )
 
-        # Extract parameters
-        # TODO: Assume the block dimension is within the first 2. This will break if you're doing something weird like having 1 or 2 device blocks.
-        num_device_blocks = max(shape[0], shape[1])
         page_size = cache_config.block_size
+        use_mla = getattr(self.vllm_config.model_config, "use_mla", False)
+
+        # MLA tensors are [num_blocks, page_size, head_size] — block dim is always axis 0.
+        # Standard attention tensors are [outer_dim, num_blocks, ...] or [num_blocks, outer_dim, ...]
+        # — block dim is whichever axis is larger, which is unambiguous as long as
+        # num_blocks >> outer_dim (always true in practice).
+        num_device_blocks = shape[0] if use_mla else max(shape[0], shape[1])
         device_id = first_tensor.device.index
+
+        layout = KvTensorLayout.from_vllm_config(self.vllm_config, shape, use_mla)
 
         # Determine cache dtype
         if cache_config.cache_dtype == "auto":
@@ -123,6 +163,8 @@ class KvConnectorWorker:
             kv_cache_dtype.itemsize,
             ordered_kv_caches,
             raw_event_handles,
+            outer_dim=layout.outer_dim,
+            inner_dim=layout.inner_dim,
         )
 
     def bind_connector_metadata(self, data: bytes) -> None:

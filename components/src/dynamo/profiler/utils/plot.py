@@ -15,6 +15,7 @@
 
 import logging
 from collections import defaultdict
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,7 +36,9 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def plot_prefill_performance(prefill_data, target_ttft, output_dir):
+def plot_prefill_performance(
+    prefill_data: Any, target_ttft: float, output_dir: str
+) -> None:
     """
     Plot prefill performance as a 2D scatter plot with GPU count and mapping annotations.
 
@@ -77,7 +80,9 @@ def plot_prefill_performance(prefill_data, target_ttft, output_dir):
     plt.close()
 
 
-def plot_decode_performance(decode_data, target_itl, output_dir):
+def plot_decode_performance(
+    decode_data: Any, target_itl: float, output_dir: str
+) -> None:
     """
     Plot decode performance with multiple GPU count lines.
 
@@ -134,8 +139,11 @@ def plot_decode_performance(decode_data, target_itl, output_dir):
 
 
 def plot_prefill_interpolation(
-    prefill_isl_np, prefill_ttft_np, prefill_thpt_per_gpu_np, work_dir
-):
+    prefill_isl_np: np.ndarray,
+    prefill_ttft_np: np.ndarray,
+    prefill_thpt_per_gpu_np: np.ndarray,
+    work_dir: str,
+) -> None:
     """
     Plot TTFT and throughput vs ISL with quadratic interpolation.
 
@@ -194,8 +202,12 @@ def plot_prefill_interpolation(
 
 
 def plot_decode_3d_surface(
-    x_kv_usage, y_context_length, z_itl, z_thpt_per_gpu, work_dir
-):
+    x_kv_usage: list[float],
+    y_context_length: list[float],
+    z_itl: list[float],
+    z_thpt_per_gpu: list[float],
+    work_dir: str,
+) -> None:
     """
     Plot 3D surface for decode interpolation with KV usage, context length, and ITL.
 
@@ -296,7 +308,9 @@ def plot_decode_3d_surface(
     plt.close()
 
 
-def plot_pd_joint_results(isl, osl, prefill_data, decode_data, output_dir):
+def plot_pd_joint_results(
+    isl: int, osl: int, prefill_data: Any, decode_data: Any, output_dir: str
+) -> None:
     """
     Plot joint prefill and decode results showing cost per 1000 requests under different SLA.
 

@@ -28,6 +28,8 @@ import (
 )
 
 func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
+	// Note: the default planner image is only published starting from Dynamo 1.1.0,
+	// so these tests use 1.1.0 as the earliest known valid version.
 	tests := []struct {
 		name            string
 		operatorVersion string
@@ -35,13 +37,13 @@ func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
 	}{
 		{
 			name:            "known version produces default image",
-			operatorVersion: "1.0.0",
-			expectedImage:   "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0",
+			operatorVersion: "1.1.0",
+			expectedImage:   "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
 		},
 		{
 			name:            "pre-release version is valid",
-			operatorVersion: "1.0.0-rc1",
-			expectedImage:   "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0-rc1",
+			operatorVersion: "1.1.0-rc1",
+			expectedImage:   "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0-rc1",
 		},
 		{
 			name:            "unknown operator version cannot be defaulted",
@@ -85,14 +87,14 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 	}{
 		{
 			name:          "CREATE with empty image defaults to operator version",
-			version:       "1.0.0",
+			version:       "1.1.0",
 			operation:     admissionv1.Create,
 			initialImage:  "",
-			expectedImage: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0",
+			expectedImage: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
 		},
 		{
 			name:          "CREATE with preset image is not overwritten",
-			version:       "1.0.0",
+			version:       "1.1.0",
 			operation:     admissionv1.Create,
 			initialImage:  "my-registry/my-image:custom",
 			expectedImage: "my-registry/my-image:custom",
@@ -106,7 +108,7 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 		},
 		{
 			name:          "UPDATE does not default image",
-			version:       "1.0.0",
+			version:       "1.1.0",
 			operation:     admissionv1.Update,
 			initialImage:  "",
 			expectedImage: "",

@@ -76,6 +76,21 @@ async def main(runtime: DistributedRuntime, args):
     else:
         logger.info("No-operation mode: DISABLED")
 
+    if args.max_total_gpus >= 0:
+        logger.info(f"Max total GPUs: {args.max_total_gpus}")
+    else:
+        logger.info("Max total GPUs: UNLIMITED")
+
+    if args.min_total_gpus >= 0:
+        logger.info(f"Min total GPUs: {args.min_total_gpus}")
+    else:
+        logger.info("Min total GPUs: DISABLED")
+
+    # Intent cache TTL governs pair freshness for BOTH floor and ceiling
+    # pairing, so log it whenever either bound is active.
+    if args.min_total_gpus >= 0 or args.max_total_gpus >= 0:
+        logger.info(f"Intent cache TTL seconds: {args.intent_cache_ttl_seconds}")
+
     logger.info("=" * 60)
 
     # Get K8s namespace (where GlobalPlanner pod is running)
@@ -88,15 +103,15 @@ async def main(runtime: DistributedRuntime, args):
         managed_namespaces=args.managed_namespaces,
         k8s_namespace=k8s_namespace,
         no_operation=args.no_operation,
+        max_total_gpus=args.max_total_gpus,
+        min_total_gpus=args.min_total_gpus,
+        intent_cache_ttl_seconds=args.intent_cache_ttl_seconds,
     )
 
-    # Serve scale_request endpoint
     logger.info("Serving endpoints...")
     scale_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.scale_request")
-    await scale_endpoint.serve_endpoint(handler.scale_request)
-    logger.info("  ✓ scale_request - Receives scaling requests from Planners")
+    health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
 
-    # Serve health check endpoint
     async def health_check(request: HealthCheckRequest):
         """Health check endpoint for monitoring"""
         yield {
@@ -106,16 +121,30 @@ async def main(runtime: DistributedRuntime, args):
             "managed_namespaces": args.managed_namespaces or "all",
         }
 
-    health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
-    await health_endpoint.serve_endpoint(health_check)
+    logger.info("  ✓ scale_request - Receives scaling requests from Planners")
     logger.info("  ✓ health - Health check endpoint")
-
     logger.info("=" * 60)
     logger.info("GlobalPlanner is ready and waiting for scale requests")
     logger.info("=" * 60)
 
-    # Keep running forever (process scale requests as they come)
-    await asyncio.Event().wait()
+    # serve_endpoint is a long-running task — it only returns on shutdown.
+    # Awaiting them sequentially would block on scale_request forever and
+    # never register the health endpoint, so system_health would never flip
+    # to Ready and the operator-injected HTTP probes on :system/live and
+    # :system/health would 503 indefinitely. Run concurrently via
+    # asyncio.gather; pattern matches components/src/dynamo/planner/__main__.py.
+    #
+    # Passing health_check_payload to the health endpoint registers it as a
+    # health-check target so system_health flips to Ready once the endpoint
+    # is live. The payload shape matches HealthCheckRequest so if canary
+    # probing is ever enabled it can deserialize cleanly.
+    await asyncio.gather(
+        scale_endpoint.serve_endpoint(handler.scale_request),
+        health_endpoint.serve_endpoint(
+            health_check,
+            health_check_payload={"text": "health"},
+        ),
+    )
 
 
 if __name__ == "__main__":

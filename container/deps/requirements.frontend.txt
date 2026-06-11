@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# tritonclient<=2.62.0 requires grpcio<1.68 and protobuf<6.0dev; pin here so the
+# resolver picks compatible versions when installed alongside runtime deps.
+grpcio<1.68,>=1.63.0
+protobuf>=5.29.5,<6.0dev
+# Frontend-specific dependencies — used by the frontend runtime and any test
+# image that needs to run gRPC frontend tests (e.g. dynamo test image).
+
+# Triton client for gRPC frontend tests
+tritonclient[grpc]<=2.62.0  # May have platform-specific builds

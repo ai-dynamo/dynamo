@@ -15,60 +15,48 @@
 
 # Benchmarks
 
-This directory contains benchmarking scripts and tools for performance evaluation of Dynamo deployments. The benchmarking framework is a wrapper around aiperf that makes it easy to benchmark DynamoGraphDeployments or other deployments with exposed endpoints.
+This directory contains benchmarking tools and scripts for Dynamo deployments. Benchmarking uses [AIPerf](https://github.com/ai-dynamo/aiperf) directly — a comprehensive tool for measuring generative AI inference performance.
 
 ## Quick Start
 
 ### Benchmark a Dynamo Deployment
-First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/pages/kubernetes/), then:
+First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/kubernetes/), then:
 
 ```bash
 # Port-forward your deployment to http://localhost:8000
 kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev/null 2>&1 &
 
-# Run benchmark
-python3 -m benchmarks.utils.benchmark \
-    --benchmark-name my-benchmark \
-    --endpoint-url http://localhost:8000 \
-    --model "<your-model>"
+# Run a single benchmark
+aiperf profile \
+    --model <your-model> \
+    --url http://localhost:8000 \
+    --endpoint-type chat \
+    --streaming \
+    --concurrency 10 \
+    --request-count 100
 
-# Generate plots
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
+# Run a concurrency sweep for Pareto analysis
+for c in 1 2 5 10 50 100; do
+    aiperf profile \
+        --model <your-model> \
+        --url http://localhost:8000 \
+        --endpoint-type chat \
+        --streaming \
+        --concurrency $c \
+        --request-count $(( c * 3 > 10 ? c * 3 : 10 )) \
+        --artifact-dir "artifacts/my-benchmark/c$c"
+done
 
-# Or plot only specific benchmark experiments
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name my-benchmark
+# Generate comparison plots
+aiperf plot artifacts/my-benchmark
 ```
 
-## Features
+## Directory Contents
 
-Benchmark any HTTP endpoints! The benchmarking framework supports:
-
-**Flexible Configuration:**
-- User-defined benchmark names using `--benchmark-name` flag
-- Support for single endpoint benchmarking with `--endpoint-url` flag
-- Customizable concurrency levels (configurable via CONCURRENCIES env var), sequence lengths, and models
-- Automated performance plot generation with custom benchmark names
-
-**Supported Backends:**
-- DynamoGraphDeployments with port-forwarded endpoints
-- External HTTP endpoints (for comparison with non-Dynamo backends or platforms)
-
-## Installation
-
-This is already included as part of the Dynamo container images. To install locally or standalone:
-
-```bash
-pip install -e .
-```
-
-## Data Generation Tools
-
-This directory also includes lightweight tools for:
-- Analyzing prefix-structured data (`datagen analyze`)
-- Synthesizing structured data customizable for testing purposes (`datagen synthesize`)
-
-Detailed information is provided in the `prefix_data_generator` directory.
+- **`incluster/`** — Kubernetes Job manifest for running benchmarks inside the cluster
+- **`router/`** — KV Router benchmarking scripts (prefix ratio, trace replay, agent, priority queue)
+- **`prefix_data_generator/`** — Tools for analyzing and synthesizing prefix-structured data
 
 ## Comprehensive Guide
 
-For detailed documentation, configuration options, and advanced usage, see the [complete benchmarking guide](../docs/pages/benchmarks/benchmarking.md).
+For detailed documentation including server-side benchmarking, Pareto analysis, and advanced AIPerf features, see the [complete benchmarking guide](../docs/benchmarks/benchmarking.md).

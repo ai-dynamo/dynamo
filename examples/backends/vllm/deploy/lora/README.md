@@ -11,7 +11,7 @@ This deployment pattern enables dynamic LoRA adapter loading from S3-compatible 
 - Kubernetes cluster with GPU support
 - Helm 3.x installed
 - `kubectl` configured to access your cluster
-- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../docs/pages/kubernetes/installation-guide.md))
+- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../docs/kubernetes/installation-guide.md))
 - HuggingFace token for downloading Base and LoRA adapters
 
 ## Files in This Directory
@@ -153,18 +153,18 @@ env:
 
 ### Update the Image (if needed)
 
-Edit `agg_lora.yaml` to use your container image:
+Edit `v1beta1/agg_lora.yaml` to use your container image:
 
 ```bash
 # Using yq to update the image
 export FRAMEWORK_RUNTIME_IMAGE=your-registry/your-image:tag
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' agg_lora.yaml > agg_lora_updated.yaml
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' v1beta1/agg_lora.yaml > v1beta1/agg_lora_updated.yaml
 ```
 
 ### Deploy the LoRA-enabled vLLM Graph
 
 ```bash
-kubectl apply -f agg_lora.yaml -n ${NAMESPACE}
+kubectl apply -f agg_lora_updated.yaml -n ${NAMESPACE}
 ```
 
 ### Verify Deployment
@@ -293,5 +293,5 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 ## Further Reading
 
 - [vLLM Deployment Guide](../README.md) - Other deployment patterns
-- [Dynamo Kubernetes Guide](../../../../../docs/pages/kubernetes/README.md) - Platform setup
-- [Installation Guide](../../../../../docs/pages/kubernetes/installation-guide.md) - Platform installation
+- [Dynamo Kubernetes Guide](../../../../../docs/kubernetes/README.md) - Platform setup
+- [Installation Guide](../../../../../docs/kubernetes/installation-guide.md) - Platform installation

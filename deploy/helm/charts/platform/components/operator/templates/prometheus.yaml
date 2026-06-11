@@ -12,7 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
+# Tri-state for PodMonitor creation (dynamo.metrics.podMonitors.enabled):
+#   null  = auto-detect via .Capabilities (works with helm install/upgrade)
+#   true  = always create (use with helm template / GitOps)
+#   false = never create (opt-out even if prometheus-operator is installed)
+{{- $podMonitorsEnabled := false }}
+{{- if kindIs "invalid" .Values.dynamo.metrics.podMonitors.enabled }}
+  {{- $podMonitorsEnabled = (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- else }}
+  {{- $podMonitorsEnabled = .Values.dynamo.metrics.podMonitors.enabled }}
+{{- end }}
+{{- if $podMonitorsEnabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

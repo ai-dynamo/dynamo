@@ -4,10 +4,9 @@
 //! LoRA Routing Table - Thread-safe data structure for storing LoRA allocation decisions.
 
 use dashmap::DashMap;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use std::sync::Arc;
 use std::time::Instant;
-
-use crate::kv_router::protocols::WorkerWithDpRank;
 
 /// Configuration for a single LoRA's allocation
 #[derive(Debug, Clone)]
@@ -23,6 +22,9 @@ pub struct LoraReplicaConfig {
 
     /// When this allocation was last updated
     pub updated_at: Instant,
+
+    /// Whether this LoRA has active load (true) or is a cold-start pin (false).
+    pub is_active: bool,
 }
 
 /// Thread-safe allocation table using DashMap for concurrent access
@@ -66,6 +68,14 @@ impl LoraRoutingTable {
         self.allocations
             .iter()
             .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Snapshot all (name, config) pairs in a single DashMap pass.
+    pub fn snapshot_configs(&self) -> Vec<(String, LoraReplicaConfig)> {
+        self.allocations
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect()
     }
 
@@ -119,6 +129,7 @@ mod tests {
             replica_factor: 2,
             replica_set: workers[..2].to_vec(),
             updated_at: Instant::now(),
+            is_active: true,
         };
 
         table.update_allocation("test-lora".to_string(), config);
@@ -150,6 +161,7 @@ mod tests {
             replica_factor: 1,
             replica_set: workers[..1].to_vec(),
             updated_at: Instant::now(),
+            is_active: true,
         };
         table.update_allocation("test-lora".to_string(), config1);
 
@@ -159,6 +171,7 @@ mod tests {
             replica_factor: 2,
             replica_set: workers[..2].to_vec(),
             updated_at: Instant::now(),
+            is_active: true,
         };
         table.update_allocation("test-lora".to_string(), config2);
 
@@ -178,6 +191,7 @@ mod tests {
             replica_factor: 1,
             replica_set: workers.clone(),
             updated_at: Instant::now(),
+            is_active: true,
         };
         table.update_allocation("test-lora".to_string(), config);
 
@@ -200,6 +214,7 @@ mod tests {
                 replica_factor: 1,
                 replica_set: workers.clone(),
                 updated_at: Instant::now(),
+                is_active: true,
             };
             table.update_allocation(format!("lora-{}", i), config);
         }
@@ -222,6 +237,7 @@ mod tests {
                 replica_factor: 1,
                 replica_set: workers.clone(),
                 updated_at: Instant::now(),
+                is_active: true,
             };
             table.update_allocation(format!("lora-{}", i), config);
         }

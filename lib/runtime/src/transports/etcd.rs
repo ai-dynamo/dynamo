@@ -83,7 +83,7 @@ impl Client {
                     })?;
 
                 let lease_id = if config.attach_lease {
-                    create_lease(connector.clone(), 10, token)
+                    create_lease(connector.clone(), config.lease_ttl, token)
                         .await
                         .with_context(|| {
                             format!(
@@ -444,7 +444,7 @@ impl Client {
                 .await
             {
                 Ok((_, watch_stream)) => {
-                    tracing::debug!("Watch stream established for prefix '{}'", prefix);
+                    tracing::debug!("Watch stream established for prefix '{prefix}'");
                     return Ok(watch_stream);
                 }
                 Err(err) => {
@@ -486,7 +486,7 @@ impl Client {
                             return true; // Exit to reconnect
                         }
                         None => {
-                            tracing::warn!("Watch stream unexpectedly closed for prefix '{}'", prefix);
+                            tracing::warn!("Watch stream unexpectedly closed for prefix '{prefix}'");
                             return true; // Exit to reconnect
                         }
                     };
@@ -495,7 +495,7 @@ impl Client {
                     *start_revision = match response.header() {
                         Some(header) => header.revision() + 1,
                         None => {
-                            tracing::error!("Missing header in watch response for prefix '{}'", prefix);
+                            tracing::error!("Missing header in watch response for prefix '{prefix}'");
                             return false;
                         }
                     };
@@ -570,6 +570,10 @@ pub struct ClientOptions {
     /// If true, the client will attach a lease to the primary [`CancellationToken`].
     #[builder(default = "true")]
     pub attach_lease: bool,
+
+    /// Lease TTL in seconds
+    #[builder(default = "default_lease_ttl()")]
+    pub lease_ttl: u64,
 }
 
 impl Default for ClientOptions {
@@ -601,6 +605,7 @@ impl Default for ClientOptions {
             etcd_url: default_servers(),
             etcd_connect_options: connect_options,
             attach_lease: true,
+            lease_ttl: default_lease_ttl(),
         }
     }
 }
@@ -612,6 +617,30 @@ fn default_servers() -> Vec<String> {
             .map(|s| s.to_string())
             .collect(),
         Err(_) => vec!["http://localhost:2379".to_string()],
+    }
+}
+
+fn default_lease_ttl() -> u64 {
+    match std::env::var(env_etcd::ETCD_LEASE_TTL) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ttl) if ttl > 0 => ttl,
+            Ok(_) => {
+                tracing::warn!(
+                    "{} must be >= 1; got 0. Falling back to 10.",
+                    env_etcd::ETCD_LEASE_TTL
+                );
+                10
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({err}). Falling back to 10.",
+                    env_etcd::ETCD_LEASE_TTL,
+                    raw
+                );
+                10
+            }
+        },
+        Err(_) => 10,
     }
 }
 
@@ -692,14 +721,14 @@ impl KvCache {
                         WatchEvent::Delete(kv) => {
                             let key = String::from_utf8_lossy(kv.key()).to_string();
 
-                            tracing::trace!("KvCache delete: {}", key);
+                            tracing::trace!("KvCache delete: {key}");
                             let mut cache_write = cache.write().await;
                             cache_write.remove(&key);
                         }
                     }
                 }
 
-                tracing::debug!("KvCache watcher for prefix '{}' stopped", prefix);
+                tracing::debug!("KvCache watcher for prefix '{prefix}' stopped");
             });
         }
 

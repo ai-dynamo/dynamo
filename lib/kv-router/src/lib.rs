@@ -6,35 +6,62 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
-pub mod approx;
-#[cfg(feature = "bench")]
-pub mod bench_utils;
-pub mod concurrent_radix_tree;
-pub mod indexer;
-pub mod multi_worker_sequence;
-#[cfg(feature = "bench")]
-pub mod naive_indexers;
-pub mod nested_map;
-pub mod protocols;
-pub mod radix_tree;
-pub mod sequence;
+mod active_set;
+pub(crate) mod cleanup;
+mod lookup_update;
 
-#[cfg(test)]
-pub(crate) mod test_utils;
+pub mod indexer;
+pub mod protocols;
+pub mod recovery;
+pub mod scheduling;
+pub mod sequences;
+pub mod services;
+pub mod zmq_wire;
+
+// Backward-compat re-exports: old top-level module paths still work
+pub use indexer::concurrent_radix_tree;
+pub use indexer::concurrent_radix_tree_compressed;
+pub use indexer::positional as nested_map;
+pub use indexer::pruning as approx;
+pub use indexer::radix_tree;
+
+pub use scheduling::config;
+pub use scheduling::queue;
+pub use scheduling::selector;
+pub use sequences::multi_worker as multi_worker_sequence;
+pub use sequences::single as sequence;
+
+#[cfg(any(test, feature = "bench"))]
+pub mod test_utils;
 
 // Re-export key types for convenience
-pub use concurrent_radix_tree::ConcurrentRadixTree;
-pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
-pub use multi_worker_sequence::{
-    ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
-    SequenceSubscriber,
+pub use self::multi_worker_sequence::{
+    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequencePublisher,
+    SequenceRequest, SequenceSubscriber,
 };
-#[cfg(feature = "bench")]
-pub use naive_indexers::{InvertedIndex, NaiveNestedMap};
+pub use self::sequence::{ActiveSequences, RequestId};
+pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
+pub use concurrent_radix_tree::ConcurrentRadixTree;
+pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+pub use config::{
+    KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
+    SharedCacheType,
+};
+#[allow(deprecated)]
+pub use indexer::{
+    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
+    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
+    ThreadPoolIndexer,
+};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
-    KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
-    compute_block_hash_for_seq,
+    KvCacheEventError, KvTransferEnforcement, LocalBlockHash, OverlapScores, RouterEvent,
+    RouterEventSink, SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
 };
+pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;
-pub use sequence::{ActiveSequences, RequestId};
+pub use scheduling::LocalScheduler;
+pub use scheduling::PrefillLoadEstimator;
+pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
+pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
+pub use selector::{DefaultWorkerSelector, WorkerSelector};

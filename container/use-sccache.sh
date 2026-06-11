@@ -15,7 +15,7 @@ usage() {
 Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
-    install         Install sccache binary (requires ARCH_ALT environment variable)
+    install         Install sccache binary (architecture auto-detected via uname -m)
     setup-env       Print export statements to configure sccache for compilation
     show-stats      Display sccache statistics with optional build name
     help            Show this help message
@@ -33,29 +33,55 @@ Environment variables:
     SCCACHE_BUCKET          S3 bucket name (fallback if not passed as parameter)
     SCCACHE_REGION          S3 region (fallback if not passed as parameter)
     ARCH                    Architecture for S3 key prefix (fallback if not passed as parameter)
-    ARCH_ALT                Alternative architecture name for downloads (e.g., x86_64, aarch64)
+    SCCACHE_BIN_DIR         Override the install dir for sccache + wrappers.
+                            Default: /usr/local/bin when running as root
+                            (image builds), \$HOME/.local/bin otherwise
+                            (e.g. CI containers running as a non-root uid).
 
 Examples:
-    ARCH_ALT=x86_64 $0 install
+    $0 install                     # architecture auto-detected via uname -m
     eval \$($0 setup-env)          # autotools / Meson
     eval \$($0 setup-env cmake)    # CMake builds
     $0 show-stats "UCX"
 EOF
 }
 
+# Resolve the directory where sccache + wrapper scripts live for this
+# invocation. Default keeps the historical image-build behavior (root writes to
+# /usr/local/bin). Non-root callers (CI job containers running as the ARC
+# runner uid) get $HOME/.local/bin so the script doesn't need root to install
+# the wrappers.
+sccache_bin_dir() {
+    if [ -n "${SCCACHE_BIN_DIR:-}" ]; then
+        printf '%s' "${SCCACHE_BIN_DIR}"
+    elif [ "$(id -u)" -eq 0 ]; then
+        printf '%s' "/usr/local/bin"
+    else
+        printf '%s' "${HOME:?HOME must be set to install sccache wrappers without root}/.local/bin"
+    fi
+}
+
 install_sccache() {
+    # Derive arch from TARGETARCH (set by BuildKit) with uname -m fallback
+    local arch_alt
+    if [ -n "${TARGETARCH:-}" ]; then
+        arch_alt=$([ "$TARGETARCH" = "amd64" ] && echo "x86_64" || echo "aarch64")
+    else
+        arch_alt=$(uname -m)
+    fi
+
+    local bin_dir
+    bin_dir=$(sccache_bin_dir)
+    mkdir -p "${bin_dir}"
+
     if command -v sccache >/dev/null 2>&1; then
         echo "sccache already installed at $(command -v sccache), skipping download"
     else
-        if [ -z "${ARCH_ALT:-}" ]; then
-            echo "Error: ARCH_ALT environment variable is required for sccache installation"
-            exit 1
-        fi
-        echo "Installing sccache ${SCCACHE_VERSION} for architecture ${ARCH_ALT}..."
+        echo "Installing sccache ${SCCACHE_VERSION} for architecture ${arch_alt} into ${bin_dir}..."
         wget --tries=3 --waitretry=5 \
-            "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz"
-        tar -xzf "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz"
-        mv "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl/sccache" /usr/local/bin/
+            "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl.tar.gz"
+        tar -xzf "sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl.tar.gz"
+        mv "sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl/sccache" "${bin_dir}/"
         rm -rf sccache*
     fi
 
@@ -63,7 +89,7 @@ install_sccache() {
     # Autoconf breaks with CC="sccache gcc" (multi-word value), so we provide
     # single-binary wrappers that autoconf sees as a regular compiler.
     # The real compiler path is passed at runtime via SCCACHE_CC_REAL / SCCACHE_CXX_REAL.
-    cat > /usr/local/bin/sccache-cc <<'WRAPPER'
+    cat > "${bin_dir}/sccache-cc" <<'WRAPPER'
 #!/bin/sh
 # Only use sccache for pure compilations (-c flag).
 # Autoconf tests the compiler with combined compile+link (no -c), and sccache
@@ -74,22 +100,30 @@ case " $* " in
     *)        exec "${SCCACHE_CC_REAL:-gcc}" "$@" ;;
 esac
 WRAPPER
-    chmod +x /usr/local/bin/sccache-cc
+    chmod +x "${bin_dir}/sccache-cc"
 
-    cat > /usr/local/bin/sccache-cxx <<'WRAPPER'
+    cat > "${bin_dir}/sccache-cxx" <<'WRAPPER'
 #!/bin/sh
 case " $* " in
     *" -c "*) exec sccache "${SCCACHE_CXX_REAL:-g++}" "$@" ;;
     *)        exec "${SCCACHE_CXX_REAL:-g++}" "$@" ;;
 esac
 WRAPPER
-    chmod +x /usr/local/bin/sccache-cxx
+    chmod +x "${bin_dir}/sccache-cxx"
 
-    echo "sccache installed successfully"
+    echo "sccache installed successfully (bin_dir=${bin_dir})"
 }
 
 setup_env() {
     local mode="${1:-default}"
+
+    local bin_dir
+    bin_dir=$(sccache_bin_dir)
+
+    # Prepend bin_dir to PATH so the wrappers (and sccache itself, when it
+    # lives there) resolve as bare names. Harmless when bin_dir is already on
+    # PATH (e.g. /usr/local/bin during image builds).
+    echo "export PATH=\"${bin_dir}:\${PATH}\";"
 
     # Output a conditional block: only configure sccache if the server starts
     # successfully. The server needs working S3 credentials (mounted via
@@ -113,8 +147,8 @@ setup_env() {
         # the real compiler so autoconf's link tests pass.
         echo '  export SCCACHE_CC_REAL="${CC:-gcc}";'
         echo '  export SCCACHE_CXX_REAL="${CXX:-g++}";'
-        echo '  export CC="/usr/local/bin/sccache-cc";'
-        echo '  export CXX="/usr/local/bin/sccache-cxx";'
+        echo "  export CC=\"${bin_dir}/sccache-cc\";"
+        echo "  export CXX=\"${bin_dir}/sccache-cxx\";"
     fi
 
     echo 'else'

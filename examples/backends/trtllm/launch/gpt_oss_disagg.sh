@@ -1,6 +1,23 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Note: --free-gpu-memory-fraction below is overridden by TRT-LLM's
+# KvCacheConfig semantics — when max_tokens is set (e.g. via
+# _PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS in CI), max_tokens takes
+# precedence over the fraction.
+#
+# TODO: replace --free-gpu-memory-fraction with build_trtllm_override_args_with_mem
+# (see other trtllm launch scripts) before adding this script to a gpu_1 test
+# in the parallel pass. Fractions are not portable across GPU sizes and
+# would break the VRAM-aware scheduler. No urgency today since gpt_oss is
+# 8-GPU only and not in the parallel pass.
+
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -9,9 +26,8 @@ export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"openai/gpt-oss-120b"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml"}
 
-set -e
-trap 'echo Cleaning up...; kill 0' EXIT
-
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Disaggregated Serving (8 GPUs)" "$SERVED_MODEL_NAME" "$HTTP_PORT"
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -43,4 +59,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --max-num-tokens 16384 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
-  --expert-parallel-size 4
+  --expert-parallel-size 4 &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

@@ -3,6 +3,7 @@
 
 """Dynamo runtime configuration ArgGroup."""
 
+import argparse
 from typing import List, Optional
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
@@ -20,13 +21,17 @@ class DynamoRuntimeConfig(ConfigBase):
     endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
-    event_plane: str
+    event_plane: Optional[str] = None
     connector: list[str]
     enable_local_indexer: bool
     durable_kv_events: bool
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
+    exclude_tools_when_tool_choice_none: bool = True
+    dyn_enable_structural_tag: bool = False
+    dyn_structural_tag_scope: str = "auto"
+    dyn_structural_tag_schema: str = "auto"
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
@@ -34,6 +39,10 @@ class DynamoRuntimeConfig(ConfigBase):
     output_modalities: List[str]
     media_output_fs_url: str = "file:///tmp/dynamo_media"
     media_output_http_url: Optional[str] = None
+    # Raw `--health-check-payload` value (JSON object string or `@/path/to/file.json`).
+    # Honored only by the unified backend's `Worker`, where it overrides the engine's
+    # default `health_check_payload()` for the runtime canary.
+    health_check_payload: Optional[str] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -63,7 +72,7 @@ class DynamoRuntimeConfig(ConfigBase):
 class DynamoRuntimeArgGroup(ArgGroup):
     """Dynamo runtime configuration parameters (common to all backends)."""
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add Dynamo runtime arguments to parser."""
         g = parser.add_argument_group("Dynamo Runtime Options")
 
@@ -96,14 +105,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_REQUEST_PLANE",
             default="tcp",
             help="Determines how requests are distributed from routers to workers. 'tcp' is fastest.",
-            choices=["tcp", "nats", "http"],
+            choices=["tcp", "nats"],
         )
         add_argument(
             g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
-            default="nats",
-            help="Determines how events are published.",
+            default=None,
+            help="Determines how events are published. If unset, auto-detected from "
+            "--discovery-backend: 'zmq' for file/mem (no external services), 'nats' "
+            "for etcd/kubernetes.",
             choices=["nats", "zmq"],
         )
         add_argument(
@@ -139,6 +150,49 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=None,
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
+        )
+        # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
+        # Both definitions are needed: this one controls the Rust-native chat
+        # template path (oai.rs), while the frontend copy controls the Python
+        # processors (vllm_processor / sglang_processor) which parse arguments
+        # independently via FrontendConfig.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--exclude-tools-when-tool-choice-none",
+            env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+            default=True,
+            help="Exclude tool definitions from the chat template when tool_choice='none'. "
+            "Prevents models from generating raw XML tool calls in the content field.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--dyn-enable-structural-tag",
+            env_var="DYN_ENABLE_STRUCTURAL_TAG",
+            default=False,
+            help="Enable structural tag guided decoding for tool calls.",
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-structural-tag-scope",
+            env_var="DYN_STRUCTURAL_TAG_SCOPE",
+            default="auto",
+            choices=["auto", "always"],
+            help="Controls when structural tags are activated. "
+            "'auto': for required/named tool_choice, and if any tool has strict=true "
+            "or parallel_tool_calls is false. "
+            "'always': also for auto without those conditions. "
+            "tool_choice none is unaffected by auto vs always.",
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-structural-tag-schema",
+            env_var="DYN_STRUCTURAL_TAG_SCHEMA",
+            default="auto",
+            choices=["auto", "strict"],
+            help="Controls parameter schema strictness inside structural tags. "
+            "'auto': real schema only for tools with strict=true; "
+            "syntactically constrained but schema-unconstrained for all other tools. "
+            "'strict': real parameter schema for all tools.",
         )
         add_argument(
             g,
@@ -197,4 +251,15 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_MEDIA_OUTPUT_HTTP_URL",
             default=None,
             help="Base URL for rewriting media file paths in responses (e.g. http://localhost:8000/media). If unset, returns raw filesystem paths.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--health-check-payload",
+            env_var="DYN_HEALTH_CHECK_PAYLOAD",
+            default=None,
+            help="Override the runtime health-check canary payload. Accepts a JSON "
+            'object (e.g. \'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}\') '
+            "or '@/path/to/payload.json'. Takes precedence over the engine's "
+            "default health_check_payload(). Unified backend only.",
         )

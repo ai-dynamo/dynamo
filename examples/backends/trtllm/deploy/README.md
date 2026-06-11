@@ -2,6 +2,8 @@
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying TensorRT-LLM inference graphs using the **DynamoGraphDeployment** resource.
 
+The top-level `deploy/*.yaml` templates use `nvidia.com/v1alpha1` for compatibility with existing tooling. Equivalent `nvidia.com/v1beta1` templates are available under [`v1beta1/`](./v1beta1/).
+
 ## Available Deployment Patterns
 
 ### 1. **Aggregated Deployment** (`agg.yaml`)
@@ -23,16 +25,16 @@ High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
 Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server (with kv router mode enabled)
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker (2 replicas for load balancing)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (2 replicas for load balancing)
 
 ### 5. **Aggregated Deployment with Config** (`agg-with-config.yaml`)
 Aggregated deployment with custom configuration.
@@ -49,11 +51,11 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `Frontend`: HTTP API server coordinating between workers
 - `Planner`: SLA-based planner that monitors performance and scales workers automatically
 - `Prometheus`: Metrics collection and monitoring
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/pages/components/profiler/profiler-guide.md) for detailed instructions.
+> This deployment can use native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
 
 ## CRD Structure
 
@@ -102,7 +104,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/pages/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -118,16 +120,9 @@ docker build -f container/rendered.Dockerfile .
 # Update the image references in the YAML files
 ```
 
-**Note:** TensorRT-LLM uses git-lfs, which needs to be installed in advance:
-```bash
-apt-get update && apt-get -y install git git-lfs
-```
+The Dynamo TensorRT-LLM image is based on the upstream `nvcr.io/nvidia/tensorrt-llm/release` container, which publishes both `amd64` and `arm64` variants. To build for arm64, pass `--platform=linux/arm64` to `render.py` and `docker buildx build`.
 
-For ARM machines, use:
-```bash
-python container/render.py --framework=vllm --platform arm64 --output-short-filename
-docker build -f container/rendered.Dockerfile .
-```
+For more customization (pinning a different upstream TRT-LLM tag or using a TRT-LLM image you built from source), see the [Building a Custom Container](../../../../docs/backends/trtllm/trtllm-building-custom-container.md) guide.
 
 ## Usage
 
@@ -155,7 +150,7 @@ args:
 
 ### 3. Deploy
 
-See the [Create Deployment Guide](../../../../docs/pages/kubernetes/deployment/create-deployment.md) to learn how to deploy the deployment file.
+See the [Create Deployment Guide](../../../../docs/kubernetes/deployment/create-deployment.md) to learn how to deploy the deployment file.
 
 First, create a secret for the HuggingFace token.
 ```bash
@@ -219,7 +214,7 @@ TensorRT-LLM workers are configured through command-line arguments in the deploy
 
 ## Testing the Deployment
 
-Send a test request to verify your deployment. See the [client section](../../../../docs/pages/backends/vllm/README.md#client) for detailed instructions.
+Send a test request to verify your deployment. See the [client section](../../../../docs/backends/vllm/README.md#client) for detailed instructions.
 
 **Note:** For multi-node deployments, target the node running `python3 -m dynamo.frontend <args>`.
 
@@ -241,11 +236,11 @@ TensorRT-LLM supports two methods for KV cache transfer in disaggregated serving
 - **UCX** (default): Standard method for KV cache transfer
 - **NIXL** (experimental): Alternative transfer method
 
-For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/pages/backends/trtllm/kv-cache-transfer.md).
+For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/backends/trtllm/trtllm-kv-cache-transfer.md).
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/pages/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -256,21 +251,15 @@ args:
   - "3"
 ```
 
-## Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script: [perf.sh](../../../../benchmarks/llm/perf.sh)
-
-Configure the `model` name and `host` based on your deployment.
-
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/pages/kubernetes/deployment/create-deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/pages/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/pages/kubernetes/installation-guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/pages/getting-started/examples.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/pages/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/pages/components/router/README.md)
-- **Multinode Deployment**: [Multinode Examples](../../../../docs/pages/backends/trtllm/multinode/multinode-examples.md)
-- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/pages/backends/trtllm/llama4-plus-eagle.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
+- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
+- **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/trtllm-multinode-examples.md)
+- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/trtllm-llama4-plus-eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting
@@ -282,7 +271,5 @@ Common issues and solutions:
 3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
-6. **Git LFS issues**: Ensure git-lfs is installed before building containers
-7. **ARM deployment**: Use `--platform linux/arm64` when building on ARM machines
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/pages/kubernetes/README.md).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).

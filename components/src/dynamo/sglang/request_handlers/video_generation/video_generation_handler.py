@@ -89,7 +89,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         start_time = time.time()
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = self._get_trace_header(context)
+        trace_header = context.trace_headers() if self.enable_trace else None
         if trace_header:
             logger.debug(f"Video generation request with trace: {trace_header}")
 
@@ -103,14 +103,31 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             # Parse size
+            if req.size is None:
+                raise ValueError("Size is required")
             width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
-            num_frames = nvext.num_frames
-            if num_frames is None:
+            if nvext.fps is None:
+                raise ValueError("FPS is required")
+            if nvext.num_frames is None:
+                if req.seconds is None:
+                    raise ValueError("Seconds is required")
                 num_frames = nvext.fps * req.seconds
+            else:
+                num_frames = nvext.num_frames
 
             # Generate video
+            context_id = context.id()
+            if context_id is None:
+                raise ValueError("Context ID is required")
+            if nvext.num_inference_steps is None:
+                raise ValueError("Num inference steps is required")
+            output_format = req.output_format or "mp4"
+            if output_format != "mp4":
+                raise ValueError(
+                    f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
+                )
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,
@@ -120,18 +137,23 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 num_inference_steps=nvext.num_inference_steps,
                 guidance_scale=nvext.guidance_scale,
                 seed=nvext.seed,
-                request_id=context.id(),
+                request_id=context_id,
                 negative_prompt=nvext.negative_prompt,
                 input_reference=req.input_reference,
             )
 
             video_data = []
-            if req.response_format == "url":
-                url = await self._upload_to_fs(video_bytes, context.id())
-                video_data.append(VideoData(url=url))
-            else:  # b64_json
+            response_format = req.response_format or "b64_json"
+            if response_format == "url":
+                url = await self._upload_to_fs(video_bytes, context_id)
+                video_data.append(VideoData(output_format=output_format, url=url))
+            elif response_format == "b64_json":
                 b64 = self._encode_base64(video_bytes)
-                video_data.append(VideoData(b64_json=b64))
+                video_data.append(VideoData(output_format=output_format, b64_json=b64))
+            else:
+                raise ValueError(
+                    f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
+                )
 
             inference_time = time.time() - start_time
 
@@ -237,7 +259,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         return video_bytes
 
     async def _frames_to_video(
-        self, frames: list, fps: int, codec: str = "libx264"
+        self, frames: list, fps: int, codec: str = "h264_nvenc"
     ) -> bytes:
         """Convert list of frames to video bytes.
 
@@ -269,13 +291,13 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             output_buffer = io.BytesIO()
             with imageio.get_writer(
                 output_buffer,
-                format="mp4",
+                format="mp4",  # type: ignore
                 fps=fps,
                 codec=codec,
                 output_params=["-pix_fmt", "yuv420p"],
             ) as writer:
                 for frame in np_frames:
-                    writer.append_data(frame)
+                    writer.append_data(frame)  # type: ignore
 
             output_buffer.seek(0)
             return output_buffer.read()

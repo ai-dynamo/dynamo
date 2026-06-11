@@ -19,7 +19,7 @@ limitations under the License.
 
 The Dynamo KVBM is a distributed KV-cache block management system designed for scalable LLM inference. It cleanly separates memory management from inference runtimes (vLLM, TensorRT-LLM, and SGLang), enabling GPU↔CPU↔Disk/Remote tiering, asynchronous block offload/onboard, and efficient block reuse.
 
-![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../../docs/assets/img/kvbm-architecture.png)
+![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../../docs/assets/img/kvbm-components.svg)
 
 
 ## Feature Highlights
@@ -35,7 +35,7 @@ The Dynamo KVBM is a distributed KV-cache block management system designed for s
 pip install kvbm
 ```
 
-See the [support matrix](../../../docs/pages/reference/support-matrix.md) for version compatibility questions.
+See the [support matrix](../../../docs/reference/support-matrix.md) for version compatibility questions.
 
 ## Build from Source
 
@@ -88,6 +88,7 @@ Note that the default pip wheel built is not compatible with CUDA 13 at the mome
 | `DYN_KVBM_METRICS_PORT` | Metrics port | `6880` |
 | `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` | Disable disk offload filtering to remove SSD lifespan protection | `false` |
 | `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY` | Minimum priority (0-100) for CPU offload with contiguous (prefix) semantics: offloading stops at the first block below threshold, and all subsequent blocks are also skipped. Used for priority-based filtering. | `0` (no filtering) |
+| `DYN_KVBM_NCCL_MLA_MODE` | Enable NCCL replicated mode for MLA (Multi-Layer Attention) models (e.g., DeepSeek). When set to `true`, rank 0 loads KV blocks from G2/G3 storage and broadcasts to all GPUs via NCCL instead of each GPU loading independently. Requires MPI and optional `nccl` feature for optimal behavior. | `false` |
 
 #### Disk Storage Configuration
 
@@ -115,7 +116,7 @@ DYN_KVBM_CPU_CACHE_GB=100 vllm serve \
   Qwen/Qwen3-8B
 ```
 
-For more detailed integration with dynamo, disaggregated serving support and benchmarking, please check [vllm-setup](../../../docs/pages/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-vllm)
+For more detailed integration with dynamo, disaggregated serving support and benchmarking, please check [vllm-setup](../../../docs/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-vllm)
 
 ### TensorRT-LLM
 
@@ -137,11 +138,11 @@ DYN_KVBM_CPU_CACHE_GB=100 trtllm-serve Qwen/Qwen3-8B \
   --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
 ```
 
-For more detailed integration with dynamo and benchmarking, please check [trtllm-setup](../../../docs/pages/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm)
+For more detailed integration with dynamo and benchmarking, please check [trtllm-setup](../../../docs/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm)
 
 
 ## 📚 Docs
 
-- [Architecture](../../../docs/pages/components/kvbm/README.md#architecture)
-- [Design Deepdive](../../../docs/pages/design-docs/kvbm-design.md)
+- [Architecture](../../../docs/components/kvbm/README.md#architecture)
+- [Design Deepdive](../../../docs/design-docs/kvbm-design.md)
 - [NIXL Overview](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)

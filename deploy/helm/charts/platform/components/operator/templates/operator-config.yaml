@@ -25,7 +25,12 @@ data:
     kind: OperatorConfiguration
     server:
       metrics:
-        bindAddress: "127.0.0.1"
+        bindAddress: "0.0.0.0"
+        secure: true
+      webhook:
+        certProvisionMode: {{ if or .Values.webhook.certManager.enabled .Values.webhook.certificateSecret.external }}"manual"{{ else }}"auto"{{ end }}
+        secretName: {{ .Values.webhook.certificateSecret.name | quote }}
+        serviceName: {{ include "dynamo-operator.fullname" . }}-webhook-service
     leaderElection:
       enabled: true
       id: {{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id | quote }}
@@ -49,15 +54,18 @@ data:
       {{- end }}
       {{- end }}
     {{- end }}
-    {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
     orchestrators:
+      kaiScheduler:
+        enabled: {{ or (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").enabled) (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").install) }}
       grove:
+        enabled: {{ or (and .Values.global .Values.global.grove .Values.global.grove.enabled) (and .Values.global .Values.global.grove .Values.global.grove.install) }}
+        {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
         terminationDelay: {{ .Values.dynamo.groveTerminationDelay | quote }}
-    {{- end }}
+        {{- end }}
     {{- $natsAddr := "" }}
     {{- if .Values.natsAddr }}
       {{- $natsAddr = .Values.natsAddr }}
-    {{- else if and .Values.nats .Values.nats.enabled }}
+    {{- else if and .Values.global .Values.global.nats .Values.global.nats.install }}
       {{- $natsAddr = printf "nats://%s-nats.%s.svc.cluster.local:4222" .Release.Name .Release.Namespace }}
     {{- end }}
     {{- $etcdAddr := "" }}
@@ -110,6 +118,29 @@ data:
       hostSuffix: {{ $ingressHostSuffix | quote }}
       {{- end }}
     {{- end }}
+    {{- if and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled }}
+    serviceMesh:
+      provider: {{ .Values.dynamo.serviceMesh.provider | default "istio" | quote }}
+      {{- if eq (.Values.dynamo.serviceMesh.provider | default "istio") "istio" }}
+      istio:
+        {{- $istio := .Values.dynamo.serviceMesh.istio | default dict }}
+        tlsMode: {{ $istio.tlsMode | default "SIMPLE" | quote }}
+        {{- if hasKey $istio "insecureSkipVerify" }}
+        insecureSkipVerify: {{ $istio.insecureSkipVerify }}
+        {{- else }}
+        insecureSkipVerify: true
+        {{- end }}
+        {{- if $istio.clientCertificate }}
+        clientCertificate: {{ $istio.clientCertificate | quote }}
+        {{- end }}
+        {{- if $istio.privateKey }}
+        privateKey: {{ $istio.privateKey | quote }}
+        {{- end }}
+        {{- if $istio.caCertificates }}
+        caCertificates: {{ $istio.caCertificates | quote }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}
     rbac:
       plannerClusterRoleName: {{ include "dynamo-operator.fullname" . }}-planner
@@ -124,38 +155,39 @@ data:
     {{- if .Values.checkpoint.enabled }}
     checkpoint:
       enabled: true
-      {{- if ne (.Values.checkpoint.readyForCheckpointFilePath | toString) "/tmp/ready-for-checkpoint" }}
-      readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
+      cleanupImage: {{ .Values.checkpoint.cleanupImage | default "busybox:1.36" | quote }}
+      {{- if or .Values.checkpoint.seccomp.disabled .Values.checkpoint.seccomp.profile }}
+      seccomp:
+        {{- if .Values.checkpoint.seccomp.disabled }}
+        disabled: true
+        {{- else if .Values.checkpoint.seccomp.profile }}
+        profile: {{ .Values.checkpoint.seccomp.profile | quote }}
+        {{- end }}
       {{- end }}
+      {{- with .Values.checkpoint.storage }}
+      {{- if .type }}
+      {{- $pvc := .pvc | default dict }}
       storage:
-        {{- if ne (.Values.checkpoint.storage.type | toString) "pvc" }}
-        type: {{ .Values.checkpoint.storage.type | quote }}
-        {{- end }}
-        {{- if eq .Values.checkpoint.storage.type "pvc" }}
-        {{- if or (ne (.Values.checkpoint.storage.pvc.pvcName | toString) "chrek-pvc") (ne (.Values.checkpoint.storage.pvc.basePath | toString) "/checkpoints") }}
+        type: {{ .type | quote }}
+        {{- if eq .type "pvc" }}
         pvc:
-          {{- if ne (.Values.checkpoint.storage.pvc.pvcName | toString) "chrek-pvc" }}
-          pvcName: {{ .Values.checkpoint.storage.pvc.pvcName | quote }}
+          pvcName: {{ required "checkpoint.storage.pvc.pvcName is required when checkpoint.storage.type=pvc" $pvc.pvcName | quote }}
+          basePath: {{ required "checkpoint.storage.pvc.basePath is required when checkpoint.storage.type=pvc" $pvc.basePath | quote }}
+          {{- if $pvc.create }}
+          create: true
           {{- end }}
-          {{- if ne (.Values.checkpoint.storage.pvc.basePath | toString) "/checkpoints" }}
-          basePath: {{ .Values.checkpoint.storage.pvc.basePath | quote }}
+          {{- if $pvc.size }}
+          size: {{ $pvc.size | quote }}
           {{- end }}
-        {{- end }}
-        {{- end }}
-        {{- if eq .Values.checkpoint.storage.type "s3" }}
-        s3:
-          uri: {{ .Values.checkpoint.storage.s3.uri | quote }}
-          {{- if .Values.checkpoint.storage.s3.credentialsSecretRef }}
-          credentialsSecretRef: {{ .Values.checkpoint.storage.s3.credentialsSecretRef | quote }}
+          {{- if $pvc.storageClassName }}
+          storageClassName: {{ $pvc.storageClassName | quote }}
           {{- end }}
-        {{- end }}
-        {{- if eq .Values.checkpoint.storage.type "oci" }}
-        oci:
-          uri: {{ .Values.checkpoint.storage.oci.uri | quote }}
-          {{- if .Values.checkpoint.storage.oci.credentialsSecretRef }}
-          credentialsSecretRef: {{ .Values.checkpoint.storage.oci.credentialsSecretRef | quote }}
+          {{- if $pvc.accessMode }}
+          accessMode: {{ $pvc.accessMode | quote }}
           {{- end }}
         {{- end }}
+      {{- end }}
+      {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}
     discovery:

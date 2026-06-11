@@ -15,7 +15,7 @@ spec:
         - -c
         - |
           set -eux
-          pip install --no-cache-dir huggingface-hub awscli
+          pip install --no-cache-dir huggingface-hub==1.11.0 awscli==1.44.80
           hf download  $MODEL_NAME --local-dir /tmp/lora
           rm -rf /tmp/lora/.cache
           aws --endpoint-url=http://minio:9000 s3 mb s3://$LORA_ROOT_PATH || true

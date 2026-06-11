@@ -6,6 +6,9 @@ use super::config::{ParserConfig, ToolCallConfig};
 use super::dsml::{
     detect_tool_call_start_dsml, find_tool_call_end_position_dsml, try_tool_call_parse_dsml,
 };
+use super::gemma4::{
+    detect_tool_call_start_gemma4, find_tool_call_end_position_gemma4, try_tool_call_parse_gemma4,
+};
 use super::harmony::{
     detect_tool_call_start_harmony, find_tool_call_end_position_harmony,
     parse_tool_calls_harmony_complete,
@@ -43,13 +46,19 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("deepseek_v3", ToolCallConfig::deepseek_v3());
         map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
         map.insert("deepseek_v3_2", ToolCallConfig::deepseek_v3_2());
+        map.insert("deepseek_v4", ToolCallConfig::deepseek_v4());
+        map.insert("deepseek-v4", ToolCallConfig::deepseek_v4());
+        map.insert("deepseekv4", ToolCallConfig::deepseek_v4());
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
         map.insert("glm47", ToolCallConfig::glm47());
         map.insert("kimi_k2", ToolCallConfig::kimi_k2());
+        map.insert("gemma4", ToolCallConfig::gemma4());
+        map.insert("gemma-4", ToolCallConfig::gemma4());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
+        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes
         map
     })
 }
@@ -99,7 +108,83 @@ pub async fn try_tool_call_parse(
                 try_tool_call_parse_kimi_k2(message, kimi_config, tools)?;
             Ok((results, normal_content))
         }
+        ParserConfig::Gemma4 => {
+            let (results, normal_content) = try_tool_call_parse_gemma4(message, tools)?;
+            Ok((results, normal_content))
+        }
     }
+}
+
+/// Same as [`detect_and_parse_tool_call`] but flips `allow_eof_recovery=true`
+/// on the JSON / XML / DSML configs so finalize / non-streaming aggregate
+/// paths recover from missing-end-token / truncated-JSON instead of silently
+/// dropping the call. Streaming jails MUST keep using the non-recovery
+/// variant — otherwise `should_exit_jail_early` fires before the end-token
+/// has actually arrived (see jail.rs).
+///
+/// DSML recovery covers DeepSeek V4: when the outer `</｜DSML｜tool_calls>`
+/// wrapper never arrives (EOS / max_tokens), still recover every complete
+/// `<｜DSML｜invoke>...</｜DSML｜invoke>` pair and keep the pre-block prose as
+/// `normal_text`, while dropping any trailing invoke that was never closed.
+/// This is best-effort recovery from the bytes already received, so the same
+/// behavior applies on both batch/non-streaming and stream-finalize paths.
+pub async fn detect_and_parse_tool_call_with_recovery(
+    message: &str,
+    parser_str: Option<&str>,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    let parser_map = get_tool_parser_map();
+    let parser_key = match parser_str {
+        Some(s) if !s.is_empty() => s,
+        _ => "default",
+    };
+    let base = parser_map.get(parser_key).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Parser '{}' is not implemented. Available parsers: {:?}",
+            parser_key,
+            get_available_tool_parsers()
+        )
+    })?;
+    let recovery_config = match &base.parser_config {
+        ParserConfig::Json(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Json(c)
+        }
+        ParserConfig::Xml(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Xml(c)
+        }
+        ParserConfig::Dsml(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Dsml(c)
+        }
+        // GLM-4.7 intentionally omitted: match upstream vLLM/SGLang behavior
+        // (drop the call when </tool_call> is missing).
+        // Other parsers don't have an EOF-recovery flag — pass through.
+        other => other.clone(),
+    };
+    let cfg = ToolCallConfig {
+        parser_config: recovery_config,
+        structural_tag_builder: None,
+    };
+    try_tool_call_parse(message, &cfg, tools).await
+}
+
+/// Deprecated compatibility shim retained for the published `dynamo-parsers`
+/// API. Batch/non-streaming and stream-end finalize now share one recovery
+/// path; call [`detect_and_parse_tool_call_with_recovery`] directly.
+#[deprecated(
+    note = "batch and stream finalize now share one recovery path; use detect_and_parse_tool_call_with_recovery"
+)]
+pub async fn detect_and_parse_tool_call_with_stream_finalize_recovery(
+    message: &str,
+    parser_str: Option<&str>,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    detect_and_parse_tool_call_with_recovery(message, parser_str, tools).await
 }
 
 // Base Detector to call for all tool parsing
@@ -155,6 +240,7 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
             ParserConfig::KimiK2(kimi_config) => {
                 Ok(detect_tool_call_start_kimi_k2(chunk, kimi_config))
             }
+            ParserConfig::Gemma4 => Ok(detect_tool_call_start_gemma4(chunk)),
         },
         None => anyhow::bail!(
             "Parser '{}' is not implemented. Available parsers: {:?}",
@@ -164,7 +250,12 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
     }
 }
 
-pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usize {
+/// Returns the byte offset immediately after the last complete tool-call
+/// section in `chunk`. Returns `None` when the parser detects that the section
+/// is not properly closed (e.g. kimi_k2 without `section_end`), signalling
+/// that the caller should NOT treat the current buffer as a complete result —
+/// more content may follow.
+pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Option<usize> {
     let parser_map = get_tool_parser_map();
     let parser_key = match parser_str {
         Some(s) if !s.is_empty() => s,
@@ -174,35 +265,37 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
     match parser_map.get(parser_key) {
         Some(config) => match &config.parser_config {
             ParserConfig::Json(json_config) => {
-                // For "default", use "nemotron_deci" as the effective parser; otherwise, use the provided parser_key
                 let effective_parser = if parser_key == "default" {
                     "nemotron_deci"
                 } else {
                     parser_key
                 };
-                find_tool_call_end_position_json(chunk, effective_parser, json_config)
+                Some(find_tool_call_end_position_json(
+                    chunk,
+                    effective_parser,
+                    json_config,
+                ))
             }
             ParserConfig::Harmony(json_config) => {
-                find_tool_call_end_position_harmony(chunk, json_config)
+                Some(find_tool_call_end_position_harmony(chunk, json_config))
             }
-            ParserConfig::Pythonic => find_tool_call_end_position_pythonic(chunk),
-            ParserConfig::Typescript => {
-                // Typescript parser not implemented
-                chunk.len()
+            ParserConfig::Pythonic => Some(find_tool_call_end_position_pythonic(chunk)),
+            ParserConfig::Typescript => Some(chunk.len()),
+            ParserConfig::Xml(xml_config) => {
+                Some(find_tool_call_end_position_xml(chunk, xml_config))
             }
-            ParserConfig::Xml(xml_config) => find_tool_call_end_position_xml(chunk, xml_config),
-            ParserConfig::Dsml(dsml_config) => find_tool_call_end_position_dsml(chunk, dsml_config),
+            ParserConfig::Dsml(dsml_config) => {
+                Some(find_tool_call_end_position_dsml(chunk, dsml_config))
+            }
             ParserConfig::Glm47(glm47_config) => {
-                find_tool_call_end_position_glm47(chunk, glm47_config)
+                Some(find_tool_call_end_position_glm47(chunk, glm47_config))
             }
             ParserConfig::KimiK2(kimi_config) => {
                 find_tool_call_end_position_kimi_k2(chunk, kimi_config)
             }
+            ParserConfig::Gemma4 => find_tool_call_end_position_gemma4(chunk),
         },
-        None => {
-            // Unknown parser, return full content length
-            chunk.len()
-        }
+        None => Some(chunk.len()),
     }
 }
 // Tests
@@ -234,12 +327,18 @@ mod tests {
             "deepseek_v3",
             "deepseek_v3_1",
             "deepseek_v3_2",
+            "deepseek_v4",
+            "deepseek-v4",
+            "deepseekv4",
             "qwen3_coder",
             "jamba",
             "nemotron_nano",
             "minimax_m2",
             "glm47",
             "kimi_k2",
+            "gemma4",
+            "gemma-4",
+            "qwen25",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
@@ -336,6 +435,7 @@ mod tests {
                     tool_call_end_tokens: vec!["".to_string()],
                     ..Default::default()
                 }),
+                structural_tag_builder: None,
             },
             None,
         )
@@ -487,6 +587,99 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         assert_eq!(result.len(), 1);
     }
 
+    /// Hermes-style models emit `arguments` as compact JSON (no spaces) on the
+    /// wire. The parser must preserve those exact bytes so the next turn's
+    /// rendered prompt is byte-equivalent to [turn-N prompt + model output],
+    /// keeping KV-cache prefix matching intact across multi-step tool use.
+    /// See PR 9301 for the matching prompt-rendering fix.
+    #[tokio::test]
+    async fn parser_preserves_compact_arguments_byte_span() {
+        let input = r#"<tool_call>{"name": "get_weather", "arguments": {"location":"San Francisco, USA","unit":"celsius"}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].function.arguments, r#"{"location":"San Francisco, USA","unit":"celsius"}"#,
+            "arguments must be preserved byte-for-byte (no `, ` or `: ` injected)"
+        );
+    }
+
+    /// HashMap iteration order is randomized; key order in the output of a
+    /// `HashMap` round-trip would not match what the model emitted. With
+    /// RawValue passthrough, the order survives.
+    #[tokio::test]
+    async fn parser_preserves_argument_key_order() {
+        let input = r#"<tool_call>{"name":"f","arguments":{"z":1,"a":2,"m":3}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].function.arguments, r#"{"z":1,"a":2,"m":3}"#);
+    }
+
+    /// Numeric formatting (e.g. `1.0` vs `1`) must survive round-tripping;
+    /// `serde_json::Value` parses `1.0` as `Number::F64(1.0)` and may
+    /// serialize differently than what the model emitted.
+    #[tokio::test]
+    async fn parser_preserves_numeric_formatting() {
+        let input = r#"<tool_call>{"name":"f","arguments":{"x":1.0,"y":42}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].function.arguments, r#"{"x":1.0,"y":42}"#);
+    }
+
+    /// Parallel tool_calls each go through the array-deserialization path
+    /// (`Vec<Box<RawValue>>`); each element's byte span must be independent.
+    #[tokio::test]
+    async fn parser_preserves_byte_span_for_parallel_calls() {
+        let input = r#"<tool_call>{"name":"a","arguments":{"k":"v1"}}</tool_call>
+<tool_call>{"name":"b","arguments":{"k":"v2"}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].function.arguments, r#"{"k":"v1"}"#);
+        assert_eq!(result[1].function.arguments, r#"{"k":"v2"}"#);
+    }
+
+    /// Single-token-start parsers (`functools`, `[TOOL_CALLS]`,
+    /// `<|python_tag|>`) route arrays through
+    /// `handle_single_token_tool_calls`. That helper previously round-tripped
+    /// each element through `serde_json::Value` + `to_string`, which dropped
+    /// whitespace and reordered keys in `arguments` before the downstream
+    /// `Vec<Box<RawValue>>` parser ever saw them. The fix parses the array
+    /// directly as `Vec<Box<RawValue>>` so each element retains its original
+    /// byte span end-to-end.
+    #[tokio::test]
+    async fn single_token_array_preserves_argument_byte_span_phi4() {
+        let input = r#"functools[{"name":"f","arguments":{"z":1,"a":2,"unit":"celsius"}}]"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("phi4"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].function.arguments, r#"{"z":1,"a":2,"unit":"celsius"}"#,
+            "phi4/functools path must preserve key order and absent whitespace verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_token_array_preserves_argument_byte_span_mistral() {
+        let input = r#"[TOOL_CALLS] [{"name":"f","arguments":{"z":1,"a":2}}, {"name":"g","arguments":{"b":3.0}}]"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("mistral"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].function.arguments, r#"{"z":1,"a":2}"#);
+        assert_eq!(
+            result[1].function.arguments, r#"{"b":3.0}"#,
+            "numeric formatting (3.0 vs 3) must be preserved"
+        );
+    }
+
     #[tokio::test]
     async fn test_nousresearch_hermes3_llama31_8b_simple() {
         let input = r#"<tool_call>
@@ -591,6 +784,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -1039,6 +1233,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -1564,14 +1759,11 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_harmony_parser_basic() {
         let input = r#"
-        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}"#;
+        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("harmony"), None)
             .await
             .unwrap();
-        assert_eq!(
-            content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -1695,6 +1887,79 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[tokio::test]
+    async fn test_deepseek_v4_single_tool_call() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_datetime">
+<｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+
+        let (tool_calls, normal_text) =
+            detect_and_parse_tool_call(input, Some("deepseek_v4"), None)
+                .await
+                .expect("Failed to parse");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_datetime");
+        assert_eq!(normal_text, Some("".to_string()));
+
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["timezone"], "Asia/Shanghai");
+    }
+    /// Both the batch/non-streaming finalize and stream-finalize paths now run
+    /// `detect_and_parse_tool_call_with_recovery`, which enables DSML EOF
+    /// recovery: a complete `<｜DSML｜invoke>...</｜DSML｜invoke>` is recovered
+    /// even when the outer `</｜DSML｜tool_calls>` wrapper never arrives.
+    #[tokio::test]
+    async fn test_deepseek_v4_recovery_recovers_without_outer_close() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_datetime">
+<｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
+</｜DSML｜invoke>"#;
+
+        let (tool_calls, normal_text) =
+            detect_and_parse_tool_call_with_recovery(input, Some("deepseek_v4"), None)
+                .await
+                .expect("Failed to parse");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_datetime");
+        assert_eq!(normal_text, Some("".to_string()));
+
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["timezone"], "Asia/Shanghai");
+    }
+
+    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a TOOLCALLING.*; covers registry plumbing.
+    #[tokio::test]
+    async fn test_deepseek_v4_compatibility_aliases() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="search">
+<｜DSML｜parameter name="query" string="true">search agent benchmark 2024</｜DSML｜parameter>
+<｜DSML｜parameter name="topn" string="false">10</｜DSML｜parameter>
+<｜DSML｜parameter name="source" string="true">web</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+
+        for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            let (tool_calls, _) = detect_and_parse_tool_call(input, Some(parser_name), None)
+                .await
+                .expect("Failed to parse");
+
+            assert_eq!(tool_calls.len(), 1);
+            assert_eq!(tool_calls[0].function.name, "search");
+
+            let args: serde_json::Value =
+                serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+            assert_eq!(args["query"], "search agent benchmark 2024");
+            assert_eq!(args["topn"], 10);
+            assert_eq!(args["source"], "web");
+        }
+    }
+
+    #[tokio::test]
     async fn test_hermes_parser_without_new_line() {
         let input = r#"<tool_call>{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "celsius"}}</tool_call>"
         "#;
@@ -1707,6 +1972,72 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "celsius");
+    }
+
+    #[tokio::test]
+    async fn test_qwen25_simple() {
+        // Qwen2.5 tool call format (matches sglang qwen25_detector):
+        // <tool_call>\n{"name": ..., "arguments": {...}}\n</tool_call>
+        let input = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("qwen25"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[tokio::test]
+    async fn test_qwen25_with_normal_text() {
+        let input = r#"I'll check the weather for you. <tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("qwen25"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("I'll check the weather for you.".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, _args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+    }
+
+    #[tokio::test]
+    async fn test_qwen25_multiple_tool_calls() {
+        let input = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>
+<tool_call>
+{"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("qwen25"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+    }
+
+    #[tokio::test]
+    async fn test_qwen25_plain_text_only() {
+        let input = "Hello, how can I help you today?";
+        let (result, content) = detect_and_parse_tool_call(input, Some("qwen25"), None)
+            .await
+            .unwrap();
+        assert!(result.is_empty());
+        assert_eq!(
+            content,
+            Some("Hello, how can I help you today?".to_string())
+        );
     }
 }
 
@@ -1771,7 +2102,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =============================================================================
-    // 1. NEMOTRON/DECI TOOL PARSER FORMAT (JSON Array in XML tags)
+    // 1. NEMOTRON/DECI TOOL-CALL FORMAT (JSON Array in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -1827,7 +2158,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =================================================
-    // 2. QWEN3CODER TOOL PARSER FORMAT (XML-style tags)
+    // 2. QWEN3CODER TOOL-CALL FORMAT (XML-style tags)
     // =================================================
 
     #[tokio::test]
@@ -1868,7 +2199,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 3. xLAM TOOL PARSER FORMAT (Pure JSON Array) - Testing via mistral parser
+    // 3. xLAM TOOL-CALL FORMAT (Pure JSON Array) - Testing via mistral parser
     // =============================================================================
 
     #[tokio::test]
@@ -1899,7 +2230,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 4. MINIMAX TOOL PARSER FORMAT (Multi-line JSON in XML tags)
+    // 4. MINIMAX TOOL-CALL FORMAT (Multi-line JSON in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -1926,7 +2257,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 5. HARMONY TOOL PARSER FORMAT (Multiple Tool Calls with Harmony Encoding)
+    // 5. HARMONY TOOL-CALL FORMAT (Multiple Tool Calls with Harmony Encoding)
     // =============================================================================
 
     #[tokio::test]
@@ -2540,6 +2871,15 @@ mod detect_parser_tests {
     }
 
     #[test]
+    fn test_e2e_detect_tool_call_start_qwen25() {
+        let text = r#"<tool_call>
+{"name": "get_current_weather", "arguments": {"location": "Tokyo"}}
+</tool_call>"#;
+        let result = detect_tool_call_start(text, Some("qwen25")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
     fn test_e2e_detect_tool_call_start_pythonic() {
         let text = r#"foo(a=1, b=2), bar(x=3)]"#;
         let result = detect_tool_call_start(text, Some("pythonic")).unwrap();
@@ -2577,14 +2917,14 @@ mod detect_parser_tests {
     }
 
     // DeepSeek V3
-    #[test]
-    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3() {
+    #[test] // A bare inner call (no outer wrapper) is jailed so it can be recovered, matching deepseek_v3_2/v4.
+    fn test_e2e_detect_bare_tool_call_start_deepseek_v3() {
         let text = r#"<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
 {"location": "Tokyo"}
 ```<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -2598,11 +2938,11 @@ mod detect_parser_tests {
     }
 
     // DeepSeek V3.1
-    #[test]
-    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
+    #[test] // A bare inner call (no outer wrapper) is jailed so it can be recovered, matching deepseek_v3_2/v4.
+    fn test_e2e_detect_bare_tool_call_start_deepseek_v3_1() {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -2700,10 +3040,7 @@ fahrenheit
             .unwrap();
         assert_eq!(
             content,
-            Some(
-                "I'll help you check the weather.  Let me get that information for you."
-                    .to_string()
-            )
+            Some("I'll help you check the weather. ".to_string())
         );
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -2777,6 +3114,7 @@ fahrenheit
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -2815,6 +3153,7 @@ true
                     "enabled": {"type": "bool"},
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -2937,6 +3276,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -2993,6 +3333,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3044,6 +3385,7 @@ weather forecasting
                     "query_list": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3136,6 +3478,7 @@ weather forecasting
                     "enabled": {"type": "boolean"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3162,6 +3505,7 @@ weather forecasting
                     "items": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await

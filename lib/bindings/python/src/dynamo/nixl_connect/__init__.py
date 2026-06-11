@@ -20,6 +20,8 @@ import base64
 import ctypes
 import logging
 import socket
+import threading
+import time
 import uuid
 import zlib
 from abc import ABC, abstractmethod
@@ -36,13 +38,51 @@ except ImportError as e:
         "PyTorch must be installed to use this module. Please install PyTorch, ex: 'pip install torch'."
     ) from e
 
+
+class _NixlImportProxy:
+    """Stand-in for a missing NIXL submodule that re-raises the deferred
+    import error on any attribute access or call.
+
+    Defer NIXL import error to only where NIXL is required. The `nixl`
+    pip wheel only ships CUDA builds (`nixl-cu12`); on platforms without
+    a NIXL wheel (e.g. AMD ROCm), letting `import dynamo.nixl_connect`
+    succeed lets transitive importers — router, planner, frontend — load.
+    Any code path that actually touches the bindings (today the only one
+    is `Connection.__init__` via `nixl_api.nixl_agent(...)`; tomorrow any
+    new one) fails loudly with a clear, deferred ImportError — no
+    explicit `_require_nixl()` guard call needed at each use site.
+    """
+
+    __slots__ = ("_module_name", "_orig_error")
+
+    def __init__(self, module_name: str, orig_error: ImportError) -> None:
+        # Bypass __setattr__ in case a subclass overrides it.
+        object.__setattr__(self, "_module_name", module_name)
+        object.__setattr__(self, "_orig_error", orig_error)
+
+    def _raise(self) -> None:
+        raise ImportError(
+            "NIXL Python bindings must be installed to use this module. "
+            "Please install NIXL, ex: 'pip install nixl'."
+        ) from self._orig_error
+
+    def __getattr__(self, name: str):
+        self._raise()
+
+    def __call__(self, *args, **kwargs):
+        self._raise()
+
+    def __repr__(self) -> str:
+        return f"<unavailable NIXL submodule {self._module_name!r}>"
+
+
 try:
     import nixl._api as nixl_api
     import nixl._bindings as nixl_bindings
 except ImportError as e:
-    raise ImportError(
-        "NIXL Python bindings must be installed to use this module. Please install NIXL, ex: 'pip install nixl'."
-    ) from e
+    nixl_api = _NixlImportProxy("nixl._api", e)  # type: ignore[assignment]
+    nixl_bindings = _NixlImportProxy("nixl._bindings", e)  # type: ignore[assignment]
+
 
 logger = logging.getLogger(__name__)
 
@@ -343,14 +383,14 @@ class ActiveOperation(AbstractOperation):
 
         self._local_xfer_descs = self._connection._nixl.get_xfer_descs(
             descs=self._local_desc_tlist,
-            mem_type=str(self._local_device_kind),
+            mem_type=self._local_device_kind.nixl_mem_type,
         )
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created local NIXL transfer descriptors: {self._local_xfer_descs}"
         )
         self._remote_xfer_descs = self._connection._nixl.get_xfer_descs(
             descs=self._remote_desc_tlist,
-            mem_type=str(self._remote_device_kind),
+            mem_type=self._remote_device_kind.nixl_mem_type,
         )
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created remote NIXL transfer descriptors: {self._remote_xfer_descs}"
@@ -446,19 +486,32 @@ class ActiveOperation(AbstractOperation):
     ) -> None:
         # Loop until the operation is no longer in progress (or "initialized"),
         # yielding control to the event loop to allow other operations to run.
-        iteration_count = 0
+        start = time.monotonic()
+        next_log_time = start
         sleep_time = min_poll_ms
         while True:
-            if iteration_count & 10 == 0:
+            now = time.monotonic()
+            if now >= next_log_time:
+                next_log_time = now + 10.0
                 logger.debug(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={iteration_count / 10}s }}."
+                    f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={now - start:.1f}s }}."
                 )
             match self.status:
                 # "in progress" or "initialized" means the operation is ongoing.
                 case OperationStatus.INITIALIZED | OperationStatus.IN_PROGRESS:
                     await asyncio.sleep(sleep_time / 1000)
                     sleep_time = min(sleep_time * backoff_factor, max_poll_ms)
-                # Any other state indicates completion or error.
+                # ERRORED indicates the remote agent may have disconnected or
+                # its memory may be invalid (e.g. prefill worker scaled down).
+                # Raise so the caller can surface this as a retryable error
+                # rather than silently returning stale/empty data.
+                case OperationStatus.ERRORED:
+                    raise RuntimeError(
+                        f"NIXL transfer operation ERRORED for remote '{self._remote.name}'. "
+                        "The remote agent may have disconnected or its GPU memory may be "
+                        "invalid (e.g. the prefill worker was scaled down mid-transfer)."
+                    )
+                # Any other state (COMPLETE, CANCELLED) indicates the transfer is done.
                 case _:
                     return
 
@@ -484,7 +537,11 @@ class ActiveOperation(AbstractOperation):
         """
         # Early return if the operation is already complete, errored, or cancelled.
         match self._status:
-            case OperationStatus.COMPLETE | OperationStatus.ERRORED | OperationStatus.CANCELLED:
+            case (
+                OperationStatus.COMPLETE
+                | OperationStatus.ERRORED
+                | OperationStatus.CANCELLED
+            ):
                 return self._status
 
         if self._xfer_hndl is None:
@@ -560,7 +617,13 @@ class Connection:
         self._connector: Connector = connector
         self._is_initialized = False
         self._name = f"{connector.name}-{number}"
+        # If NIXL bindings are absent, `nixl_api` is a `_NixlImportProxy`
+        # and the next line raises the deferred ImportError on attribute
+        # access — no explicit guard needed.
         self._nixl = nixl_api.nixl_agent(self._name)
+
+        self._remote_refs: dict[str, int] = {}  # ref-count remote agents
+        self._remote_refs_lock = threading.Lock()
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
@@ -597,6 +660,22 @@ class Connection:
         Get the name of the connection.
         """
         return self._name
+
+    def acquire_remote_ref(self, name: str) -> None:
+        with self._remote_refs_lock:
+            self._remote_refs[name] = self._remote_refs.get(name, 0) + 1
+
+    def release_remote_ref(self, name: str) -> bool:
+        """Returns True when the last reference is released."""
+        with self._remote_refs_lock:
+            ref_count = self._remote_refs.get(name)
+            if ref_count is None:
+                return False
+            if ref_count == 1:
+                self._remote_refs.pop(name, None)
+                return True
+            self._remote_refs[name] = ref_count - 1
+            return False
 
     async def initialize(self) -> None:
         # Only initialize the connection once.
@@ -642,6 +721,9 @@ class Connector:
         self._connection_count: int = 0
         self._worker_id = worker_id
         self._hostname = socket.gethostname()
+
+        self._shared_connection: Optional[Connection] = None
+        self._shared_connection_lock = asyncio.Lock()
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
@@ -820,13 +902,18 @@ class Connector:
         )
 
     async def _create_connection(self) -> Connection:
-        """
-        Private method to create a new connection.
-        """
-        self._connection_count += 1
-        conn = Connection(self, self._connection_count)
-        await conn.initialize()
-        return conn
+        """Create and return a single shared Connection (NIXL agent)."""
+        async with self._shared_connection_lock:
+            if self._shared_connection is not None:
+                return self._shared_connection
+            self._connection_count += 1
+            conn = Connection(self, self._connection_count)
+            await conn.initialize()
+            self._shared_connection = conn
+            logger.info(
+                f"dynamo.nixl_connect.Connector: Created shared connection '{conn.name}'."
+            )
+            return conn
 
 
 class Descriptor:
@@ -900,10 +987,16 @@ class Descriptor:
 
         # Data is `torch.Tensor`.
         if isinstance(data, torch.Tensor):
+            # NIXL registration uses pointer+size, so the underlying storage must be contiguous.
+            if not data.is_contiguous():
+                data = data.contiguous()
+
             self._data_ptr = data.data_ptr()
             self._data_size = data.numel() * data.element_size()
             if data.is_cuda:
                 self._data_device = Device((DeviceKind.CUDA, data.get_device()))
+            elif data.device.type == "xpu":
+                self._data_device = Device((DeviceKind.XPU, data.get_device()))
             self._data_ref = data
 
             logger.debug(
@@ -1112,16 +1205,29 @@ class Descriptor:
             return
 
         # Register the memory with NIXL.
-        self._connection = connection
-
         if isinstance(self._data_ref, torch.Tensor):
-            self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
+            # TODO: Remove the following WA when default NIXL version with dynamo is updated to > v1.0.1
+            # XPU tensors passed before https://github.com/ai-dynamo/nixl/pull/1534 fix need the following WA:
+            if self._data_ref.device.type == "xpu":
+                mem_type = "VRAM"
+                reg_list = [
+                    (self._data_ptr, self._data_size, self._data_device.id, mem_type)
+                ]
+                nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+            else:
+                nixl_hndl = connection._nixl.register_memory(self._data_ref)
+            # After NIXL is updated we can simply use this one-line instead:
+            # nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
-            mem_type = str(self._data_device.kind)
+            mem_type = self._data_device.kind.nixl_mem_type
             reg_list = [
                 (self._data_ptr, self._data_size, self._data_device.id, mem_type)
             ]
-            self._nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+            nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+
+        # Mark as bound after successful registration.
+        self._nixl_hndl = nixl_hndl
+        self._connection = connection
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Registered {self.__repr__()} with NIXL."
@@ -1199,12 +1305,17 @@ class Device:
                 device_id = (
                     0 if metadata.find(":") == -1 else int(metadata.split(":")[1])
                 )
+            elif metadata.startswith("xpu"):
+                kind = DeviceKind.XPU
+                device_id = (
+                    0 if metadata.find(":") == -1 else int(metadata.split(":")[1])
+                )
             elif metadata.startswith("cpu") or metadata.startswith("host"):
                 kind = DeviceKind.HOST
                 device_id = 0
             else:
                 raise ValueError(
-                    "Argument `metadata` must be in the format 'cuda:<device_id>' or 'cpu'."
+                    "Argument `metadata` must be in the format 'cuda:<device_id>', 'xpu:<device_id>', or 'cpu'."
                 )
         else:
             raise TypeError(
@@ -1220,7 +1331,7 @@ class Device:
     def __str__(self) -> str:
         return (
             f"{self._kind}:{self._device_id}"
-            if self._kind is DeviceKind.CUDA
+            if self._kind in (DeviceKind.CUDA, DeviceKind.XPU)
             else f"{self._kind}"
         )
 
@@ -1256,13 +1367,30 @@ class DeviceKind(IntEnum):
     CUDA addressable device (GPU) memory.
     """
 
+    XPU = 3
+    """
+    Intel XPU (Level-Zero) device memory.
+    """
+
     def __str__(self) -> str:
         if self == DeviceKind.HOST:
             return "cpu"
         elif self == DeviceKind.CUDA:
             return "cuda"
+        elif self == DeviceKind.XPU:
+            return "xpu"
         else:
             return "<invalid>"
+
+    @property
+    def nixl_mem_type(self) -> str:
+        """Return the canonical NIXL segment name for this device kind."""
+        if self == DeviceKind.HOST:
+            return "DRAM"
+        elif self in (DeviceKind.CUDA, DeviceKind.XPU):
+            return "VRAM"
+        else:
+            return "VRAM"
 
 
 class OperationKind(IntEnum):
@@ -1434,7 +1562,11 @@ class PassiveOperation(AbstractOperation):
         """
         # Early return if the operation is already complete, errored, or cancelled.
         match self._status:
-            case OperationStatus.COMPLETE | OperationStatus.ERRORED | OperationStatus.CANCELLED:
+            case (
+                OperationStatus.COMPLETE
+                | OperationStatus.ERRORED
+                | OperationStatus.CANCELLED
+            ):
                 return self._status
 
         old_status = self._status
@@ -1698,6 +1830,9 @@ class Remote:
         if isinstance(self._name, bytes):
             self._name = self._name.decode("utf-8")
 
+        connection.acquire_remote_ref(self._name)
+        self._released = False
+
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
         )
@@ -1724,15 +1859,11 @@ class Remote:
         return self._name
 
     def _release(self) -> None:
-        """
-        Private method for releasing NIXL resources. Not intended for public use.
-        """
-        # We have to deregister the remote agent from NIXL because we cannot know if the remote worker has updated its descriptors or not, and
-        # NIXL will return an error if we attempt to register a remote agent with the same name but different descriptors (aka conn_info).
-        self._connection._nixl.remove_remote_agent(self._name)
-        logger.debug(
-            f'dynamo.nixl_connect.{self.__class__.__name__}: Deregistered NIXL remote {{ name: "{self._name}" }}.'
-        )
+        if self._released:
+            return
+        self._released = True
+        if self._connection.release_remote_ref(self._name):
+            self._connection._nixl.remove_remote_agent(self._name)
 
     @property
     def connection(self) -> Connection:
@@ -1776,9 +1907,9 @@ class SerializedDescriptor(BaseModel):
         if not isinstance(v, str):
             raise TypeError("Argument `device` must be `str`.")
         v = v.strip().lower()
-        if not (v.startswith("cuda") or v == "cpu"):
+        if not (v.startswith("cuda") or v.startswith("xpu") or v == "cpu"):
             raise ValueError(
-                "Argument `device` must be one of 'cpu' or 'cuda:<device_id>'."
+                "Argument `device` must be one of 'cpu', 'cuda:<device_id>', or 'xpu:<device_id>'."
             )
         return v
 

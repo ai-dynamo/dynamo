@@ -18,19 +18,41 @@ use super::metrics;
 use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
-use crate::kv_router::metrics::{RoutingOverheadMetrics, register_worker_load_metrics};
+use crate::kv_router::metrics::{
+    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
+};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
-use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
+use dynamo_runtime::metrics::{
+    frontend_perf::ensure_frontend_perf_metrics_registered_prometheus,
+    request_plane::ensure_request_plane_metrics_registered_prometheus,
+    tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
+    transport_metrics::ensure_transport_metrics_registered_prometheus,
+};
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
+
+/// Middleware that echoes `x-request-id` from request to response headers.
+async fn echo_request_id_header(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let x_request_id = request.headers().get("x-request-id").cloned();
+    let mut response = next.run(request).await;
+    if let Some(value) = x_request_id {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
+}
 
 /// HTTP service shared state
 pub struct State {
@@ -48,6 +70,8 @@ struct StateFlags {
     embeddings_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
+    audios_endpoints_enabled: AtomicBool,
+    realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
 }
@@ -60,8 +84,8 @@ impl StateFlags {
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
-            // TODO: add audios_endpoints_enabled flag
-            EndpointType::Audios => false,
+            EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Realtime => self.realtime_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
@@ -86,8 +110,12 @@ impl StateFlags {
             EndpointType::Videos => self
                 .videos_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
-            // TODO: add audios_endpoints_enabled flag
-            EndpointType::Audios => {}
+            EndpointType::Audios => self
+                .audios_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Realtime => self
+                .realtime_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
@@ -114,6 +142,8 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
+                audios_endpoints_enabled: AtomicBool::new(false),
+                realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
@@ -152,6 +182,26 @@ impl State {
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
     }
+
+    /// Returns true if streaming tool call dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
+    /// SSE events for each complete tool call, letting clients start processing tool calls
+    /// before `finish_reason="tool_calls"` arrives.
+    pub fn streaming_tool_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)
+    }
+
+    /// Returns true if streaming reasoning dispatch is enabled via
+    /// [`env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH`].
+    ///
+    /// When enabled, the chat completions streaming path accumulates reasoning tokens and
+    /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
+    /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
+    pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
+        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)
+    }
 }
 
 #[derive(Clone)]
@@ -166,6 +216,9 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+    /// RL worker discovery router, served on a dedicated port when enabled.
+    rl_router: Option<axum::Router>,
+    rl_port: u16,
 }
 
 #[derive(Clone, Builder)]
@@ -221,6 +274,25 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    /// When true, serve the RL worker discovery API on `rl_port`.
+    #[builder(default = "false")]
+    enable_rl: bool,
+
+    /// Port for the RL worker discovery listener. Defaults to `DYN_RL_PORT` or 8001.
+    #[builder(default = "default_rl_port()")]
+    rl_port: u16,
+
+    /// Distributed runtime used by the RL worker discovery API.
+    #[builder(default = "None")]
+    runtime: Option<Arc<DistributedRuntime>>,
+}
+
+fn default_rl_port() -> u16 {
+    std::env::var("DYN_RL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8001)
 }
 
 impl HttpService {
@@ -246,6 +318,45 @@ impl HttpService {
     }
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
+        self.run_inner(cancel_token, None).await
+    }
+
+    /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
+    /// port-allocation gap for tests that need to know the bound port up front. Not
+    /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
+    /// bind, so a pre-bound listener cannot be threaded through and dropping it before
+    /// `bind_rustls` would just re-open the same race. Returns an error if invoked on a
+    /// service built with `enable_tls(true)`.
+    ///
+    /// [`spawn`]: HttpService::spawn
+    pub async fn spawn_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> JoinHandle<Result<()>> {
+        let this = self.clone();
+        tokio::spawn(async move { this.run_with_listener(cancel_token, listener).await })
+    }
+
+    /// Like [`run`], but serves on a caller-provided pre-bound listener instead of
+    /// binding `{host}:{port}` internally. See [`spawn_with_listener`] for the TLS
+    /// restriction.
+    ///
+    /// [`run`]: HttpService::run
+    /// [`spawn_with_listener`]: HttpService::spawn_with_listener
+    pub async fn run_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> Result<()> {
+        self.run_inner(cancel_token, Some(listener)).await
+    }
+
+    async fn run_inner(
+        &self,
+        cancel_token: CancellationToken,
+        listener: Option<tokio::net::TcpListener>,
+    ) -> Result<()> {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
@@ -255,11 +366,17 @@ impl HttpService {
 
         let state_cancel = self.state.cancel_token().clone();
 
-        let addr: SocketAddr = address
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
-
         if self.enable_tls {
+            if listener.is_some() {
+                return Err(anyhow::anyhow!(
+                    "Pre-bound listener is not supported in TLS mode; \
+                     axum_server::bind_rustls owns its own bind. \
+                     Use run()/spawn() (which bind internally) when enable_tls is set."
+                ));
+            }
+            let addr: SocketAddr = address
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
             let cert_path = self
                 .tls_cert_path
                 .as_ref()
@@ -284,9 +401,16 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
             tokio::select! {
                 result = server => {
-                    result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
+                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
+                    cancel_token.cancel();
+                    result?;
                 }
                 _ = observer.cancelled() => {
                     state_cancel.cancel();
@@ -297,27 +421,40 @@ impl HttpService {
                 }
             }
         } else {
-            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-                tracing::error!(
-                    protocol = %protocol,
-                    address = %address,
-                    error = %e,
-                    "Failed to bind server to address"
-                );
-                match e.kind() {
-                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                        protocol,
-                        self.port
-                    ),
-                    _ => anyhow::anyhow!(
-                        "Failed to start {} server on {}: {}",
-                        protocol,
-                        address,
-                        e
-                    ),
+            let listener = match listener {
+                Some(l) => l,
+                None => {
+                    let addr: SocketAddr = address
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+                    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                        tracing::error!(
+                            protocol = %protocol,
+                            address = %address,
+                            error = %e,
+                            "Failed to bind server to address"
+                        );
+                        match e.kind() {
+                            std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                                "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                                protocol,
+                                self.port
+                            ),
+                            _ => anyhow::anyhow!(
+                                "Failed to start {} server on {}: {}",
+                                protocol,
+                                address,
+                                e
+                            ),
+                        }
+                    })?
                 }
-            })?;
+            };
+
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
@@ -331,8 +468,46 @@ impl HttpService {
                 })
                 .await
                 .inspect_err(|_| cancel_token.cancel())?;
+            cancel_token.cancel();
         }
 
+        Ok(())
+    }
+
+    async fn spawn_rl_listener_if_configured(
+        &self,
+        cancel_token: &CancellationToken,
+    ) -> Result<()> {
+        let Some(rl_router) = self.rl_router.clone() else {
+            return Ok(());
+        };
+        let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        // Bind eagerly and fail fast: when RL discovery is enabled, a bind failure
+        // should abort service startup rather than silently leave RL discovery
+        // unavailable while the main HTTP service keeps running.
+        let listener = tokio::net::TcpListener::bind(&rl_addr).await.map_err(|e| {
+            tracing::error!(
+                address = %rl_addr,
+                error = %e,
+                "Failed to bind RL worker discovery listener"
+            );
+            anyhow::anyhow!("Failed to bind RL worker discovery listener on {rl_addr}: {e}")
+        })?;
+        tracing::info!(
+            address = %rl_addr,
+            "RL worker discovery listener started"
+        );
+        let rl_cancel = cancel_token.child_token();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, rl_router)
+                .with_graceful_shutdown(async move {
+                    rl_cancel.cancelled_owned().await;
+                })
+                .await
+            {
+                tracing::error!("RL worker discovery listener error: {e}");
+            }
+        });
         Ok(())
     }
 
@@ -426,6 +601,12 @@ impl HttpServiceConfigBuilder {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
         }
 
+        // Register router queue metrics (pending requests per worker_type)
+        // These are updated by KvScheduler on enqueue/update/free
+        if let Err(e) = register_router_queue_metrics(&registry) {
+            tracing::warn!("Failed to register router queue metrics: {}", e);
+        }
+
         if let Some(ref discovery) = config.drt_discovery {
             let instance_id = discovery.instance_id();
             if let Err(e) = RoutingOverheadMetrics::register(&registry, instance_id) {
@@ -433,69 +614,110 @@ impl HttpServiceConfigBuilder {
             }
         }
 
-        let mut router = axum::Router::new();
+        if let Err(e) = ensure_request_plane_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register request-plane metrics: {}", e);
+        }
+        if let Err(e) = ensure_frontend_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register frontend perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_tokio_perf_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register tokio perf metrics: {}", e);
+        }
+        if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
+            tracing::warn!("Failed to register transport metrics: {}", e);
+        }
 
         let mut all_docs = Vec::new();
 
-        let mut routes = vec![
+        // Shared on_response callback for both system and inference routes
+        let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
+            let status = response.status();
+            let latency_ms = latency.as_millis();
+            if status.is_server_error() || status.is_client_error() {
+                tracing::error!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
+            } else {
+                tracing::info!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
+            }
+        };
+
+        // System routes (health, metrics, models) — debug-level spans
+        let system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
                 config.drt_metrics,
             ),
-            super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
+            if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+                super::anthropic::anthropic_models_router(
+                    state.clone(),
+                    var(HTTP_SVC_MODELS_PATH_ENV).ok(),
+                )
+            } else {
+                super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok())
+            },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
-
-        let endpoint_routes =
-            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config.request_template);
-        routes.extend(endpoint_routes);
-        for (route_docs, route) in routes {
-            router = router.merge(route);
+        let mut system_router = axum::Router::new();
+        for (route_docs, route) in system_routes {
+            system_router = system_router.merge(route);
             all_docs.extend(route_docs);
         }
+        // Inference routes (completions, chat, embeddings, etc.) — info-level spans
+        let endpoint_routes =
+            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config.request_template);
+        let mut inference_router = axum::Router::new();
+        for (route_docs, route) in endpoint_routes {
+            inference_router = inference_router.merge(route);
+            all_docs.extend(route_docs);
+        }
+        inference_router = inference_router.layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_inference_request_span)
+                .on_response(on_response),
+        );
 
-        // Add OpenAPI documentation routes (must be after all other routes so it can document them)
-        // Note: The path parameter is currently unused as SwaggerUi requires static paths
+        // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
             super::openapi_docs::openapi_router(all_docs.clone(), None);
-        router = router.merge(openapi_route);
+        system_router = system_router.merge(openapi_route);
         all_docs.extend(openapi_docs);
 
-        // Add span for tracing
-        // Add on_response callback for logging response status code
-        router = router.layer(
+        system_router = system_router.layer(
             TraceLayer::new_for_http()
-                .make_span_with(make_request_span)
-                .on_response(
-                    |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
-                        let status = response.status();
-                        let latency_ms = latency.as_millis();
-
-                        if status.is_server_error() {
-                            tracing::error!(
-                                status = %status.as_u16(),
-                                latency_ms = %latency_ms,
-                                "request completed with server error"
-                            );
-                        } else if status.is_client_error() {
-                            tracing::warn!(
-                                status = %status.as_u16(),
-                                latency_ms = %latency_ms,
-                                "request completed with client request error"
-                            );
-                        } else {
-                            tracing::debug!(
-                                status = %status.as_u16(),
-                                latency_ms = %latency_ms,
-                                "request completed"
-                            );
-                        }
-                    },
-                ),
+                .make_span_with(make_system_request_span)
+                .on_response(on_response),
         );
+
+        let router = system_router.merge(inference_router);
+
+        // Echo x-request-id from request to response headers for client correlation
+        let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
+
+        let enable_rl_router = config.enable_rl || env_is_truthy("DYN_ENABLE_RL");
+        let rl_router = if enable_rl_router {
+            let Some(drt) = config.runtime.as_ref() else {
+                return Err(anyhow::anyhow!(
+                    "RL worker discovery was requested (DYN_ENABLE_RL=true \
+                     or enable_rl) but HttpServiceConfig.runtime is not set."
+                ));
+            };
+            let router = super::openai::rl_router(drt.clone())?;
+            tracing::info!(
+                rl_port = config.rl_port,
+                "RL worker discovery enabled at /v1/rl/workers"
+            );
+            Some(
+                router.layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(make_system_request_span)
+                        .on_response(on_response),
+                ),
+            )
+        } else {
+            None
+        };
 
         Ok(HttpService {
             state,
@@ -506,6 +728,8 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            rl_router,
+            rl_port: config.rl_port,
         })
     }
 
@@ -531,6 +755,8 @@ impl HttpServiceConfigBuilder {
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
+        let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
+        let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -542,6 +768,8 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
+        endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
+        endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
@@ -588,22 +816,27 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
-    #[serial]
     async fn test_liveness_endpoint_reflects_cancellation() {
-        // 1. Setup service & token
+        // 1. Setup service & token. Pre-bind to a random loopback port and hand the
+        //    listener to `run_with_listener` to avoid colliding with parallel tests.
         let cancel_token = Arc::new(CancellationToken::new());
-        let service = HttpService::builder().build().unwrap();
-        let port = service.port;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
 
         // 2. Spawn service with shared token
         let service_token = cancel_token.clone();
         let handle = tokio::spawn(async move {
-            service.run((*service_token).clone()).await.unwrap();
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;

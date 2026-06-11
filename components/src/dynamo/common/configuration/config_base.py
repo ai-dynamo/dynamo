@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 
+# typing.Self is 3.11+; pyproject declares requires-python>=3.10 so use the
+# typing_extensions back-port (added as an explicit dep in pyproject.toml).
+from typing_extensions import Self
+
 
 class ConfigBase:
     """Base configuration class that allows properties with and without defaults in arbitrary order."""
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace):
+    def from_cli_args(cls, args: argparse.Namespace) -> Self:
         obj = cls.__new__(cls)
 
         # 1) Set everything provided by argparse

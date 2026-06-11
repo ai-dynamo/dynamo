@@ -8,6 +8,7 @@ import signal
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, DefaultDict
 
+from dynamo._core import DistributedRuntime
 from dynamo.common.utils.graceful_shutdown import graceful_shutdown_with_discovery
 
 SignalCallback = Callable[..., Any]
@@ -15,8 +16,8 @@ SignalCallback = Callable[..., Any]
 
 def install_graceful_shutdown(
     loop: asyncio.AbstractEventLoop,
-    runtime: Any,
-    endpoints: list,
+    runtime: DistributedRuntime,
+    endpoints: list[str],
     shutdown_event: asyncio.Event,
     *,
     signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),

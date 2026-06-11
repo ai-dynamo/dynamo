@@ -78,6 +78,10 @@ spec:
         envFrom:
         - secretRef:
             name: dynamo-deployment-env
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

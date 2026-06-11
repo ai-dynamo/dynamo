@@ -12,8 +12,11 @@ import logging
 import os
 import time
 from enum import Enum
+from typing import Any
 
 import yaml
+
+from dynamo.profiler.utils.dgdr_v1beta1_types import ProfilingPhase
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,7 @@ def write_profiler_status(
     message: str = "",
     error: str = "",
     outputs: dict | None = None,
+    phase: ProfilingPhase | None = None,
 ) -> None:
     """
     Write profiler status file.
@@ -45,9 +49,11 @@ def write_profiler_status(
         message: Optional status message
         error: Optional error message (for failed status)
         outputs: Optional dict of output files (for success status)
+        phase: Optional profiling sub-phase (e.g. ProfilingPhase value).
+               Relayed by the sidecar to the controller for kubectl visibility.
     """
     status_file = os.path.join(output_dir, STATUS_FILE_NAME)
-    status_data = {
+    status_data: dict[str, Any] = {
         "status": status.value,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -57,6 +63,8 @@ def write_profiler_status(
         status_data["error"] = error
     if outputs:
         status_data["outputs"] = outputs
+    if phase:
+        status_data["phase"] = phase.value
 
     try:
         with open(status_file, "w") as f:

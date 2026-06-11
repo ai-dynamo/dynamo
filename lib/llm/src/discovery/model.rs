@@ -6,7 +6,7 @@
 //!
 //! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use rand::Rng;
@@ -17,22 +17,35 @@ use super::{KvWorkerMonitor, ModelManagerError};
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
+    RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
     openai::{
+        audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
         images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
     },
 };
 
+/// Emit a one-time deprecation warning when serving-readiness falls back to
+/// the legacy path because a namespace still contains a legacy card (a
+/// worker with no declared `worker_type`). Logged once per process to avoid
+/// spamming the per-request readiness hot path. Remove with the compat shim.
+fn warn_legacy_readiness_once(model: &str, namespace: &str) {
+    static LEGACY_READINESS_WARNED: std::sync::Once = std::sync::Once::new();
+    LEGACY_READINESS_WARNED.call_once(|| {
+        tracing::warn!(
+            model = model,
+            namespace = namespace,
+            "Serving-readiness in compatibility mode, please upgrade the workers to latest version. This compatibility shim will be removed in a future release."
+        );
+    });
+}
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
     worker_sets: DashMap<String, Arc<WorkerSet>>,
-    /// The canonical MDC checksum for this model. Set by the first WorkerSet registered;
-    /// all subsequent WorkerSets must match. Naturally cleared when the Model is dropped
-    /// (last WorkerSet removed), allowing a new version to register.
-    canonical_checksum: OnceLock<String>,
 }
 
 impl Model {
@@ -40,7 +53,6 @@ impl Model {
         Self {
             name,
             worker_sets: DashMap::new(),
-            canonical_checksum: OnceLock::new(),
         }
     }
 
@@ -48,21 +60,23 @@ impl Model {
         &self.name
     }
 
-    /// Add a WorkerSet to this model. Returns `Err` if the WorkerSet's checksum
-    /// doesn't match the model's canonical checksum (set by the first WorkerSet).
-    pub fn add_worker_set(
-        &self,
-        namespace: String,
-        worker_set: Arc<WorkerSet>,
-    ) -> Result<(), ModelManagerError> {
-        self.set_canonical_checksum(worker_set.mdcsum())?;
+    /// Add a WorkerSet to this model.
+    pub fn add_worker_set(&self, namespace: String, worker_set: Arc<WorkerSet>) {
         tracing::info!(
             model = %self.name,
             namespace = %namespace,
             "Adding worker set to model"
         );
         self.worker_sets.insert(namespace, worker_set);
-        Ok(())
+    }
+
+    /// Check whether a candidate checksum is compatible with an existing WorkerSet
+    /// identified by `ws_key`.
+    pub fn is_checksum_compatible(&self, ws_key: &str, candidate_checksum: &str) -> bool {
+        match self.worker_sets.get(ws_key) {
+            Some(existing_ws) => existing_ws.mdcsum() == candidate_checksum,
+            None => true,
+        }
     }
 
     pub fn remove_worker_set(&self, namespace: &str) -> Option<Arc<WorkerSet>> {
@@ -152,34 +166,185 @@ impl Model {
             .any(|entry| entry.value().has_videos_engine())
     }
 
-    /// Check if a candidate checksum is valid for this model.
-    /// Returns `Some(true)` if it matches the canonical checksum, `Some(false)` if it
-    /// doesn't match, or `None` if no canonical checksum has been set yet (no WorkerSets).
-    pub fn is_valid_checksum(&self, candidate: &str) -> Option<bool> {
-        let canonical = self.canonical_checksum.get()?;
-        Some(canonical == candidate)
+    /// Check if any WorkerSet has an audios engine.
+    pub fn has_audios_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_audios_engine())
     }
 
-    /// Set the canonical checksum for this model. The first caller wins (OnceLock).
-    /// Returns `Err` if a different checksum was already set.
-    fn set_canonical_checksum(&self, checksum: &str) -> Result<(), ModelManagerError> {
-        // Try to set; if already set, verify it matches.
-        match self.canonical_checksum.set(checksum.to_string()) {
-            Ok(()) => Ok(()),
-            Err(_) => {
-                // OnceLock was already set — check if the value matches
-                let canonical = self.canonical_checksum.get().unwrap();
-                if canonical == checksum {
-                    Ok(())
-                } else {
-                    Err(ModelManagerError::ChecksumMismatch {
-                        model: self.name.clone(),
-                        expected: canonical.clone(),
-                        got: checksum.to_string(),
-                    })
+    /// Check if any WorkerSet has a realtime engine.
+    pub fn has_realtime_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_realtime_engine())
+    }
+
+    // -- Model serving readiness --
+    //
+    // The set of WorkerSets in this Model that share the same `namespace`
+    // string collectively serve traffic for one deployment. A worker's
+    // `needs` is in DNF: a list of alternative AND-sets of required peer
+    // worker types. The namespace is ready when, for every WorkerSet in it,
+    // at least one alternative is fully covered by the worker types
+    // currently present (workers with worker_count > 0).
+    //
+
+    /// Distinct namespaces represented by this model's WorkerSets, sorted.
+    /// Each namespace identifies one deployment of the model.
+    pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
+        let mut ns: Vec<String> = self
+            .worker_sets
+            .iter()
+            .map(|entry| entry.value().namespace().to_string())
+            .collect();
+        ns.sort();
+        ns.dedup();
+        ns
+    }
+
+    /// Return `(worker_type, needs)` for this WorkerSet, or `None` if the
+    /// card has no declared `worker_type` (a legacy card from an old,
+    /// pre-`worker_type` worker). The readiness path treats `None` as the
+    /// signal to fall back to the cross-version compat path — see
+    /// `is_workers_ready`.
+    fn ws_role_and_needs(
+        ws: &WorkerSet,
+    ) -> Option<(
+        crate::worker_type::WorkerType,
+        Vec<Vec<crate::worker_type::WorkerType>>,
+    )> {
+        let card = ws.card();
+        card.worker_type.map(|wt| (wt, card.needs.clone()))
+    }
+
+    /// Whether the workers in the given namespace are ready to serve traffic.
+    ///
+    /// Iterates the WorkerSets sharing this namespace and checks that every
+    /// WorkerSet's `needs` (DNF) has at least one alternative fully covered
+    /// by the present worker types. Returns false for an unknown namespace or
+    /// one with no WorkerSets.
+    ///
+    /// **Cross-version compat:** if the namespace still contains a legacy card
+    /// (a worker with no declared `worker_type`, i.e. an old pre-`worker_type`
+    /// binary), its disaggregated roles cannot be reconstructed — old decode and
+    /// old aggregated workers are indistinguishable on the wire. Rather than hide
+    /// the model, we fall back to legacy behavior and report ready as long as some
+    /// worker is live. Strict gating resumes once every worker in the namespace
+    /// carries a `worker_type`. Remove this branch when the compat shim is retired.
+    pub fn is_workers_ready(&self, namespace: &str) -> bool {
+        let wsets: Vec<Arc<WorkerSet>> = self
+            .worker_sets
+            .iter()
+            .filter(|entry| entry.value().namespace() == namespace)
+            .map(|entry| entry.value().clone())
+            .collect();
+        self.namespace_ready(&wsets)
+    }
+
+    /// Core readiness check over an explicit set of WorkerSets that all share
+    /// one namespace. Returns false when `wsets` is empty.
+    fn namespace_ready(&self, wsets: &[Arc<WorkerSet>]) -> bool {
+        if wsets.is_empty() {
+            return false;
+        }
+        let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
+            std::collections::HashSet::new();
+        let mut has_legacy = false;
+        let mut has_live_worker = false;
+        for ws in wsets {
+            match Self::ws_role_and_needs(ws) {
+                Some((wt, _needs)) => {
+                    if ws.worker_count() > 0 {
+                        present.insert(wt);
+                    }
                 }
+                // No declared worker_type → legacy card.
+                None => has_legacy = true,
+            }
+            if ws.worker_count() > 0 {
+                has_live_worker = true;
             }
         }
+
+        // COMPAT branch: legacy card present → preserve legacy behavior.
+        if has_legacy {
+            warn_legacy_readiness_once(&self.name, wsets[0].namespace());
+            return has_live_worker;
+        }
+
+        // Strict path: every WorkerSet must (a) have at least one live worker
+        // of its own role, and (b) have its `needs` DNF satisfied by the
+        // present roles. (a) is what rejects an Aggregated WorkerSet with
+        // worker_count == 0: its `needs` is empty, but without a live worker
+        // the namespace cannot serve traffic.
+        for ws in wsets {
+            let Some((wt, needs)) = Self::ws_role_and_needs(ws) else {
+                return false;
+            };
+            if !present.contains(&wt) {
+                return false;
+            }
+            if needs.is_empty() {
+                continue;
+            }
+            let any_alt_satisfied = needs
+                .iter()
+                .any(|alt| alt.iter().all(|t| present.contains(t)));
+            if !any_alt_satisfied {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Return the namespace identifier of the first ready set of workers (in
+    /// sorted order), or `None` if none are ready.
+    pub fn first_ready_workers(&self) -> Option<String> {
+        self.distinct_namespaces_sorted()
+            .into_iter()
+            .find(|ns| self.is_workers_ready(ns))
+    }
+
+    /// Whether at least one namespace's worker set in this model is ready to
+    /// serve traffic.
+    pub fn has_ready_workers(&self) -> bool {
+        self.first_ready_workers().is_some()
+    }
+
+    /// Whether this model can serve at least one inference request right now.
+    ///
+    /// Differs from [`Self::is_displayable`] in that it does **not** fall back
+    /// to prefill-only WorkerSets: requires a WorkerSet that has a serving
+    /// engine attached, workers connected, and `can_serve_requests()` true.
+    /// Used by KServe gRPC `model_ready` / `server_ready` to avoid the race
+    /// where a `ModelDeploymentCard` is registered before its WorkerSet has
+    /// been wired up.
+    ///
+    /// Delegates to [`Self::select_worker_set_with`] so readiness reports
+    /// exactly what request routing would accept — including the namespace
+    /// completeness gate. Without that, a live decode-only WorkerSet with a
+    /// chat engine but no prefill peer would report ready while every request
+    /// was rejected.
+    pub fn is_ready_to_serve(&self) -> bool {
+        self.select_worker_set_with(|ws| ws.has_any_serving_engine().then_some(()))
+            .is_some()
+    }
+
+    /// Whether this model should be visible in /v1/models.
+    pub fn is_displayable(&self) -> bool {
+        let any_set_has_engine = self
+            .worker_sets
+            .iter()
+            .any(|entry| entry.value().has_any_serving_engine());
+
+        self.worker_sets.iter().any(|entry| {
+            let ws = entry.value();
+            if ws.worker_count() == 0 || !ws.can_serve_requests() {
+                return false;
+            }
+            ws.has_any_serving_engine() || (!any_set_has_engine && ws.is_prefill_set())
+        })
     }
 
     // -- Engine accessors: select a WorkerSet, return its engine --
@@ -188,36 +353,46 @@ impl Model {
         &self,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine(
         &self,
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.completions_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
     pub fn get_embeddings_engine(
         &self,
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.embeddings_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_embeddings_engine()))
     }
 
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.images_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_images_engine()))
     }
 
     pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.videos_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_videos_engine()))
+    }
+
+    pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.audios_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_audios_engine()))
     }
 
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
+    }
+
+    pub fn get_realtime_engine(&self) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.realtime_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -226,7 +401,7 @@ impl Model {
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -237,7 +412,7 @@ impl Model {
                 .clone()
                 .map(|e| (e, ws.parsing_options()))
         })
-        .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+        .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --
@@ -277,6 +452,19 @@ impl Model {
             .sum()
     }
 
+    // -- Internal helpers --
+
+    /// Return the appropriate error when no servable WorkerSet was found.
+    /// If the engine exists but no WorkerSet can serve (zero workers, prefill not activated,
+    /// etc.), return ModelUnavailable (maps to 503). Otherwise ModelNotFound (maps to 404).
+    fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
+        if engine_exists {
+            ModelManagerError::ModelUnavailable(self.name.clone())
+        } else {
+            ModelManagerError::ModelNotFound(self.name.clone())
+        }
+    }
+
     // -- Internal selection --
 
     /// Select a WorkerSet and extract a value from it.
@@ -287,33 +475,62 @@ impl Model {
     ///
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
+    ///
     fn select_worker_set_with<T, F>(&self, extract: F) -> Option<T>
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
-        // Fast path: single set (same zero-worker filtering as the multi-set path below)
-        // TODO: When the single set has 0 workers, this returns None which maps to
-        // ModelNotFound (404). Ideally should be 503 "no available workers" — see follow-up.
-        if self.worker_sets.len() == 1 {
-            return self.worker_sets.iter().next().and_then(|entry| {
-                let ws = entry.value();
-                if ws.worker_count() == 0 {
-                    return None;
-                }
-                extract(ws)
-            });
-        }
-
-        // Collect eligible sets with their worker counts, skipping sets with no workers.
-        // In-process models (no discovery watcher) return count=1, so they always participate.
-        // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = self
+        // One snapshot drives both the readiness filter and candidate
+        // eligibility, so a concurrent add/remove can't make us treat a
+        // namespace as complete while routing to a set that lost a peer. It also
+        // avoids re-entering the DashMap mid-iteration, which can deadlock.
+        let snapshot: Vec<Arc<WorkerSet>> = self
             .worker_sets
             .iter()
-            .filter_map(|entry| {
-                let ws = entry.value();
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        // Namespaces whose worker set is complete, evaluated against the snapshot.
+        let mut namespaces: Vec<&str> = snapshot.iter().map(|ws| ws.namespace()).collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        let ready_namespaces: std::collections::HashSet<&str> = namespaces
+            .into_iter()
+            .filter(|ns| {
+                let in_ns: Vec<Arc<WorkerSet>> = snapshot
+                    .iter()
+                    .filter(|ws| ws.namespace() == *ns)
+                    .cloned()
+                    .collect();
+                self.namespace_ready(&in_ns)
+            })
+            .collect();
+
+        // Fast path: single set (same zero-worker filtering as the multi-set path below)
+        if snapshot.len() == 1 {
+            let ws = &snapshot[0];
+            if ws.worker_count() == 0
+                || !ws.can_serve_requests()
+                || !ready_namespaces.contains(ws.namespace())
+            {
+                return None;
+            }
+            return extract(ws);
+        }
+
+        // Collect eligible sets with their worker counts, skipping sets with no workers,
+        // sets whose prefill router has died under enforce_disagg, or sets in a namespace
+        // whose worker set is incomplete.
+        // In-process models (no discovery watcher) return count=1, so they always participate.
+        // Discovery models with count=0 have no available workers and are skipped.
+        let eligible: Vec<(T, usize)> = snapshot
+            .iter()
+            .filter_map(|ws| {
                 let count = ws.worker_count();
-                if count == 0 {
+                if count == 0
+                    || !ws.can_serve_requests()
+                    || !ready_namespaces.contains(ws.namespace())
+                {
                     return None;
                 }
                 extract(ws).map(|val| (val, count))
@@ -385,7 +602,7 @@ mod tests {
         let model = Model::new("llama".to_string());
         let ws = make_worker_set("ns1", "abc");
 
-        model.add_worker_set("ns1".to_string(), ws).unwrap();
+        model.add_worker_set("ns1".to_string(), ws);
         assert!(!model.is_empty());
         assert_eq!(model.worker_set_count(), 1);
         assert!(model.has_worker_set("ns1"));
@@ -403,7 +620,7 @@ mod tests {
     fn test_get_worker_set() {
         let model = Model::new("llama".to_string());
         let ws = make_worker_set("ns1", "abc");
-        model.add_worker_set("ns1".to_string(), ws).unwrap();
+        model.add_worker_set("ns1".to_string(), ws);
 
         let retrieved = model.get_worker_set("ns1");
         assert!(retrieved.is_some());
@@ -415,12 +632,8 @@ mod tests {
     #[test]
     fn test_multiple_worker_sets_same_checksum() {
         let model = Model::new("llama".to_string());
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
-        model
-            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
 
         assert_eq!(model.worker_set_count(), 2);
         assert!(model.has_worker_set("ns1"));
@@ -433,41 +646,57 @@ mod tests {
     }
 
     #[test]
-    fn test_add_worker_set_rejects_checksum_mismatch() {
+    fn test_multiple_worker_sets_different_checksums() {
+        // Different namespaces are allowed to have different checksums
         let model = Model::new("llama".to_string());
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
 
-        // Different checksum from a different namespace should be rejected
-        let result = model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
-        assert!(result.is_err());
-        assert_eq!(model.worker_set_count(), 1); // ns2 was not added
+        assert_eq!(model.worker_set_count(), 2);
+        assert!(model.has_worker_set("ns1"));
+        assert!(model.has_worker_set("ns2"));
     }
 
     #[test]
-    fn test_is_valid_checksum() {
+    fn test_is_checksum_compatible_no_existing_worker_set() {
         let model = Model::new("llama".to_string());
+        // No WorkerSet exists yet — any checksum is compatible
+        assert!(model.is_checksum_compatible("ns1", "abc"));
+        assert!(model.is_checksum_compatible("ns1", "xyz"));
+    }
 
-        // No canonical set yet
-        assert_eq!(model.is_valid_checksum("abc123"), None);
+    #[test]
+    fn test_is_checksum_compatible_matching_checksum() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
 
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc123"))
-            .unwrap();
+        // Same ws_key, same checksum → compatible
+        assert!(model.is_checksum_compatible("ns1", "abc"));
+    }
 
-        // Matches canonical
-        assert_eq!(model.is_valid_checksum("abc123"), Some(true));
-        // Does not match canonical
-        assert_eq!(model.is_valid_checksum("wrong"), Some(false));
+    #[test]
+    fn test_is_checksum_compatible_mismatched_checksum() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        // Same ws_key, different checksum → incompatible
+        assert!(!model.is_checksum_compatible("ns1", "def"));
+    }
+
+    #[test]
+    fn test_is_checksum_compatible_different_ws_key() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        // Different ws_key — no existing WorkerSet for "ns2", so any checksum is fine
+        assert!(model.is_checksum_compatible("ns2", "def"));
+        assert!(model.is_checksum_compatible("ns2", "abc"));
     }
 
     #[test]
     fn test_no_engines_means_prefill() {
         let model = Model::new("llama".to_string());
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
 
         // WorkerSets with no engines are treated as prefill sets
         assert!(model.has_prefill());
@@ -482,15 +711,39 @@ mod tests {
     #[test]
     fn test_get_engine_returns_error_without_engines() {
         let model = Model::new("llama".to_string());
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
 
         assert!(model.get_chat_engine().is_err());
         assert!(model.get_completions_engine().is_err());
         assert!(model.get_embeddings_engine().is_err());
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
+        assert!(model.get_realtime_engine().is_err());
+    }
+
+    fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            "abc".to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn test_realtime_engine_round_trip() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.has_realtime_engine());
+        assert!(model.get_realtime_engine().is_ok());
+    }
+
+    #[test]
+    fn test_realtime_only_model_is_displayable() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.is_displayable());
     }
 
     #[test]
@@ -505,15 +758,11 @@ mod tests {
         assert!(model.get_chat_engine().is_err());
 
         // Single set (fast path)
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
         assert!(model.get_chat_engine().is_err()); // No engine → filtered out
 
         // Multiple sets (weighted path)
-        model
-            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
-            .unwrap();
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
         assert!(model.get_chat_engine().is_err()); // Still no engines → all filtered out
     }
 
@@ -523,14 +772,10 @@ mod tests {
         let model = Model::new("llama".to_string());
         assert_eq!(model.total_workers(), 0); // empty model
 
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
         assert_eq!(model.total_workers(), 1);
 
-        model
-            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
-            .unwrap();
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
         assert_eq!(model.total_workers(), 2);
     }
 
@@ -540,8 +785,8 @@ mod tests {
 
         let (ws1, _tx1) = make_worker_set_with_count("ns1", "abc", vec![1, 2, 3]);
         let (ws2, _tx2) = make_worker_set_with_count("ns2", "abc", vec![10, 20]);
-        model.add_worker_set("ns1".to_string(), ws1).unwrap();
-        model.add_worker_set("ns2".to_string(), ws2).unwrap();
+        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns2".to_string(), ws2);
 
         assert_eq!(model.total_workers(), 5); // 3 + 2
     }
@@ -551,7 +796,7 @@ mod tests {
         let model = Model::new("llama".to_string());
 
         let (ws1, tx1) = make_worker_set_with_count("ns1", "abc", vec![1, 2]);
-        model.add_worker_set("ns1".to_string(), ws1).unwrap();
+        model.add_worker_set("ns1".to_string(), ws1);
         assert_eq!(model.total_workers(), 2);
 
         // Workers leave
@@ -572,7 +817,7 @@ mod tests {
         let model = Model::new("llama".to_string());
 
         let (ws, _tx) = make_worker_set_with_count("ns1", "abc", vec![]);
-        model.add_worker_set("ns1".to_string(), ws).unwrap();
+        model.add_worker_set("ns1".to_string(), ws);
 
         // WorkerSet exists but has 0 workers → selection filtered out → Err
         assert!(model.get_chat_engine().is_err());
@@ -586,10 +831,630 @@ mod tests {
 
         let (ws1, _tx1) = make_worker_set_with_count("ns1", "abc", vec![]);
         let (ws2, _tx2) = make_worker_set_with_count("ns2", "abc", vec![]);
-        model.add_worker_set("ns1".to_string(), ws1).unwrap();
-        model.add_worker_set("ns2".to_string(), ws2).unwrap();
+        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns2".to_string(), ws2);
 
         // Both have 0 workers → all filtered → Err
         assert!(model.get_chat_engine().is_err());
+    }
+
+    // -- Disaggregated prefill death tests --
+
+    use crate::kv_router::PrefillRouter;
+
+    /// Build a WorkerSet with a deactivated PrefillRouter simulating "was activated, now dead".
+    /// worker_count defaults to 1 (no instance_count_rx -> in-process default).
+    fn make_worker_set_with_dead_prefill(namespace: &str, enforce_disagg: bool) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        let pr = PrefillRouter::disabled(
+            std::sync::Arc::new(crate::discovery::ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            enforce_disagg,
+        );
+        pr.deactivate();
+        ws.prefill_router = Some(pr);
+        Arc::new(ws)
+    }
+
+    /// Baseline: a WorkerSet without a PrefillRouter is always displayable
+    /// (worker_count=1, is_prefill_set=true, no can_serve_requests block).
+    #[test]
+    fn test_is_displayable_true_basic() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        assert!(
+            model.is_displayable(),
+            "model with an unconstrained WorkerSet must be displayable"
+        );
+    }
+
+    /// When the prefill engine dies and enforce_disagg is set, the model must be
+    /// hidden from /v1/models.
+    #[test]
+    fn test_is_displayable_false_when_prefill_dies_enforce_disagg() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set(
+            "ns1".to_string(),
+            make_worker_set_with_dead_prefill("ns1", true),
+        );
+
+        assert!(
+            !model.is_displayable(),
+            "model must be hidden when prefill died and enforce_disagg=true"
+        );
+    }
+
+    /// When enforce_disagg is false the deployment can fall back to aggregated mode,
+    /// so the model should remain visible in /v1/models.
+    #[test]
+    fn test_is_displayable_true_when_prefill_dies_no_enforce() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set(
+            "ns1".to_string(),
+            make_worker_set_with_dead_prefill("ns1", false),
+        );
+
+        assert!(
+            model.is_displayable(),
+            "model must remain visible when prefill died but enforce_disagg=false (fallback)"
+        );
+    }
+
+    /// A single WorkerSet with a deactivated prefill router (enforce_disagg=true) must be
+    /// skipped by select_worker_set_with(), causing engine accessors to return Err.
+    #[test]
+    fn test_dead_prefill_single_set_not_selectable() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set(
+            "ns1".to_string(),
+            make_worker_set_with_dead_prefill("ns1", true),
+        );
+
+        assert!(model.get_chat_engine().is_err());
+        assert!(model.get_completions_engine().is_err());
+    }
+
+    /// With two WorkerSets -- one healthy, one with dead prefill -- the healthy set
+    /// keeps the model displayable. Removing the healthy set hides the model.
+    #[test]
+    fn test_dead_prefill_multi_set_skips_dead_namespace() {
+        let model = Model::new("llama".to_string());
+
+        // Healthy set (no prefill constraint)
+        model.add_worker_set("healthy".to_string(), make_worker_set("healthy", "abc"));
+
+        // Dead set (deactivated prefill + enforce_disagg)
+        model.add_worker_set(
+            "dead".to_string(),
+            make_worker_set_with_dead_prefill("dead", true),
+        );
+
+        assert!(
+            model.is_displayable(),
+            "model must be displayable when at least one healthy set exists"
+        );
+
+        // Removing the healthy set leaves only the dead set -- model must be hidden.
+        model.remove_worker_set("healthy");
+        assert!(
+            !model.is_displayable(),
+            "model must be hidden when only the dead prefill set remains"
+        );
+    }
+
+    // -- Model serving readiness --
+    //
+    // These tests exercise the live-compute readiness methods on `Model`.
+    // They construct WorkerSets with specific `worker_type` / `needs` values
+    // on their cards and verify DNF readiness math, including the encode
+    // worker's two-alternative needs and the rejection of cards with no
+    // declared `worker_type`.
+
+    use crate::worker_type::WorkerType;
+
+    /// Build a WorkerSet with an explicit worker_type / needs and a live
+    /// worker count (via a watch channel).
+    fn ws_with_role(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+        worker_ids: Vec<u64>,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        let (tx, rx) = watch::channel(worker_ids);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        (Arc::new(ws), tx)
+    }
+
+    #[test]
+    fn readiness_empty_model_not_ready() {
+        let model = Model::new("llama".to_string());
+        assert!(!model.has_ready_workers());
+        assert_eq!(model.first_ready_workers(), None);
+        assert!(!model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_pd_pair_ready() {
+        let model = Model::new("llama".to_string());
+        let (prefill, _tx_p) = ws_with_role(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (decode, _tx_d) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("dynamo:prefill".to_string(), prefill);
+        model.add_worker_set("dynamo".to_string(), decode);
+
+        assert!(model.is_workers_ready("dynamo"));
+        assert_eq!(model.first_ready_workers(), Some("dynamo".to_string()));
+    }
+
+    #[test]
+    fn readiness_pd_missing_prefill_not_ready() {
+        let model = Model::new("llama".to_string());
+        let (decode, _tx) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("dynamo".to_string(), decode);
+
+        assert!(!model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_epd_aggregated_plus_encode_ready() {
+        // E-PD pattern: Aggregated worker (with --route-to-encoder, so it
+        // needs Encode) + Encode worker (whose needs has two alternatives:
+        // P+D pair OR a single Aggregated peer). The second alternative is
+        // satisfied here because Aggregated is present.
+        let model = Model::new("llava".to_string());
+        let (agg, _tx_a) = ws_with_role(
+            "dynamo",
+            "mdc-a",
+            WorkerType::Aggregated,
+            vec![vec![WorkerType::Encode]],
+            vec![1],
+        );
+        let (enc, _tx_e) = ws_with_role(
+            "dynamo",
+            "mdc-e",
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+            vec![2],
+        );
+        model.add_worker_set("dynamo:aggregated".to_string(), agg);
+        model.add_worker_set("dynamo:encode".to_string(), enc);
+
+        assert!(model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_epd_pd_pair_plus_encode_ready() {
+        // E-P-D pattern: separate Prefill + Decode + Encode workers.
+        // Encode's first alternative (Prefill+Decode) is satisfied.
+        let model = Model::new("llava".to_string());
+        let (prefill, _tx_p) = ws_with_role(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode, WorkerType::Encode]],
+            vec![1],
+        );
+        let (decode, _tx_d) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        let (enc, _tx_e) = ws_with_role(
+            "dynamo",
+            "mdc-e",
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+            vec![3],
+        );
+        model.add_worker_set("dynamo:prefill".to_string(), prefill);
+        model.add_worker_set("dynamo".to_string(), decode);
+        model.add_worker_set("dynamo:encode".to_string(), enc);
+
+        assert!(model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_encode_alone_not_ready() {
+        // Encode alone: neither alternative in its needs DNF is satisfied.
+        let model = Model::new("llava".to_string());
+        let (enc, _tx) = ws_with_role(
+            "dynamo",
+            "mdc-e",
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+            vec![1],
+        );
+        model.add_worker_set("dynamo:encode".to_string(), enc);
+
+        assert!(!model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_cross_namespace_isolation() {
+        // Prefill in ns-old, Decode in ns-new: neither namespace is ready.
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = ws_with_role(
+            "ns-old",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (d, _td) = ws_with_role(
+            "ns-new",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("ns-old:prefill".to_string(), p);
+        model.add_worker_set("ns-new".to_string(), d);
+
+        assert!(!model.is_workers_ready("ns-old"));
+        assert!(!model.is_workers_ready("ns-new"));
+        assert!(!model.has_ready_workers());
+    }
+
+    #[test]
+    fn readiness_scale_down_flips_to_not_ready() {
+        // Decode worker_count drops to 0 → readiness flips from ready to
+        // not-ready with no clearing hook (the point of live-compute).
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = ws_with_role(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (d, tx_d) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("dynamo:prefill".to_string(), p);
+        model.add_worker_set("dynamo".to_string(), d);
+
+        assert!(model.is_workers_ready("dynamo"));
+
+        // Drop decode workers — no hook, just an update to the watch channel.
+        tx_d.send(vec![]).unwrap();
+        assert!(!model.is_workers_ready("dynamo"));
+
+        // Rejoin a decode worker — readiness flips back to ready.
+        tx_d.send(vec![2]).unwrap();
+        assert!(model.is_workers_ready("dynamo"));
+    }
+
+    // -- Cross-version compat: legacy cards (no worker_type) --
+    //
+    // A new frontend may see cards from old (pre-`worker_type`) workers that
+    // carry no `worker_type`. Their disaggregated roles can't be reconstructed
+    // (old decode and old aggregated workers are wire-indistinguishable), so a
+    // namespace containing any legacy card falls back to legacy behavior:
+    // ready iff some worker is live. Strict gating resumes once every worker
+    // carries a worker_type.
+
+    #[test]
+    fn readiness_legacy_card_with_live_worker_is_ready() {
+        // COMPAT: old aggregated worker (no worker_type) upgraded-frontend case.
+        let model = Model::new("llama".to_string());
+        let (ws, _tx) = make_worker_set_with_count("dynamo", "mdc-default", vec![1]);
+        model.add_worker_set("dynamo".to_string(), ws);
+
+        assert!(
+            model.is_workers_ready("dynamo"),
+            "a legacy card with a live worker must be ready under the compat shim"
+        );
+    }
+
+    #[test]
+    fn readiness_legacy_card_with_no_live_worker_is_not_ready() {
+        // Even under compat, an empty namespace can't serve.
+        let model = Model::new("llama".to_string());
+        let (ws, _tx) = make_worker_set_with_count("dynamo", "mdc-default", vec![]);
+        model.add_worker_set("dynamo".to_string(), ws);
+
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "a legacy card with no live worker must not be ready"
+        );
+    }
+
+    #[test]
+    fn readiness_legacy_disagg_pd_is_ready() {
+        // COMPAT: old disaggregated deployment (prefill + decode, both legacy
+        // and cardless of worker_type) seen by a new frontend. The roles can't
+        // be reconstructed, so the namespace is ready as long as workers are
+        // live — matching legacy behavior.
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = make_worker_set_with_count("dynamo", "mdc-p", vec![1]);
+        let (d, _td) = make_worker_set_with_count("dynamo", "mdc-d", vec![2]);
+        model.add_worker_set("dynamo:prefill".to_string(), p);
+        model.add_worker_set("dynamo".to_string(), d);
+
+        assert!(
+            model.is_workers_ready("dynamo"),
+            "a legacy disagg namespace with live workers must be ready under compat"
+        );
+    }
+
+    #[test]
+    fn readiness_mixed_legacy_and_typed_uses_legacy_path() {
+        // A namespace containing even one legacy card drops to the compat path
+        // (ready iff live), rather than strict-gating on the typed cards.
+        let model = Model::new("llama".to_string());
+        // Typed decode that, under strict rules, needs a Prefill peer (absent).
+        let (decode, _td) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        // Legacy card alongside it.
+        let (legacy, _tl) = make_worker_set_with_count("dynamo", "mdc-legacy", vec![3]);
+        model.add_worker_set("dynamo".to_string(), decode);
+        model.add_worker_set("dynamo:legacy".to_string(), legacy);
+
+        // Strict rules would say not-ready (decode's Prefill need unmet), but
+        // the legacy card forces the compat path → ready because workers live.
+        assert!(
+            model.is_workers_ready("dynamo"),
+            "a namespace with a legacy card must use the compat (live) path"
+        );
+    }
+
+    #[test]
+    fn readiness_aggregated_zero_workers_not_ready() {
+        // An Aggregated WorkerSet with `worker_count() == 0` must NOT be
+        // considered ready: its `needs` is empty, but with no live worker
+        // the namespace can't serve traffic.
+        let model = Model::new("llama".to_string());
+        let (agg, _tx) = ws_with_role(
+            "dynamo",
+            "mdc-a",
+            WorkerType::Aggregated,
+            vec![],
+            vec![], // zero workers
+        );
+        model.add_worker_set("dynamo".to_string(), agg);
+
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "an Aggregated worker set with zero live workers must NOT be ready"
+        );
+    }
+
+    // -- is_ready_to_serve tests --
+    //
+    // Regression coverage for the KServe gRPC `model_ready` race: a
+    // ModelDeploymentCard is saved before the WorkerSet's engines are wired up,
+    // and `is_ready_to_serve` must remain false until at least one serving
+    // engine is attached to a WorkerSet that has workers.
+
+    #[test]
+    fn test_is_ready_to_serve_false_when_no_worker_sets() {
+        let model = Model::new("llama".to_string());
+        assert!(!model.is_ready_to_serve());
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_false_for_prefill_only_set() {
+        // A WorkerSet without any serving engine attached (the lifecycle state
+        // between ModelDeploymentCard save and engine attach) must not count
+        // as ready, even though `is_displayable` treats prefill-only as visible.
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        assert!(
+            model.is_displayable(),
+            "displayable fallback covers prefill"
+        );
+        assert!(
+            !model.is_ready_to_serve(),
+            "prefill-only set must not be ready to serve inference"
+        );
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_false_when_zero_workers_even_with_engine() {
+        // Engine attached but the discovery watcher reports zero connected
+        // workers. KServe must report not-ready until a worker is available.
+        let model = Model::new("llama".to_string());
+        let mut ws = WorkerSet::new(
+            "ns1".to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        // Keep the sender bound for the duration of the test so the watcher
+        // doesn't close.
+        let (_tx, rx) = watch::channel::<Vec<u64>>(vec![]);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(make_test_chat_engine());
+        model.add_worker_set("ns1".to_string(), Arc::new(ws));
+
+        assert!(
+            !model.is_ready_to_serve(),
+            "engine attached but no workers connected -> not ready"
+        );
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_true_with_chat_engine() {
+        // In-process WorkerSet (no instance_count_rx → worker_count==1) with a
+        // chat engine attached is ready to serve.
+        let model = Model::new("llama".to_string());
+        let mut ws = WorkerSet::new(
+            "ns1".to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        ws.chat_engine = Some(make_test_chat_engine());
+        model.add_worker_set("ns1".to_string(), Arc::new(ws));
+
+        assert!(model.is_ready_to_serve());
+    }
+
+    /// Build a chat completions engine backed by the in-tree echo engine.
+    fn make_test_chat_engine()
+    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
+    }
+
+    /// Build a WorkerSet with an explicit worker_type / needs, a live worker
+    /// count, AND a chat engine attached (i.e. it can be selected to serve a
+    /// chat request).
+    fn ws_serving_role(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+        worker_ids: Vec<u64>,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        let (tx, rx) = watch::channel(worker_ids);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(make_test_chat_engine());
+        (Arc::new(ws), tx)
+    }
+
+    /// A single deployment with an incomplete worker set (decode-only, no
+    /// prefill peer) must not be selected for serving, even though it has a
+    /// live worker and a chat engine attached. Confirms the fast-path
+    /// readiness filter in `select_worker_set_with`.
+    #[test]
+    fn select_skips_unready_namespace_single_set() {
+        let model = Model::new("llama".to_string());
+        let (decode, _tx) = ws_serving_role(
+            "bad",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![1],
+        );
+        model.add_worker_set("bad".to_string(), decode);
+
+        assert!(!model.is_workers_ready("bad"));
+        assert!(
+            model.get_chat_engine().is_err(),
+            "decode-only namespace (missing prefill) must not be selectable"
+        );
+        // KServe readiness must agree with routability: an incomplete namespace
+        // is not ready to serve even though it has a live worker + chat engine.
+        assert!(
+            !model.is_ready_to_serve(),
+            "incomplete namespace must not report ready to serve"
+        );
+    }
+
+    /// With two deployments of one model — a ready P/D pair and an unready
+    /// decode-only namespace — selection must only ever land on the ready one.
+    /// The decode WorkerSets in BOTH namespaces carry a chat engine and a live
+    /// worker, so before the readiness filter the unready namespace could be
+    /// picked. Removing the ready namespace leaves only the unready one, which
+    /// must then be unservable rather than silently accepting (and failing) the
+    /// request.
+    #[test]
+    fn select_skips_unready_namespace_multi_set() {
+        let model = Model::new("llama".to_string());
+
+        // Ready deployment: live prefill + live decode (decode is the front door).
+        let (good_prefill, _tx_gp) = ws_with_role(
+            "good",
+            "mdc-gp",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (good_decode, _tx_gd) = ws_serving_role(
+            "good",
+            "mdc-gd",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("good:prefill".to_string(), good_prefill);
+        model.add_worker_set("good".to_string(), good_decode);
+
+        // Unready deployment: live decode only, no prefill peer.
+        let (bad_decode, _tx_bd) = ws_serving_role(
+            "bad",
+            "mdc-bd",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![3],
+        );
+        model.add_worker_set("bad".to_string(), bad_decode);
+
+        assert!(model.is_workers_ready("good"));
+        assert!(!model.is_workers_ready("bad"));
+
+        // The ready namespace keeps the model servable.
+        assert!(
+            model.get_chat_engine().is_ok(),
+            "a ready namespace must keep the model servable"
+        );
+        assert!(
+            model.is_ready_to_serve(),
+            "a ready namespace must report ready to serve"
+        );
+
+        // Drop the ready namespace; only the unready decode-only namespace is
+        // left. It must NOT be selectable despite having a live worker + engine.
+        model.remove_worker_set("good:prefill");
+        model.remove_worker_set("good");
+        assert!(
+            model.get_chat_engine().is_err(),
+            "unready namespace must never be selected for serving"
+        );
+        assert!(
+            !model.is_ready_to_serve(),
+            "only an incomplete namespace remains: not ready to serve"
+        );
     }
 }

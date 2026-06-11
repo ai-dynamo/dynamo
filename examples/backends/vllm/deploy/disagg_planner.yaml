@@ -18,27 +18,21 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/src/dynamo/planner
+          # Planner image selection:
+          #   Dynamo >= 1.1.0: use the dedicated planner image
+          #     nvcr.io/nvidia/ai-dynamo/dynamo-planner:<version>
+          #     (backend runtime images no longer ship planner runtime deps
+          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
+          #   Dynamo <  1.1.0: use the backend runtime image
+          #     nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>.
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
           command:
           - python3
           - -m
-          - planner_sla
+          - dynamo.planner
           args:
-            - --environment=kubernetes
-            - --backend=vllm
-            - --adjustment-interval=60
-            - --profile-results-dir=/workspace/profiling_results
-          volumeMounts:
-            - name: planner-profile-data
-              mountPath: /workspace/profiling_results
-              readOnly: true
-        volumes:
-          - name: planner-profile-data
-            configMap:
-              # Must be pre-created before deployment by the profiler
-              # See docs/planner/sla_planner_quickstart.md for more details
-              name: planner-profile-data
+            - --config
+            - '{"environment": "kubernetes", "backend": "vllm", "optimization_target": "sla", "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode": "none", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds": 5}'
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker

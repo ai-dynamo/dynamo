@@ -2,6 +2,8 @@
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying SGLang inference graphs using the **DynamoGraphDeployment** resource.
 
+The top-level `deploy/*.yaml` templates use `nvidia.com/v1alpha1` for compatibility with existing tooling. Equivalent `nvidia.com/v1beta1` templates are available under [`v1beta1/`](./v1beta1/).
+
 ## Available Deployment Patterns
 
 ### 1. **Aggregated Deployment** (`agg.yaml`)
@@ -74,7 +76,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Kubernetes Platform installed** - See [Installing Dynamo Kubernetes Platform](../../../../docs/pages/kubernetes/installation-guide.md)
+1. **Dynamo Kubernetes Platform installed** - See [Installing Dynamo Kubernetes Platform](../../../../docs/kubernetes/installation-guide.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for SGLang runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -144,10 +146,10 @@ All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/pages/kubernetes/deployment/create-deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/pages/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/pages/kubernetes/installation-guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/pages/getting-started/examples.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
+- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting
@@ -159,4 +161,4 @@ Common issues and solutions:
 3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
 4. **Out of memory**: Increase memory limits or reduce model batch size
 
-For additional support, refer to the [deployment guide](../../../../docs/pages/kubernetes/README.md).
+For additional support, refer to the [deployment guide](../../../../docs/kubernetes/README.md).

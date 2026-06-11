@@ -29,6 +29,7 @@ async def fetch_embeddings_from_encoder(
     request: Dict[str, Any],
     encode_client: Any,
     encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
+    trace_context=None,
 ) -> Union[List[torch.Tensor], DisaggregatedParams]:
     """
     Fetch embeddings from remote encode worker.
@@ -38,6 +39,7 @@ async def fetch_embeddings_from_encoder(
         request: Request dict (used for creating modified requests for caching)
         encode_client: Client to call remote encode worker
         encoder_cache: Optional cache for embeddings
+        trace_context: Optional Dynamo context for OTel trace propagation
 
     Returns:
         - List[torch.Tensor]: When using cache (CPU tensors from cache)
@@ -49,8 +51,6 @@ async def fetch_embeddings_from_encoder(
     if not image_urls:
         raise ValueError("image_urls must not be empty")
 
-    logger.info(f"fetch_embeddings_from_encoder: image_urls={image_urls}")
-
     if encoder_cache:
         # Cache path: extract embeddings to CPU tensors
         return await _fetch_embeddings_with_cache(
@@ -58,13 +58,19 @@ async def fetch_embeddings_from_encoder(
             request,
             encoder_cache,
             lambda req: _remote_encode_full_epd(
-                req, encode_client, update_request_for_decode=False
+                req,
+                encode_client,
+                update_request_for_decode=False,
+                trace_context=trace_context,
             ),
         )
     else:
         # No cache: return DisaggregatedParams directly (no GPU→CPU extraction)
         return await _remote_encode_full_epd(
-            request, encode_client, update_request_for_decode=True
+            request,
+            encode_client,
+            update_request_for_decode=True,
+            trace_context=trace_context,
         )
 
 
@@ -72,6 +78,7 @@ async def _remote_encode_full_epd(
     request: Dict[str, Any],
     encode_client: Any,
     update_request_for_decode: bool = True,
+    trace_context=None,
 ) -> DisaggregatedParams:
     """
     Call encode worker for full EPD flow.
@@ -80,6 +87,7 @@ async def _remote_encode_full_epd(
         request: Request dict
         encode_client: Client to call remote encode worker
         update_request_for_decode: If True, store EPD metadata in request
+        trace_context: Optional Dynamo context for OTel trace propagation
 
     Returns:
         DisaggregatedParams with multimodal_embedding_handles
@@ -88,7 +96,7 @@ async def _remote_encode_full_epd(
         RuntimeError: If encode worker returns invalid response
     """
     encode_response = None
-    async for res in await encode_client.round_robin(request):
+    async for res in await encode_client.round_robin(request, context=trace_context):
         encode_response = res.data()
         break
 
@@ -148,25 +156,17 @@ async def _fetch_embeddings_with_cache(
         url_hash = MultimodalHasher.hash_bytes(url.encode())
         cached = cache.get(url_hash)
         if cached is not None:
-            logger.info(f"fetch_embeddings_with_cache: cache hit for URL: {url}")
             embeddings_with_index.append((i, cached.tensor))
         else:
-            logger.info(f"fetch_embeddings_with_cache: cache miss for URL: {url}")
             uncached_urls.append(url)
             uncached_indices.append(i)
             uncached_hashes.append(url_hash)
 
     # If all cached, return immediately
     if not uncached_urls:
-        logger.info(f"fetch_embeddings_with_cache: all {len(image_urls)} URLs cached")
         embeddings_with_index.sort(key=lambda x: x[0])
         tensors = [t for _, t in embeddings_with_index]
         return tensors
-
-    # Encode uncached URLs
-    logger.info(
-        f"fetch_embeddings_with_cache: encoding {len(uncached_urls)} uncached URLs"
-    )
 
     # Create modified request with only uncached URLs
     modified_request = _create_request_with_urls(request, uncached_urls)
@@ -191,9 +191,6 @@ async def _fetch_embeddings_with_cache(
     # Cache new tensors (reuse hashes computed during cache lookup)
     for url, url_hash, tensor in zip(uncached_urls, uncached_hashes, new_tensors):
         cache.set(url_hash, CachedEmbedding(tensor=tensor))
-        logger.info(
-            f"fetch_embeddings_with_cache: cached embedding for URL: {url}, shape: {tensor.shape}"
-        )
 
     # Add new tensors to our list with their original indices
     for idx, tensor in zip(uncached_indices, new_tensors):

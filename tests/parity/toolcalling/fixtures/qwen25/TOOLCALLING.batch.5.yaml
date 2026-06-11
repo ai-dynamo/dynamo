@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen25
+mode: batch
+cases:
+  TOOLCALLING.batch.5.a:
+    description: Missing </tool_call> end marker
+    ref: dynamo
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
+  TOOLCALLING.batch.5.b:
+    description: Closing </tool_call> without matching <tool_call> open
+    ref: dynamo
+    model_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+    tools:
+    - *id001
+    expected:
+      dynamo: &id002
+        reason: "Dynamo's qwen25 (hermes alias) parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang: *id002
+  TOOLCALLING.batch.5.c:
+    description: Truncation mid-arguments JSON
+    ref: dynamo
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
+    tools:
+    - *id001
+    expected:
+      dynamo: &id003
+        reason: "Dynamo's qwen25 (hermes alias) parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang: *id003
+  TOOLCALLING.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name": "get_weather",
+      "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location": "New York"}}'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
+          "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
+          "New York"}}'
+  TOOLCALLING.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name": "get_weather",
+      "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location": "New York'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
+          "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
+          "New York'
