@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Tiny pytest-free runner for test_license_text.py (CI/local lack pytest)."""
 import importlib.util
 import inspect
