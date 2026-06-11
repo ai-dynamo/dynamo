@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{ExtProcServer, Router};
+use dynamo_ext_proc::{ExtProcServer, Router, RouterOnlyConfig};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -119,6 +119,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let router_only = RouterOnlyConfig::is_enabled();
     let config = Config::from_env();
 
     tracing::info!(
@@ -127,6 +128,7 @@ async fn main() -> Result<()> {
         namespace = %config.namespace,
         component = %config.component,
         enforce_disagg = config.enforce_disagg,
+        router_only_mode = router_only,
         "Starting Dynamo Rust EPP"
     );
 
@@ -144,9 +146,22 @@ async fn main() -> Result<()> {
             .serve(health_addr),
     );
 
-    tracing::info!("Initializing KV-aware router from discovery...");
-    let router =
-        Router::from_discovery(&config.namespace, &config.component, config.enforce_disagg).await?;
+    // Mode selection: router-only ("on-ramp", raw vLLM, no Dynamo runtime) vs the
+    // default Dynamo mode (DistributedRuntime over etcd/NATS + Dynamo workers).
+    let router = if router_only {
+        let ro_cfg = RouterOnlyConfig::from_env()?;
+        tracing::info!(
+            model = %ro_cfg.model_name,
+            block_size = ro_cfg.block_size,
+            pod_selector = %ro_cfg.pod_selector,
+            disaggregated = ro_cfg.is_disaggregated(),
+            "Initializing KV-aware router in router-only (raw-vLLM) mode..."
+        );
+        Router::from_router_only(ro_cfg).await?
+    } else {
+        tracing::info!("Initializing KV-aware router from discovery...");
+        Router::from_discovery(&config.namespace, &config.component, config.enforce_disagg).await?
+    };
 
     // Gate SERVING on pod-reflector readiness. `from_discovery` returns once
     // worker discovery and the model card are ready, but the K8s pod reflector's
