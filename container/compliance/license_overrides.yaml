@@ -989,3 +989,12 @@ overrides:
   - { ecosystem: python, name: humming-kernels,               license: "Apache-2.0",                   source: "inclusionAI/humming JIT GEMM kernels — https://github.com/inclusionAI/humming/blob/main/LICENSE (Apache-2.0)" }
   - { ecosystem: python, name: tokenspeed-mla,                license: "MIT",                          source: "LightSeek Foundation tokenspeed — https://github.com/lightseekorg/tokenspeed (MIT, PyPI license field)" }
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu13,  license: "LicenseRef-NVIDIA-Proprietary", source: "NVIDIA CUTLASS Python DSL license — https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/license.html (PyPI classifier: Other/Proprietary)" }
+
+  # --- libdrm family (X.Org DRM; MIT; syft/DEP-5 leaves the per-GPU subpackages
+  #     UNKNOWN — libdrm-intel1 is amd64-only so it missed the arm64-derived pass) ---
+  - { ecosystem: dpkg, name: libdrm-intel1,   license: "MIT", source: "X.Org libdrm (MIT); Intel DRM component" }
+  - { ecosystem: dpkg, name: libdrm-amdgpu1,  license: "MIT", source: "X.Org libdrm (MIT); AMDGPU DRM component" }
+  - { ecosystem: dpkg, name: libdrm-nouveau2, license: "MIT", source: "X.Org libdrm (MIT); Nouveau DRM component" }
+  - { ecosystem: dpkg, name: libdrm-radeon1,  license: "MIT", source: "X.Org libdrm (MIT); Radeon DRM component" }
+  - { ecosystem: dpkg, name: libdrm2,         license: "MIT", source: "X.Org libdrm (MIT)" }
+  - { ecosystem: dpkg, name: libdrm-common,   license: "MIT", source: "X.Org libdrm (MIT); common data" }
