@@ -227,6 +227,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             "expected all workers to have zero active tokens, got {active_tokens:?}",
         );
 
+        let active_requests = self.active_request_counts();
+        assert!(
+            active_requests.values().all(|&count| count == 0),
+            "expected all workers to have zero active requests, got {active_requests:?}",
+        );
+
         assert!(
             self.request_index.is_empty(),
             "expected no active request-to-worker mappings, found {}",
@@ -1295,6 +1301,7 @@ mod tests {
             sequences.active_tokens(decay_now).get(&worker).copied(),
             Some(0)
         );
+        assert_eq!(active_request_count(&sequences, worker), 1);
     }
 
     #[test]
@@ -1357,6 +1364,7 @@ mod tests {
         );
 
         sequences.mark_prefill_completed(&a_oldest, query).unwrap();
+        assert_eq!(active_request_count(&sequences, worker_a), 2);
 
         let loads = modeled_time_loads_by_worker(&sequences, query + Duration::from_secs(2));
         assert_eq!(loads.get(&worker_a).copied(), Some(Ok(2_000)));
@@ -1418,6 +1426,7 @@ mod tests {
         );
 
         sequences.free(&later, completion_time).unwrap();
+        assert_eq!(active_request_count(&sequences, worker), 1);
 
         assert_eq!(
             sequences
@@ -1660,57 +1669,6 @@ mod tests {
 
         sequences.free(&"req-a".to_string(), decay_now).unwrap();
         sequences.assert_completely_drained(decay_now);
-    }
-
-    #[test]
-    fn active_request_counts_follow_local_lifecycle_snapshot() {
-        let sequences = make_sequences();
-        let worker = WorkerWithDpRank::new(1, 0);
-        let now = Instant::now();
-        let request_id = "req-1".to_string();
-
-        assert_eq!(active_request_count(&sequences, worker), 0);
-
-        sequences
-            .add_request(
-                SequenceRequest {
-                    request_id: request_id.clone(),
-                    token_sequence: Some(vec![1, 2, 3]),
-                    track_prefill_tokens: true,
-                    expected_output_tokens: None,
-                    prefill_load_hint: tracking_hint(12),
-                    worker,
-                    lora_name: None,
-                },
-                now,
-            )
-            .unwrap();
-        assert_eq!(active_request_count(&sequences, worker), 1);
-
-        sequences.mark_prefill_completed(&request_id, now).unwrap();
-        assert_eq!(active_request_count(&sequences, worker), 1);
-
-        sequences.free(&request_id, now).unwrap();
-        assert_eq!(active_request_count(&sequences, worker), 0);
-
-        sequences
-            .add_request(
-                SequenceRequest {
-                    request_id: "req-2".to_string(),
-                    token_sequence: Some(vec![4, 5, 6]),
-                    track_prefill_tokens: true,
-                    expected_output_tokens: None,
-                    prefill_load_hint: tracking_hint(12),
-                    worker,
-                    lora_name: None,
-                },
-                now,
-            )
-            .unwrap();
-        assert_eq!(active_request_count(&sequences, worker), 1);
-
-        sequences.unregister_worker(worker.worker_id).unwrap();
-        assert!(!sequences.active_request_counts().contains_key(&worker));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2365,15 +2323,18 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(active_request_count(&sequences, worker), 1);
         sequences.reconcile_workers([]).unwrap();
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert!(sequences.active_blocks().is_empty());
+        assert!(!sequences.active_request_counts().contains_key(&worker));
         assert!(sequences.request_index.is_empty());
 
         sequences
             .reconcile_workers([WorkerDpRange::new(1, 0, 1)])
             .unwrap();
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
         assert!(sequences.prompt_registry.is_block_index_empty());
     }
 
@@ -2442,9 +2403,7 @@ mod tests {
         sequences.free(&request_id, decay_now).unwrap();
         sequences.free(&request_id, decay_now).unwrap();
 
-        assert!(sequences.request_index.is_empty());
-        assert!(sequences.prompt_registry.is_block_index_empty());
-        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        sequences.assert_completely_drained(decay_now);
     }
 
     #[test]
