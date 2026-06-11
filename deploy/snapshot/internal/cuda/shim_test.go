@@ -11,7 +11,7 @@ import (
 	"github.com/go-logr/logr"
 )
 
-func TestLockPassesDriverTimeout(t *testing.T) {
+func TestLockOmitsDriverTimeout(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args")
 	helperPath := filepath.Join(dir, "cuda-checkpoint-helper")
@@ -40,8 +40,6 @@ func TestLockPassesDriverTimeout(t *testing.T) {
 		"lock",
 		"--pid",
 		strconv.Itoa(os.Getpid()),
-		"--timeout",
-		strconv.FormatInt(cudaShortActionTimeout.Milliseconds(), 10),
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("helper args = %q, want %q", got, want)

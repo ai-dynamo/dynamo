@@ -64,9 +64,6 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 	if action == actionCheckpoint || action == actionRestore {
 		timeout = cudaLongActionTimeout
 	}
-	if action == actionLock {
-		args = append(args, "--timeout", strconv.FormatInt(timeout.Milliseconds(), 10))
-	}
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
