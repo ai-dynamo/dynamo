@@ -27,13 +27,10 @@ pytestmark = [
 ]
 
 
-def _read_zstd_payload(path, payload_format="msgpack"):
+def _read_zstd_payload(path):
     import zstandard as zstd
 
     raw = zstd.ZstdDecompressor().decompress(path.read_bytes())
-    if payload_format == "json":
-        return json.loads(raw)
-
     import msgspec
 
     return msgspec.msgpack.decode(raw)
@@ -307,7 +304,6 @@ def test_metadata_uploader_parses_extra_args_nvext():
                 "nvext": {
                     "metadata_upload": {
                         "url": "s3://bucket/root/rollouts",
-                        "format": "json",
                     }
                 }
             }
@@ -316,13 +312,29 @@ def test_metadata_uploader_parses_extra_args_nvext():
 
     assert uploader is not None
     assert uploader.url == "s3://bucket/root/rollouts"
-    assert uploader.payload_format == "json"
 
     uploader = MetadataUploader.from_backend_request(
         {"nvext": {"metadata_upload": {"url": "s3://bucket/root/rollouts"}}}
     )
     assert uploader is not None
-    assert uploader.payload_format == "msgpack"
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({}, "metadata_upload.url is required"),
+        ({"url": ""}, "metadata_upload.url must not be empty"),
+        ({"url": 1}, "metadata_upload.url must be a string"),
+        ("invalid", "metadata_upload must be an object"),
+        (
+            {"url": "s3://bucket/root/rollouts", "format": "json"},
+            "metadata_upload.format is not supported",
+        ),
+    ],
+)
+def test_metadata_uploader_rejects_invalid_settings(settings, message):
+    with pytest.raises(ValueError, match=message):
+        MetadataUploader.from_backend_request({"nvext": {"metadata_upload": settings}})
 
 
 def test_nvext_extra_field_requested_supports_raw_and_preprocessed_shapes():
@@ -353,7 +365,6 @@ def test_metadata_upload_requires_enable_rl():
     )
     assert uploader is not None
     assert uploader.url == "s3://bucket/root/rollouts/run-1"
-    assert uploader.payload_format == "msgpack"
 
 
 @pytest.mark.asyncio
@@ -686,10 +697,7 @@ async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
 @pytest.mark.asyncio
 async def test_process_text_stream_uploads_routed_experts(tmp_path):
     handler = _new_decode_handler(use_sglang_tokenizer=True)
-    uploader = MetadataUploader(
-        url=(tmp_path / "metadata/rollout-8").as_uri(),
-        payload_format="json",
-    )
+    uploader = MetadataUploader(url=(tmp_path / "metadata/rollout-8").as_uri())
     meta_info = {
         "id": "sglang-2",
         "finish_reason": {"type": "stop"},
@@ -713,9 +721,7 @@ async def test_process_text_stream_uploads_routed_experts(tmp_path):
     )
 
     assert "nvext" not in chunks[0]
-    payload = _read_zstd_payload(
-        tmp_path / "metadata/rollout-8/choice_0.json.zst", payload_format="json"
-    )
+    payload = _read_zstd_payload(tmp_path / "metadata/rollout-8/choice_0.msgpack.zst")
     assert payload["metadata"]["id"] == "sglang-2"
     assert payload["metadata"]["finish_reason"] == {"type": "stop"}
     assert payload["metadata"]["routed_experts"] == "base64-experts"

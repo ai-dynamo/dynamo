@@ -4,13 +4,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, cast
-
-_DEFAULT_FORMAT = "msgpack"
-_FORMATS = {"json", "msgpack"}
 
 
 def _backend_metadata_upload_settings(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -21,9 +17,14 @@ def _backend_metadata_upload_settings(request: dict[str, Any]) -> dict[str, Any]
     for source in (nvext, extra_nvext):
         if not isinstance(source, dict):
             continue
-        settings = source.get("metadata_upload")
-        if settings:
-            return settings
+        if "metadata_upload" not in source:
+            continue
+        settings = source["metadata_upload"]
+        if settings is None:
+            continue
+        if not isinstance(settings, dict):
+            raise ValueError("metadata_upload must be an object")
+        return settings
     return None
 
 
@@ -39,7 +40,7 @@ async def _upload_bytes(url: str, storage_path: str, data: bytes) -> str:
     return await upload_to_fs(get_fs(url), storage_path, data)
 
 
-def _serialize_payload(payload: dict[str, Any], payload_format: str) -> bytes:
+def _serialize_metadata(metadata: dict[str, Any]) -> bytes:
     try:
         import zstandard as zstd
     except ImportError as exc:
@@ -48,21 +49,17 @@ def _serialize_payload(payload: dict[str, Any], payload_format: str) -> bytes:
             "Install ai-dynamo with the selected backend extra or add the zstandard package."
         ) from exc
 
-    if payload_format == "json":
-        raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
-            "utf-8"
-        )
-    else:
-        try:
-            import msgspec
-        except ImportError as exc:
-            raise RuntimeError("Metadata msgpack upload requires msgspec.") from exc
-        raw = msgspec.msgpack.encode(payload)
-
     try:
-        return zstd.ZstdCompressor().compress(raw)
-    finally:
-        del raw
+        import msgspec
+    except ImportError as exc:
+        raise RuntimeError("Metadata upload requires msgspec.") from exc
+
+    payload = {
+        "schema_version": 1,
+        "metadata": _normalize_for_upload(metadata),
+    }
+    raw = msgspec.msgpack.encode(payload)
+    return zstd.ZstdCompressor().compress(raw)
 
 
 @cache
@@ -141,40 +138,29 @@ def _normalize_for_upload(value: Any) -> Any:
     return value
 
 
-def _serialize_metadata(metadata: dict[str, Any], payload_format: str) -> bytes:
-    return _serialize_payload(
-        {
-            "schema_version": 1,
-            "metadata": _normalize_for_upload(metadata),
-        },
-        payload_format,
-    )
-
-
 @dataclass(frozen=True)
 class MetadataUploader:
     url: str
-    payload_format: str = _DEFAULT_FORMAT
 
     def __post_init__(self) -> None:
+        if not isinstance(self.url, str):
+            raise ValueError("metadata_upload.url must be a string")
         url = self.url.strip()
         if not url:
             raise ValueError("metadata_upload.url must not be empty")
-
-        payload_format = self.payload_format.strip().lower()
-        if payload_format not in _FORMATS:
-            raise ValueError("metadata_upload.format must be one of: json, msgpack")
         object.__setattr__(self, "url", url)
-        object.__setattr__(self, "payload_format", payload_format)
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any] | None) -> MetadataUploader | None:
-        if not settings or not settings.get("url"):
+        if settings is None:
             return None
-        return cls(
-            url=settings["url"],
-            payload_format=settings.get("format", _DEFAULT_FORMAT),
-        )
+        unexpected = settings.keys() - {"url"}
+        if unexpected:
+            field = min(unexpected)
+            raise ValueError(f"metadata_upload.{field} is not supported")
+        if "url" not in settings:
+            raise ValueError("metadata_upload.url is required")
+        return cls(url=settings["url"])
 
     @classmethod
     def from_backend_request(cls, request: dict[str, Any]) -> MetadataUploader | None:
@@ -184,10 +170,8 @@ class MetadataUploader:
         if not metadata:
             return
 
-        storage_path = f"choice_{choice_index}.{self.payload_format}.zst"
-        data = await asyncio.to_thread(
-            _serialize_metadata, metadata, self.payload_format
-        )
+        storage_path = f"choice_{choice_index}.msgpack.zst"
+        data = await asyncio.to_thread(_serialize_metadata, metadata)
         try:
             await _upload_bytes(self.url, storage_path, data)
         finally:

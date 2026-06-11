@@ -389,20 +389,26 @@ pub struct RoutingConstraintsSchema {
     pub preferred_taints: std::collections::HashMap<String, f32>,
 }
 
-/// Serialization format for large backend metadata uploads.
+/// Destination for large backend metadata uploaded out of band.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum MetadataUploadFormat {
-    Json,
-    Msgpack,
+#[serde(deny_unknown_fields)]
+pub struct MetadataUpload {
+    #[serde(deserialize_with = "deserialize_metadata_upload_url")]
+    pub url: String,
 }
 
-/// Destination for large backend metadata uploaded out of band.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct MetadataUpload {
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<MetadataUploadFormat>,
+fn deserialize_metadata_upload_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let url = String::deserialize(deserializer)?;
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(serde::de::Error::custom(
+            "metadata_upload.url must not be empty",
+        ));
+    }
+    Ok(url.to_string())
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -835,30 +841,17 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_upload_parses_url_and_format() {
+    fn test_metadata_upload_parses_url() {
         let nvext: NvExt = serde_json::from_value(serde_json::json!({
             "metadata_upload": {
-                "url": "s3://bucket/root/rollouts"
+                "url": " s3://bucket/root/rollouts "
             }
         }))
         .unwrap();
 
         let upload = nvext.metadata_upload.as_ref().unwrap();
         assert_eq!(upload.url, "s3://bucket/root/rollouts");
-        assert_eq!(upload.format, None);
         assert!(!NvExtResponseFieldSelection::from_nvext(Some(&nvext)).engine_data);
-
-        let nvext: NvExt = serde_json::from_value(serde_json::json!({
-            "metadata_upload": {
-                "url": "s3://bucket/root/rollouts",
-                "format": "json"
-            }
-        }))
-        .unwrap();
-        assert_eq!(
-            nvext.metadata_upload.as_ref().unwrap().format,
-            Some(MetadataUploadFormat::Json)
-        );
 
         assert!(
             serde_json::from_value::<NvExt>(serde_json::json!({
@@ -869,8 +862,16 @@ mod tests {
         assert!(
             serde_json::from_value::<NvExt>(serde_json::json!({
                 "metadata_upload": {
+                    "url": ""
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {
                     "url": "s3://bucket/root/rollouts",
-                    "format": "parquet"
+                    "format": "json"
                 }
             }))
             .is_err()

@@ -3327,8 +3327,7 @@ mod tests {
                 "cache_salt": "step_7",
                 "extra_fields": ["completion_token_ids"],
                 "metadata_upload": {
-                    "url": "s3://bucket/root/rollouts",
-                    "format": "json"
+                    "url": "s3://bucket/root/rollouts"
                 }
             }
         }))
@@ -3344,8 +3343,7 @@ mod tests {
         assert_eq!(
             extra_args["nvext"]["metadata_upload"],
             serde_json::json!({
-                "url": "s3://bucket/root/rollouts",
-                "format": "json"
+                "url": "s3://bucket/root/rollouts"
             })
         );
         assert_eq!(extra_args["sampling_options"]["detokenize"], false);

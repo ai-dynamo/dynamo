@@ -260,7 +260,6 @@ def _build_dynamo_preproc(
     if mm_data:
         preproc["multi_modal_data"] = mm_data
 
-    # Backend preproc carries nvext passthrough in extra_args, matching Rust.
     nvext = request.get("nvext") or {}
     nvext_passthrough = {
         key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
