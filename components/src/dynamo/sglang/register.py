@@ -59,8 +59,12 @@ def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> 
     the Rust-side HF download entirely (lib/bindings/python/rust/lib.rs:314)
     and don't need this rewrite.
     """
-    mc = getattr(getattr(engine, "tokenizer_manager", None), "model_config", None)
-    if mc is not None and getattr(mc, "model_weights", ""):
+    try:
+        mc = engine.tokenizer_manager.model_config
+    except AttributeError:
+        return server_args.model_path
+    weights = getattr(mc, "model_weights", None)
+    if weights:
         return mc.model_path
     return server_args.model_path
 
