@@ -38,6 +38,14 @@ inputs:
     description: 'When "true", also extract the source archive (--target sources_archive). Set on post-merge / RC / release pipelines only; PR builds skip to avoid storage cost.'
     required: false
     default: 'false'
+  make_efa:
+    description: 'When "true", render with --make-efa so the licenses stage adds native EFA attribution (libfabric / aws-ofi-nccl via native_packages.yaml). MUST match the build job''s make_efa so the rendered Dockerfile (and thus the licenses-stage cache key) is identical — otherwise the extract cache-misses and rebuilds.'
+    required: false
+    default: 'false'
+  artifact_retention_days:
+    description: 'Retention (days) for the uploaded /legal NOTICES + /sboms CSV artifacts. PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
+    required: false
+    default: '30'
 
 runs:
   using: 'composite'
@@ -49,6 +57,13 @@ runs:
         RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform ${{ inputs.platform }}"
         if [ -n "${{ inputs.cuda_version }}" ]; then
           RENDER_ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
+        fi
+        # Mirror the build job's "Generate Dockerfile" step: EFA images render
+        # with --make-efa so the licenses stage attributes libfabric /
+        # aws-ofi-nccl. This must match the build render exactly, or the
+        # licenses-stage cache key differs and the extract rebuilds.
+        if [ "${{ inputs.make_efa }}" == "true" ]; then
+          RENDER_ARGS+=" --make-efa"
         fi
         # render.py prints an "INFO: Generated Dockerfile written to ..." line
         # to stdout, so we can't capture its output as the path. With
@@ -163,7 +178,7 @@ runs:
       with:
         name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-legal
         path: /tmp/legal/
-        retention-days: 90
+        retention-days: ${{ inputs.artifact_retention_days }}
 
     - name: Upload /sboms/ artifact
       if: always()
@@ -171,7 +186,7 @@ runs:
       with:
         name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-sboms
         path: /tmp/sboms/
-        retention-days: 90
+        retention-days: ${{ inputs.artifact_retention_days }}
 
     - name: Upload /sources/ tarball (post-merge / RC / release only)
       if: ${{ inputs.archive_sources == 'true' && always() }}

@@ -252,6 +252,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
       # Nightly serves as the continuous-compliance source-archival cadence
       # (post-merge-ci skips main and only archives on release/*.*.* cuts).
@@ -270,6 +271,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
       archive_sources: true
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -286,6 +288,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
       archive_sources: true
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -293,66 +296,14 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # COMPLIANCE JOBS
+  # COMPLIANCE
   # ============================================================================
-  # Sibling compliance_only jobs (same split as pr.yaml/post-merge-ci.yml) that
-  # extract + verify /legal + /sboms and — because archive_sources is true —
-  # run --target sources_archive to emit the /sources.zip artifact. This is the
-  # continuous-compliance source-archival cadence the build jobs above advertise;
-  # without these jobs the build jobs no longer extract anything (extraction is
-  # gated to compliance_only mode). The runtime images themselves already carry
-  # /legal baked in regardless.
-
-  vllm-compliance:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [create-fresh-builder, resolve-source-sha, vllm-build]
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: vllm
-      target: runtime
-      cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      build_timeout_minutes: 60
-      compliance_only: true
-      archive_sources: true
-      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-      image_tag_suffix: '-nightly'
-    secrets: inherit
-
-  sglang-compliance:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [create-fresh-builder, resolve-source-sha, sglang-build]
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: sglang
-      target: runtime
-      cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      build_timeout_minutes: 60
-      compliance_only: true
-      archive_sources: true
-      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-      image_tag_suffix: '-nightly'
-    secrets: inherit
-
-  trtllm-compliance:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [create-fresh-builder, resolve-source-sha, trtllm-build]
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: trtllm
-      target: runtime
-      cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      build_timeout_minutes: 60
-      compliance_only: true
-      archive_sources: true
-      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-      image_tag_suffix: '-nightly'
-    secrets: inherit
+  # Compliance extract + verify now runs as an inline step INSIDE each build job
+  # (inline_compliance: true above), on the same warm builder — a cache hit + small
+  # scratch export instead of a cold full-image rebuild on the fresh builder. The
+  # build jobs already set archive_sources: true (the continuous-compliance
+  # source-archival cadence), so /sources.zip is still emitted; /legal + /sboms
+  # upload at the default 30-day retention. A compliance failure fails the build.
 
   # ============================================================================
   # TEST JOBS

@@ -218,6 +218,8 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -247,6 +249,8 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -276,6 +280,8 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -306,6 +312,8 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -321,6 +329,8 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -336,6 +346,8 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -350,6 +362,8 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -368,6 +382,8 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -536,96 +552,16 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # IMAGE COMPLIANCE PIPELINES
+  # IMAGE COMPLIANCE
   # ============================================================================
-  #
-  # Compliance extract + verify runs via shared-build-image.yml in
-  # compliance_only mode: a sibling <framework>-compliance job that
-  # needs:[<framework>-build] (so the registry build cache is warm) and runs in
-  # PARALLEL with <framework>-test. The extract is ~10 min; keeping it OUT of
-  # the build job lets tests start at image push instead of waiting for it.
-  # License-policy enforcement happens IN the licenses Dockerfile stage, and the
-  # compliance job fails on policy/SBOM-diff violations. NOTE: these jobs do not
-  # yet preempt in-flight tests on failure (tracked follow-up).
-
-  vllm-compliance:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: vllm
-      target: runtime
-      cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      compliance_only: true
-      build_timeout_minutes: 45
-    secrets: inherit
-
-  sglang-compliance:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: sglang
-      target: runtime
-      cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      compliance_only: true
-      build_timeout_minutes: 45
-    secrets: inherit
-
-  trtllm-compliance:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: trtllm
-      target: runtime
-      cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      compliance_only: true
-      build_timeout_minutes: 45
-    secrets: inherit
-
-  planner-compliance:
-    name: planner # This name overlaps with other planner jobs to group them in the UI
-    needs: [changed-files, planner-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: dynamo
-      target: planner
-      cuda_version: '[""]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      compliance_only: true
-      build_timeout_minutes: 45
-    secrets: inherit
-
-  frontend-compliance:
-    name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [changed-files, frontend-build]
-    if: |
-      needs.changed-files.outputs.frontend == 'true' ||
-      needs.changed-files.outputs.operator == 'true' ||
-      needs.changed-files.outputs.snapshot == 'true' ||
-      needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: dynamo
-      target: frontend
-      cuda_version: '[""]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      compliance_only: true
-      build_timeout_minutes: 45
-    secrets: inherit
+  # Compliance extract + verify (per-ecosystem /sboms CSVs + /legal NOTICES, plus
+  # the SBOM-diff completeness check) runs as an inline step INSIDE each shipped
+  # framework build job (inline_compliance: true above) — same job, same warm
+  # builder, so it's a cache hit + small scratch export rather than a cold
+  # full-image rebuild. License-policy enforcement also happens in the licenses
+  # Dockerfile stage during the build. Because the extract is now part of the
+  # build job, a compliance failure fails the build and (via needs:) preempts the
+  # dependent tests. EFA images are covered too (make_efa flows to the extract).
 
   # ============================================================================
   # IMAGE COPY PIPELINES

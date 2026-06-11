@@ -112,13 +112,38 @@ on:
       compliance_only:
         description: |
           Run ONLY the compliance extract + verify (and artifact upload),
-          skipping the image build/push. Used to run compliance as a sibling
-          job in parallel with tests instead of serially in the build job —
-          the caller invokes this with needs:[<framework>-build] so the
-          registry build cache is already warm. Default false (build mode).
+          skipping the image build/push, as a sibling job in parallel with
+          tests instead of serially in the build job.
+
+          NOTE: no caller sets this today — the compliance extract is folded
+          into the build job via `inline_compliance` (same job → same warm
+          builder → cache hit, vs. this sibling-job model which lands on a
+          random pool pod and cold-rebuilds the whole image; see
+          route_buildkit.sh:342). It is intentionally RETAINED so we can revert
+          to the parallel-job model IF the warm-rebuild problem is solved at the
+          routing layer (e.g. a deterministic run_id-seeded pod pick that pins
+          the compliance job to the build job's warm pod). The `!compliance_only`
+          guards on the build/test-image steps stay correct at the false default.
         required: false
         type: boolean
         default: false
+      inline_compliance:
+        description: |
+          Run the compliance extract + verify as a step INSIDE this build job
+          (after "Build and Push Image"), reusing the same warm builder. Set
+          true by callers on the shipped-image build jobs (runtime / efa /
+          planner / frontend); replaces the separate compliance_only sibling
+          job. Skipped for dev / local-dev targets.
+        required: false
+        type: boolean
+        default: false
+      artifact_retention_days:
+        description: |
+          Retention (days) for the uploaded /legal NOTICES + /sboms CSV
+          compliance artifacts. PR passes 7; post-merge / nightly default to 30.
+        required: false
+        type: string
+        default: '30'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -434,15 +459,16 @@ jobs:
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}
             ${{ inputs.extra_build_args }}
-      # Compliance extract + verify. Runs ONLY in compliance_only mode — i.e. a
-      # sibling <framework>-compliance job that needs:[<framework>-build] and
-      # therefore runs in PARALLEL with the test jobs rather than serially in
-      # the build job (the extract takes ~10 min; keeping it off the build job
-      # lets tests start at image push). The needs: edge guarantees the
-      # registry build cache is already warm. Skipped for dev / local-dev
+      # Compliance extract + verify. Runs as a step INSIDE the build job
+      # (inline_compliance), right after "Build and Push Image", so it reuses
+      # the SAME warm builder — the licenses stage the runtime build already ran
+      # is a cache hit, so this is just the small FROM-scratch /legal + /sboms
+      # export (~1 min) instead of the cold full-image rebuild a separate pod
+      # would do. Also runs in the legacy compliance_only sibling-job mode (no
+      # caller sets that today; see the input note). Skipped for dev / local-dev
       # targets (those don't ship and don't go through OSRB).
       - name: Compliance extract + verify
-        if: ${{ inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' }}
+        if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
         uses: ./.github/actions/compliance-extract
         with:
           framework: ${{ inputs.framework }}
@@ -451,10 +477,14 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          # Must match the build's render: EFA images attribute libfabric /
+          # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
+          make_efa: ${{ inputs.make_efa }}
+          artifact_retention_days: ${{ inputs.artifact_retention_days }}
           # Source archival is opt-in per top-level caller (see the
-          # `archive_sources` input above). PR / on-demand / nightly leave
-          # it false; post-merge-ci flips it on for push to main +
-          # release/*.*.* branches so RC promotions inherit the archive.
+          # `archive_sources` input above). PR / on-demand leave it false;
+          # post-merge-ci + nightly flip it on (release/*.*.* / nightly) so
+          # RC promotions inherit the source archive.
           archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
         if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
