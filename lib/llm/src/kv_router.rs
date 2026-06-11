@@ -966,7 +966,7 @@ where
 }
 
 // NOTE: KVRouter works like a PushRouter,
-// but without the reverse proxy functionality, but based on contract of 3 request types
+// but without the reverse proxy functionality, but based on the RouterRequest contract
 #[async_trait]
 impl<Sel> AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error>
     for KvRouter<Sel>
