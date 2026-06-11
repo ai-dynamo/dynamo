@@ -585,7 +585,7 @@ class PlannerConfig(BaseModel):
         ge=0,
         le=100,
         validation_alias=AliasChoices(
-            "decode_scale_up_kv_rate", "decode_sacle_up_kv_rate"
+            "decode_scale_up_kv_rate"
         ),
         description=(
             "Decode KV utilization percentage that triggers scale-up when "
