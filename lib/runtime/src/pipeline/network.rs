@@ -39,6 +39,7 @@ use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
 /// Shared default maximum TCP message size across request-plane components.
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+pub(crate) const DEFAULT_STREAM_BUFFER_COUNT: usize = 64;
 
 static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 
@@ -364,6 +365,7 @@ pub struct ConnectionInfo {
 /// connections to the server. Internally, we may use bcast channels to coordinate the
 /// internal control messages between the sender and receiver socket connections.
 #[derive(Clone, Builder)]
+#[builder(build_fn(validate = "Self::validate"))]
 pub struct StreamOptions {
     /// Context
     pub context: Arc<dyn AsyncEngineContext>,
@@ -379,11 +381,11 @@ pub struct StreamOptions {
     pub enable_response_stream: bool,
 
     /// The number of messages to buffer before blocking
-    #[builder(default = "8")]
+    #[builder(default = "DEFAULT_STREAM_BUFFER_COUNT")]
     pub send_buffer_count: usize,
 
     /// The number of messages to buffer before blocking
-    #[builder(default = "8")]
+    #[builder(default = "DEFAULT_STREAM_BUFFER_COUNT")]
     pub recv_buffer_count: usize,
 }
 
@@ -393,13 +395,29 @@ impl StreamOptions {
     }
 }
 
+impl StreamOptionsBuilder {
+    fn validate(&self) -> Result<(), String> {
+        if matches!(self.send_buffer_count, Some(0)) {
+            return Err("send_buffer_count must be greater than zero".to_string());
+        }
+        if matches!(self.recv_buffer_count, Some(0)) {
+            return Err("recv_buffer_count must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+}
+
 pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
     transport_engine: Arc<dyn AsyncTransportEngine<Req, Resp>>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestControlMessage, RequestType, ResponseType};
+    use super::{
+        DEFAULT_STREAM_BUFFER_COUNT, RequestControlMessage, RequestType, ResponseType,
+        StreamOptions,
+    };
+    use crate::pipeline::Context;
 
     #[test]
     fn request_control_message_defaults_missing_metadata() {
@@ -423,6 +441,45 @@ mod tests {
         assert_eq!(message.connection_info.info, "{}");
         assert!(message.metadata.is_empty());
         assert!(message.frontend_send_ts_ns.is_none());
+    }
+
+    #[test]
+    fn stream_options_default_to_legacy_buffer_count() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        assert_eq!(options.send_buffer_count, DEFAULT_STREAM_BUFFER_COUNT);
+        assert_eq!(options.recv_buffer_count, DEFAULT_STREAM_BUFFER_COUNT);
+    }
+
+    #[test]
+    fn stream_options_reject_zero_buffer_counts() {
+        let context = Context::new(());
+        let err = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(0)
+            .build()
+            .err()
+            .expect("zero send buffer count should be rejected");
+        assert!(err.to_string().contains("send_buffer_count"));
+
+        let context = Context::new(());
+        let err = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .recv_buffer_count(0)
+            .build()
+            .err()
+            .expect("zero receive buffer count should be rejected");
+        assert!(err.to_string().contains("recv_buffer_count"));
     }
 }
 

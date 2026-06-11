@@ -494,6 +494,18 @@ impl ResponseService for TcpStreamServer {
     }
 }
 
+fn stream_channel<T>(
+    buffer_count: usize,
+    stream_kind: &str,
+) -> Result<(mpsc::Sender<T>, mpsc::Receiver<T>)> {
+    if buffer_count == 0 {
+        return Err(error!(
+            "{stream_kind} stream buffer count must be greater than zero"
+        ));
+    }
+    Ok(mpsc::channel(buffer_count))
+}
+
 // this method listens on a tcp port for incoming connections
 // new connections are expected to send a protocol specific handshake
 // for us to determine the subject they are interested in, in this case,
@@ -659,7 +671,7 @@ async fn tcp_listener(
             buffer_count,
         } = request_stream;
 
-        let (request_tx, request_rx) = mpsc::channel(buffer_count);
+        let (request_tx, request_rx) = stream_channel(buffer_count, "request")?;
 
         if connection
             .send(Ok(crate::pipeline::network::StreamSender {
@@ -811,7 +823,7 @@ async fn tcp_listener(
             return Err(error!("Received error prologue: {}", error));
         }
 
-        let (response_tx, response_rx) = mpsc::channel(buffer_count);
+        let (response_tx, response_rx) = stream_channel(buffer_count, "response")?;
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
@@ -1740,10 +1752,16 @@ mod tests {
     type TestFramedWrite = FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>;
     type TestResponseStream = (TestFramedRead, TestFramedWrite, StreamReceiver);
 
+    async fn open_registered_response_stream() -> TestResponseStream {
+        open_registered_response_stream_with_buffer_count(64).await
+    }
+
     /// Stand up a TcpStreamServer, register a response stream, connect a
     /// client, drive the handshake + prologue, and return the client-side
     /// framed reader/writer along with the receiver.
-    async fn open_registered_response_stream() -> TestResponseStream {
+    async fn open_registered_response_stream_with_buffer_count(
+        recv_buffer_count: usize,
+    ) -> TestResponseStream {
         let options = ServerOptions::builder().port(0).build().unwrap();
         let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
             .await
@@ -1753,6 +1771,7 @@ mod tests {
             .context(context.context())
             .enable_request_stream(false)
             .enable_response_stream(true)
+            .recv_buffer_count(recv_buffer_count)
             .build()
             .unwrap();
         let pending_connection = server.register(stream_options).await;
@@ -1793,6 +1812,14 @@ mod tests {
             .expect("response stream should be accepted");
 
         (framed_reader, framed_writer, receiver)
+    }
+
+    #[tokio::test]
+    async fn test_response_stream_uses_registered_buffer_count() {
+        let (_framed_reader, _framed_writer, receiver) =
+            open_registered_response_stream_with_buffer_count(5).await;
+
+        assert_eq!(receiver.rx.max_capacity(), 5);
     }
 
     async fn recv_control_message(framed_reader: &mut TestFramedRead) -> ControlMessage {
@@ -1952,11 +1979,23 @@ mod tests {
         super::StreamSender,
         Arc<dyn AsyncEngineContext>,
     ) {
+        register_and_dial_request_stream_with_buffer_count(server, 64).await
+    }
+
+    async fn register_and_dial_request_stream_with_buffer_count(
+        server: &TcpStreamServer,
+        send_buffer_count: usize,
+    ) -> (
+        FramedRead<tokio::io::ReadHalf<TcpStream>, TwoPartCodec>,
+        super::StreamSender,
+        Arc<dyn AsyncEngineContext>,
+    ) {
         let upstream_ctx = Context::new(()).context();
         let options = StreamOptions::builder()
             .context(upstream_ctx.clone())
             .enable_request_stream(true)
             .enable_response_stream(false)
+            .send_buffer_count(send_buffer_count)
             .build()
             .unwrap();
 
@@ -1983,6 +2022,15 @@ mod tests {
 
         let sender = send_provider.await.unwrap().unwrap();
         (framed_reader, sender, upstream_ctx)
+    }
+
+    #[tokio::test]
+    async fn test_request_stream_uses_registered_buffer_count() {
+        let server = test_server().await;
+        let (_reader, sender, _ctx) =
+            register_and_dial_request_stream_with_buffer_count(&server, 3).await;
+
+        assert_eq!(sender.tx.max_capacity(), 3);
     }
 
     /// Pull frames off the raw client reader until the first `ControlMessage`
