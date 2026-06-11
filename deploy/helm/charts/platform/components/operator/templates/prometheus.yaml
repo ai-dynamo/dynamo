@@ -70,13 +70,31 @@ spec:
   - interval: 5s
     path: /metrics
     port: system
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+      targetLabel: dynamo_component_type
   - interval: 5s
     path: /metrics
     port: nixl
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+      targetLabel: dynamo_component_type
   selector:
-    matchLabels:
-      nvidia.com/dynamo-component-type: worker
-      nvidia.com/metrics-enabled: "true"
+    matchExpressions:
+      - key: nvidia.com/dynamo-component-type
+        operator: In
+        values:
+          - worker
+          - decode
+          - prefill
+      - key: nvidia.com/metrics-enabled
+        operator: In
+        values:
+          - "true"
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
