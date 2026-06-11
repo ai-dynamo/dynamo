@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 import uvloop
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
 from tests.frontend.test_realtime_omni_bridge import (
@@ -83,6 +83,7 @@ async def main() -> None:
         endpoint,
         MODEL_NAME,
         model_name=MODEL_NAME,
+        worker_type=WorkerType.Aggregated,
     )
     await endpoint.serve_bidirectional_endpoint(handler.generate)
 
