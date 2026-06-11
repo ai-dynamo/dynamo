@@ -155,7 +155,6 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
   overrides:
     dgd:
       apiVersion: nvidia.com/v1beta1
