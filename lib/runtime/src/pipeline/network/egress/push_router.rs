@@ -538,19 +538,99 @@ where
             .await
     }
 
+    /// Select a worker for a load-aware routing mode (`PowerOfTwoChoices`,
+    /// `LeastLoaded`, `DeviceAwareWeighted`), incrementing the occupancy
+    /// counter and returning a [`OccupancyPermit`] that will release it.
+    ///
+    /// This is the shared selection logic used by both the unary `generate`
+    /// path and the bidirectional `generate` path so the two stay at parity;
+    /// the only difference between the two paths is the dispatch call, not the
+    /// worker selection. Returns an error (via [`Self::empty_free_pool_error`])
+    /// when no free workers exist for the chosen group, so callers surface a
+    /// "no instances" / "all busy" message rather than a misleading default.
+    async fn select_load_aware_worker(&self) -> anyhow::Result<(u64, OccupancyPermit)> {
+        let state = self.occupancy_state()?;
+        match self.router_mode {
+            RouterMode::PowerOfTwoChoices => {
+                let instance_id = {
+                    let routing_instances = self.client.routing_instances();
+                    if routing_instances.free_ids().is_empty() {
+                        return Err(self.empty_free_pool_error(&routing_instances));
+                    }
+                    p2c_select_from(state.as_ref(), routing_instances.free_ids())
+                };
+                state.increment(instance_id);
+                Ok((instance_id, OccupancyPermit::new(state, instance_id)))
+            }
+            RouterMode::LeastLoaded => {
+                let routing_instances = self.client.routing_instances();
+                let instance_ids = routing_instances.free_ids().to_vec();
+                let instance_id = state
+                    .select_exact_min_and_increment(&instance_ids)
+                    .await
+                    .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                tracing::trace!(
+                    "least loaded router selected {instance_id} (connections: {})",
+                    state.load(instance_id)
+                );
+                Ok((instance_id, OccupancyPermit::new(state, instance_id)))
+            }
+            RouterMode::DeviceAwareWeighted => {
+                let routing_instances = self.client.routing_instances();
+                let instance_ids = routing_instances.free_ids().to_vec();
+                if instance_ids.is_empty() {
+                    return Err(self.empty_free_pool_error(&routing_instances));
+                }
+
+                let endpoint_id = self.client.endpoint.id();
+
+                // For encoder endpoints, partition by device type
+                let instances = self.client.instances();
+                let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
+                    .iter()
+                    .map(|inst| (inst.instance_id, inst.device_type.clone()))
+                    .collect();
+
+                // Apply budget-based routing to determine which group to send to
+                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|v| *v >= 1)
+                    .unwrap_or(8);
+                let candidates = device_aware_candidate_group(
+                    state.as_ref(),
+                    &instance_ids,
+                    &device_type_map,
+                    cuda_to_cpu_ratio,
+                );
+
+                // Empty group: budget-selected device class has no free workers.
+                let instance_id = state
+                    .select_exact_min_and_increment(&candidates)
+                    .await
+                    .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                let is_cpu = matches!(
+                    device_type_map.get(&instance_id),
+                    Some(Some(DeviceType::Cpu))
+                );
+                tracing::info!(
+                    endpoint = %endpoint_id,
+                    selected_instance = instance_id,
+                    is_cpu,
+                    "DeviceAwareWeighted selected instance"
+                );
+                Ok((instance_id, OccupancyPermit::new(state, instance_id)))
+            }
+            other => Err(anyhow::anyhow!(
+                "select_load_aware_worker called for non-load-aware router mode {other:?}"
+            )),
+        }
+    }
+
     /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
     /// route to the one with fewer in-flight requests.
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let state = self.occupancy_state()?;
-        let instance_id = {
-            let routing_instances = self.client.routing_instances();
-            if routing_instances.free_ids().is_empty() {
-                return Err(self.empty_free_pool_error(&routing_instances));
-            }
-            p2c_select_from(state.as_ref(), routing_instances.free_ids())
-        };
-        state.increment(instance_id);
-        let permit = OccupancyPermit::new(state, instance_id);
+        let (instance_id, permit) = self.select_load_aware_worker().await?;
 
         match self
             .generate_with_fault_detection(instance_id, request)
@@ -599,53 +679,7 @@ where
     /// If only one device class exists (all CPU or all non-CPU), this naturally
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let state = self.occupancy_state()?;
-        let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids().to_vec();
-
-        if instance_ids.is_empty() {
-            return Err(self.empty_free_pool_error(&routing_instances));
-        }
-
-        // Apply a unified policy for all endpoints.
-        let endpoint_id = self.client.endpoint.id();
-
-        // For encoder endpoints, partition by device type
-        let instances = self.client.instances();
-        let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
-            .iter()
-            .map(|inst| (inst.instance_id, inst.device_type.clone()))
-            .collect();
-
-        // Apply budget-based routing to determine which group to send to
-        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v >= 1)
-            .unwrap_or(8);
-        let candidates = device_aware_candidate_group(
-            state.as_ref(),
-            &instance_ids,
-            &device_type_map,
-            cuda_to_cpu_ratio,
-        );
-
-        // Empty group: budget-selected device class has no free workers.
-        let instance_id = state
-            .select_exact_min_and_increment(&candidates)
-            .await
-            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = OccupancyPermit::new(state.clone(), instance_id);
-        let is_cpu = matches!(
-            device_type_map.get(&instance_id),
-            Some(Some(DeviceType::Cpu))
-        );
-        tracing::info!(
-            endpoint = %endpoint_id,
-            selected_instance = instance_id,
-            is_cpu,
-            "DeviceAwareWeighted selected instance"
-        );
+        let (instance_id, permit) = self.select_load_aware_worker().await?;
 
         match self
             .generate_with_fault_detection(instance_id, request)
@@ -658,18 +692,7 @@ where
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let state = self.occupancy_state()?;
-        let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids().to_vec();
-        let instance_id = state
-            .select_exact_min_and_increment(&instance_ids)
-            .await
-            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = OccupancyPermit::new(state.clone(), instance_id);
-        tracing::trace!(
-            "least loaded router selected {instance_id} (connections: {})",
-            state.load(instance_id)
-        );
+        let (instance_id, permit) = self.select_load_aware_worker().await?;
 
         match self
             .generate_with_fault_detection(instance_id, request)
@@ -1070,31 +1093,48 @@ where
 {
     async fn generate(&self, input: ManyIn<T>) -> Result<ManyOut<U>, Error> {
         match self.router_mode {
+            // KV routing is content-aware: the routing key is derived from the
+            // request content (first frame / session), which conflicts with the
+            // reserve-before-observe design documented above — we must pick a
+            // worker before any inbound frame is seen. Wiring bidirectional KV
+            // routing is the main open design question and is intentionally left
+            // unimplemented here rather than half-built.
             RouterMode::KV => {
-                anyhow::bail!("KV routing should not call generate on PushRouter");
+                anyhow::bail!(
+                    "bidirectional KV routing is not yet supported: KV selection is \
+                     content-aware (routing key derived from the first frame/session) \
+                     and conflicts with the reserve-worker-before-first-frame design \
+                     of bidirectional dispatch"
+                );
             }
+            // Direct routing is handled by the DirectRoutingRouter wrapper on the
+            // way in (same invariant as the unary path); generate is never the
+            // right entry point for it.
             RouterMode::Direct => {
                 anyhow::bail!(
                     "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
                 );
             }
-            // These modes drive `select_next_worker()` to `None` — they rely on
-            // the occupancy/load-aware selection the bidirectional path does not
-            // wire yet, which would otherwise surface as a misleading "no
-            // instances available" error below. Reject them explicitly until
-            // bidirectional support lands; tracked in
-            // https://github.com/ai-dynamo/dynamo/issues/10320.
+            // Load-aware modes: reuse the unary path's occupancy-based selection
+            // so the bidirectional path reaches parity. Selection increments the
+            // occupancy counter and hands back a permit; the permit is attached
+            // to the response stream so the slot is released when the stream ends
+            // (or dropped early). `select_load_aware_worker` returns a clear
+            // "no instances" / "all busy" error when the candidate pool is empty.
             RouterMode::PowerOfTwoChoices
             | RouterMode::LeastLoaded
             | RouterMode::DeviceAwareWeighted => {
-                anyhow::bail!(
-                    "{:?} routing is not yet supported for bidirectional dispatch",
-                    self.router_mode
-                );
+                let (instance_id, permit) = self.select_load_aware_worker().await?;
+                return match self.bidirectional_dispatch(instance_id, input).await {
+                    Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+                    Err(err) => Err(err),
+                };
             }
             RouterMode::RoundRobin | RouterMode::Random => {}
         }
 
+        // Stateless modes (RoundRobin / Random): no occupancy tracking. A `None`
+        // here genuinely means there are no free instances for this endpoint.
         let instance_id = self
             .select_next_worker()
             .ok_or_else(|| anyhow::anyhow!("no instances available for bidirectional routing"))?;
@@ -1395,8 +1435,12 @@ mod tests {
         rt.shutdown();
     }
 
+    /// With load-aware modes now wired for the bidirectional path, a router
+    /// with no registered instances must surface a "no instances" / "all busy"
+    /// style error — NOT a misleading "not supported" message. This distinguishes
+    /// the supported-but-empty case from genuinely-unsupported modes (KV).
     #[tokio::test]
-    async fn bidirectional_generate_rejects_unsupported_load_aware_modes() {
+    async fn bidirectional_generate_load_aware_modes_report_no_instances_when_empty() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -1420,14 +1464,57 @@ mod tests {
             let result = router.generate(input).await;
             assert!(
                 result.is_err(),
-                "bidirectional generate must reject {mode:?} (not yet supported)"
+                "bidirectional generate must error for {mode:?} with no instances"
             );
             let err_msg = format!("{:?}", result.unwrap_err());
+            // The error must be the accurate empty-pool message, not the old
+            // "not yet supported for bidirectional dispatch" wording.
             assert!(
-                err_msg.contains("not yet supported for bidirectional dispatch"),
-                "error should explain the mode is unsupported, not 'no instances': got {err_msg}"
+                !err_msg.contains("not yet supported for bidirectional dispatch"),
+                "{mode:?} is now wired for bidirectional dispatch; must not claim it is unsupported: got {err_msg}"
+            );
+            assert!(
+                err_msg.contains("no instances")
+                    || err_msg.contains("All workers are busy")
+                    || err_msg.contains("not initialized"),
+                "error should describe the empty/unavailable pool: got {err_msg}"
             );
         }
+
+        rt.shutdown();
+    }
+
+    /// KV remains genuinely unsupported for bidirectional dispatch (content-aware
+    /// selection vs. reserve-before-first-frame). Its error must clearly say so —
+    /// distinct from the "no instances" message used for supported-but-empty modes.
+    #[tokio::test]
+    async fn bidirectional_generate_kv_reports_unsupported_not_empty() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_bidi_kv_unsupported".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::KV)
+            .await
+            .unwrap();
+
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![1u64]))));
+        let err_msg = format!("{:?}", router.generate(input).await.unwrap_err());
+        assert!(
+            err_msg.contains("not yet supported"),
+            "KV bidirectional error must explain it is unsupported: got {err_msg}"
+        );
+        assert!(
+            !err_msg.contains("no instances"),
+            "KV error must not be the misleading 'no instances' message: got {err_msg}"
+        );
 
         rt.shutdown();
     }
