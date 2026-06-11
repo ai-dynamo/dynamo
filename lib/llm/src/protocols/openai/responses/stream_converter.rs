@@ -579,8 +579,8 @@ impl ResponseStreamConverter {
         output
     }
 
-    fn make_failed_response(&self, code: &str, message: &str) -> Response {
-        let mut response = self.make_response(Status::Failed, vec![]);
+    fn make_failed_response(&self, output: Vec<OutputItem>, code: &str, message: &str) -> Response {
+        let mut response = self.make_response(Status::Failed, output);
         response.error = Some(ErrorObject {
             code: code.to_string(),
             message: message.to_string(),
@@ -591,6 +591,7 @@ impl ResponseStreamConverter {
 
     pub fn emit_failed_event(
         &mut self,
+        output: Vec<OutputItem>,
         code: &str,
         message: &str,
     ) -> Vec<Result<Event, anyhow::Error>> {
@@ -598,13 +599,13 @@ impl ResponseStreamConverter {
         vec![
             self.make_sse_event(&ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
                 sequence_number,
-                response: self.make_failed_response(code, message),
+                response: self.make_failed_response(output, code, message),
             })),
         ]
     }
 
     pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
-        self.emit_failed_event("server_error", "The response stream failed.")
+        self.emit_failed_event(vec![], "server_error", "The response stream failed.")
     }
 
     /// Append error events when the stream ends due to a backend error.
@@ -1049,6 +1050,36 @@ mod tests {
         serde_json::from_str(&converter.serialize_event_data(event).unwrap()).unwrap()
     }
 
+    async fn collect_sse_body(events: Vec<Result<Event, anyhow::Error>>) -> String {
+        use axum::body::to_bytes;
+        use axum::response::{IntoResponse, Sse};
+
+        let stream = futures::stream::iter(
+            events
+                .into_iter()
+                .map(|event| event.map_err(axum::Error::new)),
+        );
+        let response = Sse::new(stream).into_response();
+        let body = to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("SSE body bytes");
+        String::from_utf8(body.to_vec()).expect("UTF-8 SSE body")
+    }
+
+    fn sse_event_json(body: &str, event_type: &str) -> Value {
+        let expected_type = format!("event: {event_type}");
+        let event = body
+            .split("\n\n")
+            .find(|event| event.lines().any(|line| line == expected_type))
+            .unwrap_or_else(|| panic!("missing `{event_type}` event in SSE body:\n{body}"));
+        let data = event
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str(&data).expect("valid SSE event JSON")
+    }
+
     /// Complete tool call emits function_call_arguments.done + output_item.done inline.
     #[test]
     fn test_complete_tool_call_emits_done_inline() {
@@ -1140,8 +1171,8 @@ mod tests {
     }
 
     /// Text-only response: no tool-related events at all.
-    #[test]
-    fn test_text_response_nvext_and_failed_event() {
+    #[tokio::test]
+    async fn test_text_response_nvext_and_failed_event() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
         let _ = conv.emit_start_events();
 
@@ -1172,15 +1203,32 @@ mod tests {
             Some(serde_json::json!({ "completion_token_ids": [11, 22, 33] }))
         );
 
-        let events = conv.emit_failed_event("server_error", "store failed");
-        let response = conv.make_failed_response("server_error", "store failed");
+        let completed = sse_event_json(&collect_sse_body(end_events).await, "response.completed");
+        assert_eq!(
+            completed["response"]["nvext"],
+            serde_json::json!({ "completion_token_ids": [11, 22, 33] })
+        );
+        assert_eq!(completed["response"]["status"], "completed");
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"],
+            "Hello world!"
+        );
 
-        assert_eq!(event_types(&events), vec!["response.failed"]);
-        assert_eq!(response.status, Status::Failed);
-        let error = response.error.unwrap();
-        assert_eq!(error.code, "server_error");
-        assert_eq!(error.message, "store failed");
-        assert!(response.usage.is_none());
+        let output = conv.completed_output();
+        let events = conv.emit_failed_event(output, "server_error", "store failed");
+        let failed = sse_event_json(&collect_sse_body(events).await, "response.failed");
+        assert_eq!(
+            failed["response"]["nvext"],
+            serde_json::json!({ "completion_token_ids": [11, 22, 33] })
+        );
+        assert_eq!(failed["response"]["status"], "failed");
+        assert_eq!(failed["response"]["error"]["code"], "server_error");
+        assert_eq!(failed["response"]["error"]["message"], "store failed");
+        assert_eq!(
+            failed["response"]["output"][0]["content"][0]["text"],
+            "Hello world!"
+        );
+        assert!(failed["response"]["usage"].is_null());
     }
 
     /// Text followed by tool call: both handled correctly.

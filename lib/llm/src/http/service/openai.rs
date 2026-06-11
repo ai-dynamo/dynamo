@@ -2209,6 +2209,7 @@ async fn responses(
                     tracing::error!(%err, "failed to persist streamed stateful Responses context");
                     persist_failed_in_stream.store(true, Ordering::Release);
                     events.extend(converter.emit_failed_event(
+                        completed_response.output,
                         "server_error",
                         "Failed to persist stateful Responses context.",
                     ));
