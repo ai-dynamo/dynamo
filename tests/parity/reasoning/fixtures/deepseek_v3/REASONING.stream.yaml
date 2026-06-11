@@ -92,6 +92,25 @@ cases:
         reasoning_text: thinking</think>answer
         normal_text: ''
         reason: Dynamo buffers an end marker split across chunk boundaries and resumes normal_text after it; SGLang streams the partial delimiter as reasoning, so the split marker is never reassembled and the answer stays in reasoning_text.
+  REASONING.stream.3.d:
+    description: End marker split across chunks at the lone '<' (off-by-one from 3.b)
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - <think>thinking<
+    - /think>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: <think>thinking</think>answer
+        normal_text: ''
+        reason: Dynamo buffers a split end delimiter (incl. a lone '<' at the chunk boundary) and resumes normal_text after it; vLLM keeps the delimiter and answer in reasoning_text.
+      sglang:
+        reasoning_text: thinking</think>answer
+        normal_text: ''
+        reason: Dynamo reassembles an end marker split at the lone '<' and resumes normal_text after it; SGLang streams the partial delimiter as reasoning, so the answer stays in reasoning_text.
   REASONING.stream.3.c:
     description: Partial start-marker prefix later resolves as force-reasoning text
     ref: *upstream_ref
