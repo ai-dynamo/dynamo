@@ -56,7 +56,12 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Install syft
         shell: bash
-        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        run: |
+          # The runner doesn't allow writing to /usr/local/bin without sudo, so
+          # install into a runner-writable dir and put it on PATH.
+          mkdir -p "${RUNNER_TEMP}/bin"
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "${RUNNER_TEMP}/bin"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
       - name: Resolve image ref, baseline + artifact name
         id: resolve
         shell: bash

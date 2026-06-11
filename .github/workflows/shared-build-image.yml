@@ -478,6 +478,10 @@ jobs:
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
           git_sha: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          # Match the build's sccache build-args so the extract reuses the warm
+          # wheel_builder/pre_runtime cache instead of a cold rebuild.
+          sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          sccache_region: ${{ secrets.AWS_DEFAULT_REGION }}
           # Must match the build's render: EFA images attribute libfabric /
           # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
           make_efa: ${{ inputs.make_efa }}

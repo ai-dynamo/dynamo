@@ -49,6 +49,14 @@ inputs:
     description: 'Commit SHA used to name the per-arch OSRB files (osrb-<image>-<arch>-<sha8>.csv/.cdx.json). Pass the github.sha context value.'
     required: false
     default: ''
+  sccache_bucket:
+    description: 'SCCACHE S3 bucket — must equal what the build passed so wheel_builder_base''s SCCACHE_* ARGs/ENV match and the heavy Rust layer cache-hits (the extract does NOT re-run sccache; it only needs the build-arg VALUES to line up).'
+    required: false
+    default: ''
+  sccache_region:
+    description: 'SCCACHE region (= aws_default_region the build passed). See sccache_bucket.'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -82,12 +90,28 @@ runs:
     # buildx writes one subdir per platform (linux_amd64/, linux_arm64/).
     - name: Extract /compliance/ (NOTICES + CSV + CycloneDX)
       shell: bash
+      env:
+        SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
+        SCCACHE_REGION: ${{ inputs.sccache_region }}
+        GIT_SHA: ${{ inputs.git_sha }}
       run: |
         mkdir -p /tmp/compliance
+        # Reuse the warm cache the build just populated by matching ALL the
+        # cache-key-affecting build-args the build passed. Otherwise the shared
+        # stages rebuild here instead of cache-hitting:
+        #   - DYNAMO_COMMIT_SHA: pre_runtime does ENV DYNAMO_COMMIT_SHA=...; licenses
+        #     (and compliance_artifact) are FROM pre_runtime.
+        #   - USE_SCCACHE/SCCACHE_*: wheel_builder_base bakes them into an ENV, and
+        #     pre_runtime COPYs from wheel_builder. We pass the same VALUES (not to
+        #     run sccache — the layer cache-hits — but so the cache key lines up).
         docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
             --target compliance_artifact \
+            --build-arg DYNAMO_COMMIT_SHA="${GIT_SHA}" \
+            --build-arg USE_SCCACHE=true \
+            --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
+            --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
             -f ${{ steps.render.outputs.rendered }} \
@@ -127,12 +151,24 @@ runs:
     - name: Extract /sources/ (post-merge / RC / release only)
       if: ${{ inputs.archive_sources == 'true' }}
       shell: bash
+      env:
+        SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
+        SCCACHE_REGION: ${{ inputs.sccache_region }}
+        GIT_SHA: ${{ inputs.git_sha }}
       run: |
         mkdir -p /tmp/sources
+        # ENABLE_SOURCE_ARCHIVAL=true to actually run sources_collect; the other
+        # build-args match the build so this shares the warm cache (same reason
+        # as the compliance_artifact extract above).
         docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
             --target sources_archive \
+            --build-arg DYNAMO_COMMIT_SHA="${GIT_SHA}" \
+            --build-arg USE_SCCACHE=true \
+            --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
+            --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
+            --build-arg ENABLE_SOURCE_ARCHIVAL=true \
             --output type=local,dest=/tmp/sources \
             --progress=plain \
             -f ${{ steps.render.outputs.rendered }} \
