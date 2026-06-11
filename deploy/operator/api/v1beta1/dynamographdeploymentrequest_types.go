@@ -389,8 +389,11 @@ type HardwareSpec struct {
 	// +kubebuilder:default="cuda"
 	DeviceType DeviceType `json:"deviceType,omitempty"`
 
-	// GPUSKU is the AIC hardware system identifier for the GPU.
-	// When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
+	// GPUSKU selects the GPU type to target.
+	// When omitted, auto-detected by selecting the GPU with the highest
+	// node count, then highest VRAM. In mixed-GPU clusters, set this to
+	// choose which GPU type to use. Discovery and totalGpus are then
+	// restricted to nodes matching this SKU.
 	// +optional
 	// +kubebuilder:validation:Enum=gb200_sxm;gb10;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
