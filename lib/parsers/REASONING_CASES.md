@@ -134,8 +134,8 @@ then chunk-boundary cases.
 - **`REASONING.stream.3.a`** Start-marker chunk-boundary split — opening `<think>` (or analog) straddles a chunk boundary; partial-token matching must keep buffering instead of flushing as plain text.
 - **`REASONING.stream.3.b`** End-marker chunk-boundary split — closing `</think>` straddles a chunk boundary; same buffering contract as `REASONING.stream.3.a`.
 - **`REASONING.stream.3.c`** Partial marker prefix later proves not to be a marker — emit the buffered text according to the parser's current state.
-- **`REASONING.stream.3.d`** End-marker split at the lone `<` — the off-by-one of `3.b` where the chunk boundary lands on the marker's first character; the parser must hold the lone `<` and still reassemble `</think>`, else reasoning never exits and trailing content (e.g. a tool-call block) is absorbed into reasoning_text (DIS-2223).
-- **`REASONING.stream.3.e`** Re-entry start-marker split at the lone `<` — the start-marker symmetric of `3.d`: a second `<think>` straddles the boundary on its lone `<`. The parser must reassemble it and re-enter reasoning so the re-think is parsed as reasoning, not leaked as raw `<think>` markup into normal_text with its span misrouted (DIS-2223). Pairs with `REASONING.stream.2.b` for the re-entry contract.
+- **`REASONING.stream.3.d`** End-marker split at the lone `<` — the off-by-one of `3.b` where the chunk boundary lands on the marker's first character; the parser must hold the lone `<` and still reassemble `</think>`, else reasoning never exits and trailing content (e.g. a tool-call block) is absorbed into reasoning_text.
+- **`REASONING.stream.3.e`** Re-entry start-marker split at the lone `<` — the start-marker symmetric of `3.d`: a second `<think>` straddles the boundary on its lone `<`. The parser must reassemble it and re-enter reasoning so the re-think is parsed as reasoning, not leaked as raw `<think>` markup into normal_text with its span misrouted. Pairs with `REASONING.stream.2.b` for the re-entry contract.
 
 ### Upstream test inventory
 

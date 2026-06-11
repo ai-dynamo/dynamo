@@ -342,7 +342,7 @@ impl ReasoningParser for BasicReasoningParser {
                         // lone '<'. A `>= 2` threshold dropped single-char overlaps, so a
                         // </think> split at the '<' chunk boundary never reassembled —
                         // reasoning never exited and the trailing content (e.g. a tool
-                        // call) was absorbed into reasoning_content (DIS-2223).
+                        // call) was absorbed into reasoning_content.
                         if ol >= 1 {
                             let safe_end = current_text.len() - ol;
                             if safe_end > 0 {
@@ -400,7 +400,7 @@ impl ReasoningParser for BasicReasoningParser {
                         // (both start with `<`), so check both and use the wider overlap.
                         // Hold back ANY non-empty overlap, including a lone `<`. A re-entry
                         // `<think>` (or a stray `</think>`) split at the `<` chunk boundary
-                        // must reassemble (DIS-2223); a `>= 2` threshold flushed the lone `<`,
+                        // must reassemble; a `>= 2` threshold flushed the lone `<`,
                         // so the marker leaked into normal_text and the re-think span was
                         // misrouted. Holding a lone `<` is lossless: it is flushed merged with
                         // the next chunk — so a tool-call tag like `<invoke>` still reaches the
@@ -513,7 +513,7 @@ mod tests {
 
     #[test] // REASONING.stream.3.d — end token </think> split across chunks at the lone '<' boundary
     fn test_streaming_end_token_split_at_open_bracket() {
-        // Repro for the Nemotron 3 Ultra tool-call leak (DIS-2223): nemotron3 /
+        // Repro for the Nemotron 3 Ultra tool-call leak: nemotron3 /
         // nemotron_v3 / deepseek_r1 are force-reasoning, so the completion starts
         // in reasoning. When the </think> end marker is split so a lone '<' lands
         // at a chunk boundary, the parser must still reassemble </think>, exit
@@ -541,7 +541,7 @@ mod tests {
 
     #[test] // REASONING.stream.3.e — re-entry <think> split across chunks at the lone '<' boundary
     fn test_streaming_reentry_start_token_split_at_open_bracket() {
-        // Symmetric to 3.d, on the START marker (DIS-2223). After a force-reasoning
+        // Symmetric to 3.d, on the START marker. After a force-reasoning
         // parser closes its block, a SECOND <think> whose '<' lands on a chunk
         // boundary must reassemble so the re-think is parsed as reasoning — not
         // leaked as raw <think> markup into normal_text, with its span misrouted.
@@ -874,7 +874,7 @@ mod tests {
     fn test_post_reasoning_angle_bracket_held_one_chunk_then_flushed() {
         // After reasoning ends, a lone `<` could begin EITHER a re-entry `<think>`
         // split at the `<` boundary OR a tool-call tag (`<invoke`). It is held back
-        // one chunk so a split start marker can reassemble (DIS-2223), then flushed
+        // one chunk so a split start marker can reassemble, then flushed
         // merged with the next chunk — so the downstream tool-call jail still sees
         // every byte (`<invoke` stays intact), one chunk later. The accumulated
         // stream is byte-identical to flushing immediately.
