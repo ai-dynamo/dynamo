@@ -20,8 +20,14 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
 ## Prerequisites
 
 1. **Kubernetes v1.34+** with DRA API v1 enabled
-2. **Intel GPU DRA Driver** installed with DeviceClass `gpu.intel.com`
-3. **Custom XPU runtime image** (build from source with `--device xpu`)
+2. **[Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes)** installed with DeviceClass `gpu.intel.com`
+3. **Custom XPU runtime image** built with Intel XPU support:
+   ```bash
+   python container/render.py --framework=vllm --device=xpu --target=runtime
+   docker build -t nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag \
+     -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
+   ```
+   See [container/README.md](../../../../../container/README.md) for complete build instructions.
 4. **HuggingFace token secret**:
    ```bash
    export HF_TOKEN=your_hf_token
@@ -70,4 +76,4 @@ curl localhost:8000/v1/completions \
 ## Further Reading
 
 - [Main Deployment README](../README.md) - Overview of all deployment patterns
-- [Intel XPU Resource Driver](https://github.com/intel/intel-resource-drivers-for-kubernetes)
+- [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes)
