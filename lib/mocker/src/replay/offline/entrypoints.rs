@@ -44,8 +44,8 @@ fn finish_with_replay_wall_time(
     collector.finish().with_wall_time_ms(wall_time_ms)
 }
 
-fn use_single_runtime(num_workers: usize) -> bool {
-    num_workers == 1
+fn use_single_runtime(num_workers: usize, router_mode: ReplayRouterMode) -> bool {
+    num_workers == 1 && router_mode != ReplayRouterMode::KvRouter
 }
 
 pub(crate) fn generate_trace_worker_artifacts(
@@ -133,7 +133,7 @@ pub(crate) fn simulate_trace(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers) {
+    if use_single_runtime(num_workers, router_mode) {
         simulate_trace_single(
             args,
             requests,
@@ -168,7 +168,7 @@ pub(crate) fn simulate_concurrency(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers) {
+    if use_single_runtime(num_workers, router_mode) {
         simulate_concurrency_single(
             args,
             requests,
@@ -223,7 +223,7 @@ pub(crate) fn simulate_agentic_trace_workload(
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers) {
+    if use_single_runtime(num_workers, router_mode) {
         simulate_agentic_trace_workload_single(args, trace)
     } else {
         simulate_agentic_trace_workload_multi(
@@ -273,7 +273,7 @@ fn simulate_trace_workload_with_delta_mode(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers) {
+    if use_single_runtime(num_workers, router_mode) {
         simulate_trace_workload_single(
             args,
             trace,
@@ -361,7 +361,7 @@ fn simulate_concurrency_workload_with_delta_mode(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers) {
+    if use_single_runtime(num_workers, router_mode) {
         simulate_concurrency_workload_single(
             args,
             trace,
@@ -1037,11 +1037,14 @@ mod tests {
     use super::{generate_trace_worker_artifacts, use_single_runtime};
     use crate::common::protocols::MockEngineArgs;
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
+    use crate::replay::ReplayRouterMode;
 
     #[test]
-    fn single_runtime_selection_depends_only_on_worker_count() {
-        assert!(use_single_runtime(1));
-        assert!(!use_single_runtime(2));
+    fn single_runtime_selection_excludes_kv_router() {
+        assert!(use_single_runtime(1, ReplayRouterMode::RoundRobin));
+        assert!(!use_single_runtime(1, ReplayRouterMode::KvRouter));
+        assert!(!use_single_runtime(2, ReplayRouterMode::RoundRobin));
+        assert!(!use_single_runtime(2, ReplayRouterMode::KvRouter));
     }
 
     #[test]
