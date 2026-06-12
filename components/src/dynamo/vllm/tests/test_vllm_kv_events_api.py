@@ -175,11 +175,32 @@ class TestVllmKvEventsApi:
         Struct and must carry a tag (asserted separately below) for variant
         identification in both encodings.
         """
+        import msgspec
+
         struct_config = getattr(KVCacheEvent, "__struct_config__", None)
         assert struct_config is not None, "KVCacheEvent is not a msgspec Struct"
-        assert struct_config.array_like in (True, False), (
-            "KVCacheEvent struct config is malformed"
-        )
+
+        # Assert the actual wire shape: a concrete variant must encode to a
+        # tagged map (dict with the tag under "type") or a tagged sequence
+        # (list with the tag first) — the two encodings visit_map/visit_seq
+        # accept. Anything else breaks Rust deserialization.
+        event = BlockRemoved(block_hashes=[1], medium="GPU")
+        decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+        if isinstance(decoded, dict):
+            assert decoded.get("type") == "BlockRemoved", (
+                "Map-encoded KVCacheEvent lost its variant tag under 'type'! "
+                "This will break Rust deserialization (visit_map)."
+            )
+        elif isinstance(decoded, list):
+            assert decoded and decoded[0] == "BlockRemoved", (
+                "Tuple-encoded KVCacheEvent lost its leading variant tag! "
+                "This will break Rust deserialization (visit_seq)."
+            )
+        else:
+            raise AssertionError(
+                f"KVCacheEvent encodes to {type(decoded)}, which neither "
+                "visit_map nor visit_seq in zmq_wire/deserialize.rs accepts."
+            )
 
     def test_kv_cache_event_uses_tag(self):
         """Verify KVCacheEvent uses tag=True for variant identification.
