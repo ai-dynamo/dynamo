@@ -188,11 +188,7 @@ fn otlp_protocol_from_env() -> OtlpProtocol {
 
 fn append_otlp_http_path(endpoint: &str, path: &str) -> String {
     let endpoint = endpoint.trim_end_matches('/');
-    if endpoint.ends_with(path) {
-        endpoint.to_string()
-    } else {
-        format!("{endpoint}{path}")
-    }
+    format!("{endpoint}{path}")
 }
 
 fn resolve_otlp_endpoint(
@@ -1145,16 +1141,8 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                 generic_endpoint.clone(),
                 "/v1/traces",
             );
-            let logs_endpoint = match (
-                logs_endpoint_env.filter(|value| !value.trim().is_empty()),
-                generic_endpoint.filter(|value| !value.trim().is_empty()),
-            ) {
-                (Some(endpoint), _) => endpoint,
-                (None, Some(endpoint)) => {
-                    resolve_otlp_endpoint(protocol, None, Some(endpoint), "/v1/logs")
-                }
-                (None, None) => traces_endpoint.clone(),
-            };
+            let logs_endpoint =
+                resolve_otlp_endpoint(protocol, logs_endpoint_env, generic_endpoint, "/v1/logs");
 
             let resource = opentelemetry_sdk::Resource::builder_empty()
                 .with_service_name(service_name.clone())
@@ -1673,6 +1661,15 @@ pub mod tests {
                 "/v1/logs",
             ),
             "https://llm-observe.weizhipin.com/v1/logs"
+        );
+        assert_eq!(
+            resolve_otlp_endpoint(
+                OtlpProtocol::HttpProtobuf,
+                None,
+                Some("https://llm-observe.weizhipin.com/v1/traces".to_string()),
+                "/v1/traces",
+            ),
+            "https://llm-observe.weizhipin.com/v1/traces/v1/traces"
         );
     }
 
