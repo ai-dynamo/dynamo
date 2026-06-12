@@ -20,7 +20,7 @@ pub enum UniqueBlock {
 
 impl Default for UniqueBlock {
     fn default() -> Self {
-        // Generate a random UUID when default is used
+        // Generate a random UUID for the default partial block.
         Self::PartialBlock(Uuid::new_v4())
     }
 }
