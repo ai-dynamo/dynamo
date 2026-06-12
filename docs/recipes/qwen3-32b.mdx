@@ -102,7 +102,6 @@ Results land on the `perf-cache` PVC under `/perf-cache/artifacts/`.
 ## Notes
 
 - The aggregated round-robin manifest is a benchmark control and lives on the related Feature Benchmarks page, not in this recipe.
-- A separate single-GPU KVBM host-memory-offload deployment guide exists at [recipes/qwen3-32b/vllm/agg-kvbm](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/README.md). It is a KVBM feature walkthrough rather than a validated recipe target (no checked-in benchmark), so it is not part of this recipe.
 - For 80 GB GPUs (H100), use the [Qwen3-32B FP8 recipe](qwen3-32b-fp8.mdx) — BF16 weights are ~64 GB and leave little KV headroom.
 
 ## Source

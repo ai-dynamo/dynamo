@@ -638,8 +638,8 @@ recipes:
   gaps:
   - No expected performance numbers in source README (directional claims + video only); Expected Performance omitted
   - maintainer unknown
-  - 'agg-kvbm single-GPU KVBM walkthrough removed from the recipe (2026-06-12): it is a KVBM feature guide, not a validated
-    recipe target (no benchmark); its tags also polluted landing-page workload filtering. Belongs in KVBM feature docs (R2).'
+  - 'agg-kvbm single-GPU walkthrough removed from the recipe entirely (2026-06-12): KVBM is being sunset, so no docs re-add
+    is planned. Source assets at recipes/qwen3-32b/vllm/agg-kvbm/ remain untouched pending KVBM deprecation.'
 - id: qwen3-235b-a22b-fp8
   title: Qwen3-235B-A22B FP8
   page: recipes/qwen3-235b-a22b-fp8.mdx
