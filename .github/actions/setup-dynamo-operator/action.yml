@@ -223,8 +223,16 @@ runs:
       shell: bash
       run: |
         echo "::group::Wait for operator rollout inside vCluster"
+        # Wait directly on pod readiness rather than deployment rollout status.
+        # vCluster's syncer can be slow to propagate pod Ready status back into
+        # virtual Deployment objects, causing `rollout status` to report
+        # ProgressDeadlineExceeded even when pods are actually running.
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          rollout status deployment -n default --watch --timeout=900s
+          wait pod \
+          -l 'control-plane=controller-manager' \
+          --for=condition=ready \
+          -n default \
+          --timeout=900s
         echo "::endgroup::"
 
     - name: Debug deployment failure
