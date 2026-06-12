@@ -1,0 +1,750 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use dynamo_tokens::SequenceHash;
+use parking_lot::RwLock;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+use crate::protocols::{
+    ActiveLoad, ActiveSequenceEvent, LocalBlockHash, WorkerId, WorkerWithDpRank,
+};
+use crate::scheduling::policy::RouterSchedulingPolicy;
+use crate::scheduling::selector::DefaultWorkerSelector;
+use crate::scheduling::{LocalScheduler, PotentialLoad};
+use crate::sequences::{
+    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequencePublisher,
+    SequenceRequest,
+};
+use crate::services::indexer::backend::Indexer;
+use crate::services::indexer::registry::WorkerRegistry;
+
+use super::catalog::WorkerCatalog;
+use super::error::SelectionError;
+use super::input::PromptRequest;
+use super::scoring::{
+    OverlapInputs, build_overlap_scores_response, cache_hit_estimates_from_tiered_matches,
+    tier_overlap_blocks_from_tiered_matches,
+};
+use super::types::{
+    ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
+    ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
+    SelectResponse, SelectionKey, SelectionWorkerConfig, WORKER_TYPE, WorkerCatalogRecord,
+    WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
+};
+
+type SelectionScheduler =
+    LocalScheduler<SelectionSequencePublisher, SelectionWorkerConfig, RouterSchedulingPolicy>;
+
+struct SelectionEntry {
+    key: SelectionKey,
+    block_size: u32,
+    is_eagle: bool,
+    indexer: Indexer,
+    workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
+    scheduler: SelectionScheduler,
+}
+
+struct PreparedSelectionInputs {
+    sequence_hashes: Vec<SequenceHash>,
+    isl_tokens: usize,
+    overlap: OverlapInputs,
+}
+
+#[derive(Clone)]
+struct SelectionSequencePublisher;
+
+impl SequencePublisher for SelectionSequencePublisher {
+    async fn publish_event(&self, _event: &ActiveSequenceEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn publish_load(&self, _load: ActiveLoad) {}
+
+    fn observe_load(
+        &self,
+        _worker: &WorkerWithDpRank,
+        _worker_type: &str,
+        _blocks: usize,
+        _tokens: usize,
+    ) {
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectionServiceConfig {
+    pub port: u16,
+    pub threads: usize,
+    pub kv_router_config: crate::config::KvRouterConfig,
+}
+
+pub struct SelectionCore {
+    catalog: WorkerCatalog,
+    entries: RwLock<HashMap<SelectionKey, Arc<SelectionEntry>>>,
+    indexer_registry: Arc<WorkerRegistry>,
+    kv_router_config: crate::config::KvRouterConfig,
+    cancel_token: CancellationToken,
+}
+
+impl SelectionCore {
+    pub fn new(
+        kv_router_config: crate::config::KvRouterConfig,
+        indexer_threads: usize,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        let indexer_registry = Arc::new(WorkerRegistry::new(indexer_threads));
+        indexer_registry.signal_ready();
+        Self {
+            catalog: WorkerCatalog::default(),
+            entries: RwLock::new(HashMap::new()),
+            indexer_registry,
+            kv_router_config,
+            cancel_token,
+        }
+    }
+
+    pub async fn upsert_worker(
+        &self,
+        req: WorkerRequest,
+    ) -> Result<WorkerCatalogRecord, SelectionError> {
+        let (previous, record) = self.catalog.upsert(req);
+        self.reconcile_worker(record.worker_id, previous).await
+    }
+
+    pub async fn patch_worker(
+        &self,
+        worker_id: WorkerId,
+        patch: WorkerPatchRequest,
+    ) -> Result<WorkerCatalogRecord, SelectionError> {
+        let (previous, record) = self.catalog.patch(worker_id, patch)?;
+        self.reconcile_worker(record.worker_id, Some(previous))
+            .await
+    }
+
+    pub async fn delete_worker(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<WorkerCatalogRecord, SelectionError> {
+        let Some(previous) = self.catalog.get(worker_id) else {
+            return Err(SelectionError::NotFound(format!(
+                "worker {worker_id} not found"
+            )));
+        };
+        let key = previous.key();
+        self.catalog
+            .set_lifecycle(worker_id, WorkerLifecycle::Draining, Vec::new());
+        self.publish_scheduler_config(&key)?;
+        self.cleanup_indexer_registration(&previous).await;
+        let record = self
+            .catalog
+            .set_lifecycle(worker_id, WorkerLifecycle::Unschedulable, Vec::new())
+            .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
+        self.publish_scheduler_config(&key)?;
+        Ok(record)
+    }
+
+    pub fn list_workers(
+        &self,
+        model_name: Option<&str>,
+        tenant_id: Option<&str>,
+    ) -> Vec<WorkerCatalogRecord> {
+        self.catalog.list(model_name, tenant_id)
+    }
+
+    pub fn ready(&self) -> ReadyResponse {
+        let schedulable_workers = self.catalog.schedulable_count();
+        let workers = self.catalog.list(None, None);
+        ReadyResponse {
+            ready: schedulable_workers > 0,
+            schedulable_workers,
+            workers,
+        }
+    }
+
+    async fn reconcile_worker(
+        &self,
+        worker_id: WorkerId,
+        previous: Option<WorkerCatalogRecord>,
+    ) -> Result<WorkerCatalogRecord, SelectionError> {
+        let Some(record) = self.catalog.get(worker_id) else {
+            return Err(SelectionError::NotFound(format!(
+                "worker {worker_id} not found"
+            )));
+        };
+
+        if previous
+            .as_ref()
+            .is_some_and(|record| record.lifecycle == WorkerLifecycle::Schedulable)
+        {
+            self.catalog
+                .set_lifecycle(worker_id, WorkerLifecycle::Draining, Vec::new());
+            self.publish_scheduler_config(&previous.as_ref().expect("checked").key())?;
+            self.cleanup_indexer_registration(previous.as_ref().expect("checked"))
+                .await;
+        }
+
+        let reasons = record.missing_schedulable_metadata(
+            self.kv_router_config.router_queue_threshold.is_some(),
+            self.kv_router_config.use_kv_events,
+        );
+        if !reasons.is_empty() {
+            let updated = self
+                .catalog
+                .set_lifecycle(worker_id, WorkerLifecycle::Incomplete, reasons)
+                .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
+            self.publish_scheduler_config(&updated.key())?;
+            return Ok(updated);
+        }
+
+        if let Err(error) = self.ensure_entry(&record) {
+            return self.mark_incomplete_after_reconcile_error(worker_id, record.key(), error);
+        }
+        if self.kv_router_config.use_kv_events
+            && let Err(error) = self.register_indexer_listeners(&record).await
+        {
+            self.cleanup_indexer_registration(&record).await;
+            return self.mark_incomplete_after_reconcile_error(worker_id, record.key(), error);
+        }
+
+        let updated = self
+            .catalog
+            .set_lifecycle(worker_id, WorkerLifecycle::Schedulable, Vec::new())
+            .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
+        self.publish_scheduler_config(&updated.key())?;
+        Ok(updated)
+    }
+
+    fn mark_incomplete_after_reconcile_error(
+        &self,
+        worker_id: WorkerId,
+        key: SelectionKey,
+        error: SelectionError,
+    ) -> Result<WorkerCatalogRecord, SelectionError> {
+        let updated = self
+            .catalog
+            .set_lifecycle(
+                worker_id,
+                WorkerLifecycle::Incomplete,
+                vec![format!("reconciliation failed: {error}")],
+            )
+            .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
+        self.publish_scheduler_config(&key)?;
+        Ok(updated)
+    }
+
+    fn ensure_entry(
+        &self,
+        record: &WorkerCatalogRecord,
+    ) -> Result<Arc<SelectionEntry>, SelectionError> {
+        let block_size = record
+            .block_size
+            .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
+        let is_eagle = record.is_eagle.unwrap_or(false);
+        let key = record.key();
+
+        if let Some(entry) = self.entries.read().get(&key).cloned() {
+            if entry.block_size != block_size {
+                return Err(SelectionError::Conflict(format!(
+                    "block_size mismatch for {key}: existing={} requested={block_size}",
+                    entry.block_size
+                )));
+            }
+            if entry.is_eagle != is_eagle {
+                return Err(SelectionError::Conflict(format!(
+                    "is_eagle mismatch for {key}: existing={} requested={is_eagle}",
+                    entry.is_eagle
+                )));
+            }
+            return Ok(entry);
+        }
+
+        let mut entries = self.entries.write();
+        if let Some(entry) = entries.get(&key).cloned() {
+            if entry.block_size != block_size {
+                return Err(SelectionError::Conflict(format!(
+                    "block_size mismatch for {key}: existing={} requested={block_size}",
+                    entry.block_size
+                )));
+            }
+            if entry.is_eagle != is_eagle {
+                return Err(SelectionError::Conflict(format!(
+                    "is_eagle mismatch for {key}: existing={} requested={is_eagle}",
+                    entry.is_eagle
+                )));
+            }
+            return Ok(entry);
+        }
+
+        let (workers_tx, workers_rx) = watch::channel(HashMap::new());
+        let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
+            SelectionSequencePublisher,
+            block_size as usize,
+            HashMap::new(),
+            self.kv_router_config.router_replica_sync,
+            uuid::Uuid::new_v4().as_u64_pair().0,
+            WORKER_TYPE,
+            ReplicaWorkerPolicy::RequireRegistered,
+        ));
+        slots.start_periodic_force_expiry_across_all_workers(self.cancel_token.child_token());
+
+        let selector = DefaultWorkerSelector::new(Some(self.kv_router_config.clone()), WORKER_TYPE);
+        let scheduler = LocalScheduler::new_without_overlap_refresh(
+            slots,
+            workers_rx,
+            self.kv_router_config.router_queue_threshold,
+            self.kv_router_config
+                .router_queue_by_incoming_missing_isl
+                .clone(),
+            block_size,
+            selector,
+            RouterSchedulingPolicy::new(self.kv_router_config.router_queue_policy),
+            None,
+            self.kv_router_config.router_queue_recheck_interval(),
+            self.kv_router_config.router_track_prefill_tokens,
+            self.cancel_token.child_token(),
+            WORKER_TYPE,
+            true,
+        );
+
+        let indexer = self
+            .indexer_registry
+            .get_or_create_indexer(key.indexer_key(), block_size);
+        let entry = Arc::new(SelectionEntry {
+            key: key.clone(),
+            block_size,
+            is_eagle,
+            indexer,
+            workers_tx,
+            scheduler,
+        });
+        entries.insert(key, entry.clone());
+        Ok(entry)
+    }
+
+    async fn register_indexer_listeners(
+        &self,
+        record: &WorkerCatalogRecord,
+    ) -> Result<(), SelectionError> {
+        let block_size = record
+            .block_size
+            .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
+        let mut endpoints: Vec<_> = record.listener_endpoints().into_iter().collect();
+        endpoints.sort_by_key(|(dp_rank, _)| *dp_rank);
+        for (dp_rank, endpoint) in endpoints {
+            crate::services::zmq::validate_endpoint(&endpoint).map_err(|error| {
+                SelectionError::BadRequest(format!(
+                    "invalid kv_events endpoint for worker {} dp_rank {dp_rank}: {error}",
+                    record.worker_id
+                ))
+            })?;
+            if let Some(replay_endpoint) = record.replay_endpoint.as_deref() {
+                crate::services::zmq::validate_endpoint(replay_endpoint).map_err(|error| {
+                    SelectionError::BadRequest(format!(
+                        "invalid replay endpoint for worker {} dp_rank {dp_rank}: {error}",
+                        record.worker_id
+                    ))
+                })?;
+            }
+            self.indexer_registry
+                .register(
+                    record.worker_id,
+                    endpoint,
+                    dp_rank,
+                    record.model_name.clone(),
+                    record.tenant_id.clone(),
+                    block_size,
+                    record.replay_endpoint.clone(),
+                )
+                .await
+                .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn cleanup_indexer_registration(&self, record: &WorkerCatalogRecord) {
+        if self.kv_router_config.use_kv_events {
+            if let Err(error) = self
+                .indexer_registry
+                .deregister(record.worker_id, &record.model_name, &record.tenant_id)
+                .await
+            {
+                tracing::debug!(
+                    worker_id = record.worker_id,
+                    error = %error,
+                    "indexer deregistration skipped or failed"
+                );
+            }
+            return;
+        }
+
+        let key = record.key().indexer_key();
+        let indexer = self
+            .indexer_registry
+            .get_indexer(&key)
+            .map(|entry| entry.indexer.clone());
+        if let Some(indexer) = indexer {
+            indexer.remove_worker(record.worker_id).await;
+        }
+    }
+
+    fn publish_scheduler_config(&self, key: &SelectionKey) -> Result<(), SelectionError> {
+        let Some(entry) = self.entries.read().get(key).cloned() else {
+            return Ok(());
+        };
+        let workers = self.catalog.scheduler_configs_for_key(key);
+        entry.workers_tx.send(workers).map_err(|_| {
+            SelectionError::Internal(format!("scheduler worker watch closed for {key}"))
+        })
+    }
+
+    fn ready_entry(&self, key: &SelectionKey) -> Result<Arc<SelectionEntry>, SelectionError> {
+        if self.catalog.schedulable_count() == 0 {
+            return Err(SelectionError::NotReady(
+                "no schedulable workers are available".to_string(),
+            ));
+        }
+
+        let Some(entry) = self.entries.read().get(key).cloned() else {
+            return Err(SelectionError::NotReady(format!(
+                "no schedulable workers for {key}"
+            )));
+        };
+        if !self.catalog.has_schedulable_for_key(key) {
+            return Err(SelectionError::NotReady(format!(
+                "no schedulable workers for {key}"
+            )));
+        }
+        Ok(entry)
+    }
+
+    pub async fn select(&self, req: SelectRequest) -> Result<SelectResponse, SelectionError> {
+        let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
+        let entry = self.ready_entry(&key)?;
+        let prepared = self.prepare_selection_inputs(&entry, &req.prompt).await?;
+        let response = entry
+            .scheduler
+            .schedule_with_block_hashes(
+                None,
+                prepared.isl_tokens,
+                Some(prepared.sequence_hashes),
+                None,
+                prepared.overlap.tier_overlap_blocks,
+                prepared.overlap.effective_overlap_blocks,
+                prepared.overlap.effective_cached_tokens,
+                req.router_config_override.as_ref(),
+                false,
+                req.prompt.lora_name.clone(),
+                req.priority_jump.unwrap_or_default(),
+                req.expected_output_tokens,
+                req.pinned_worker,
+                req.allowed_worker_ids,
+                req.routing_constraints,
+                None,
+            )
+            .await?;
+        self.selection_response(key, entry.block_size, req.selection_id, None, response)
+    }
+
+    pub async fn select_and_reserve(
+        &self,
+        mut req: SelectAndReserveRequest,
+    ) -> Result<SelectResponse, SelectionError> {
+        let reservation_id = req
+            .reservation_id
+            .take()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
+        let entry = self.ready_entry(&key)?;
+        let prepared = self.prepare_selection_inputs(&entry, &req.prompt).await?;
+        let response = entry
+            .scheduler
+            .schedule_with_block_hashes(
+                Some(reservation_id.clone()),
+                prepared.isl_tokens,
+                Some(prepared.sequence_hashes),
+                None,
+                prepared.overlap.tier_overlap_blocks,
+                prepared.overlap.effective_overlap_blocks,
+                prepared.overlap.effective_cached_tokens,
+                req.router_config_override.as_ref(),
+                true,
+                req.prompt.lora_name.clone(),
+                req.priority_jump.unwrap_or_default(),
+                req.expected_output_tokens,
+                req.pinned_worker,
+                req.allowed_worker_ids,
+                req.routing_constraints,
+                None,
+            )
+            .await?;
+        self.selection_response(
+            key,
+            entry.block_size,
+            req.selection_id,
+            Some(reservation_id),
+            response,
+        )
+    }
+
+    pub async fn create_reservation(
+        &self,
+        req: ReservationRequest,
+    ) -> Result<ReservationResponse, SelectionError> {
+        let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
+        let entry = self.ready_entry(&key)?;
+        let normalized = req
+            .prompt
+            .normalize_for_reservation(entry.block_size, entry.is_eagle)?;
+        let worker = WorkerWithDpRank::new(req.worker_id, req.dp_rank.unwrap_or(0));
+        let endpoint = self
+            .catalog
+            .schedulable_endpoint(req.worker_id, &key)
+            .ok_or_else(|| {
+                SelectionError::NotFound(format!(
+                    "schedulable worker {} not found for {key}",
+                    req.worker_id
+                ))
+            })?;
+        let track_prefill_tokens = req
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
+
+        entry
+            .scheduler
+            .add_request(SequenceRequest {
+                request_id: req.reservation_id.clone(),
+                token_sequence: Some(normalized.sequence_hashes),
+                track_prefill_tokens,
+                expected_output_tokens: req.expected_output_tokens,
+                prefill_load_hint: None,
+                worker,
+                lora_name: req.prompt.lora_name.clone(),
+            })
+            .await?;
+
+        Ok(ReservationResponse {
+            reservation_id: req.reservation_id,
+            model_name: key.model_name,
+            tenant_id: key.tenant_id,
+            worker_id: worker.worker_id,
+            dp_rank: worker.dp_rank,
+            endpoint,
+        })
+    }
+
+    pub async fn prefill_complete(&self, reservation_id: &str) -> Result<(), SelectionError> {
+        let entries = { self.entries.read().values().cloned().collect::<Vec<_>>() };
+        for entry in entries {
+            match entry.scheduler.mark_prefill_completed(reservation_id).await {
+                Ok(()) => return Ok(()),
+                Err(SequenceError::RequestNotFound { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(SelectionError::NotFound(format!(
+            "reservation {reservation_id} not found"
+        )))
+    }
+
+    pub async fn free_reservation(&self, reservation_id: &str) -> Result<(), SelectionError> {
+        let entries = { self.entries.read().values().cloned().collect::<Vec<_>>() };
+        for entry in entries {
+            match entry.scheduler.free(reservation_id).await {
+                Ok(()) => return Ok(()),
+                Err(SequenceError::RequestNotFound { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(SelectionError::NotFound(format!(
+            "reservation {reservation_id} not found"
+        )))
+    }
+
+    pub fn add_output_block(
+        &self,
+        reservation_id: &str,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SelectionError> {
+        if let Some(frac) = decay_fraction
+            && !(0.0..=1.0).contains(&frac)
+        {
+            return Err(SelectionError::BadRequest(
+                "decay_fraction must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+
+        let entries = { self.entries.read().values().cloned().collect::<Vec<_>>() };
+        for entry in entries {
+            match entry
+                .scheduler
+                .add_output_block(reservation_id, decay_fraction)
+            {
+                Ok(()) => return Ok(()),
+                Err(SequenceError::RequestNotFound { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(SelectionError::NotFound(format!(
+            "reservation {reservation_id} not found"
+        )))
+    }
+
+    pub fn loads(
+        &self,
+        model_name: Option<&str>,
+        tenant_id: Option<&str>,
+    ) -> Vec<ModelLoadResponse> {
+        let entries: Vec<_> = self.entries.read().values().cloned().collect();
+        let mut loads = Vec::new();
+        for entry in entries {
+            if model_name.is_some_and(|model_name| entry.key.model_name != model_name)
+                || tenant_id.is_some_and(|tenant_id| entry.key.tenant_id != tenant_id)
+            {
+                continue;
+            }
+            loads.push(ModelLoadResponse {
+                model_name: entry.key.model_name.clone(),
+                tenant_id: entry.key.tenant_id.clone(),
+                loads: entry
+                    .scheduler
+                    .get_potential_loads(None, 0, HashMap::new(), false),
+                pending_count: entry.scheduler.pending_count(),
+                pending_isl_tokens: entry.scheduler.pending_isl_tokens(),
+            });
+        }
+        loads.sort_by(|a, b| (&a.model_name, &a.tenant_id).cmp(&(&b.model_name, &b.tenant_id)));
+        loads
+    }
+
+    pub async fn potential_loads(
+        &self,
+        req: PotentialLoadsRequest,
+    ) -> Result<Vec<PotentialLoad>, SelectionError> {
+        let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
+        let entry = self.ready_entry(&key)?;
+        let prepared = self.prepare_selection_inputs(&entry, &req.prompt).await?;
+        let track_prefill_tokens = req
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
+        Ok(entry.scheduler.get_potential_loads(
+            Some(prepared.sequence_hashes),
+            prepared.isl_tokens,
+            prepared.overlap.effective_cached_tokens,
+            track_prefill_tokens,
+        ))
+    }
+
+    pub async fn overlap_scores(
+        &self,
+        req: OverlapScoresRequest,
+    ) -> Result<OverlapScoresResponse, SelectionError> {
+        let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
+        let entry = self.ready_entry(&key)?;
+        let normalized = req
+            .prompt
+            .normalize_for_selection(entry.block_size, entry.is_eagle)?;
+        let tiered = entry
+            .indexer
+            .find_tiered_matches(normalized.block_hashes)
+            .await
+            .map_err(|error| SelectionError::Internal(error.to_string()))?;
+        let schedulable_workers = self.schedulable_worker_ranks(&key);
+        Ok(build_overlap_scores_response(
+            &self.kv_router_config,
+            req.router_config_override.as_ref(),
+            &tiered,
+            entry.block_size,
+            schedulable_workers,
+        ))
+    }
+
+    async fn prepare_selection_inputs(
+        &self,
+        entry: &SelectionEntry,
+        prompt: &PromptRequest,
+    ) -> Result<PreparedSelectionInputs, SelectionError> {
+        let normalized = prompt.normalize_for_selection(entry.block_size, entry.is_eagle)?;
+        let overlap = self.overlap_inputs(entry, &normalized.block_hashes).await?;
+        Ok(PreparedSelectionInputs {
+            sequence_hashes: normalized.sequence_hashes,
+            isl_tokens: normalized.isl_tokens,
+            overlap,
+        })
+    }
+
+    async fn overlap_inputs(
+        &self,
+        entry: &SelectionEntry,
+        block_hashes: &[LocalBlockHash],
+    ) -> Result<OverlapInputs, SelectionError> {
+        if block_hashes.is_empty() {
+            return Ok(OverlapInputs::default());
+        }
+        let tiered = entry
+            .indexer
+            .find_tiered_matches(block_hashes.to_vec())
+            .await
+            .map_err(|error| SelectionError::Internal(error.to_string()))?;
+        let estimates = cache_hit_estimates_from_tiered_matches(
+            &self.kv_router_config,
+            entry.block_size,
+            &tiered,
+        );
+        Ok(OverlapInputs {
+            tier_overlap_blocks: tier_overlap_blocks_from_tiered_matches(&tiered),
+            effective_overlap_blocks: estimates.effective_overlap_blocks,
+            effective_cached_tokens: estimates.cached_tokens,
+        })
+    }
+
+    fn selection_response(
+        &self,
+        key: SelectionKey,
+        block_size: u32,
+        selection_id: Option<String>,
+        reservation_id: Option<String>,
+        response: crate::scheduling::SchedulingResponse,
+    ) -> Result<SelectResponse, SelectionError> {
+        let endpoint = self
+            .catalog
+            .schedulable_endpoint(response.best_worker.worker_id, &key)
+            .ok_or_else(|| {
+                SelectionError::Internal(format!(
+                    "selected worker {} is no longer schedulable",
+                    response.best_worker.worker_id
+                ))
+            })?;
+        Ok(SelectResponse {
+            selection_id,
+            reservation_id,
+            model_name: key.model_name,
+            tenant_id: key.tenant_id,
+            worker_id: response.best_worker.worker_id,
+            dp_rank: response.best_worker.dp_rank,
+            endpoint,
+            effective_overlap_blocks: response.effective_overlap_blocks,
+            cached_tokens: response.cached_tokens,
+            block_size,
+        })
+    }
+
+    fn schedulable_worker_ranks(&self, key: &SelectionKey) -> Vec<WorkerWithDpRank> {
+        let configs = self.catalog.scheduler_configs_for_key(key);
+        let mut workers = Vec::new();
+        for (worker_id, config) in configs {
+            let start = config.data_parallel_start_rank;
+            let end = start.saturating_add(config.data_parallel_size);
+            for dp_rank in start..end {
+                workers.push(WorkerWithDpRank::new(worker_id, dp_rank));
+            }
+        }
+        workers
+    }
+}

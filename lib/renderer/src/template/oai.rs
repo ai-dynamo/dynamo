@@ -1533,10 +1533,11 @@ NORMAL MODE
             .render(context! { messages => messages.as_array().unwrap() })
             .unwrap();
 
-        // Should produce clean JSON without double-encoding
+        // Should produce clean JSON without double-encoding, with Python
+        // json.dumps separators (what transformers' tojson emits).
         assert_eq!(
             out,
-            r#"{"format":"celsius","location":"San Francisco, CA"}"#
+            r#"{"format": "celsius", "location": "San Francisco, CA"}"#
         );
     }
 
