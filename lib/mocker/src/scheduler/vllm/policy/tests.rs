@@ -158,6 +158,8 @@ mod trtllm {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            priority: 0,
+            strict_priority: 0,
         });
     }
 

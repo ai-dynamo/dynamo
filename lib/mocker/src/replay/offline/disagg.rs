@@ -1306,6 +1306,8 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(arrival_ms),
+            priority: 0,
+            strict_priority: 0,
         }
     }
 
@@ -1322,12 +1324,16 @@ mod tests {
                             max_output_tokens: 2,
                             hash_ids: vec![11],
                             delay_after_previous_ms: 0.0,
+                            priority: 0,
+                            strict_priority: 0,
                         },
                         TurnTrace {
                             input_length: 192,
                             max_output_tokens: 2,
                             hash_ids: vec![21, 22, 23],
                             delay_after_previous_ms: 10.0,
+                            priority: 0,
+                            strict_priority: 0,
                         },
                     ],
                 },
@@ -1339,6 +1345,8 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![31, 32],
                         delay_after_previous_ms: 0.0,
+                        priority: 0,
+                        strict_priority: 0,
                     }],
                 },
             ],
@@ -1487,6 +1495,8 @@ mod tests {
                 uuid: Some(Uuid::from_u128(1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                priority: 0,
+                strict_priority: 0,
             },
             DirectRequest {
                 tokens: vec![2; 128],
@@ -1494,6 +1504,8 @@ mod tests {
                 uuid: Some(Uuid::from_u128(2)),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                priority: 0,
+                strict_priority: 0,
             },
         ];
 
