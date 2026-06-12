@@ -237,6 +237,22 @@ runs:
           --timeout=1800s
         echo "::endgroup::"
 
+    - name: Wait for operator pod to be ready
+      shell: bash
+      run: |
+        echo "::group::Wait for operator pod Ready inside vCluster"
+        # The DGD mutating webhook is served by the operator pod. If the test runs
+        # before the webhook server is up it gets a 500 connection-refused on the
+        # first POST to the DGD API. Wait here so the pod is Ready before the test job
+        # connects. Uses the stable pod-template selector from the operator Deployment.
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          wait pod \
+          -l 'control-plane=controller-manager' \
+          -n default \
+          --for=condition=Ready \
+          --timeout=1800s
+        echo "::endgroup::"
+
     - name: Debug deployment failure
       if: failure()
       shell: bash
