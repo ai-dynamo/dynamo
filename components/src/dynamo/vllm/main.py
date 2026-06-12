@@ -70,6 +70,29 @@ def should_register_model_ignore_weights(config: Config) -> bool:
     return uses_modelexpress_load_format(config)
 
 
+def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
+    """Pick the path passed to `register_model` for MDC construction.
+
+    When `--model` is an object-storage URI (`s3://...`, `gs://...`, `az://...`),
+    vLLM's `maybe_pull_model_tokenizer_for_runai` (vllm/config/model.py) pulls
+    metadata files to a local temp dir and rewrites `vllm_config.model_config`:
+
+      - `.model_weights = <original URI>`  (used by runai-streamer / mx plugin)
+      - `.model = <local temp dir>`        (contains config.json, tokenizer, …)
+
+    Dynamo's `register_model` would otherwise try to resolve the raw URI via
+    `hub.rs` → ModelExpress, which has no S3 provider and 404s. Returning the
+    local dir lets `register_model` take its `fs::exists` shortcut.
+
+    Temporary vLLM-only workaround until `hub.rs` learns object-storage routing.
+    Falls back to `config.model` whenever vLLM did not pull (HF id, local path,
+    or older vLLM without `model_weights`).
+    """
+    if getattr(vllm_config.model_config, "model_weights", ""):
+        return vllm_config.model_config.model
+    return config.model
+
+
 def build_headless_namespace(config: Config) -> argparse.Namespace:
     """Build an argparse Namespace from engine_args for vLLM's run_headless().
 
@@ -490,14 +513,6 @@ def setup_vllm_engine(
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
 
-    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
-    # Dynamo does not register loaders or set a custom worker class here.
-
-    # Load default sampling params from `generation_config.json`
-    default_sampling_params = (
-        engine_args.create_model_config().get_diff_sampling_param()
-    )
-
     # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
     # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
     if (
@@ -527,6 +542,7 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None
@@ -680,7 +696,7 @@ async def register_vllm_model(
         model_input,
         model_type,
         generate_endpoint,
-        config.model,
+        _register_model_source_path(config, vllm_config),
         config.served_model_name,
         context_length=vllm_config.model_config.max_model_len,
         kv_cache_block_size=runtime_values["kv_event_block_size"],

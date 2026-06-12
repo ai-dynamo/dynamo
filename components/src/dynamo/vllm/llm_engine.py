@@ -89,14 +89,13 @@ class VllmLLMEngine(LLMEngine):
             )
             os.environ["PROMETHEUS_MULTIPROC_DIR"] = self._prometheus_temp_dir.name
 
-        self._default_sampling_params = (
-            self.engine_args.create_model_config().get_diff_sampling_param()
-        )
-
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
         self._vllm_config = vllm_config
+        self._default_sampling_params = (
+            vllm_config.model_config.get_diff_sampling_param()
+        )
 
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
