@@ -59,8 +59,14 @@ const DEFAULT_MAX_TOKENS: u64 = 10_000_000;
 
 /// Compute the set of overloaded worker ids across all tracked worker load states
 /// under the given thresholds. The returned set mixes decode workers (flagged by
-/// `active_decode_blocks`) and prefill workers (flagged by `active_prefill_tokens`),
-/// since both publish their load to the same monitor.
+/// `active_decode_blocks`) and prefill workers (flagged by `active_prefill_tokens`).
+///
+/// Although a monitor is owned 1-to-1 by its (decode/aggregated) WorkerSet — the
+/// prefill WorkerSet has none — its load observation is namespace-wide: it subscribes
+/// to the namespace-scoped `kv_metrics` subject (`EventSubscriber::for_namespace`), so
+/// it receives `ActiveLoad` from every worker in the namespace, prefill and decode
+/// alike. Hence the mixed set. `publish_overloaded_instances` then pushes this set to
+/// both the decode and prefill `Client`s; each ignores ids outside its own pool.
 fn compute_overloaded_instances(
     worker_load_states: &DashMap<u64, WorkerLoadState>,
     cfg: &LoadThresholdConfig,
