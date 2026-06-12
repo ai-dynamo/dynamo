@@ -40,8 +40,8 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 # =============================================================================
 FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
@@ -75,8 +75,8 @@ RUN go test ./... -v
 # =============================================================================
 FROM go-base AS builder
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
@@ -107,7 +107,7 @@ FROM ubuntu:24.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ARG SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -167,7 +167,7 @@ RUN mkdir -p /cuda-checkpoint-binary/usr/local/sbin /cuda-checkpoint-binary/lega
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS agent
 
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ARG SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=true
 
 RUN if [ "${SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY}" = "true" ] && [ "${TARGETARCH}" != "amd64" ]; then \
@@ -225,7 +225,7 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 FROM ${BASE_IMAGE} AS placeholder
 
 ARG BASE_IMAGE
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ARG SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=true
 ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
 
