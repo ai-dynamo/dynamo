@@ -2155,7 +2155,7 @@ mod tests {
             let mdcsum = mdc.mdcsum().to_string();
             mdc.download_config(None).await?;
 
-            let blobs = home_path.join(".cache/dynamo/mdc/blobs");
+            let blobs = std::fs::canonicalize(home_path.join(".cache/dynamo/mdc/blobs"))?;
             let snap = home_path
                 .join(".cache/dynamo/mdc/by-slug")
                 .join(slug.to_string())

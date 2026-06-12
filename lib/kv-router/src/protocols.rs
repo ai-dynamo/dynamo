@@ -484,6 +484,16 @@ pub enum RouterBackpressureReason {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PotentialLoad {
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
+    pub potential_prefill_tokens: usize,
+    pub potential_decode_blocks: usize,
+    #[serde(default)]
+    pub active_requests: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterResponse {
     New {
@@ -506,7 +516,7 @@ pub enum RouterResponse {
     },
     PotentialLoads {
         // loads of every worker tracked by the scheduler.
-        loads: Vec<crate::scheduling::PotentialLoad>,
+        loads: Vec<PotentialLoad>,
         // the queue sizes for this specific router instance.
         #[serde(default)]
         pending_count: usize,
@@ -1779,7 +1789,7 @@ mod tests {
 
     #[test]
     fn test_potential_load_defaults_active_requests() {
-        let load = serde_json::from_str::<crate::scheduling::PotentialLoad>(
+        let load = serde_json::from_str::<PotentialLoad>(
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4}"#,
         )
         .unwrap();
@@ -1793,7 +1803,7 @@ mod tests {
 
     #[test]
     fn test_potential_load_serializes_active_requests() {
-        let load = crate::scheduling::PotentialLoad {
+        let load = PotentialLoad {
             worker_id: 1,
             dp_rank: 0,
             potential_prefill_tokens: 16,

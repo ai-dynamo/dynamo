@@ -855,15 +855,18 @@ impl AggRuntime {
 #[cfg(test)]
 mod tests {
     use super::super::entrypoints::{
+        run_agentic_trace_multi_collect_with_stats, run_agentic_trace_single_collect,
         run_concurrency_multi_collect_with_stats, run_concurrency_single_collect,
-        run_concurrency_workload_multi_collect_with_stats, run_trace_multi_collect_with_stats,
-        run_trace_single_collect, run_trace_workload_multi_collect_with_stats,
+        run_concurrency_workload_multi_collect_with_stats, run_concurrency_workload_single_collect,
+        run_trace_multi_collect_with_stats, run_trace_single_collect,
+        run_trace_workload_multi_collect_with_stats, run_trace_workload_single_collect,
     };
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs};
-    use crate::loadgen::{SessionTrace, Trace, TurnTrace};
-    use crate::replay::normalize_trace_requests;
+    use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+    use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
     use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
+    use rstest::rstest;
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
         MockEngineArgs::builder()
@@ -876,6 +879,147 @@ mod tests {
             .speedup_ratio(0.0)
             .build()
             .unwrap()
+    }
+
+    fn parity_args(engine_type: EngineType) -> MockEngineArgs {
+        let mut builder = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(128)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0);
+        if engine_type == EngineType::Sglang {
+            builder = builder.sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }));
+        }
+        builder.build().unwrap()
+    }
+
+    fn parity_requests() -> Vec<DirectRequest> {
+        vec![
+            DirectRequest {
+                tokens: vec![1; 4],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+            },
+            DirectRequest {
+                tokens: vec![2; 8],
+                max_output_tokens: 4,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(101.0),
+            },
+            DirectRequest {
+                tokens: vec![3; 12],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(500.0),
+            },
+        ]
+    }
+
+    fn parity_workload() -> Trace {
+        Trace {
+            block_size: 4,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "session-a".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 4,
+                            max_output_tokens: 2,
+                            hash_ids: vec![11],
+                            delay_after_previous_ms: 0.0,
+                        },
+                        TurnTrace {
+                            input_length: 12,
+                            max_output_tokens: 2,
+                            hash_ids: vec![21, 22, 23],
+                            delay_after_previous_ms: 5.0,
+                        },
+                    ],
+                },
+                SessionTrace {
+                    session_id: "session-b".to_string(),
+                    first_arrival_timestamp_ms: Some(1.0),
+                    turns: vec![TurnTrace {
+                        input_length: 8,
+                        max_output_tokens: 2,
+                        hash_ids: vec![31, 32],
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+            ],
+        }
+    }
+
+    fn parity_agentic_trace() -> AgenticTrace {
+        AgenticTrace {
+            block_size: 4,
+            turns: vec![
+                AgenticTurnTrace {
+                    request_id: "root".to_string(),
+                    session_id: "root".to_string(),
+                    input_length: 4,
+                    max_output_tokens: 2,
+                    hash_ids: vec![1],
+                    first_ready_timestamp_ms: Some(0.0),
+                    delay_after_dependencies_ms: 0.0,
+                    wait_for: Vec::new(),
+                    prefix_reset: true,
+                },
+                AgenticTurnTrace {
+                    request_id: "dependent".to_string(),
+                    session_id: "dependent".to_string(),
+                    input_length: 8,
+                    max_output_tokens: 2,
+                    hash_ids: vec![1, 2],
+                    first_ready_timestamp_ms: Some(100.0),
+                    delay_after_dependencies_ms: 5.0,
+                    wait_for: vec!["root".to_string()],
+                    prefix_reset: true,
+                },
+            ],
+        }
+    }
+
+    fn sorted_snapshots(collector: &TraceCollector) -> Vec<TraceRequestStatsSnapshot> {
+        let mut snapshots = collector.snapshots();
+        snapshots.sort_by_key(|snapshot| snapshot.input_length);
+        snapshots
+    }
+
+    fn assert_collectors_match(single: TraceCollector, multi: TraceCollector) {
+        assert_eq!(sorted_snapshots(&single), sorted_snapshots(&multi));
+
+        let single_report = single.finish();
+        let multi_report = multi.finish();
+        assert_eq!(
+            single_report.request_counts.num_requests,
+            multi_report.request_counts.num_requests
+        );
+        assert_eq!(
+            single_report.request_counts.completed_requests,
+            multi_report.request_counts.completed_requests
+        );
+        assert_eq!(
+            single_report.request_counts.total_input_tokens,
+            multi_report.request_counts.total_input_tokens
+        );
+        assert_eq!(
+            single_report.request_counts.total_output_tokens,
+            multi_report.request_counts.total_output_tokens
+        );
     }
 
     fn fast_router_args() -> MockEngineArgs {
@@ -1982,46 +2126,21 @@ mod tests {
         assert_eq!(stats.max_in_flight_seen, 2);
     }
 
-    #[test]
-    fn test_multi_worker_trace_single_worker_round_robin_matches_single_runtime() {
-        let args = replay_args(true, true);
-        let requests = vec![
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(11)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(100.0),
-            },
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(22)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(101.0),
-            },
-            DirectRequest {
-                tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(33)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(500.0),
-            },
-        ];
-
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_multi_worker_trace_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let requests = parity_requests();
         let single = run_trace_single_collect(args.clone(), requests.clone(), 1.0);
         let (multi, stats) =
             run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::RoundRobin);
 
         assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
-        for uuid in [11_u128, 22, 33] {
-            assert_eq!(
-                multi.snapshot(Uuid::from_u128(uuid)),
-                single.snapshot(Uuid::from_u128(uuid))
-            );
-        }
-        assert_eq!(multi.finish().request_counts.completed_requests, 3);
-        assert_eq!(single.finish().request_counts.completed_requests, 3);
+        assert_collectors_match(single, multi);
     }
 
     #[test]
@@ -2067,33 +2186,15 @@ mod tests {
         assert_eq!(single.finish().request_counts.completed_requests, 3);
     }
 
-    #[test]
-    fn test_multi_worker_concurrency_single_worker_round_robin_matches_single_runtime() {
-        let args = replay_args(true, true);
-        let requests = vec![
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(11)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(900.0),
-            },
-            DirectRequest {
-                tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
-                max_output_tokens: 4,
-                uuid: Some(Uuid::from_u128(22)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(1000.0),
-            },
-            DirectRequest {
-                tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(33)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(100.0),
-            },
-        ];
-
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_multi_worker_concurrency_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let requests = parity_requests();
         let single = run_concurrency_single_collect(args.clone(), requests.clone(), 2);
         let (multi, stats) = run_concurrency_multi_collect_with_stats(
             &args,
@@ -2104,12 +2205,68 @@ mod tests {
         );
 
         assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
-        for uuid in [11_u128, 22, 33] {
-            assert_eq!(
-                multi.snapshot(Uuid::from_u128(uuid)),
-                single.snapshot(Uuid::from_u128(uuid))
-            );
-        }
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_trace_workload_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_trace_workload_single_collect(args.clone(), parity_workload());
+        let (multi, stats) = run_trace_workload_multi_collect_with_stats(
+            &args,
+            parity_workload(),
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_concurrency_workload_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_concurrency_workload_single_collect(args.clone(), parity_workload(), 1);
+        let (multi, stats) = run_concurrency_workload_multi_collect_with_stats(
+            &args,
+            parity_workload(),
+            1,
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_agentic_trace_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_agentic_trace_single_collect(args.clone(), parity_agentic_trace());
+        let (multi, stats) = run_agentic_trace_multi_collect_with_stats(
+            &args,
+            parity_agentic_trace(),
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0]);
+        assert_collectors_match(single, multi);
     }
 
     #[test]
