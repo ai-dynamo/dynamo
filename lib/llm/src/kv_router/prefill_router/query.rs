@@ -65,10 +65,12 @@ impl PrefillRouter {
                         reason,
                         queued_isl_tokens,
                         max_queued_isl_tokens,
+                        potential_cached_tokens,
                     } => Ok(PrefillQueryOutcome::Backpressure {
                         reason,
                         queued_isl_tokens,
                         max_queued_isl_tokens,
+                        potential_cached_tokens,
                     }),
                 }
             }

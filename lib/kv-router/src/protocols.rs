@@ -514,6 +514,8 @@ pub enum RouterResponse {
         queued_isl_tokens: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_queued_isl_tokens: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        potential_cached_tokens: Option<usize>,
     },
     PrefillMarked {
         success: bool,
@@ -1866,6 +1868,21 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&load).unwrap(),
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
+        );
+    }
+
+    #[test]
+    fn test_router_response_backpressure_potential_cached_tokens() {
+        let response = RouterResponse::Backpressure {
+            reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
+            queued_isl_tokens: 512,
+            max_queued_isl_tokens: Some(1024),
+            potential_cached_tokens: Some(384),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"method":"backpressure","reason":"max_queued_isl_tokens_exceeded","queued_isl_tokens":512,"max_queued_isl_tokens":1024,"potential_cached_tokens":384}"#
         );
     }
 }

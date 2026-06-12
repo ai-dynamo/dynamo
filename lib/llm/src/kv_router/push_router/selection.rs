@@ -110,10 +110,11 @@ impl KvPushRouter {
                 reason,
                 queued_isl_tokens,
                 max_queued_isl_tokens,
+                potential_cached_tokens,
             } => Err(DynamoError::builder()
                 .error_type(ErrorType::ResourceExhausted)
                 .message(format!(
-                    "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+                    "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?}, potential_cached_tokens={potential_cached_tokens:?})"
                 ))
                 .build()
                 .into()),
