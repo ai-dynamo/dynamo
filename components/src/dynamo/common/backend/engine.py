@@ -50,6 +50,7 @@ class GenerateRequest(TypedDict, total=False):
     output_options: dict[str, Any]
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
+    extra_args: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):

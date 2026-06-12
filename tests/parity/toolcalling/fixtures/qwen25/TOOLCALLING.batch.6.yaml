@@ -7,52 +7,53 @@ cases:
   TOOLCALLING.batch.6.a:
     description: 'Canonical "arguments": {}'
     ref: dynamo
-    model_text: '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "get_time", "arguments": {}}
+      </tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      dynamo:
+      dynamo: &id001
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>'
+      sglang: *id001
   TOOLCALLING.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
-    model_text: '<tool_call>{"name": "get_time", "arguments": { }}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "get_time", "arguments": { }}
+      </tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo:
+      dynamo: &id003
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_time", "arguments": { }}</tool_call>'
+      sglang: *id003
   TOOLCALLING.batch.6.c:
     description: No arguments key
     ref: dynamo
     model_text: '<tool_call>{"name": "get_time"}</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &id002
-        reason: "Dynamo's qwen25 (hermes alias) parser leaves <tool_call> tag in normal_text on minimal/no-body case"
+      dynamo: &id004
         calls: []
         normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *id002
+      sglang: *id004
