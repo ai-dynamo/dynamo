@@ -973,11 +973,11 @@ impl KvRouter {
                     }
 
                     // On the terminal chunk, finalize timing and attach it for the frontend.
-                    if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
-                        if data.finish_reason.is_some() {
-                            tracker.record_finish();
-                            inject_timing_from_tracker(data, tracker);
-                        }
+                    if let (Some(tracker), Some(data)) = (&tracker, &mut response.data)
+                        && data.finish_reason.is_some()
+                    {
+                        tracker.record_finish();
+                        inject_timing_from_tracker(data, tracker);
                     }
 
                     let py_response = Python::with_gil(|py| {
