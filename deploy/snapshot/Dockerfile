@@ -131,11 +131,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
+COPY criu-patches /tmp/criu-patches
+
 RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
+    && for patch in /tmp/criu-patches/*.patch; do \
+        [ -e "${patch}" ] || continue; \
+        if git apply --check "${patch}"; then \
+          git apply "${patch}"; \
+        elif git apply --reverse --check "${patch}"; then \
+          echo "CRIU patch already applied: ${patch}"; \
+        else \
+          echo "CRIU patch does not apply: ${patch}" >&2; \
+          git apply --check "${patch}"; \
+        fi; \
+      done \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 

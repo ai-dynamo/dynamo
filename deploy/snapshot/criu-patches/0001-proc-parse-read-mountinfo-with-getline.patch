@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dynamo Snapshot <snapshot@dynamo.local>
+Date: Thu, 12 Jun 2026 00:00:00 +0000
+Subject: [PATCH] proc_parse: read mountinfo with getline
+
+Overlay mounts can have very long superblock option strings because
+lowerdir= records one path per image layer. Container images with many layers
+can therefore exceed the fixed 4096 byte scratch buffer previously used for
+/proc/<pid>/mountinfo.
+
+When fgets() splits such a line, CRIU parses the first fragment as a complete
+mount entry and then fails with "Bad format in <pid> mountinfo" on the
+continuation fragment. Use getline() for mountinfo so the parser always sees a
+complete mount entry.
+---
+ criu/proc_parse.c | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/criu/proc_parse.c b/criu/proc_parse.c
+index 85ccbd0d9..d2af9a87e 100644
+--- a/criu/proc_parse.c
++++ b/criu/proc_parse.c
+@@ -1650,17 +1650,19 @@ static int get_mountinfo_sdev_from_mntid(int mnt_id, unsigned int *sdev)
+ {
+ 	int exit_code = -1;
+ 	FILE *f;
++	char *line = NULL;
++	size_t line_size = 0;
+ 
+ 	f = fopen_proc(PROC_SELF, "mountinfo");
+ 	if (!f)
+ 		return -1;
+ 
+-	while (fgets(buf, BUF_SIZE, f)) {
++	while (getline(&line, &line_size, f) != -1) {
+ 		unsigned int kmaj, kmin;
+ 		int id;
+ 
+-		if (sscanf(buf, "%i %*i %u:%u", &id, &kmaj, &kmin) != 3) {
+-			pr_err("Failed to parse mountinfo line %s\n", buf);
++		if (sscanf(line, "%i %*i %u:%u", &id, &kmaj, &kmin) != 3) {
++			pr_err("Failed to parse mountinfo line %s\n", line);
+ 			goto err;
+ 		}
+ 
+@@ -1671,6 +1673,7 @@ static int get_mountinfo_sdev_from_mntid(int mnt_id, unsigned int *sdev)
+ 		}
+ 	}
+ err:
++	free(line);
+ 	fclose(f);
+ 	return exit_code;
+ }
+@@ -1703,12 +1706,14 @@ struct mount_info *parse_mountinfo(pid_t pid, struct ns_id *nsid, bool for_dump)
+ {
+ 	struct mount_info *list = NULL;
+ 	FILE *f;
++	char *line = NULL;
++	size_t line_size = 0;
+ 
+ 	f = fopen_proc(pid, "mountinfo");
+ 	if (!f)
+ 		return NULL;
+ 
+-	while (fgets(buf, BUF_SIZE, f)) {
++	while (getline(&line, &line_size, f) != -1) {
+ 		struct mount_info *new;
+ 		int ret = -1;
+ 		char *fsname = NULL;
+@@ -1719,9 +1724,9 @@ struct mount_info *parse_mountinfo(pid_t pid, struct ns_id *nsid, bool for_dump)
+ 
+ 		new->nsid = nsid;
+ 
+-		ret = parse_mountinfo_ent(buf, new, &fsname);
++		ret = parse_mountinfo_ent(line, new, &fsname);
+ 		if (ret < 0) {
+-			pr_err("Bad format in %d mountinfo: '%s'\n", pid, buf);
++			pr_err("Bad format in %d mountinfo: '%s'\n", pid, line);
+ 			goto end;
+ 		}
+ 
+@@ -1768,6 +1773,7 @@ struct mount_info *parse_mountinfo(pid_t pid, struct ns_id *nsid, bool for_dump)
+ 			goto err;
+ 	}
+ out:
++	free(line);
+ 	fclose(f);
+ 	return list;
+ 
+-- 
+2.43.0
