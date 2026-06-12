@@ -1584,6 +1584,11 @@ pub trait ModelInfo: Send + Sync {
     /// Token ID for the end of sequence
     fn eos_token_ids(&self) -> Vec<TokenIdType>;
 
+    /// Token IDs that mark chat-template turn boundaries for prefix reuse.
+    fn prefix_reuse_eos_token_ids(&self) -> Vec<TokenIdType> {
+        self.eos_token_ids()
+    }
+
     /// Maximum position embeddings / max sequence length
     /// TODO: This is only used in a single test, no other code. Remove?
     fn max_position_embeddings(&self) -> Option<usize>;
@@ -1630,6 +1635,9 @@ struct HFTextConfig {
 
     #[serde(default)]
     final_eos_token_ids: Vec<TokenIdType>,
+
+    #[serde(default)]
+    prefix_reuse_eos_token_ids: Vec<TokenIdType>,
 
     /// max sequence length
     max_position_embeddings: Option<usize>,
@@ -1751,14 +1759,22 @@ impl HFConfig {
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .join("tokenizer_config.json");
-        if let Ok(tokenizer_eos_id) =
-            resolve_eos_token_id_from_tokenizer_config(&tokenizer_cfg_path)
-            && !final_eos_token_ids.contains(&tokenizer_eos_id)
-        {
-            final_eos_token_ids.push(tokenizer_eos_id);
+        let tokenizer_eos_token_ids =
+            match resolve_eos_token_id_from_tokenizer_config(&tokenizer_cfg_path) {
+                Ok(tokenizer_eos_id) => vec![tokenizer_eos_id],
+                Err(err) => {
+                    tracing::debug!(%err, "Unable to resolve tokenizer eos_token for prefix reuse");
+                    Vec::new()
+                }
+            };
+        for tokenizer_eos_id in &tokenizer_eos_token_ids {
+            if !final_eos_token_ids.contains(tokenizer_eos_id) {
+                final_eos_token_ids.push(*tokenizer_eos_id);
+            }
         }
 
         text_config.final_eos_token_ids = final_eos_token_ids;
+        text_config.prefix_reuse_eos_token_ids = tokenizer_eos_token_ids;
 
         Ok(Arc::new(config))
     }
@@ -1831,6 +1847,14 @@ impl ModelInfo for HFConfig {
             .unwrap()
             .final_eos_token_ids
             .clone()
+    }
+
+    fn prefix_reuse_eos_token_ids(&self) -> Vec<TokenIdType> {
+        let text_config = self.text_config.as_ref().unwrap();
+        if text_config.prefix_reuse_eos_token_ids.is_empty() {
+            return text_config.final_eos_token_ids.clone();
+        }
+        text_config.prefix_reuse_eos_token_ids.clone()
     }
 
     fn max_position_embeddings(&self) -> Option<usize> {
@@ -2048,6 +2072,18 @@ mod tests {
             eos_token_id_set.contains(&248046),
             "Should contain tokenizer eos_token (248046 <|im_end|>)"
         );
+        assert_eq!(config.prefix_reuse_eos_token_ids(), vec![248046]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_json_nemotron_prefix_reuse_uses_tokenizer_eos() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-nemotron-nano-v2/config.json");
+        let config = HFConfig::from_json_file(&config_file)?;
+        let eos_token_id_set: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        assert_eq!(eos_token_id_set, vec![2, 11, 12].into_iter().collect());
+        assert_eq!(config.prefix_reuse_eos_token_ids(), vec![12]);
         Ok(())
     }
 

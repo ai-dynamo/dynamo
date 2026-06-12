@@ -1,0 +1,21 @@
+{
+  "eos_token": "<SPECIAL_12>",
+  "added_tokens_decoder": {
+    "11": {
+      "content": "<SPECIAL_11>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "12": {
+      "content": "<SPECIAL_12>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    }
+  }
+}

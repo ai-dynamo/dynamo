@@ -609,7 +609,7 @@ fn render_tokenize_chat_tokens(
     let tokenizer = card
         .tokenizer()
         .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
-    let eos_token_ids = card
+    let prefix_reuse_eos_token_ids = card
         .model_info
         .as_ref()
         .ok_or_else(|| {
@@ -619,7 +619,7 @@ fn render_tokenize_chat_tokens(
         })?
         .get_model_info()
         .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load model info"))?
-        .eos_token_ids();
+        .prefix_reuse_eos_token_ids();
 
     let wrapped_request = make_tokenize_chat_completion_request(model.clone(), request);
     let mut prompt = match &formatter {
@@ -645,7 +645,7 @@ fn render_tokenize_chat_tokens(
             tokenizer.as_ref(),
             &wrapped_request,
             &token_ids,
-            eos_token_ids.as_slice(),
+            prefix_reuse_eos_token_ids.as_slice(),
             request.add_special_tokens,
         )
         .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to apply tokenize prefix reuse"))?
@@ -675,7 +675,7 @@ fn render_tokenize_chat_tokens_from_handle(
             "Tokenizer metadata is missing model_info for prefix reuse.",
         )
     })?;
-    let eos_token_ids = model_info.eos_token_ids();
+    let prefix_reuse_eos_token_ids = model_info.prefix_reuse_eos_token_ids();
 
     let wrapped_request = make_tokenize_chat_completion_request(model, request);
     let mut prompt = formatter
@@ -698,7 +698,7 @@ fn render_tokenize_chat_tokens_from_handle(
         handle.tokenizer.as_ref(),
         &wrapped_request,
         &token_ids,
-        eos_token_ids.as_slice(),
+        prefix_reuse_eos_token_ids.as_slice(),
         request.add_special_tokens,
     )
     .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to apply tokenize prefix reuse"))?
@@ -5350,14 +5350,14 @@ mod tests {
             }
         };
 
-        let eos_token_ids = card
+        let prefix_reuse_eos_token_ids = card
             .model_info
             .as_ref()
             .unwrap()
             .get_model_info()
             .unwrap()
-            .eos_token_ids();
-        let eos_token = eos_token_ids[0];
+            .prefix_reuse_eos_token_ids();
+        let eos_token = prefix_reuse_eos_token_ids[0];
         let replacement_token = if eos_token == 0 { 1 } else { 0 };
         let mut required_prefix_token_ids = prefix_tokens.clone();
         if let Some(last_non_eos) = required_prefix_token_ids
@@ -5379,7 +5379,7 @@ mod tests {
                     ..wrapped_request.clone()
                 },
                 &baseline_tokens,
-                eos_token_ids.as_slice(),
+                prefix_reuse_eos_token_ids.as_slice(),
                 request.add_special_tokens,
             )
             .unwrap()

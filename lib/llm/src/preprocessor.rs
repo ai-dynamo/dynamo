@@ -105,22 +105,22 @@ fn replace_prefix_tokens(
     model_prefix_token_ids: &[u32],
     template_prefix_token_ids: &[u32],
     template_token_ids: &[u32],
-    eos_token_ids: &[u32],
+    prefix_reuse_eos_token_ids: &[u32],
 ) -> Result<Vec<u32>> {
     if model_prefix_token_ids.is_empty() {
         return Ok(template_token_ids.to_vec());
     }
 
     anyhow::ensure!(
-        !eos_token_ids.is_empty(),
-        "Your tokenizer must have at least one EOS token ID!"
+        !prefix_reuse_eos_token_ids.is_empty(),
+        "Your tokenizer must have at least one prefix-reuse EOS token ID!"
     );
 
     let mut model_cut_end = model_prefix_token_ids.len();
-    if model_prefix_token_ids
+    let model_prefix_ends_with_eos = model_prefix_token_ids
         .last()
-        .is_some_and(|token| eos_token_ids.contains(token))
-    {
+        .is_some_and(|token| prefix_reuse_eos_token_ids.contains(token));
+    if model_prefix_ends_with_eos {
         model_cut_end -= 1;
     }
 
@@ -141,21 +141,36 @@ fn replace_prefix_tokens(
     // the boundary EOS. The COUNT of turn-terminator (EOS) tokens is invariant to
     // reasoning being kept vs stripped, so we resume at the Nth EOS of the full
     // tokenization, where N is the EOS count of the prefix render.
-    let prefix_eos_count = template_prefix_token_ids
-        .iter()
-        .filter(|token| eos_token_ids.contains(*token))
-        .count();
+    //
+    // Some templates special-case a final assistant tool-call message and omit
+    // its tokenizer EOS in the prefix render. If the model prefix ends in the
+    // tokenizer EOS, use the verbatim model prefix to count completed turns.
+    let prefix_eos_count_source;
+    let prefix_eos_count = if model_prefix_ends_with_eos {
+        prefix_eos_count_source = "model prefix";
+        model_prefix_token_ids
+            .iter()
+            .filter(|token| prefix_reuse_eos_token_ids.contains(*token))
+            .count()
+    } else {
+        prefix_eos_count_source = "prefix render";
+        template_prefix_token_ids
+            .iter()
+            .filter(|token| prefix_reuse_eos_token_ids.contains(*token))
+            .count()
+    };
 
-    if prefix_eos_count == 0 {
-        // No completed turn precedes the generation point: no history to preserve.
-        return Ok(template_token_ids.to_vec());
-    }
+    anyhow::ensure!(
+        prefix_eos_count > 0,
+        "replace_prefix_tokens: required_prefix_token_ids were provided but no prefix-reuse EOS \
+         token was found; refusing to silently emit a non-contiguous prompt"
+    );
 
     let mut eos_seen = 0usize;
     let template_cut_start = template_token_ids
         .iter()
         .position(|token| {
-            if eos_token_ids.contains(token) {
+            if prefix_reuse_eos_token_ids.contains(token) {
                 eos_seen += 1;
             }
             eos_seen == prefix_eos_count
@@ -163,20 +178,28 @@ fn replace_prefix_tokens(
         .with_context(|| {
             format!(
                 "replace_prefix_tokens: full template tokenization has {} EOS token(s) but \
-                 the prefix render expects {prefix_eos_count}; refusing to silently emit a \
+                 the {prefix_eos_count_source} expects {prefix_eos_count}; refusing to silently emit a \
                  reasoning-stripped prompt for a non-monotonically-increasing trajectory",
                 template_token_ids
                     .iter()
-                    .filter(|t| eos_token_ids.contains(*t))
+                    .filter(|t| prefix_reuse_eos_token_ids.contains(*t))
                     .count()
             )
         })?;
 
-    Ok([
+    let final_token_ids = [
         &model_prefix_token_ids[..model_cut_end],
         &template_token_ids[template_cut_start..],
     ]
-    .concat())
+    .concat();
+
+    anyhow::ensure!(
+        final_token_ids.starts_with(model_prefix_token_ids),
+        "replace_prefix_tokens: prefix reuse produced non-contiguous token IDs; \
+         refusing to replace required_prefix_token_ids"
+    );
+
+    Ok(final_token_ids)
 }
 
 pub(crate) fn apply_required_prefix_token_ids_to_chat_request(
@@ -184,7 +207,7 @@ pub(crate) fn apply_required_prefix_token_ids_to_chat_request(
     tokenizer: &dyn crate::tokenizers::traits::Tokenizer,
     request: &NvCreateChatCompletionRequest,
     token_ids: &[u32],
-    eos_token_ids: &[u32],
+    prefix_reuse_eos_token_ids: &[u32],
     add_special_tokens: bool,
 ) -> Result<Option<Vec<u32>>> {
     let Some(required_prefix_token_ids) = request.required_prefix_token_ids.as_ref() else {
@@ -207,7 +230,7 @@ pub(crate) fn apply_required_prefix_token_ids_to_chat_request(
         required_prefix_token_ids,
         &template_prefix_token_ids,
         token_ids,
-        eos_token_ids,
+        prefix_reuse_eos_token_ids,
     )?))
 }
 
@@ -1143,7 +1166,7 @@ impl OpenAIPreprocessor {
             self.tokenizer.as_ref(),
             request,
             token_ids,
-            self.model_info.eos_token_ids().as_slice(),
+            self.model_info.prefix_reuse_eos_token_ids().as_slice(),
             false,
         )
     }
@@ -3439,6 +3462,36 @@ mod tests {
         let out = replace_prefix_tokens(&model_prefix, &template_prefix, &template_full, &eos)
             .expect("splice should succeed");
         assert_eq!(out, vec![11, 12, 13, 40, 41, 220, 17, 2, 21, 22, 40, 41]);
+    }
+
+    #[test]
+    fn test_replace_prefix_tokens_uses_model_prefix_eos_when_template_prefix_omits_it() {
+        let prefix_reuse_eos = [12u32];
+        let model_prefix = vec![100, 101, 12];
+        let template_prefix = vec![100, 11];
+        let template_full = vec![100, 11, 200, 12, 11, 300];
+
+        let out = replace_prefix_tokens(
+            &model_prefix,
+            &template_prefix,
+            &template_full,
+            &prefix_reuse_eos,
+        )
+        .expect("splice should succeed");
+
+        assert_eq!(out, vec![100, 101, 12, 11, 300]);
+        assert!(out.starts_with(&model_prefix));
+    }
+
+    #[test]
+    fn test_replace_prefix_tokens_rejects_non_contiguous_prefix_reuse() {
+        let err = replace_prefix_tokens(&[100, 12], &[100, 12], &[100, 11, 300], &[12])
+            .expect_err("splice should fail");
+
+        assert!(
+            err.to_string().contains("full template tokenization has"),
+            "unexpected error: {err}"
+        );
     }
 
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.

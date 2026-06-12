@@ -1,0 +1,10 @@
+{
+  "architectures": [
+    "NemotronHForCausalLM"
+  ],
+  "bos_token_id": 1,
+  "eos_token_id": 12,
+  "max_position_embeddings": 131072,
+  "model_type": "nemotron_h",
+  "vocab_size": 131072
+}
