@@ -116,7 +116,7 @@ fn parse_positive_usize(name: &str, value: Option<&str>, default: usize) -> usiz
                 default
             }
         },
-        Err(_) => default,
+        None => default,
     }
 }
 
