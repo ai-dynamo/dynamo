@@ -174,7 +174,7 @@ jobs:
     env:
       KUBE_CONTEXT: ${{ inputs.kube_context || 'nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02' }}
       VCLUSTER_NAME: vc-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-      VCLUSTER_NAMESPACE: vc-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAMESPACE: dynamo-deploy-test
       VCLUSTER_K8S_VERSION: v1.32.13
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -203,12 +203,12 @@ jobs:
             fi
             kubectl get pods -n "${VCLUSTER_NAMESPACE}" -o wide || true
             vcluster delete "${VCLUSTER_NAME}" --namespace "${VCLUSTER_NAMESPACE}" 2>&1 || true
-            kubectl delete namespace "${VCLUSTER_NAMESPACE}" --ignore-not-found=true --timeout=120s || true
             echo "::endgroup::"
           }
           trap cleanup EXIT
 
-          kubectl create namespace "${VCLUSTER_NAMESPACE}"
+          kubectl create namespace "${VCLUSTER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+          vcluster delete "${VCLUSTER_NAME}" --namespace "${VCLUSTER_NAMESPACE}" 2>&1 || true
 
           vcluster create "${VCLUSTER_NAME}" \
             --namespace "${VCLUSTER_NAMESPACE}" \
