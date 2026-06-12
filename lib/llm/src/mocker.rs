@@ -317,6 +317,7 @@ impl MockEngine {
                             let source_config = Some(KvEventSourceConfig::Zmq {
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
                                 topic: String::new(),
+                                image_token_id: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
                                 comp.clone(),
@@ -617,6 +618,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string()));
                             break;
                         };
+
+                        // A terminally rejected request never ran (its footprint
+                        // exceeds the KV pool): emit no token and do not complete the
+                        // bootstrap room — surface the rejection and end the stream
+                        // before any token/prefill bookkeeping.
+                        if signal.rejected {
+                            let _ = stream_tx.send(LLMEngineOutput::error(
+                                "request rejected: KV footprint exceeds pool capacity".to_string(),
+                            ));
+                            break;
+                        }
 
                         // Generate a token (with thinking boundaries if configured)
                         let token_id = if token_count == 0 && think_len > 0 {

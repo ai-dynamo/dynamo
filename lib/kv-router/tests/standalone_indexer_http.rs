@@ -19,8 +19,8 @@ use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, compute_seq_hash_for_block,
 };
-use dynamo_kv_router::standalone_indexer::registry::{IndexerKey, WorkerRegistry};
-use dynamo_kv_router::standalone_indexer::server::{AppState, create_router};
+use dynamo_kv_router::services::indexer::registry::{IndexerKey, WorkerRegistry};
+use dynamo_kv_router::services::indexer::server::{AppState, create_router};
 use dynamo_kv_router::zmq_wire::{BlockHashValue, RawKvEvent};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -314,7 +314,7 @@ async fn health_returns_ok() {
 // =============================================================================
 
 /// Reserve an OS-assigned TCP port by binding+dropping a `std::net::TcpListener`
-/// (matches the pattern used in `standalone_indexer/listener.rs` tests).
+/// (matches the pattern used in `services/indexer/listener.rs` tests).
 fn reserve_zmq_endpoint() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe listener");
     let port = listener

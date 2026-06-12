@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::indexer::compressed_radix::append_dump_events;
 
 impl ConcurrentRadixTreeCompressed {
     // ------------------------------------------------------------------
@@ -64,46 +65,16 @@ impl ConcurrentRadixTreeCompressed {
                     break;
                 }
 
-                let full_blocks: Vec<KvCacheStoredBlockData> = merged_edge
-                    .iter()
-                    .map(|&(local, ext)| KvCacheStoredBlockData {
-                        tokens_hash: local,
-                        block_hash: ext,
-                        mm_extra_info: None,
-                    })
-                    .collect();
                 let last_ext = merged_edge.last().unwrap().1;
 
-                for worker in snapshot.full_edge_workers {
-                    events.push(RouterEvent::new(
-                        worker.worker_id,
-                        KvCacheEvent {
-                            event_id: *event_id,
-                            data: KvCacheEventData::Stored(KvCacheStoreData {
-                                parent_hash,
-                                start_position: None,
-                                blocks: full_blocks.clone(),
-                            }),
-                            dp_rank: worker.dp_rank,
-                        },
-                    ));
-                    *event_id += 1;
-                }
-                for (worker, cutoff) in snapshot.worker_cutoffs {
-                    events.push(RouterEvent::new(
-                        worker.worker_id,
-                        KvCacheEvent {
-                            event_id: *event_id,
-                            data: KvCacheEventData::Stored(KvCacheStoreData {
-                                parent_hash,
-                                start_position: None,
-                                blocks: full_blocks[..cutoff].to_vec(),
-                            }),
-                            dp_rank: worker.dp_rank,
-                        },
-                    ));
-                    *event_id += 1;
-                }
+                append_dump_events(
+                    events,
+                    event_id,
+                    parent_hash,
+                    &merged_edge,
+                    &snapshot.full_edge_workers,
+                    &snapshot.worker_cutoffs,
+                );
 
                 for child in snapshot.live_children {
                     queue.push_back((child, Some(last_ext)));

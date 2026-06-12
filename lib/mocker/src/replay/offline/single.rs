@@ -21,6 +21,10 @@ enum AdmissionSource {
     Workload(WorkloadDriver),
 }
 
+// SGLang may intentionally retry 600 same-timestamp passes while reducing its
+// output reservation ratio before an otherwise valid request can be admitted.
+const MAX_CONSECUTIVE_NO_PROGRESS_PASSES: usize = 1024;
+
 pub(super) struct SingleRuntime {
     current_time_ms: f64,
     admission: AdmissionSource,
@@ -28,6 +32,7 @@ pub(super) struct SingleRuntime {
     collector: TraceCollector,
     mode: SingleReplayMode,
     progress: ReplayProgress,
+    consecutive_no_progress_passes: usize,
     /// Optional cap on simulated wall-clock time. When set, `run()` exits
     /// gracefully once `current_time_ms` exceeds this cap, leaving any
     /// in-flight requests as incomplete in the report.
@@ -67,6 +72,7 @@ impl SingleRuntime {
             collector: TraceCollector::default(),
             mode,
             progress: ReplayProgress::new(total_requests, "offline replay"),
+            consecutive_no_progress_passes: 0,
             max_sim_time_ms: None,
         }
     }
@@ -196,11 +202,19 @@ impl SingleRuntime {
         Ok(())
     }
 
-    fn drive_worker(&mut self, admit_arrivals_between_steps: bool) {
+    fn drive_worker(&mut self, admit_arrivals_between_steps: bool) -> anyhow::Result<()> {
+        let pass_start_ms = self.current_time_ms;
+        let requests_before = self.worker.num_requests();
         let pass = self
             .worker
             .execute_pass(&mut self.collector, self.current_time_ms);
         self.current_time_ms = pass.end_ms;
+        let made_progress = self.current_time_ms > pass_start_ms
+            || self.worker.num_requests() < requests_before
+            || pass.completed_requests > 0
+            || !pass.admissions.is_empty()
+            || !pass.output_signals.is_empty()
+            || !pass.kv_events.is_empty();
         if let AdmissionSource::Workload(driver) = &mut self.admission {
             for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
                 driver
@@ -219,6 +233,21 @@ impl SingleRuntime {
         if admit_arrivals_between_steps {
             self.enqueue_trace_arrivals();
         }
+        if made_progress {
+            self.consecutive_no_progress_passes = 0;
+            return Ok(());
+        }
+
+        self.consecutive_no_progress_passes += 1;
+        if self.consecutive_no_progress_passes >= MAX_CONSECUTIVE_NO_PROGRESS_PASSES
+            && !self.worker.is_empty()
+        {
+            bail!(
+                "offline replay reached a dead end with {} in-flight requests remaining",
+                self.worker.num_requests()
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn run(mut self) -> anyhow::Result<TraceCollector> {
@@ -241,7 +270,7 @@ impl SingleRuntime {
                         self.enqueue_trace_arrivals();
                         continue;
                     }
-                    self.drive_worker(true);
+                    self.drive_worker(true)?;
                 }
                 SingleReplayMode::Concurrency { max_in_flight } => {
                     self.enqueue_concurrency_arrivals(max_in_flight);
@@ -252,7 +281,7 @@ impl SingleRuntime {
                         self.advance_to_next_trace_arrival()?;
                         continue;
                     }
-                    self.drive_worker(false);
+                    self.drive_worker(false)?;
                 }
             }
         }
@@ -269,6 +298,7 @@ mod tests {
         simulate_concurrency_single, simulate_trace_single,
     };
     use super::*;
+    use crate::common::protocols::EngineType;
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
     use crate::replay::{TraceRequestStatsSnapshot, TraceSimulationReport};
     use rstest::rstest;
@@ -839,6 +869,41 @@ mod tests {
         assert!(arrival_times.contains(&0.0));
         assert!(arrival_times.iter().all(|arrival| *arrival >= 0.0));
         assert_eq!(report.request_counts.completed_requests, 3);
+    }
+
+    #[test]
+    fn trtllm_oversized_request_rejected_unblocks_follower_single() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Trtllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let request = |uuid: u128, prompt_tokens: u32, max_output_tokens: usize| DirectRequest {
+            tokens: (0..prompt_tokens).collect(),
+            max_output_tokens,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+        };
+
+        let report = simulate_concurrency_single(
+            args,
+            vec![request(1, 20, 8), request(2, 4, 4)],
+            1,
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.num_requests, 2);
+        assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.request_counts.total_output_tokens, 4);
     }
 
     fn cap_request(uuid: u128, arrival_ms: f64) -> DirectRequest {

@@ -24,6 +24,7 @@ from tests.serve.common import (
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payloads import (
     AudioSpeechPayload,
+    ChatPayload,
     I2VPayload,
     ImageGenerationPayload,
     VideoGenerationPayload,
@@ -70,6 +71,33 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    "omni_text": VLLMOmniConfig(
+        name="omni_text",
+        directory=vllm_dir,
+        script_name="agg_omni.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.skip(
+                reason="Qwen2.5-Omni-7B requires ~80GB GPU memory, exceeds CI capacity (22GB)"
+            ),
+        ],
+        model="Qwen/Qwen2.5-Omni-7B",
+        request_payloads=[
+            ChatPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Say hello"}],
+                    "max_tokens": 32,
+                    "temperature": 0.0,
+                },
+                repeat_count=1,
+                expected_response=["hello", "Hello"],
+                expected_log=[],
+            ),
+        ],
+    ),
     "omni_image": VLLMOmniConfig(
         name="omni_image",
         directory=vllm_dir,
@@ -81,6 +109,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -114,6 +143,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
         ],
@@ -145,6 +175,7 @@ vllm_omni_configs = {
         script_name="agg_omni_audio.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -182,6 +213,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.profiled_vram_gib(16.8),  # actual profiled peak with kv-bytes

@@ -404,19 +404,57 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        min_routing_total_blocks: int = 0,
         router_nvext_expectation: RouterNvextExpectation | None = None,
+        require_rust_processor_init: bool = False,
+        require_vllm_mm_processor_init: bool = False,
+        min_avg_kv_hit_rate: float = 0.0,
     ):
+        # MM-aware routing checks: piggyback on engine_process.validate_expected_logs.
+        log_patterns: List[str] = list(expected_log or [])
+        if require_rust_processor_init:
+            log_patterns.append(r"MM-aware KV routing enabled")
+        if require_vllm_mm_processor_init:
+            log_patterns.append(r"\[mm-routing\] Transfer mode:")
+        if min_routing_total_blocks > 0:
+            # The regex below gates by digit-count, so the threshold must
+            # be a power of 10 (1, 10, 100, ...). Reject any non-conforming
+            # value at construction time — otherwise the assertion would
+            # under-enforce (e.g. min_routing_total_blocks=25 would still
+            # only require 2-digit counts ≥10, not ≥25).
+            n_str = str(min_routing_total_blocks)
+            if n_str[0] != "1" or any(c != "0" for c in n_str[1:]):
+                raise ValueError(
+                    f"min_routing_total_blocks must be a power of 10 "
+                    f"(1, 10, 100, ...); got {min_routing_total_blocks}"
+                )
+            min_digits = len(n_str)
+            log_patterns.append(
+                rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
+            )
         super().__init__(
             body=body,
             repeat_count=repeat_count,
             expected_response=expected_response or [],
-            expected_log=expected_log or [],
+            expected_log=log_patterns,
             timeout=timeout,
         )
         self.min_cached_tokens = min_cached_tokens
         self._request_count = 0
         self._cached_tokens_found = False
         self.router_nvext_expectation = router_nvext_expectation
+        # Asserts the post-R1 mean of router_kv_hit_rate >= threshold. Catches
+        # router/worker hash divergence (overlap=0) that cached_tokens alone
+        # can miss via load-balance luck on vLLM's per-worker prefix cache.
+        #
+        # TODO(mm-routing): this field + _metrics_baseline + the kv_hit_rate
+        # delta assertion in final_validation() are router-metric-specific
+        # logic accreting onto a general-purpose Cached*Payload base. If
+        # more strong-gate metrics get added (decode-imbalance, routing-
+        # block-count, etc.), move into a RouterMetricsAssertion
+        # mixin/subclass.
+        self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -433,18 +471,27 @@ class CachedTokensChatPayload(ChatPayload):
 
         # Check usage field for cached tokens
         # Expected structure: usage.prompt_tokens_details.cached_tokens
-        usage = result.get("usage", {})
-        prompt_tokens_details = usage.get("prompt_tokens_details") or {}
+        usage = result.get("usage")
+        prompt_tokens_details = (usage or {}).get("prompt_tokens_details") or {}
         cached_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
+        prompt_tokens = (usage or {}).get("prompt_tokens")
 
         logger.info(
-            f"Request {self._request_count}: prompt_tokens={usage.get('prompt_tokens')}, "
+            f"Request {self._request_count}: prompt_tokens={prompt_tokens}, "
             f"cached_tokens={cached_tokens}, prompt_tokens_details={prompt_tokens_details}"
         )
 
-        # For requests after the first one, we expect cached tokens > 0
-        # (since identical prompts should hit the prefix cache)
-        if self._request_count > 1:
+        # On repeats we expect a cache hit. Require usage with prompt_tokens > 0
+        # so a backend that reports no usage fails instead of passing by default.
+        # An absent cached_tokens field is a legit miss (vLLM/SGLang omit it when
+        # cached==0), so treat it as a soft miss below, not a hard error.
+        if self._request_count > 1 and self.min_cached_tokens > 0:
+            if usage is None or prompt_tokens is None or prompt_tokens <= 0:
+                raise AssertionError(
+                    f"Request {self._request_count}: response carried no usage "
+                    f"evidence (usage={usage!r}); cannot validate cached tokens. "
+                    f"Expected a usage block with prompt_tokens > 0."
+                )
             if cached_tokens >= self.min_cached_tokens:
                 self._cached_tokens_found = True
                 logger.info(
@@ -457,20 +504,96 @@ class CachedTokensChatPayload(ChatPayload):
                     f"(expected >= {self.min_cached_tokens})"
                 )
 
-    def final_validation(self) -> None:
-        """Called after all requests are processed to ensure we saw cached tokens.
+        # Snapshot after R1 so the delta in final_validation isolates R2+.
+        if (
+            self._metrics_baseline is None
+            and self._request_count == 1
+            and self.min_avg_kv_hit_rate > 0
+        ):
+            self._metrics_baseline = self._scrape_router_kv_hit_rate()
 
-        Raises AssertionError if cached tokens were not found on any repeated request.
+    def _scrape_router_kv_hit_rate(self) -> Optional[tuple[float, float]]:
+        """Return ``(sum, count)`` for ``router_kv_hit_rate`` from the
+        frontend /metrics endpoint, or ``None`` if the endpoint is
+        unreachable. The component MetricsHierarchy auto-prepends
+        ``dynamo_component_`` to the exported name.
         """
-        if self.repeat_count > 1 and not self._cached_tokens_found:
+        url = f"http://localhost:{self.port}/metrics"
+        try:
+            text = requests.get(url, timeout=5).text
+        except requests.RequestException as e:
+            # Narrow to HTTP/network errors per .ai/python-guidelines.md:
+            # we expect transient endpoint flakes here (timeout, connection
+            # refused while the frontend is still binding /metrics) and
+            # the strong gate has its own `is None` guard. Programming
+            # errors propagate so they surface at test-time instead of
+            # being swallowed.
+            logger.warning("Failed to scrape %s: %s", url, e)
+            return None
+        # Compose from canonical constants so a metric rename in
+        # prometheus_names cascades here instead of silently breaking
+        # the kv_hit_rate strong gate.
+        full = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.router.KV_HIT_RATE}"
+        )
+        return (
+            sum_metric_samples(text, f"{full}_sum"),
+            sum_metric_samples(text, f"{full}_count"),
+        )
+
+    def final_validation(self) -> None:
+        """Assert cached_tokens >= min_cached_tokens on at least one repeat
+        (only when min_cached_tokens > 0), and (if set) router_kv_hit_rate
+        post-R1 mean >= min_avg_kv_hit_rate.
+        """
+        # Only assert cached tokens when a positive threshold is set; a caller
+        # validating purely via the router metric passes min_cached_tokens=0.
+        if self.min_cached_tokens > 0:
+            if self.repeat_count > 1 and not self._cached_tokens_found:
+                raise AssertionError(
+                    f"Expected cached_tokens >= {self.min_cached_tokens} in "
+                    f"prompt_tokens_details for at least one repeated request, "
+                    f"but none found after {self._request_count} requests. "
+                    f"Verify that prefix caching is enabled and working correctly."
+                )
+            logger.info(
+                "✓ Final validation PASSED: cached_tokens found in repeated requests"
+            )
+
+        if self.min_avg_kv_hit_rate <= 0:
+            return
+        if self._metrics_baseline is None:
             raise AssertionError(
-                f"Expected cached_tokens >= {self.min_cached_tokens} in "
-                f"prompt_tokens_details for at least one repeated request, "
-                f"but none found after {self._request_count} requests. "
-                f"Verify that prefix caching is enabled and working correctly."
+                "min_avg_kv_hit_rate set but no metrics baseline captured "
+                "(R1 validate() didn't run or /metrics was unreachable)."
+            )
+        after = self._scrape_router_kv_hit_rate()
+        if after is None:
+            raise AssertionError(
+                "router_kv_hit_rate scrape failed at final_validation; "
+                "/metrics endpoint unreachable from test."
+            )
+        bsum, bcount = self._metrics_baseline
+        asum, acount = after
+        d_sum, d_count = asum - bsum, acount - bcount
+        if d_count <= 0:
+            raise AssertionError(
+                f"router_kv_hit_rate: no new observations between R1 and final "
+                f"(baseline_count={bcount}, after_count={acount}); "
+                f"MM-routing likely not engaging on repeat requests."
+            )
+        avg = d_sum / d_count
+        if avg < self.min_avg_kv_hit_rate:
+            raise AssertionError(
+                f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "
+                f"min ({self.min_avg_kv_hit_rate}). delta_n={d_count}, "
+                f"delta_sum={d_sum:.3f}. Router-side block hashes did not "
+                f"match the worker — MM-aware routing degraded silently."
             )
         logger.info(
-            "✓ Final validation PASSED: cached_tokens found in repeated requests"
+            f"✓ router_kv_hit_rate: mean over R2+ = {avg:.3f} "
+            f"(>= {self.min_avg_kv_hit_rate})"
         )
 
 
@@ -581,6 +704,32 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class ImagesPayload(BasePayload):
+    """Payload for the image-generation endpoint (raw-media / DiffusionEngine).
+
+    Targets ``/v1/images/generations`` and validates the OpenAI-shaped
+    response: a non-empty ``data`` list whose first item carries either a
+    ``b64_json`` or a ``url``.
+    """
+
+    endpoint: str = "/v1/images/generations"
+
+    @staticmethod
+    def extract_image(response):
+        response.raise_for_status()
+        result = response.json()
+        assert "data" in result, "Missing 'data' in image response"
+        assert len(result["data"]) > 0, "Empty 'data' in image response"
+        item = result["data"][0]
+        # Return whichever representation the engine produced — either is a
+        # valid image result.
+        return item.get("b64_json") or item.get("url") or ""
+
+    def response_handler(self, response: Any) -> str:
+        return ImagesPayload.extract_image(response)
 
 
 @dataclass
@@ -960,6 +1109,136 @@ class EmbeddingPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return EmbeddingPayload.extract_embeddings(response)
+
+
+@dataclass
+class EmbeddingMultiWorkerDispatchPayload(BasePayload):
+    """Send ``repeat_count`` embedding requests to the frontend, capturing a
+    per-worker ``/metrics`` snapshot on the FIRST iteration and on the LAST
+    iteration. Assert the delta — i.e. requests attributed during *this*
+    burst — matches an expected per-worker pattern.
+
+    Diff semantics are important because the same fixture may run multiple
+    bursts back-to-back (e.g. one per model in a multi-model dispatch
+    test): the prior burst leaves a worker's absolute counter > 0, so only
+    deltas can prove the second burst did not also reach that worker.
+
+    Two routing properties of the embedding worker pool are checked
+    through this payload:
+
+    1. **Same-model load balancing** — when multiple workers serve the
+       same embedding model, ``select_worker_set_with()`` does
+       weighted-random selection across them, so both workers should see
+       ``>0`` delta. Set ``expected_workers_with_delta={port1, port2}``.
+
+    2. **Multi-model dispatch** — when workers serve different models,
+       the name-keyed ``get_embeddings_engine(model)`` lookup must route
+       only to the worker registered for the requested model. Set
+       ``expected_workers_with_delta={port_of_requested_model}`` so the
+       check asserts the wrong-model worker observed exactly 0 delta
+       during this burst.
+
+    The per-worker counter sampled is
+    ``dynamo_component_requests_total`` — the same counter exercised by
+    ``MetricsPayload`` for single-worker tests. The dispatch assertion
+    fires once after the last repeat.
+    """
+
+    endpoint: str = "/v1/embeddings"
+
+    # Indices into ``self.system_ports`` (inherited from BasePayload, with
+    # DefaultPort.SYSTEM{1,2} entries remapped to per-test dynamic ports
+    # by the harness). Each indexed worker must have observed >0 delta
+    # during this burst; other workers must observe exactly 0 delta.
+    #
+    # Index-based on purpose: the actual port values are not known at
+    # config-construction time because the harness assigns dynamic ports.
+    expected_worker_indices_with_delta: set[int] = field(default_factory=set)
+
+    # Lower bound on the SUM of per-worker deltas across all workers. Use
+    # ``repeat_count`` for an exact-match expectation in clean fixtures.
+    # Defaults to 0 (predicate-only — workers_with_delta must match).
+    min_total_delta: int = 0
+
+    # Settle delay applied around each /metrics scrape so the worker has
+    # time to flush the most recent counter increment.
+    settle_seconds: float = 1.0
+
+    # Internal: iteration counter and baseline snapshot. Both are mutated
+    # in validate(); the dataclass machinery treats them as normal
+    # attributes once the instance is constructed.
+    _calls_seen: int = 0
+    _baseline: dict[int, float] = field(default_factory=dict)
+
+    def with_model(self, model):
+        # Embedding body is set externally; this is a no-op.
+        return self
+
+    def response_handler(self, response: Any) -> str:
+        # Validate the per-iteration response shape so an HTML/JSON error
+        # surfaces immediately. The *dispatch* assertion happens in
+        # validate() on the final repeat.
+        return EmbeddingPayload.extract_embeddings(response)
+
+    def _scrape(self) -> dict[int, float]:
+        prefix = prometheus_names.name_prefix.COMPONENT
+        counter_name = f"{prefix}_{prometheus_names.work_handler.REQUESTS_TOTAL}"
+
+        counts: dict[int, float] = {}
+        for port in self.system_ports:
+            r = requests.get(
+                f"http://{self.host}:{port}/metrics",
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+            counts[port] = sum_metric_samples(r.text, counter_name)
+        return counts
+
+    def validate(self, response: Any, content: str) -> None:
+        """First repeat: snapshot baseline counts. Last repeat: scrape
+        again, compute deltas, and assert the dispatch pattern.
+        """
+        self._calls_seen += 1
+
+        if self._calls_seen == 1:
+            # Snapshot AFTER the first request; this is fine because the
+            # baseline is subtracted out below — we only care that the
+            # delta from this point forward matches expectations.
+            time.sleep(self.settle_seconds)
+            self._baseline = self._scrape()
+            logger.info("Baseline per-worker counts: %s", self._baseline)
+            return
+
+        if self._calls_seen < self.repeat_count:
+            return
+
+        # Last repeat — compute delta.
+        time.sleep(self.settle_seconds)
+        final = self._scrape()
+        delta = {p: final[p] - self._baseline.get(p, 0.0) for p in final}
+        logger.info(
+            "Per-worker delta (final - baseline) over %d requests: %s",
+            self.repeat_count - 1,
+            delta,
+        )
+
+        workers_with_delta_idx = {
+            i for i, port in enumerate(self.system_ports) if delta.get(port, 0) > 0
+        }
+        assert workers_with_delta_idx == self.expected_worker_indices_with_delta, (
+            f"Expected worker indices with delta "
+            f"{self.expected_worker_indices_with_delta}, got "
+            f"{workers_with_delta_idx}. Per-worker delta: {delta} "
+            f"(baseline={self._baseline}, final={final}, "
+            f"system_ports={self.system_ports})"
+        )
+
+        if self.min_total_delta > 0:
+            total_delta = sum(delta.values())
+            assert total_delta >= self.min_total_delta, (
+                f"Expected at least {self.min_total_delta} total delta across "
+                f"workers, got {int(total_delta)}. Per-worker delta: {delta}"
+            )
 
 
 @dataclass

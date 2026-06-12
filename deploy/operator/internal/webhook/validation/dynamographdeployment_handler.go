@@ -49,7 +49,7 @@ type DynamoGraphDeploymentHandler struct {
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
 // operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
 // replica changes on scaling-adapter-enabled services (#7656).
-// groveEnabled reflects the operator's runtime config (global.grove.enabled).
+// groveEnabled reflects the operator's runtime Grove configuration.
 func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string, groveEnabled bool) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,
@@ -70,7 +70,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidator(deployment, h.mgr, h.groveEnabled)
 	return validator.Validate(ctx)
 }
 
@@ -97,7 +97,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidator(newDeployment, h.mgr, h.groveEnabled)
 	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err

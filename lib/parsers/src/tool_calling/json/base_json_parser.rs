@@ -215,10 +215,54 @@ pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
     Some(repaired)
 }
 
+/// Recover the complete leading tool-call objects from an unterminated mistral
+/// JSON array body (e.g. `[{...complete...}, {...truncated`). Parses top-level
+/// `{...}` objects left-to-right with a streaming deserializer and stops at the
+/// first incomplete one, keeping every complete leading call and dropping the
+/// truncated tail. Unlike `try_repair_truncated_json`, it performs no
+/// brace-balancing fabrication, so a half-emitted trailing call is discarded
+/// rather than invented. Returns the verbatim byte spans of the complete
+/// objects (empty when none completed).
+fn recover_leading_complete_objects(json: &str) -> Vec<String> {
+    let trimmed = json.trim();
+    let body = trimmed.strip_prefix('[').unwrap_or(trimmed);
+    let mut out: Vec<String> = Vec::new();
+    let mut remaining = body.trim_start();
+    while !remaining.is_empty() {
+        let mut stream = serde_json::Deserializer::from_str(remaining).into_iter::<Box<RawValue>>();
+        match stream.next() {
+            Some(Ok(rv)) => {
+                let raw = rv.get();
+                if raw.is_empty() || !raw.trim_start().starts_with('{') {
+                    break;
+                }
+                out.push(raw.to_string());
+                remaining = remaining[raw.len()..].trim_start();
+                match remaining.strip_prefix(',') {
+                    Some(rest) => remaining = rest.trim_start(),
+                    None => break,
+                }
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
 fn try_parse_normal_text(input: &str, start_token: &str) -> String {
     // If input contains start token, just take the part before it
     if let Some(idx) = input.find(start_token) {
-        return input[..idx].trim().to_string();
+        let prefix = &input[..idx];
+        // The mistral family ([TOOL_CALLS]) keeps the boundary space before the
+        // marker to match vLLM; every other JSON family trims it. Keyed on the
+        // family's distinctive start token rather than a config field so the
+        // exported `JsonParserConfig` gains no new public member (downstream
+        // struct-literal constructors stay source-compatible).
+        return if start_token == "[TOOL_CALLS]" {
+            prefix.to_string()
+        } else {
+            prefix.trim().to_string()
+        };
     }
 
     // No start token found, return empty string
@@ -266,6 +310,56 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
 /// let result = try_tool_call_parse_json(input)?;
 /// assert!(result.is_some());
 /// ```
+/// Parse `payload` into tool calls, trying the three canonical JSON shapes in
+/// order: an array of calls, a single `{name, arguments}`, then a single
+/// `{name, parameters}`. Within an array, each element is tried as
+/// `arguments` then `parameters`.
+///
+/// Returns:
+/// - `Ok(Some(calls))` when `payload` matched one of the shapes. The vec may be
+///   empty (e.g. a literal `[]`, or an array whose elements were all malformed),
+///   which still counts as "recognized" so the caller returns rather than
+///   falling through to truncation repair / strict recovery.
+/// - `Ok(None)` when `payload` matched none of the shapes.
+///
+/// `arguments` bytes are passed through verbatim via `RawValue::get()` rather
+/// than re-serializing a parsed `HashMap` / `Value`, which keeps them
+/// byte-identical to what the model emitted (required for KV-cache append-only
+/// prefix matching across multi-step tool use).
+fn parse_calls(payload: &str) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
+    let mk = |name: String, args: &RawValue| ToolCallResponse {
+        id: format!("call-{}", Uuid::new_v4()),
+        tp: ToolCallType::Function,
+        function: CalledFunction {
+            name,
+            arguments: args.get().to_string(),
+        },
+    };
+
+    if let Ok(array) = serde_json::from_str::<Vec<Box<RawValue>>>(payload) {
+        let mut calls = Vec::new();
+        for item in array {
+            let item_str = item.get();
+            if let Ok(func_args) = serde_json::from_str::<CalledFunctionArguments>(item_str) {
+                calls.push(mk(func_args.name, &func_args.arguments));
+            } else if let Ok(func_params) =
+                serde_json::from_str::<CalledFunctionParameters>(item_str)
+            {
+                calls.push(mk(func_params.name, &func_params.parameters));
+            }
+            // Skip malformed entries silently.
+        }
+        return Ok(Some(calls));
+    }
+    if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(payload) {
+        return Ok(Some(vec![mk(single.name, &single.parameters)]));
+    }
+    if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(payload) {
+        return Ok(Some(vec![mk(single.name, &single.arguments)]));
+    }
+    Ok(None)
+}
+
 pub fn try_tool_call_parse_basic_json(
     message: &str,
     config: &JsonParserConfig,
@@ -380,77 +474,39 @@ pub fn try_tool_call_parse_basic_json(
     let json = json.as_str();
     // Anonymous function to attempt deserialization into a known representation.
     //
-    // We pass through the original byte span via `RawValue::get()` rather than
-    // re-serializing a parsed `HashMap` / `Value`. That keeps `arguments`
-    // byte-identical to what the model emitted, which is required for KV-cache
-    // append-only prefix matching across multi-step tool use.
-    let parse = |name: String, args: &RawValue| -> anyhow::Result<ToolCallResponse> {
-        Ok(ToolCallResponse {
-            id: format!("call-{}", Uuid::new_v4()),
-            tp: ToolCallType::Function,
-            function: CalledFunction {
-                name,
-                arguments: args.get().to_string(),
-            },
-        })
-    };
+    // Try the three canonical JSON shapes (single object with `parameters` or
+    // `arguments`, or an array of either). A recognized shape returns here —
+    // including an empty array, which is a valid empty result and must not fall
+    // through to truncation recovery.
+    if let Some(calls) = parse_calls(json)? {
+        return Ok((calls, Some(normal_text)));
+    }
 
-    // CalledFunctionParameters: Single { name, parameters }
-    // Example:
-    // {
-    //   "name": "search_docs",
-    //   "parameters": {
-    //     "query": "how to use Rust",
-    //     "limit": 5
-    //   }
-    // }
-    if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(json) {
-        return Ok((
-            vec![parse(single.name, &single.parameters)?],
-            Some(normal_text),
-        ));
-
-        // CalledFunctionArguments: Single { name, arguments }
-        // Example:
-        // {
-        //   "name": "summarize",
-        //   "arguments": {
-        //     "text": "Rust is a systems programming language.",
-        //     "length": "short"
-        //   }
-        // }
-    } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(json) {
-        return Ok((
-            vec![parse(single.name, &single.arguments)?],
-            Some(normal_text),
-        ));
-
-    // Vec<CalledFunctionParameters> or Vec<CalledFunctionArguments>: Array of tool calls
-    // Example:
-    // [
-    //   { "name": "lookup_user", "parameters": { "user_id": "123" } },
-    //   { "name": "get_weather", "arguments": { "location": "SF", "units": "celsius" } }
-    // ]
-    // Parse the array as `Vec<Box<RawValue>>` so each element retains its
-    // original byte span. Going through `Vec<serde_json::Value>` would
-    // already have mangled the inner `arguments` / `parameters` bytes by the
-    // time we tried to extract them.
-    } else if let Ok(array) = serde_json::from_str::<Vec<Box<RawValue>>>(json) {
-        let mut results = Vec::new();
-        for item in array {
-            let item_str = item.get();
-            // Try both CalledFunctionArguments and CalledFunctionParameters formats
-            if let Ok(func_args) = serde_json::from_str::<CalledFunctionArguments>(item_str) {
-                results.push(parse(func_args.name, &func_args.arguments)?);
-            } else if let Ok(func_params) =
-                serde_json::from_str::<CalledFunctionParameters>(item_str)
-            {
-                results.push(parse(func_params.name, &func_params.parameters)?);
-            }
-            // Skip malformed entries silently
+    // mistral optional-close form: an unterminated call (a `[TOOL_CALLS]`
+    // opener with no `[/TOOL_CALLS]` close) whose JSON array did not parse
+    // cleanly above. Recover only the complete leading objects, dropping the
+    // truncated tail with no brace-balancing fabrication; if nothing complete
+    // remains, suppress entirely so the raw `[TOOL_CALLS]...` markup never
+    // leaks into normal_text (consistent incomplete-call handling, matching
+    // hermes). Gated on `allow_eof_recovery` so it only runs at finalize /
+    // batch, never mid-stream, and scoped to mistral via its start token so
+    // other JSON families keep their existing recovery.
+    if config.allow_eof_recovery
+        && config
+            .tool_call_start_tokens
+            .iter()
+            .any(|t| t == "[TOOL_CALLS]")
+        && trimmed.contains("[TOOL_CALLS]")
+        && !trimmed.contains("[/TOOL_CALLS]")
+    {
+        let recovered = recover_leading_complete_objects(json);
+        if !recovered.is_empty()
+            && let Some(calls) = parse_calls(&format!("[{}]", recovered.join(",")))?
+            && !calls.is_empty()
+        {
+            return Ok((calls, Some(normal_text)));
         }
-        // Return with whatever results we have, even if empty (e.g., [] is a valid empty array)
-        return Ok((results, Some(normal_text)));
+        return Ok((vec![], Some(normal_text)));
     }
 
     // Truncation recovery: balance unclosed strings/braces (common
@@ -459,43 +515,103 @@ pub fn try_tool_call_parse_basic_json(
     // call while the model is still emitting JSON tokens.
     if config.allow_eof_recovery
         && let Some(repaired) = try_repair_truncated_json(json)
+        && let Some(calls) = parse_calls(repaired.as_str())?
+        && !calls.is_empty()
     {
-        let repaired = repaired.as_str();
-        if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(repaired) {
-            return Ok((
-                vec![parse(single.name, &single.parameters)?],
-                Some(normal_text),
-            ));
-        } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(repaired) {
-            return Ok((
-                vec![parse(single.name, &single.arguments)?],
-                Some(normal_text),
-            ));
-        } else if let Ok(array) = serde_json::from_str::<Vec<Box<RawValue>>>(repaired) {
-            let mut results = Vec::new();
-            for item in array {
-                let item_str = item.get();
-                if let Ok(func_args) = serde_json::from_str::<CalledFunctionArguments>(item_str) {
-                    results.push(parse(func_args.name, &func_args.arguments)?);
-                } else if let Ok(func_params) =
-                    serde_json::from_str::<CalledFunctionParameters>(item_str)
-                {
-                    results.push(parse(func_params.name, &func_params.parameters)?);
-                }
-            }
-            if !results.is_empty() {
-                return Ok((results, Some(normal_text)));
-            }
-        }
+        return Ok((calls, Some(normal_text)));
     }
 
     // If we found a start token but no valid JSON, return empty content
     // to avoid leaking the token and invalid JSON content
     if found_start_token_with_no_valid_json {
-        Ok((vec![], Some(String::new())))
-    } else {
-        Ok((vec![], Some(trimmed.to_string())))
+        return Ok((vec![], Some(String::new())));
     }
+
+    // Strict recovery (opt-in via `strip_markup_on_recovery`, e.g. nemotron_deci):
+    // every parse above failed, so the fall-through below would return the raw
+    // text verbatim — which leaks the wrapper markers (`<TOOLCALL>` /
+    // `</TOOLCALL>`) into `normal_text`. Instead, strip all configured markers
+    // and retry a strict parse of the remaining payload: recover any well-formed
+    // call (this is what salvages orphan-close framing like
+    // `[{...}]</TOOLCALL>`), otherwise drop the content. Markers never reach the
+    // user either way; `tracing::warn!` records what was recovered or dropped.
+    // Gated on `allow_eof_recovery` so this only runs on finalize / non-streaming
+    // aggregate paths — never on a mid-stream chunk. Firing mid-stream would
+    // claim a "complete" call before the end token arrives (same hazard as
+    // `allow_eof_recovery` itself), which strands the trailing `</TOOLCALL>` as
+    // leaked normal_text on the next chunk.
+    if config.strip_markup_on_recovery && config.allow_eof_recovery {
+        // Only intervene when a wrapper marker is actually present. Plain text
+        // with no tool-call marker is a normal (non-tool) response and MUST
+        // pass through unchanged — it must never be dropped or treated as a
+        // failed tool call.
+        let has_marker = config
+            .tool_call_start_tokens
+            .iter()
+            .chain(config.tool_call_end_tokens.iter())
+            .any(|token| !token.is_empty() && trimmed.contains(token.as_str()));
+
+        if has_marker {
+            // Strip wrapper markers only at the boundaries — start tokens from
+            // the front, end tokens from the end — never globally. A global
+            // replace would corrupt literal marker text inside a JSON string
+            // value (e.g. an argument that mentions "</TOOLCALL>"); boundary
+            // stripping leaves the JSON bytes handed to serde untouched.
+            //
+            // Base the payload on `json` (already split from `normal_text` by
+            // the extraction stages above), not `trimmed`. With a preamble like
+            // `Let me check.[{...}]</TOOLCALL>`, `trimmed` re-glues the prose
+            // onto the JSON so it never parses and the call is dropped; `json`
+            // is just `[{...}]</TOOLCALL>` and recovers. `has_marker` still
+            // checks `trimmed` because extraction may have already consumed the
+            // markers from `json`.
+            let mut payload = json;
+            loop {
+                payload = payload.trim();
+                match config
+                    .tool_call_start_tokens
+                    .iter()
+                    .filter(|token| !token.is_empty())
+                    .find_map(|token| payload.strip_prefix(token.as_str()))
+                {
+                    Some(rest) => payload = rest,
+                    None => break,
+                }
+            }
+            loop {
+                payload = payload.trim();
+                match config
+                    .tool_call_end_tokens
+                    .iter()
+                    .filter(|token| !token.is_empty())
+                    .find_map(|token| payload.strip_suffix(token.as_str()))
+                {
+                    Some(rest) => payload = rest,
+                    None => break,
+                }
+            }
+            let payload = payload.trim();
+
+            let calls = parse_calls(payload)?.unwrap_or_default();
+
+            if !calls.is_empty() {
+                tracing::warn!(
+                    recovered_calls = calls.len(),
+                    "Recovered {} tool call(s) from malformed tool-call framing; stripped wrapper markers instead of leaking them into normal_text",
+                    calls.len()
+                );
+                return Ok((calls, Some(String::new())));
+            }
+
+            tracing::warn!(
+                dropped_content = %trimmed,
+                "Dropping unparseable tool-call content; wrapper markers stripped, no valid tool call recovered"
+            );
+            return Ok((vec![], Some(String::new())));
+        }
+    }
+
+    Ok((vec![], Some(trimmed.to_string())))
 }
 
 pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig) -> bool {

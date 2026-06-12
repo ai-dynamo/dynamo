@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::config::RouterQueueDepthTiers;
+use super::filter::RoutingEligibility;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, read_overlap_refresh_after,
     refresh_overlap,
@@ -20,13 +21,13 @@ use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, RoutingEligibility, SchedulingContext,
-    SchedulingRequest, SchedulingResponse, pinned_worker_config,
+    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
+    SchedulingResponse,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
 };
+use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -273,22 +274,21 @@ impl<
     /// `(0, 1)` for workers not yet known to discovery.
     pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
         let discovery_workers = self.workers_with_configs.borrow();
-        let dp_range: std::collections::HashMap<u64, (u32, u32)> = worker_ids
-            .iter()
-            .map(|&id| {
-                let (dp_start, dp_size) = discovery_workers
-                    .get(&id)
-                    .map(|runtime_config| {
-                        (
-                            runtime_config.data_parallel_start_rank(),
-                            runtime_config.data_parallel_size(),
-                        )
-                    })
-                    .unwrap_or((0, 1));
-                (id, (dp_start, dp_size))
-            })
-            .collect();
-        self.slots.register_external_workers(&dp_range);
+        for &worker_id in worker_ids {
+            let (dp_start, dp_size) = discovery_workers
+                .get(&worker_id)
+                .map(|runtime_config| {
+                    (
+                        runtime_config.data_parallel_start_rank(),
+                        runtime_config.data_parallel_size(),
+                    )
+                })
+                .unwrap_or((0, 1));
+            let range = WorkerDpRange::new(worker_id, dp_start, dp_size);
+            if let Err(error) = self.slots.upsert_worker(range) {
+                tracing::warn!(worker_id, %error, "Invalid externally-provided worker topology");
+            }
+        }
     }
 
     /// Enqueue a new request.
@@ -568,15 +568,11 @@ impl<
     }
 
     /// Run the full scheduling pipeline for a single request:
-    /// compute potential load -> select worker -> respond -> book via add_request.
+    /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
-            request.token_seq.as_deref(),
-            &request.prefill_token_deltas(),
-            decay_now,
-        );
-        request.decode_blocks = decode_blocks;
-        request.prefill_tokens = prefill_tokens;
+        request.worker_loads = self
+            .slots
+            .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
         let selection = {
             let workers = self.workers_with_configs.borrow();
@@ -598,18 +594,22 @@ impl<
             }
         };
 
-        request.respond(Ok(SchedulingResponse {
+        let response = SchedulingResponse {
             best_worker: selection.worker,
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
-        }));
+        };
 
         if !request.update_states {
+            request.respond(Ok(response));
             return;
         }
 
-        let Some(request_id) = request.maybe_request_id else {
+        let Some(request_id) = request.maybe_request_id.clone() else {
             tracing::error!("No request_id provided to add_request to the slot tracker");
+            request.respond(Err(KvSchedulerError::BookingFailed(
+                "tracked scheduling request did not include a request_id".to_string(),
+            )));
             return;
         };
 
@@ -619,19 +619,46 @@ impl<
             request.track_prefill_tokens,
         );
 
-        if let Err(e) = self.slots.add_request(
-            SequenceRequest {
-                request_id: request_id.clone(),
-                token_sequence: request.token_seq,
-                track_prefill_tokens: request.track_prefill_tokens,
-                expected_output_tokens: request.expected_output_tokens,
-                prefill_load_hint,
-                worker: selection.worker,
-                lora_name: request.lora_name.clone(),
-            },
-            Instant::now(),
-        ) {
-            tracing::warn!("Failed to add request {request_id}: {e}");
+        let sequence_request = SequenceRequest {
+            request_id,
+            token_sequence: request.token_seq.take(),
+            track_prefill_tokens: request.track_prefill_tokens,
+            expected_output_tokens: request.expected_output_tokens,
+            prefill_load_hint,
+            worker: selection.worker,
+            lora_name: request.lora_name.take(),
+        };
+        self.book_and_respond(request, sequence_request, response);
+    }
+
+    fn book_and_respond(
+        &self,
+        mut request: SchedulingRequest,
+        sequence_request: SequenceRequest,
+        response: SchedulingResponse,
+    ) {
+        if request.response_is_closed() {
+            tracing::debug!(
+                request_id = %sequence_request.request_id,
+                "Skipping scheduler booking for cancelled request"
+            );
+            return;
+        }
+
+        let request_id = sequence_request.request_id.clone();
+        if let Err(error) = self.slots.add_request(sequence_request, Instant::now()) {
+            tracing::warn!(%request_id, %error, "Failed to book scheduler state");
+            request.respond(Err(KvSchedulerError::BookingFailed(error.to_string())));
+            return;
+        }
+
+        if request.respond(Ok(response)) {
+            return;
+        }
+
+        tracing::debug!(%request_id, "Rolling back undelivered scheduler booking");
+        if let Err(error) = self.slots.free(&request_id, Instant::now()) {
+            tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
     }
 
@@ -706,12 +733,9 @@ impl<
         let configs = self.workers_with_configs.borrow();
 
         if let Some(worker) = eligibility.pinned_worker() {
-            let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
+            let Ok(config) = eligibility.validate_worker_rank(&configs, worker) else {
                 return false;
             };
-            if !eligibility.allows_worker(worker.worker_id, config) {
-                return false;
-            }
 
             let max_batched = config
                 .max_num_batched_tokens()
@@ -721,26 +745,16 @@ impl<
         }
 
         let mut checked_any = false;
-        for (&worker_id, config) in configs.iter() {
-            if !eligibility.allows_worker(worker_id, config) {
-                continue;
-            }
-            let dp_size = config.data_parallel_size();
-            let dp_start_rank = config.data_parallel_start_rank();
+        let has_available = eligibility.any_eligible_worker_rank(&configs, |worker, config| {
+            checked_any = true;
             let max_batched = config
                 .max_num_batched_tokens()
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+            (tokens as f64) <= threshold * (max_batched as f64)
+        });
 
-            for dp_rank in dp_start_rank..dp_start_rank + dp_size {
-                checked_any = true;
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-                if (tokens as f64) <= threshold * (max_batched as f64) {
-                    return false;
-                }
-            }
-        }
-        checked_any
+        checked_any && !has_available
     }
 }
 
@@ -757,9 +771,12 @@ mod tests {
 
     use super::*;
     use crate::config::RouterQueueDepthByMissingIslTier;
-    use crate::protocols::{RouterBackpressureReason, WorkerSelectionResult, WorkerWithDpRank};
+    use crate::protocols::{
+        ActiveLoad, ActiveSequenceEvent, RouterBackpressureReason, WorkerSelectionResult,
+        WorkerWithDpRank,
+    };
     use crate::scheduling::types::KvSchedulerError;
-    use crate::sequences::ActiveSequencesMultiWorker;
+    use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::{DefaultWorkerSelector, WorkerSelector};
 
@@ -780,6 +797,28 @@ mod tests {
         ) -> anyhow::Result<Duration> {
             Ok(self.duration)
         }
+    }
+
+    type SchedulingResponseReceiver =
+        tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>;
+
+    struct DropResponseOnLoadPublisher {
+        response_rx: Arc<StdMutex<Option<SchedulingResponseReceiver>>>,
+    }
+
+    impl SequencePublisher for DropResponseOnLoadPublisher {
+        fn publish_event(
+            &self,
+            _event: &ActiveSequenceEvent,
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
+            std::future::ready(Ok(()))
+        }
+
+        fn publish_load(&self, _load: ActiveLoad) {
+            self.response_rx.lock().unwrap().take();
+        }
+
+        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
     }
 
     #[derive(Default)]
@@ -822,24 +861,31 @@ mod tests {
                 rendezvous.wait_for_peer();
             }
 
-            let Some(worker) = workers
-                .iter()
-                .filter(|(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
-                .flat_map(|(worker_id, config)| {
-                    let dp_start = config.data_parallel_start_rank();
-                    let dp_end = dp_start + config.data_parallel_size();
-                    (dp_start..dp_end)
-                        .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
-                })
-                .min_by_key(|worker| {
-                    (
-                        request.prefill_tokens_for(*worker),
-                        request.decode_blocks.get(worker).copied().unwrap_or(0),
-                        worker.worker_id,
-                        worker.dp_rank,
+            let mut best_worker = None;
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                let load = request.worker_load_for(worker);
+                let potential_prefill_tokens = if request.track_prefill_tokens {
+                    load.active_prefill_tokens.saturating_add(
+                        request
+                            .isl_tokens
+                            .saturating_sub(request.effective_cached_tokens_for(worker)),
                     )
-                })
-            else {
+                } else {
+                    0
+                };
+                let potential_decode_blocks = load.potential_decode_blocks();
+                let key = (
+                    potential_prefill_tokens,
+                    potential_decode_blocks,
+                    worker.worker_id,
+                    worker.dp_rank,
+                );
+                if best_worker.is_none_or(|(_, best_key)| key < best_key) {
+                    best_worker = Some((worker, key));
+                }
+            });
+
+            let Some((worker, _)) = best_worker else {
                 return Err(KvSchedulerError::NoEndpoints);
             };
 
@@ -1225,8 +1271,7 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks: HashMap::new(),
             effective_cached_tokens: HashMap::new(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
@@ -1240,6 +1285,71 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cancelled_pending_request_is_not_booked() {
+        let isl = 512;
+        let (queue, slots) = make_queue(1, 16, isl, Some(0.0));
+
+        let (first, first_rx) = make_request("first", isl);
+        queue.enqueue(first).await;
+        first_rx
+            .await
+            .expect("first response sender dropped")
+            .expect("first request should be scheduled");
+
+        let (cancelled, cancelled_rx) = make_request("cancelled", isl);
+        queue.enqueue(cancelled).await;
+        assert_eq!(queue.pending_count(), 1);
+        drop(cancelled_rx);
+
+        slots.free(&"first".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_failed_response_delivery_rolls_back_booking() {
+        let isl = 512;
+        let response_rx = Arc::new(StdMutex::new(None));
+        let publisher = DropResponseOnLoadPublisher {
+            response_rx: Arc::clone(&response_rx),
+        };
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            publisher,
+            16,
+            HashMap::from([(0, (0, 1))]),
+            false,
+            0,
+            "test",
+        ));
+        let (_cfg_tx, cfg_rx) = watch::channel(HashMap::from([(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        )]));
+        let queue = SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            None,
+            RouterQueueDepthTiers::unbounded_cap(),
+            16,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+        );
+
+        let (request, receiver) = make_request("delivery-race", isl);
+        *response_rx.lock().unwrap() = Some(receiver);
+        queue.enqueue(request).await;
+
+        assert!(response_rx.lock().unwrap().is_none());
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1618,10 +1728,8 @@ mod tests {
         );
 
         // Lazily register two workers in the slot tracker (EPP supplies pod list)
-        let mut dp_range = std::collections::HashMap::new();
-        dp_range.insert(100_u64, (0_u32, 1_u32));
-        dp_range.insert(200_u64, (0_u32, 1_u32));
-        slots.register_external_workers(&dp_range);
+        slots.upsert_worker(WorkerDpRange::new(100, 0, 1)).unwrap();
+        slots.upsert_worker(WorkerDpRange::new(200, 0, 1)).unwrap();
 
         // Also update the config watch so the selector can see these workers
         let mut configs = HashMap::new();
@@ -1667,9 +1775,7 @@ mod tests {
         let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Register worker 10 in slots and config
-        let mut dp1 = std::collections::HashMap::new();
-        dp1.insert(10_u64, (0_u32, 1_u32));
-        slots.register_external_workers(&dp1);
+        slots.upsert_worker(WorkerDpRange::new(10, 0, 1)).unwrap();
 
         let mut configs = HashMap::new();
         configs.insert(
@@ -1682,9 +1788,7 @@ mod tests {
         cfg_tx.send(configs.clone()).unwrap();
 
         // Register worker 20 (worker 10 must NOT be evicted)
-        let mut dp2 = std::collections::HashMap::new();
-        dp2.insert(20_u64, (0_u32, 1_u32));
-        slots.register_external_workers(&dp2);
+        slots.upsert_worker(WorkerDpRange::new(20, 0, 1)).unwrap();
 
         configs.insert(
             20_u64,
@@ -1725,11 +1829,11 @@ mod tests {
         let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Register three workers
-        let mut dp = std::collections::HashMap::new();
-        dp.insert(1_u64, (0_u32, 1_u32));
-        dp.insert(2_u64, (0_u32, 1_u32));
-        dp.insert(3_u64, (0_u32, 1_u32));
-        slots.register_external_workers(&dp);
+        for worker_id in 1..=3 {
+            slots
+                .upsert_worker(WorkerDpRange::new(worker_id, 0, 1))
+                .unwrap();
+        }
 
         let mut configs = HashMap::new();
         for &id in &[1_u64, 2_u64, 3_u64] {
@@ -1755,8 +1859,7 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks: HashMap::new(),
             effective_cached_tokens: HashMap::new(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,

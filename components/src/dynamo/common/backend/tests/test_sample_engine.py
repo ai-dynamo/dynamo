@@ -162,3 +162,36 @@ async def test_decode_without_probe_marker_still_requires_prefill_result():
     )
     with pytest.raises(ValueError, match="prefill_result"):
         await _collect(engine, {"token_ids": [1]})
+
+
+async def test_logprobs_absent_when_not_requested():
+    engine = SampleLLMEngine(max_tokens=2, delay=0.0)
+    chunks = await _collect(engine, {"token_ids": [1]})
+    for chunk in chunks:
+        assert "log_probs" not in chunk
+        assert "top_logprobs" not in chunk
+
+
+async def test_logprobs_zero_emits_selected_only():
+    # logprobs=0 means "selected token only" — no top_logprobs.
+    engine = SampleLLMEngine(max_tokens=2, delay=0.0)
+    chunks = await _collect(
+        engine, {"token_ids": [1], "output_options": {"logprobs": 0}}
+    )
+    assert all("log_probs" in c for c in chunks)
+    assert all("top_logprobs" not in c for c in chunks)
+    assert all(len(c["log_probs"]) == len(c["token_ids"]) for c in chunks)
+
+
+async def test_logprobs_with_top_k_emits_alternatives():
+    engine = SampleLLMEngine(max_tokens=2, delay=0.0)
+    chunks = await _collect(
+        engine, {"token_ids": [1], "output_options": {"logprobs": 3}}
+    )
+    for chunk in chunks:
+        assert len(chunk["log_probs"]) == len(chunk["token_ids"])
+        assert len(chunk["top_logprobs"]) == len(chunk["token_ids"])
+        for position in chunk["top_logprobs"]:
+            # k=3 -> selected + 3 alternatives = 4 entries; ranks 1..4.
+            assert len(position) == 4
+            assert [entry["rank"] for entry in position] == [1, 2, 3, 4]

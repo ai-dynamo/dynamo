@@ -25,6 +25,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
+    get_kv_indexer_test_env,
     wait_for_indexer_workers_active,
 )
 from tests.utils.constants import DefaultPort
@@ -340,6 +341,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="dynamo-kv-indexer",
+            env=get_kv_indexer_test_env(),
         )
         logger.info(
             "Starting standalone indexer on port %s", self._standalone_indexer_port
@@ -472,6 +474,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="dynamo-kv-indexer-b",
+            env=get_kv_indexer_test_env(),
         )
         logger.info(
             "Starting standalone indexer B on port %s with peer http://localhost:%s",
@@ -645,7 +648,7 @@ def test_router_decisions_vllm_disagg(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
+@pytest.mark.timeout(690)  # 3x ~230s under new scheduler (3d1554f)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [

@@ -105,7 +105,29 @@ pub(crate) fn build_fpm_snapshot(
         sum_queued_decode_kv_tokens: queued_decode_acc.sum as u64,
         var_queued_decode_kv_tokens: queued_decode_acc.variance(),
         wall_time_secs,
+        ..Default::default()
     }
+}
+
+/// Return (visible output tokens, request-forwards) for accept-length
+/// accounting. One output signal corresponds to one visible token; multiple
+/// signals with the same UUID in a pass are an MTP/spec-decode burst.
+pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, usize) {
+    let visible_tokens = output_signals
+        .iter()
+        .filter(|signal| !signal.rejected)
+        .count();
+    if visible_tokens == 0 {
+        return (0, 0);
+    }
+
+    let request_forwards = output_signals
+        .iter()
+        .filter(|signal| !signal.rejected)
+        .map(|signal| signal.uuid)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    (visible_tokens, request_forwards)
 }
 
 pub(crate) use sglang::SglangCore;
@@ -133,6 +155,10 @@ pub(crate) struct EnginePassResult {
     pub(crate) kv_events: Vec<RouterEvent>,
     /// Forward pass metrics snapshot for this iteration.
     pub(crate) fpm: Option<ForwardPassSnapshot>,
+    /// Visible output tokens emitted by this pass for accept-length accounting.
+    pub(crate) accept_length_output_tokens: usize,
+    /// Number of request decode forwards that emitted those visible tokens.
+    pub(crate) accept_length_decode_forwards: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +249,10 @@ impl EngineScheduler {
         fpm_publisher: FpmPublisher,
     ) -> Self {
         match args.engine_type {
-            crate::common::protocols::EngineType::Vllm => {
+            // TRT-LLM reuses the vLLM scheduler; the GUARANTEED_NO_EVICT
+            // policy is carried in `args` and read by `VllmCore` per pass.
+            crate::common::protocols::EngineType::Vllm
+            | crate::common::protocols::EngineType::Trtllm => {
                 Self::Vllm(Scheduler::new_with_admission(
                     args,
                     dp_rank,
@@ -323,11 +352,14 @@ pub fn init_kvbm_offline(
     tracing::debug!(
         num_g2_blocks = config.num_g2_blocks,
         num_g3_blocks = config.num_g3_blocks,
+        g4_enabled = config.enable_g4_storage,
         offload_batch_size = config.offload_batch_size,
         bw_g1_to_g2_gbps = config.bandwidth_g1_to_g2_gbps,
         bw_g2_to_g1_gbps = config.bandwidth_g2_to_g1_gbps,
         bw_g2_to_g3_gbps = config.bandwidth_g2_to_g3_gbps,
         bw_g3_to_g2_gbps = config.bandwidth_g3_to_g2_gbps,
+        bw_g2_to_g4_gbps = config.bandwidth_g2_to_g4_gbps,
+        bw_g4_to_g2_gbps = config.bandwidth_g4_to_g2_gbps,
         "kvbm-offload: init_kvbm_offline attaching engine"
     );
     let engine = build_owned_offload_engine(config)?;

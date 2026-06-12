@@ -11,7 +11,6 @@ use crate::http::service::Metrics;
 use crate::http::service::service_v2 as http_service;
 
 use crate::discovery::ModelManager;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::tensor::TensorModelConfig;
 use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use crate::request_template::RequestTemplate;
@@ -300,8 +299,10 @@ enum Config {
 }
 
 impl Config {
-    fn from_runtime_config(runtime_config: &ModelRuntimeConfig) -> Result<Config, anyhow::Error> {
-        if let Some(tensor_model_config) = runtime_config.tensor_model_config.as_ref() {
+    fn from_tensor_model_config(
+        tensor_model_config: Option<&TensorModelConfig>,
+    ) -> Result<Config, anyhow::Error> {
+        if let Some(tensor_model_config) = tensor_model_config {
             if let Some(triton_model_config) = tensor_model_config.triton_model_config.as_ref() {
                 let model_config = ModelConfig::decode(triton_model_config.as_slice())?;
                 Ok(Config::Triton(model_config))
@@ -320,8 +321,8 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
-        let model = request.get_ref().model_name.clone();
-        let request = request.into_inner();
+        let (metadata, _extensions, request) = request.into_parts();
+        let model = request.model_name.clone();
         let request_id = request.id.clone();
 
         // [gluo TODO] refactor to reuse code, inference logic is largely the same
@@ -330,7 +331,9 @@ impl GrpcInferenceService for KserveService {
             let tensor_request: NvCreateTensorRequest = NvCreateTensorRequest::try_from(request)
                 .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
-            let stream = tensor_response_stream(self.state_clone(), tensor_request, false).await?;
+            let stream =
+                tensor_response_stream(self.state_clone(), tensor_request, false, &metadata)
+                    .await?;
 
             let tensor_response = ExtendedNvCreateTensorResponse {
                 response: NvCreateTensorResponse::from_annotated_stream(stream)
@@ -378,7 +381,7 @@ impl GrpcInferenceService for KserveService {
         }
 
         let (stream, parsing_options) =
-            completion_response_stream(self.state_clone(), completion_request).await?;
+            completion_response_stream(self.state_clone(), completion_request, &metadata).await?;
 
         let completion_response =
             NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -403,7 +406,8 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<tonic::Streaming<ModelInferRequest>>,
     ) -> Result<Response<Self::ModelStreamInferStream>, Status> {
-        let mut request_stream = request.into_inner();
+        let (metadata, _extensions, request_stream) = request.into_parts();
+        let mut request_stream = request_stream;
         let state = self.state_clone();
         let template = self.request_template.clone();
         let output = async_stream::try_stream! {
@@ -437,7 +441,13 @@ impl GrpcInferenceService for KserveService {
                         Status::invalid_argument(format!("Failed to parse request: {}", e))
                     })?;
 
-                    let stream = tensor_response_stream(state.clone(), tensor_request, true).await?;
+                    let stream = tensor_response_stream(
+                        state.clone(),
+                        tensor_request,
+                        true,
+                        &metadata,
+                    )
+                    .await?;
 
                     pin_mut!(stream);
                     while let Some(delta) = stream.next().await {
@@ -494,7 +504,12 @@ impl GrpcInferenceService for KserveService {
 
                 let streaming = completion_request.inner.stream.unwrap_or(false);
 
-                let (stream, parsing_options) = completion_response_stream(state.clone(), completion_request).await?;
+                let (stream, parsing_options) = completion_response_stream(
+                    state.clone(),
+                    completion_request,
+                    &metadata,
+                )
+                .await?;
 
                 if streaming {
                     pin_mut!(stream);
@@ -562,12 +577,13 @@ impl GrpcInferenceService for KserveService {
             .find(|card| request_model_name == &card.display_name)
         {
             if card.model_type.supports_tensor() {
-                let config = Config::from_runtime_config(&card.runtime_config).map_err(|e| {
-                    Status::invalid_argument(format!(
-                        "Model '{}' has type Tensor but: {}",
-                        request_model_name, e
-                    ))
-                })?;
+                let config = Config::from_tensor_model_config(card.tensor_model_config.as_ref())
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "Model '{}' has type Tensor but: {}",
+                            request_model_name, e
+                        ))
+                    })?;
                 match config {
                     Config::Triton(model_config) => {
                         return Ok(Response::new(ModelMetadataResponse {
@@ -681,12 +697,13 @@ impl GrpcInferenceService for KserveService {
             .find(|card| request_model_name == &card.display_name)
         {
             if card.model_type.supports_tensor() {
-                let config = Config::from_runtime_config(&card.runtime_config).map_err(|e| {
-                    Status::invalid_argument(format!(
-                        "Model '{}' has type Tensor but: {}",
-                        request_model_name, e
-                    ))
-                })?;
+                let config = Config::from_tensor_model_config(card.tensor_model_config.as_ref())
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "Model '{}' has type Tensor but: {}",
+                            request_model_name, e
+                        ))
+                    })?;
                 match config {
                     Config::Triton(model_config) => {
                         return Ok(Response::new(ModelConfigResponse {
@@ -803,5 +820,114 @@ impl GrpcInferenceService for KserveService {
                 .manager()
                 .is_model_ready_to_serve(request_model_name),
         }))
+    }
+}
+
+#[cfg(test)]
+mod readiness_gate_tests {
+    use super::inference::grpc_inference_service_server::GrpcInferenceService;
+    use super::inference::{ModelReadyRequest, ServerReadyRequest};
+    use super::*;
+    use crate::discovery::WorkerSet;
+    use crate::model_card::ModelDeploymentCard;
+    use crate::worker_type::WorkerType;
+    use tonic::Request;
+
+    /// A WorkerSet with an explicit role/needs, a live worker, and a chat engine
+    /// attached. `namespace` is the WorkerSet's own namespace (sets sharing it
+    /// form one deployment); the caller passes a distinct DashMap key.
+    fn chat_ws_with_role(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+    ) -> WorkerSet {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        // Watch receiver keeps its last value after the sender drops → count 1.
+        let (_tx, rx) = tokio::sync::watch::channel(vec![1u64]);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        ws
+    }
+
+    fn model_ready_req(name: &str) -> Request<ModelReadyRequest> {
+        Request::new(ModelReadyRequest {
+            name: name.to_string(),
+            version: String::new(),
+        })
+    }
+
+    /// KServe `ModelReady` / `ServerReady` must reflect the namespace
+    /// completeness gate: a live decode-only WorkerSet with a chat engine but no
+    /// prefill peer reports NOT ready (even though an engine is attached), and
+    /// flips to ready once the prefill peer joins the same namespace. Drives the
+    /// real gRPC handlers end to end through `is_model_ready_to_serve`.
+    #[tokio::test]
+    async fn model_ready_reflects_worker_set_completeness() {
+        let svc = KserveService::builder().build().unwrap();
+        let mm = svc.model_manager();
+
+        // Incomplete deployment: decode-only (needs a prefill peer), live + chat engine.
+        mm.add_worker_set(
+            "llama",
+            "dep1",
+            chat_ws_with_role(
+                "dep1",
+                "mdc-d",
+                WorkerType::Decode,
+                vec![vec![WorkerType::Prefill]],
+            ),
+        );
+
+        assert!(
+            !svc.model_ready(model_ready_req("llama"))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "decode-only (missing prefill) must report KServe ModelReady=false"
+        );
+        assert!(
+            !svc.server_ready(Request::new(ServerReadyRequest {}))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "no complete worker set → ServerReady=false"
+        );
+
+        // Prefill peer joins the SAME namespace (distinct DashMap key) → complete.
+        mm.add_worker_set(
+            "llama",
+            "dep1:prefill",
+            chat_ws_with_role(
+                "dep1",
+                "mdc-p",
+                WorkerType::Prefill,
+                vec![vec![WorkerType::Decode]],
+            ),
+        );
+
+        assert!(
+            svc.model_ready(model_ready_req("llama"))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "completing the worker set must flip KServe ModelReady=true"
+        );
+        assert!(
+            svc.server_ready(Request::new(ServerReadyRequest {}))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "a complete worker set → ServerReady=true"
+        );
     }
 }

@@ -8,24 +8,68 @@ use rustc_hash::FxHashSet;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 
 use super::PrefillTokenDeltas;
-use super::prefill_tracker::PrefillLoadSnapshot;
+use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
 use super::prompt_membership_trie::{PromptMembershipTrie, WorkerLookup};
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::protocols::WorkerWithDpRank;
 
+/// Ephemeral, request-specific view of worker load.
+///
+/// Values are materialized for one incoming request at a specific instant and
+/// should be passed to worker selection immediately. Do not persist, reuse, or
+/// publish this projection as durable worker state.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerLoadProjection {
+    pub active_prefill_tokens: usize,
+    pub active_decode_blocks: usize,
+    /// Request blocks not already shared with active sequences on this worker.
+    ///
+    /// These blocks may still exist in an inactive cache; this field describes
+    /// additional active block footprint, not cache misses.
+    pub additional_active_blocks: usize,
+}
+
+impl WorkerLoadProjection {
+    pub fn potential_decode_blocks(self) -> usize {
+        self.active_decode_blocks + self.additional_active_blocks
+    }
+}
+
+pub type PotentialLoadMaps = (
+    FxHashMap<WorkerWithDpRank, usize>,
+    FxHashMap<WorkerWithDpRank, usize>,
+    Option<FxHashMap<WorkerWithDpRank, usize>>,
+);
+
+/// Reusable snapshot of a worker's currently tracked execution state.
+///
+/// `active_blocks` is the worker's unique active decode load in blocks.
+/// `prefill` retains the decay state needed to evaluate active prefill load in
+/// tokens at a caller-provided instant. Unlike [`WorkerLoadProjection`], this
+/// snapshot contains no incoming-request-specific state.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
+    pub(super) active_requests: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
 
 impl WorkerLoadSnapshot {
     pub(super) fn active_tokens(&self, decay_now: Instant) -> usize {
         self.prefill.active_tokens_at(decay_now)
+    }
+
+    pub(super) fn modeled_remaining_prefill_time_ms(
+        &self,
+        now: Instant,
+    ) -> Result<u64, PrefillTimeLoadError> {
+        self.prefill.modeled_remaining_prefill_time_ms_at(now)
     }
 }
 
@@ -38,6 +82,8 @@ pub(super) struct PromptRegistry {
     // never existed atomically and make a suboptimal routing choice.
     membership: PromptMembershipTrie,
     loads: DashMap<WorkerWithDpRank, WorkerLoadSnapshot, FxBuildHasher>,
+    #[cfg(test)]
+    cleanup_attempts: AtomicUsize,
 }
 
 impl Default for PromptRegistry {
@@ -45,6 +91,8 @@ impl Default for PromptRegistry {
         Self {
             membership: PromptMembershipTrie::new(),
             loads: DashMap::with_hasher(FxBuildHasher),
+            #[cfg(test)]
+            cleanup_attempts: AtomicUsize::new(0),
         }
     }
 }
@@ -73,6 +121,17 @@ impl PromptRegistry {
         delta: PromptMembershipDelta,
         load: WorkerLoadSnapshot,
     ) {
+        self.apply_membership_delta_and_load_without_cleanup(worker, lookup, delta, load);
+        self.maybe_cleanup();
+    }
+
+    pub(super) fn apply_membership_delta_and_load_without_cleanup(
+        &self,
+        worker: WorkerWithDpRank,
+        lookup: &Arc<parking_lot::RwLock<WorkerLookup>>,
+        delta: PromptMembershipDelta,
+        load: WorkerLoadSnapshot,
+    ) {
         for remove in delta.removes {
             self.membership.remove_chain(worker, lookup, &remove.hashes);
         }
@@ -81,7 +140,17 @@ impl PromptRegistry {
                 .store_chain(worker, lookup, store.parent, &store.hashes);
         }
         self.loads.insert(worker, load);
+    }
+
+    pub(super) fn maybe_cleanup(&self) {
+        #[cfg(test)]
+        self.cleanup_attempts.fetch_add(1, Ordering::Relaxed);
         self.membership.maybe_cleanup();
+    }
+
+    #[cfg(test)]
+    pub(super) fn cleanup_attempts(&self) -> usize {
+        self.cleanup_attempts.load(Ordering::Relaxed)
     }
 
     pub(super) fn apply_topology_change(&self, change: WorkerTopologyChange) {
@@ -97,20 +166,19 @@ impl PromptRegistry {
         self.membership.maybe_cleanup();
     }
 
-    fn project_loads_from_membership(
+    fn project_loads_from_membership<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         query_len: usize,
         matched_depth: &FxHashMap<WorkerWithDpRank, usize>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-    ) {
+    ) -> PotentialLoadMaps {
         let mut potential_blocks =
             FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
         let mut potential_tokens =
             FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
+        let mut active_requests = INCLUDE_ACTIVE_REQUESTS
+            .then(|| FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher));
 
         for entry in &self.loads {
             let worker = *entry.key();
@@ -122,28 +190,54 @@ impl PromptRegistry {
 
             potential_blocks.insert(worker, load.active_blocks + new_blocks);
             potential_tokens.insert(worker, active_tokens + added_tokens);
+            if let Some(active_requests) = active_requests.as_mut() {
+                active_requests.insert(worker, load.active_requests);
+            }
         }
 
-        (potential_blocks, potential_tokens)
+        (potential_blocks, potential_tokens, active_requests)
     }
 
-    pub(super) fn potential_blocks_and_tokens(
+    pub(super) fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-    ) {
+    ) -> PotentialLoadMaps {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
-        self.project_loads_from_membership(
+        self.project_loads_from_membership::<INCLUDE_ACTIVE_REQUESTS>(
             query_len,
             &matched_depth,
             prefill_token_deltas,
             decay_now,
         )
+    }
+
+    pub(super) fn project_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let query_len = token_sequence.map_or(0, |query| query.len());
+        let matched_depth = self.membership.compute_overlap_depths(token_sequence);
+        let mut projections = FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
+
+        for entry in &self.loads {
+            let worker = *entry.key();
+            let load = *entry.value();
+            let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
+            projections.insert(
+                worker,
+                WorkerLoadProjection {
+                    active_prefill_tokens: load.active_tokens(decay_now),
+                    active_decode_blocks: load.active_blocks,
+                    additional_active_blocks: query_len.saturating_sub(overlap_depth),
+                },
+            );
+        }
+
+        projections
     }
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
@@ -153,10 +247,32 @@ impl PromptRegistry {
             .collect()
     }
 
+    pub(super) fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.loads
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().active_requests))
+            .collect()
+    }
+
     pub(super) fn active_tokens(&self, decay_now: Instant) -> HashMap<WorkerWithDpRank, usize> {
         self.loads
             .iter()
             .map(|entry| (*entry.key(), entry.value().active_tokens(decay_now)))
+            .collect()
+    }
+
+    pub(super) fn modeled_remaining_prefill_times_ms(
+        &self,
+        now: Instant,
+    ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
+        self.loads
+            .iter()
+            .map(|entry| {
+                (
+                    *entry.key(),
+                    entry.value().modeled_remaining_prefill_time_ms(now),
+                )
+            })
             .collect()
     }
 
@@ -231,6 +347,7 @@ mod tests {
     fn worker_load_snapshot(active_blocks: usize) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            active_requests: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
     }
@@ -244,6 +361,7 @@ mod tests {
     ) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            active_requests: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
                 anchored_prefill: Some(AnchoredPrefillSnapshot {
@@ -251,6 +369,8 @@ mod tests {
                     expected_prefill_duration,
                     anchored_since,
                 }),
+                total_modeled_prefill_time_ms: expected_prefill_duration
+                    .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64),
             },
         }
     }
@@ -361,13 +481,14 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = registry.potential_blocks_and_tokens(
+        let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&full_prompt),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
     }
 
     #[test]
@@ -396,7 +517,7 @@ mod tests {
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
         assert_eq!(registry.active_tokens(now).get(&worker).copied(), Some(9));
 
-        let actual = registry.potential_blocks_and_tokens(
+        let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             now,
@@ -442,7 +563,7 @@ mod tests {
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
         assert!(!registry.active_blocks().contains_key(&worker_a));
 
-        let actual = registry.potential_blocks_and_tokens(
+        let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             Instant::now(),
@@ -484,12 +605,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = registry.potential_blocks_and_tokens(
+        let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
     }
 }

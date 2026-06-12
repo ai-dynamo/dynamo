@@ -17,16 +17,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token in normal_text on malformed input (impl-defined recovery)"
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
-      vllm:
+      dynamo: &d_4_a
         calls: []
         normal_text: ''
-      sglang:
-        calls: []
-        normal_text: ''
+      vllm: *d_4_a
+      sglang: *d_4_a
   TOOLCALLING.batch.4.b:
     description: Missing close brace inside fenced JSON
     ref: dynamo
@@ -38,20 +33,23 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id002
-        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        reason: vLLM surfaces malformed DeepSeek V3 JSON arguments as a raw string while Dynamo treats the whole wrapper as malformed.
+        calls:
+        - name: get_weather
+          arguments: '{"location": "NYC"'
+        normal_text: ''
+      sglang:
+        reason: SGLang preserves the malformed DeepSeek V3 wrapper as normal_text; Dynamo strips tool-call markup from message content.
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
           ```json
           {"location": "NYC"
           ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-      vllm:
-        calls:
-        - name: get_weather
-          arguments: '{"location": "NYC"'
-        normal_text: ''
-      sglang: *id002
   TOOLCALLING.batch.4.c:
     description: Missing function name token
     ref: dynamo
@@ -63,23 +61,17 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
+      dynamo: &d_4_c
         calls: []
-        normal_text: |-
-          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
-          ```json
-          {"location": "NYC"}
-          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        normal_text: ''
       vllm:
+        reason: vLLM recovers a call with an empty function name when the arguments are valid; Dynamo treats the missing name as malformed.
         calls:
         - name: ''
           arguments:
             location: NYC
         normal_text: ''
-      sglang:
-        calls: []
-        normal_text: ''
+      sglang: *d_4_c
   TOOLCALLING.batch.4.d:
     description: Missing fenced JSON block (no ```json)
     ref: dynamo
@@ -89,16 +81,12 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
-      vllm:
+      dynamo: &d_4_d
         calls: []
         normal_text: ''
+      vllm: *d_4_d
       sglang:
+        reason: SGLang preserves the unfenced DeepSeek V3 wrapper as normal_text; Dynamo and vLLM strip malformed tool-call markup from message content.
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather

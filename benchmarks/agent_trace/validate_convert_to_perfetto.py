@@ -41,6 +41,27 @@ def check_convert_records_emits_request_stages_and_metadata():
                         "avg_itl_ms": 4.2,
                         "kv_hit_rate": 0.8,
                         "queue_depth": 2,
+                        "finish_reason_metadata": {
+                            "finish_reason": "tool_calls",
+                            "backend_finish_reason": "stop",
+                            "stop_reason": "END",
+                            "tool_calls": [
+                                {
+                                    "choice_index": 0,
+                                    "tool_call_index": 0,
+                                    "id": "call-1",
+                                    "name": "web_search",
+                                }
+                            ],
+                            "choices": [
+                                {
+                                    "choice_index": 0,
+                                    "finish_reason": "tool_calls",
+                                    "backend_finish_reason": "stop",
+                                    "stop_reason": "END",
+                                }
+                            ],
+                        },
                         "worker": {
                             "prefill_worker_id": 1,
                             "prefill_dp_rank": 0,
@@ -67,6 +88,13 @@ def check_convert_records_emits_request_stages_and_metadata():
     assert request["dur"] == 50_000
     assert request["args"]["x_request_id"] == "caller-1"
     assert request["args"]["worker.decode_worker_id"] == 2
+    assert request["args"]["finish.finish_reason"] == "tool_calls"
+    assert request["args"]["finish.backend_finish_reason"] == "stop"
+    assert request["args"]["finish.stop_reason"] == "END"
+    assert request["args"]["finish.tool_call_count"] == 1
+    assert request["args"]["finish.tool_call_names"] == "web_search"
+    assert request["args"]["finish.choice_count"] == 1
+    assert request["args"]["finish.choice_finish_reasons"] == "0:tool_calls"
 
     stage_events = [event for event in events if event.get("cat") == "dynamo.llm.stage"]
     assert {event["tid"] for event in stage_events} == {request["tid"]}

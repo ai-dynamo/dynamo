@@ -93,6 +93,9 @@ async def init_decode(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
@@ -248,6 +251,9 @@ async def init_prefill(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
 
@@ -301,6 +307,12 @@ async def init_prefill(
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Tokens,
+                # Prefill workers have no OpenAI surface — the role is carried
+                # by `worker_type=Prefill` below. We register the legacy
+                # `ModelType.Prefill` marker bit (not a surface) so an OLD
+                # frontend, which detects prefill via that bit, still routes
+                # disaggregated traffic during the cross-version rollout. A new
+                # frontend ignores it and dispatches off `worker_type`.
                 output_type=ModelType.Prefill,
                 readiness_gate=ready_event,
                 worker_type=WorkerType.Prefill,

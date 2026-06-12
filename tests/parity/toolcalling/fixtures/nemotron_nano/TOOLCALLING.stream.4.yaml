@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: nemotron_nano
-model_label: Nemotron Nano
+model_label: Nemotron Nano v3
 mode: stream
 cases:
   TOOLCALLING.stream.4.a:
