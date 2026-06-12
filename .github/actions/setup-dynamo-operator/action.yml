@@ -274,16 +274,17 @@ runs:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
         echo "::group::Wait for operator pod Ready (host namespace)"
-        # Phase 1: poll the host namespace. The vCluster syncer on AWS stalls pod-Ready
-        # propagation due to a NATS qosClass reconciliation loop, so kubectl wait against
-        # the virtual cluster never returns. The host pod status is always accurate.
+        # Poll the host namespace instead of the vCluster API. The vCluster syncer
+        # on AWS stalls pod-Ready propagation due to a NATS qosClass reconciliation
+        # loop, so kubectl wait against the virtual cluster never returns. The host
+        # pod status is always accurate.
         end=$((SECONDS + 1800))
         while true; do
           STATUS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
             | grep 'dynamo-platform-dynamo-operator-controller-manager' \
             | awk '{print $2}' | head -1)
           if [ "${STATUS}" = "1/1" ]; then
-            echo "Operator pod Ready in host namespace"
+            echo "Operator pod Ready"
             break
           fi
           if [ $SECONDS -ge $end ]; then
@@ -292,30 +293,6 @@ runs:
           fi
           echo "Waiting for operator pod... status=${STATUS:-not found}"
           sleep 15
-        done
-
-        # Phase 2: wait for the webhook service endpoint to have ready addresses inside
-        # the virtual cluster. Even after the host pod is 1/1, the vCluster syncer needs
-        # a moment to sync pod status → virtual endpoint → kube-proxy routing. Without
-        # this check the test POST hits the webhook before the ClusterIP is routable.
-        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
-        end=$((SECONDS + 300))
-        while true; do
-          READY=$(kubectl --kubeconfig="${VKUBECONFIG}" \
-            get endpoints dynamo-platform-dynamo-operator-webhook-service -n default \
-            -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)
-          if [ -n "${READY}" ]; then
-            echo "Webhook endpoint ready: ${READY}"
-            break
-          fi
-          if [ $SECONDS -ge $end ]; then
-            echo "::error::Webhook endpoint not ready after 300s — syncer may still be stalled"
-            kubectl --kubeconfig="${VKUBECONFIG}" \
-              get endpoints dynamo-platform-dynamo-operator-webhook-service -n default 2>&1 || true
-            exit 1
-          fi
-          echo "Waiting for webhook endpoint..."
-          sleep 5
         done
         echo "::endgroup::"
 
