@@ -45,7 +45,7 @@ but the binary should work for any Kubernetes resource set.
 5. Hide all non-allowlisted resources from discovery and OpenAPI so generated UI
    clients only see the intended API surface.
 6. Keep the implementation generic enough to live outside the Dynamo repository,
-   for example under `github.com/ai-dynamo/kube-rest-proxy`.
+   for example under `github.com/ai-dynamo/rest-proxy`.
 
 ## Non-Goals
 
@@ -615,7 +615,7 @@ spec:
       serviceAccountName: kube-rest-proxy
       containers:
       - name: proxy
-        image: ghcr.io/ai-dynamo/kube-rest-proxy:latest
+        image: ghcr.io/ai-dynamo/rest-proxy:latest
         args:
         - --listen=:8443
         - --external-url=https://dynamo-ui-api.example.com
