@@ -22,7 +22,7 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: I will check the weather.
+        normal_text: 'I will check the weather. '
       vllm:
         calls:
         - name: get_weather
@@ -32,6 +32,7 @@ cases:
       sglang:
         calls: []
         normal_text: I will check the weather.
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -50,6 +51,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L1858
@@ -63,7 +65,7 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: I will check the weather.
+        normal_text: 'I will check the weather. '
       vllm:
         calls:
         - name: get_weather
@@ -73,6 +75,7 @@ cases:
       sglang:
         calls: []
         normal_text: I will check the weather.
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -81,10 +84,13 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id003
+      dynamo:
         calls: []
-        normal_text: I will check the weather.
+        normal_text: 'I will check the weather. '
       vllm:
         error: 'ValueError: Only one BOT token should have been outputted'
         reason: vLLM mistral_tool_parser raises ValueError on two consecutive [TOOL_CALLS] envelopes
-      sglang: *id003
+      sglang:
+        calls: []
+        normal_text: I will check the weather.
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits; it also trims the boundary whitespace Dynamo now preserves.

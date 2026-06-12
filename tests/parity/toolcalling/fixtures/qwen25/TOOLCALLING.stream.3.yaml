@@ -11,14 +11,17 @@ cases:
     chunks:
     - delta_text: <t
     - delta_text: ool
-    - delta_text: _call
-    - delta_text: '>{"name": "'
+    - delta_text: |-
+        _call>
+        {"name": "
     - delta_text: get_weather", "argu
     - delta_text: me
     - delta_text: nts
     - delta_text: '": {"'
     - delta_text: 'location": '
-    - delta_text: '"NYC"}}</tool_call>'
+    - delta_text: |-
+        "NYC"}}
+        </tool_call>
     - delta_text: ''
       finish_reason: tool_calls
     tools:
@@ -29,14 +32,12 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
+      sglang: *id001

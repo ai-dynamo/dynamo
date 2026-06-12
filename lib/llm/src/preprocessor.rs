@@ -310,6 +310,12 @@ impl OpenAIPreprocessor {
             if let Some(ref salt) = nvext.cache_salt {
                 nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
             }
+            if let Some(ref metadata_upload) = nvext.metadata_upload {
+                nvext_passthrough.insert(
+                    "metadata_upload".to_string(),
+                    serde_json::json!(metadata_upload),
+                );
+            }
             if nvext.token_data.is_some() {
                 nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
             }
@@ -3319,7 +3325,10 @@ mod tests {
             "bad_words_token_ids": [[12, 13]],
             "nvext": {
                 "cache_salt": "step_7",
-                "extra_fields": ["completion_token_ids"]
+                "extra_fields": ["completion_token_ids"],
+                "metadata_upload": {
+                    "url": "s3://bucket/root/rollouts"
+                }
             }
         }))
         .unwrap();
@@ -3330,6 +3339,12 @@ mod tests {
         assert_eq!(
             extra_args["nvext"]["extra_fields"],
             serde_json::json!(["completion_token_ids"])
+        );
+        assert_eq!(
+            extra_args["nvext"]["metadata_upload"],
+            serde_json::json!({
+                "url": "s3://bucket/root/rollouts"
+            })
         );
         assert_eq!(extra_args["sampling_options"]["detokenize"], false);
         assert_eq!(

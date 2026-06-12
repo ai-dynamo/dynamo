@@ -389,6 +389,28 @@ pub struct RoutingConstraintsSchema {
     pub preferred_taints: std::collections::HashMap<String, f32>,
 }
 
+/// Destination for large backend metadata uploaded out of band.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataUpload {
+    #[serde(deserialize_with = "deserialize_metadata_upload_url")]
+    pub url: String,
+}
+
+fn deserialize_metadata_upload_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let url = String::deserialize(deserializer)?;
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(serde::de::Error::custom(
+            "metadata_upload.url must not be empty",
+        ));
+    }
+    Ok(url.to_string())
+}
+
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -455,6 +477,11 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Upload large backend metadata before the final response is emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub metadata_upload: Option<MetadataUpload>,
 
     /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
     /// When set, the request will be routed to this specific prefill worker.
@@ -644,6 +671,7 @@ mod tests {
         assert_eq!(nv_ext.max_thinking_tokens, None);
         assert_eq!(nv_ext.cache_salt, None);
         assert_eq!(nv_ext.extra_fields, None);
+        assert_eq!(nv_ext.metadata_upload, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
@@ -810,6 +838,44 @@ mod tests {
         assert!(!selection.timing);
         assert!(!selection.token_ids);
         assert!(selection.routed_experts);
+    }
+
+    #[test]
+    fn test_metadata_upload_parses_url() {
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "metadata_upload": {
+                "url": " s3://bucket/root/rollouts "
+            }
+        }))
+        .unwrap();
+
+        let upload = nvext.metadata_upload.as_ref().unwrap();
+        assert_eq!(upload.url, "s3://bucket/root/rollouts");
+        assert!(!NvExtResponseFieldSelection::from_nvext(Some(&nvext)).engine_data);
+
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {
+                    "url": ""
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {
+                    "url": "s3://bucket/root/rollouts",
+                    "format": "json"
+                }
+            }))
+            .is_err()
+        );
     }
 
     #[test]

@@ -958,17 +958,25 @@ mod tests {
     /// exposed via the accessor used by the openai handlers.
     #[test]
     fn test_enable_nvext_propagates_through_builder_to_state() {
-        let on = HttpService::builder().enable_nvext(true).build().unwrap();
-        assert!(on.state.nvext_enabled());
+        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
 
-        let off = HttpService::builder().enable_nvext(false).build().unwrap();
-        assert!(!off.state.nvext_enabled());
+        // `build()` ANDs the builder flag with the env var, so this test must
+        // pin the env to unset. Going through `temp_env` also serializes it
+        // against `test_dyn_enable_frontend_nvext_env_var_mirror`, which mutates
+        // the same process-global var in parallel.
+        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+            let on = HttpService::builder().enable_nvext(true).build().unwrap();
+            assert!(on.state.nvext_enabled());
 
-        let default = HttpService::builder().build().unwrap();
-        assert!(
-            default.state.nvext_enabled(),
-            "default should preserve current behavior (nvext on)"
-        );
+            let off = HttpService::builder().enable_nvext(false).build().unwrap();
+            assert!(!off.state.nvext_enabled());
+
+            let default = HttpService::builder().build().unwrap();
+            assert!(
+                default.state.nvext_enabled(),
+                "default should preserve current behavior (nvext on)"
+            );
+        });
     }
 
     /// `DYN_ENABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
