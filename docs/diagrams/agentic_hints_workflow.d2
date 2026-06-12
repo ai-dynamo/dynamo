@@ -23,7 +23,7 @@ dynamo_box: "Dynamo" {
       shape: rectangle
       style.font-size: 24
     }
-    frontend_parse: "Parses nvext → agentic_hints, cache_control" {
+    frontend_parse: "Parses nvext → agent_hints" {
       shape: text
       style.font-size: 20
     }
@@ -36,7 +36,7 @@ dynamo_box: "Dynamo" {
       shape: rectangle
       style.font-size: 24
     }
-    kv_router_text: "- Latency sensitive first\n- Priority scheduling\n- Worker selection" {
+    kv_router_text: "- Priority queueing\n- KV-aware placement\n- Worker selection" {
       shape: text
       style.font-size: 20
     }
@@ -47,7 +47,7 @@ dynamo_box: "Dynamo" {
       shape: rectangle
       style.font-size: 24
     }
-    kv_block_mgr_text: "- Cache Pinning\n- Prefetching\n- Eviction" {
+    kv_block_mgr_text: "- Priority metadata\n- KV offload\n- Eviction policy" {
       shape: text
       style.font-size: 20
     }
@@ -62,7 +62,7 @@ footer: "Every request can also include predictive metadata for 'expected future
 }
 
 # Request label in top half of arrow (intermediate node to avoid overlap with Dynamo box)
-request_label: "POST /v1/chat/completions\nbody: { ... \"nvext\": { \"agent_hints\": {...}, \"cache_control\": {...} } }" {
+request_label: "POST /v1/chat/completions\nbody: { ... \"nvext\": { \"agent_hints\": {...} } }" {
   shape: text
   style.font-size: 20
 }
