@@ -371,6 +371,12 @@ class MinioBaseModelConfig:
             # to False and the worker falls back through RDMA / GDS / Default
             # — none of which work in a local-MinIO setup.
             "MX_MODEL_URI": self.get_s3_uri(),
+            # MinIO uses path-style addressing (`http://host/bucket/key`),
+            # not virtual-hosted (`http://bucket.host/key`). Real AWS S3
+            # uses virtual by default — that's why the production DGD
+            # doesn't set this. libstreamer (runai-streamer's C++ S3 client,
+            # AWS SDK C++ based) reads this env directly.
+            "RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING": "false",
         }
 
 
