@@ -17,7 +17,8 @@ on:
       image_suffix:
         description: 'Image suffix (e.g. vllm-runtime-cuda13-amd64)'
         type: string
-        required: true
+        required: false
+        default: ''
       namespace:
         description: 'Host namespace where the vCluster lives'
         type: string
