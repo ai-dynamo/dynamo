@@ -23,7 +23,7 @@ The numbers below come from the [`qwen3.6-35b` recipe](../../recipes/qwen3.6-35b
 
 **Workload:** `Qwen/Qwen3.6-35B-A3B-FP8`, sliding-window dataset (30 users × 8 turns, window = 5, 2400×1080 base64 images, 8000 input text tokens, `max_tokens=1024`, concurrency = 30). Each turn shares 4-of-5 images with the previous turn of the same user, so repeated images dominate — the exact shape the embedding cache is designed for.
 
-See the [recipe README](../../recipes/qwen3.6-35b/README.md) for standalone deploy instructions, and the [benchmark README](../../recipes/qwen3.6-35b/benchmark/README.md) for dataset generation and the `aiperf` invocation.
+See the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/README.md) for standalone deploy instructions, and the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/benchmark/README.md) for dataset generation and the `aiperf` invocation.
 
 ## Results — H100
 
