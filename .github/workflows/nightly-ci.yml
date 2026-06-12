@@ -6,11 +6,6 @@ name: Nightly CI Pipeline
 on:
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
-  # TODO: REVERT — testing only. Triggers full nightly on push to this dev
-  # branch. MUST be removed before merging to main.
-  push:
-    branches:
-      - pvijayakrish/nightly-notifications
   workflow_dispatch:  # Allow manual triggering for testing
     inputs:
       release:
@@ -129,13 +124,6 @@ jobs:
           case "${GITHUB_EVENT_NAME}" in
             schedule)
               # cron must keep tests on so a failing nightly blocks the release.
-              echo "release=true" >> "$GITHUB_OUTPUT"
-              echo "run_tests=true" >> "$GITHUB_OUTPUT"
-              ;;
-            push)
-              # TODO: REVERT — testing only. Treats push to the dev branch like
-              # schedule so the full nightly (incl. release.yml + GitLab) runs.
-              # MUST be removed before merging to main.
               echo "release=true" >> "$GITHUB_OUTPUT"
               echo "run_tests=true" >> "$GITHUB_OUTPUT"
               ;;
@@ -261,7 +249,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
@@ -276,7 +264,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
@@ -309,11 +297,13 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
@@ -334,11 +324,13 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
@@ -354,11 +346,13 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
@@ -380,11 +374,13 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
@@ -400,6 +396,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -426,6 +424,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -439,6 +439,20 @@ jobs:
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
+
+  # ============================================================================
+  # XPU TEST JOBS
+  # ============================================================================
+
+  vllm-test-xpu:
+    name: vllm-xpu
+    needs: [resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/xpu-ci.yaml
+    with:
+      framework: vllm
+      pytest_markers: 'vllm and xpu_1'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE

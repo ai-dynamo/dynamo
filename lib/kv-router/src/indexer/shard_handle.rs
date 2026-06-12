@@ -52,11 +52,11 @@ pub trait AsyncShardHandle: Send + Sync + 'static {
     ) -> Result<(), KvRouterError>;
 
     /// Read: find block matches starting from a previously installed anchor.
-    fn find_matches_from_anchor(
-        &self,
+    fn find_matches_from_anchor<'a>(
+        &'a self,
         anchor: AnchorRef,
-        suffix: Vec<LocalBlockHash>,
-    ) -> impl Future<Output = Result<OverlapScores, KvRouterError>> + Send;
+        suffix: &'a [LocalBlockHash],
+    ) -> impl Future<Output = Result<OverlapScores, KvRouterError>> + Send + 'a;
 
     /// Remove all state associated with a worker (fire-and-forget).
     fn remove_worker(&self, worker_id: WorkerId) -> impl Future<Output = ()> + Send;
@@ -100,8 +100,9 @@ pub trait AsyncShardHandle: Send + Sync + 'static {
 /// running in the same process.
 ///
 /// * Writes are channel sends (sync, wrapped in async).
-/// * `find_matches_from_anchor` runs on a `spawn_blocking` thread since the
-///   underlying trie `find_matches_from_anchor` is synchronous.
+/// * `find_matches_from_anchor` runs inline on the caller's task, matching
+///   `ThreadPoolIndexer::find_matches` and avoiding scheduler overhead in the
+///   in-process branch-sharded hot path.
 impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
     async fn apply_event(&self, event: RouterEvent) {
         KvIndexerInterface::apply_event(self, event).await;
@@ -115,15 +116,12 @@ impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
         ThreadPoolIndexer::enqueue_anchor(self, worker, anchor)
     }
 
-    async fn find_matches_from_anchor(
-        &self,
+    async fn find_matches_from_anchor<'a>(
+        &'a self,
         anchor: AnchorRef,
-        suffix: Vec<LocalBlockHash>,
+        suffix: &'a [LocalBlockHash],
     ) -> Result<OverlapScores, KvRouterError> {
-        let backend = self.backend_arc();
-        tokio::task::spawn_blocking(move || backend.find_matches_from_anchor(anchor, &suffix))
-            .await
-            .map_err(|_| KvRouterError::IndexerOffline)?
+        self.backend().find_matches_from_anchor(anchor, suffix)
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {

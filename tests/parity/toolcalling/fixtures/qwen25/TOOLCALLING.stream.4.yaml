@@ -20,17 +20,16 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        reason: 'Incomplete call (open <tool_call>, no close): Dynamo suppresses to empty, SGLang keeps raw. Non-parity by
+          design.'
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from TOOLCALLING.batch.5.c
@@ -47,12 +46,16 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
-      sglang: *id001
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        reason: 'Incomplete call (open <tool_call>, no close): Dynamo suppresses to empty, SGLang keeps raw. Non-parity by
+          design.'
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
   TOOLCALLING.stream.4.c:
     description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
       repeated close markers
@@ -75,5 +78,6 @@ cases:
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
       sglang:
+        reason: 'Orphan </tool_call> markers with no opener: SGLang strips them, Dynamo keeps them (impl-defined recovery).'
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}'

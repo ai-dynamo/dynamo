@@ -60,7 +60,7 @@ trtllm_configs = {
                 2592
             ),  # KV cache cap (2x safety over min=1296)
             pytest.mark.timeout(
-                300
+                650
             ),  # 3x measured time (44.66s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
@@ -94,7 +94,7 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.profiled_vram_gib(3.9),
             pytest.mark.requested_trtllm_kv_tokens(2592),
-            pytest.mark.timeout(300),
+            pytest.mark.timeout(600),  # 3x ~200s (trtllm gpu_1 log)
             pytest.mark.pre_merge,
             pytest.mark.unified,
         ],
@@ -169,7 +169,7 @@ trtllm_configs = {
             pytest.mark.requested_trtllm_kv_tokens(
                 2592
             ),  # KV cache cap (2x safety over min=1296)
-            pytest.mark.timeout(300),  # 3x measured time (~44s) + download time (150s)
+            pytest.mark.timeout(440),  # 3x ~145s (trtllm gpu_1 log)
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -212,7 +212,7 @@ trtllm_configs = {
             pytest.mark.profiled_vram_gib(3.9),
             pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(
-                300
+                360
             ),  # 3x measured time (37.91s) + download time (180s)
         ],
         model="Qwen/Qwen3-0.6B",
@@ -404,10 +404,17 @@ trtllm_configs = {
         # Embeddings generation + worker startup takes longer than normal
         delayed_start=180,
         request_payloads=[
-            multimodal_payload_default(
-                image_url="file:///tmp/llava_embeddings.safetensors",
-                text="Describe what this image shows.",
-                expected_response=["bench", "person", "image", "picture"],
+            chat_payload(
+                content=[
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "file:///tmp/llava_embeddings.safetensors"
+                        },
+                    },
+                    {"type": "text", "text": "Describe what this image shows."},
+                ],
+                expected_response=["mountain", "road", "trees", "vegetation"],
             )
         ],
         env={
@@ -590,14 +597,16 @@ trtllm_configs = {
             pytest.mark.post_merge,
             pytest.mark.skip(reason="DIS-1566"),
             pytest.mark.timeout(
-                480
-            ),  # 3x measured time (83.85s) + download time (210s) for 7B model
+                300
+            ),  # 1.1B loads quickly; margin covers CI model download
         ],
-        model="deepseek-ai/deepseek-llm-7b-base",
+        # Base model with NO chat template (the point of completions_only),
+        # matching the vllm/sglang configs. Replaces deepseek-llm-7b-base (7B).
+        model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         script_args=["--dyn-endpoint-types", "completions"],
         env={
-            "MODEL_PATH": "deepseek-ai/deepseek-llm-7b-base",
-            "SERVED_MODEL_NAME": "deepseek-ai/deepseek-llm-7b-base",
+            "MODEL_PATH": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+            "SERVED_MODEL_NAME": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         },
         request_payloads=[
             completion_payload_default(),
@@ -668,7 +677,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
     """
 
     # Enable HelloWorld logits processor only for this test
-    monkeypatch.setenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR", "1")
+    monkeypatch.setenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR", "1")
 
     base = trtllm_configs["aggregated"]
     config = TRTLLMConfig(

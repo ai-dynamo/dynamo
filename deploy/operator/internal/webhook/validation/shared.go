@@ -193,11 +193,6 @@ func (v *SharedSpecValidator) validateCheckpointConfig() error {
 		*v.spec.Checkpoint.CheckpointRef != "" {
 		return fmt.Errorf("%s.checkpoint.job cannot be set when checkpointRef is specified", v.fieldPath)
 	}
-	if v.spec.Checkpoint.Job != nil &&
-		v.spec.Checkpoint.Mode != "" &&
-		v.spec.Checkpoint.Mode != nvidiacomv1alpha1.CheckpointModeAuto {
-		return fmt.Errorf("%s.checkpoint.job can only be set in Auto mode", v.fieldPath)
-	}
 	if v.spec.Checkpoint.TargetContainerName != "" {
 		if errs := k8svalidation.IsDNS1123Label(v.spec.Checkpoint.TargetContainerName); len(errs) > 0 {
 			return fmt.Errorf(

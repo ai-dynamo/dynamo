@@ -7,7 +7,6 @@ import importlib
 import inspect
 import json
 import logging
-import os
 import random
 import threading
 from abc import ABC, abstractmethod
@@ -28,6 +27,7 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
@@ -36,6 +36,7 @@ from dynamo.llm import (
     ModelInput,
     ModelType,
     WorkerMetricsPublisher,
+    WorkerType,
     lora_name_to_id,
     register_llm,
     unregister_llm,
@@ -43,83 +44,10 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
 logger = logging.getLogger(__name__)
-
-# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
-# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
-_lora_manager = None
-
-
-def get_lora_manager():
-    """Get the LoRAManager singleton, initializing it on first call if enabled."""
-    global _lora_manager
-
-    if _lora_manager is not None:
-        return _lora_manager
-
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
-        try:
-            from dynamo.common.lora import LoRAManager
-
-            _lora_manager = LoRAManager()
-            logger.info("LoRAManager initialized successfully")
-            return _lora_manager
-        except Exception as e:
-            logger.warning(
-                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
-            )
-
-    return None
-
-
-class SGLangEngineQuiesceController:
-    def __init__(self, engine: sgl.Engine):
-        self._engine = engine
-        self._is_quiesced = False
-
-    @property
-    def is_quiesced(self) -> bool:
-        return self._is_quiesced
-
-    async def quiesce(self, tags: Optional[list[str]] = None) -> bool:
-        if self._is_quiesced:
-            return False
-
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
-
-        await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
-        await self._engine.tokenizer_manager.release_memory_occupation(
-            ReleaseMemoryOccupationReqInput(tags=tags),
-            None,
-        )
-        self._is_quiesced = True
-        return True
-
-    async def resume(self, tags: Optional[list[str]] = None) -> bool:
-        if not self._is_quiesced:
-            return False
-
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
-
-        await self._engine.tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(tags=tags),
-            None,
-        )
-        await self._engine.tokenizer_manager.continue_generation(
-            ContinueGenerationReqInput()
-        )
-        return True
-
-    def mark_resumed(self) -> None:
-        self._is_quiesced = False
 
 
 RequestT = TypeVar("RequestT")
@@ -216,9 +144,11 @@ class RLMixin:
         if isinstance(result, list):
             return {
                 "result": [
-                    dataclasses.asdict(item)
-                    if dataclasses.is_dataclass(item) and not isinstance(item, type)
-                    else item
+                    (
+                        dataclasses.asdict(item)
+                        if dataclasses.is_dataclass(item) and not isinstance(item, type)
+                        else item
+                    )
                     for item in result
                 ]
             }
@@ -454,19 +384,32 @@ class LoraMixin:
 
                             # Match the base-model registration topology so the
                             # prefill router activates for the LoRA model name
-                            # the same way it does for the base model. Without
-                            # this, prefill workers register the LoRA as a
-                            # chat-completions target and the frontend routes
-                            # chat requests directly to prefill, which then
-                            # waits forever for a KV transfer. For non-prefill
-                            # workers, honor --endpoint-types so the LoRA is
-                            # exposed on the same endpoints as the base model.
+                            # the same way it does for the base model. The prefill
+                            # role is carried by `worker_type=Prefill`; we register
+                            # the legacy `ModelType.Prefill` marker bit (not a
+                            # surface) so an old frontend still detects it during
+                            # the cross-version rollout. Non-prefill workers honor
+                            # --endpoint-types so the LoRA is exposed on the same
+                            # endpoints as the base model.
                             if self.config.serving_mode == DisaggregationMode.PREFILL:
                                 lora_model_type = ModelType.Prefill
+                                lora_worker_type = WorkerType.Prefill
+                                lora_needs: list[list[WorkerType]] = [
+                                    [WorkerType.Decode]
+                                ]
                             else:
                                 lora_model_type = parse_endpoint_types(
                                     self.config.dynamo_args.endpoint_types
                                 )
+                                if (
+                                    self.config.serving_mode
+                                    == DisaggregationMode.DECODE
+                                ):
+                                    lora_worker_type = WorkerType.Decode
+                                    lora_needs = [[WorkerType.Prefill]]
+                                else:
+                                    lora_worker_type = WorkerType.Aggregated
+                                    lora_needs = []
                             await register_llm(
                                 model_input=ModelInput.Tokens,
                                 model_type=lora_model_type,
@@ -476,6 +419,8 @@ class LoraMixin:
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.server_args.model_path,
+                                worker_type=lora_worker_type,
+                                needs=lora_needs,
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
@@ -733,10 +678,10 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
-        self._quiesce_controller = (
-            SGLangEngineQuiesceController(engine) if engine is not None else None
+        self._pause_controller = (
+            SGLangEnginePauseController(engine) if engine is not None else None
         )
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_lock = asyncio.Lock()
 
         # LoRA tracking (via LoraMixin)
         self._init_lora_tracking()
@@ -762,7 +707,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         2. Pause generation - drain in-flight requests
         3. Release memory - safe now that no requests are active
         """
-        if self._quiesce_controller is None:
+        if self._pause_controller is None:
             return {
                 "status": "error",
                 "message": "memory control not supported on this worker",
@@ -770,19 +715,26 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            if self._pause_controller.is_paused:
                 return {
                     "status": "ok",
                     "message": "Memory already released",
                 }
+            if self._pause_controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
 
+            unregistered = False
             try:
                 # Stop new requests and drain in-flight work before releasing memory.
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
+                    unregistered = True
 
-                await self._quiesce_controller.quiesce(tags)
+                await self._pause_controller.pause(tags)
 
                 return {
                     "status": "ok",
@@ -794,6 +746,24 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
+                # If pause rolled back cleanly the engine is serving-safe again,
+                # but discovery still shows us unregistered and resume will
+                # early-return. Re-register so the worker rejoins the routing pool.
+                if (
+                    unregistered
+                    and not self._pause_controller.is_paused
+                    and not self._pause_controller.needs_resume_recovery
+                    and self.generate_endpoint is not None
+                ):
+                    try:
+                        await self.generate_endpoint.register_endpoint_instance()
+                        logging.info(
+                            "Re-registered endpoint after failed memory release rollback"
+                        )
+                    except Exception as reg_err:
+                        logging.error(
+                            f"Failed to re-register endpoint after release failure: {reg_err}"
+                        )
                 return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
@@ -807,7 +777,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         2. Continue generation - ready to serve requests
         3. Re-register to discovery - allow frontend to route here
         """
-        if self._quiesce_controller is None:
+        if self._pause_controller is None:
             return {
                 "status": "error",
                 "message": "memory control not supported on this worker",
@@ -815,19 +785,20 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            needs_recovery = self._pause_controller.needs_resume_recovery
+            if not self._pause_controller.is_paused and not needs_recovery:
                 return {
                     "status": "ok",
                     "message": "Memory already resumed",
                 }
 
             try:
-                await self._quiesce_controller.resume(tags)
+                await self._pause_controller.resume(tags)
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
-                self._quiesce_controller.mark_resumed()
+                self._pause_controller.mark_resumed()
 
                 return {
                     "status": "ok",
@@ -1136,6 +1107,8 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Raises:
             EngineShutdown: If shutdown event was triggered.
         """
+        cancellation_future: asyncio.Future[Any] | None = None
+        shutdown_task: asyncio.Task[Any] | None = None
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
 
@@ -1151,7 +1124,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
             # Build list of futures/tasks to wait for
             wait_for: list[asyncio.Future[Any]] = [cancellation_future]
-            shutdown_task = None
 
             if self.shutdown_event:
                 # Create task for shutdown monitoring and add to wait list
@@ -1209,6 +1181,15 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 f"Cancellation monitor task cancelled for SGLang Request ID {request_id}, Context: {context.id()}"
             )
             raise
+        finally:
+            for awaitable in (cancellation_future, shutdown_task):
+                if awaitable is None or awaitable.done():
+                    continue
+                awaitable.cancel()
+                try:
+                    await awaitable
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     @asynccontextmanager
     async def _cancellation_monitor(

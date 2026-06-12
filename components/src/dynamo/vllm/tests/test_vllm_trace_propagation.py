@@ -59,6 +59,7 @@ def _make_engine(engine_client) -> VllmLLMEngine:
     engine._default_sampling_params = SimpleNamespace()
     engine._model_max_len = 1024
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
+    engine.enable_rl = False
     # `_dp_range=None` bypasses the router's DP-rank resolution branch.
     engine._dp_range = None
     return engine

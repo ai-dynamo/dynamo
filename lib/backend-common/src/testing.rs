@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Conformance test kit for [`LLMEngine`] implementations.
+//! Conformance test kit for [`LLMEngine`] and [`RawEngine`] implementations.
 //!
-//! Engines wire themselves into the test suite with one call:
+//! Engines wire themselves into the test suite with one call —
+//! [`run_conformance`] for token engines, [`run_raw_conformance`] for raw
+//! media engines:
 //!
 //! ```ignore
 //! #[tokio::test]
@@ -31,7 +33,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 
-use crate::engine::{GenerateContext, LLMEngine};
+use crate::engine::{GenerateContext, LLMEngine, RawEngine};
 use crate::metrics::{EngineMetrics, TestHierarchy};
 use ConformanceFailure::*;
 
@@ -60,6 +62,9 @@ pub fn cancelling_context(after: Duration) -> Arc<dyn AsyncEngineContext> {
 pub enum ConformanceFailure {
     StartFailed(String),
     EmptyModelInConfig,
+    /// A `RawEngine` populated `EngineConfig.llm` — raw media engines have no
+    /// token pipeline, so they must leave the registration sub-record `None`.
+    RawEngineAdvertisedLlmRegistration,
     GenerateFailed(String),
     NoChunksYielded,
     ChunkAfterTerminal,
@@ -93,6 +98,11 @@ impl std::fmt::Display for ConformanceFailure {
         match self {
             StartFailed(m) => write!(f, "start() failed: {m}"),
             EmptyModelInConfig => write!(f, "EngineConfig.model is empty"),
+            RawEngineAdvertisedLlmRegistration => write!(
+                f,
+                "RawEngine populated EngineConfig.llm; raw media engines have no \
+                 token pipeline and must leave it None"
+            ),
             GenerateFailed(m) => write!(f, "generate() failed: {m}"),
             NoChunksYielded => write!(f, "generate() stream yielded no chunks"),
             ChunkAfterTerminal => write!(f, "chunk yielded after terminal chunk"),
@@ -394,6 +404,153 @@ async fn check_cancellation<E: LLMEngine>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// RawEngine conformance — the raw-media analog of the suite above.
+//
+// Raw responses are opaque JSON objects: no `finish_reason`, no token
+// bookkeeping, and no `kv_event_sources`. So the raw checks pin only the
+// modality-neutral contract — a well-formed stream, concurrency safety, and
+// prompt cancellation (measured purely as "the stream terminates", since
+// there's no Cancelled marker to assert).
+// ---------------------------------------------------------------------------
+
+/// Run the raw-media conformance suite against a [`RawEngine`] implementation.
+///
+/// Like [`run_conformance`], takes a factory so the kit can build a second,
+/// pristine engine for the "cleanup before start" check.
+pub async fn run_raw_conformance<E, F>(mut factory: F) -> Result<(), ConformanceFailure>
+where
+    E: RawEngine,
+    F: FnMut() -> E,
+{
+    let engine = factory();
+
+    // 1. start() returns a non-empty model and — for a raw engine — leaves
+    //    the token-pipeline `llm` registration sub-record unset.
+    let config = engine
+        .start(0)
+        .await
+        .map_err(|e| StartFailed(e.to_string()))?;
+    if config.model.is_empty() {
+        return Err(EmptyModelInConfig);
+    }
+    if config.llm.is_some() {
+        return Err(RawEngineAdvertisedLlmRegistration);
+    }
+
+    // 2. A plain generate() yields a well-formed (non-empty, all-Ok) stream.
+    check_single_generate_raw(&engine).await?;
+
+    // 3. Interleaved generate() calls all complete — catches shared-state bugs.
+    check_concurrent_generates_raw(&engine).await?;
+
+    // 4. Cancellation is observed within a bounded deadline.
+    check_cancellation_raw(&engine, DEFAULT_CANCEL_DEADLINE).await?;
+
+    // 5. cleanup() succeeds and is idempotent.
+    engine
+        .cleanup()
+        .await
+        .map_err(|e| CleanupFailed(e.to_string()))?;
+    engine
+        .cleanup()
+        .await
+        .map_err(|e| SecondCleanupFailed(e.to_string()))?;
+
+    // 6. cleanup() is safe on a never-started engine — mirrors Worker's
+    //    post-start-failure path.
+    let fresh = factory();
+    fresh
+        .cleanup()
+        .await
+        .map_err(|e| CleanupWithoutStartFailed(e.to_string()))?;
+
+    Ok(())
+}
+
+/// A raw request body. `steps` lets the cancellation check ask for a long
+/// stream that only ends early if the engine observes cancellation; engines
+/// that don't read it just serve their normal (short) response.
+fn raw_request(steps: Option<u64>) -> serde_json::Value {
+    match steps {
+        Some(n) => serde_json::json!({ "prompt": "ping", "steps": n }),
+        None => serde_json::json!({ "prompt": "ping" }),
+    }
+}
+
+async fn check_single_generate_raw<E: RawEngine>(engine: &E) -> Result<(), ConformanceFailure> {
+    let ctx = mock_context();
+    let stream = engine
+        .generate(raw_request(None), GenerateContext::new(ctx, None))
+        .await
+        .map_err(|e| GenerateFailed(e.to_string()))?;
+    let items: Vec<_> = stream.collect().await;
+    if items.is_empty() {
+        return Err(NoChunksYielded);
+    }
+    for item in items {
+        if let Err(e) = item {
+            return Err(StreamYieldedError(e.to_string()));
+        }
+    }
+    Ok(())
+}
+
+async fn check_concurrent_generates_raw<E: RawEngine>(
+    engine: &E,
+) -> Result<(), ConformanceFailure> {
+    const CONCURRENT: usize = 8;
+    let futs = (0..CONCURRENT).map(|_| async {
+        let ctx = mock_context();
+        let stream = engine
+            .generate(raw_request(None), GenerateContext::new(ctx, None))
+            .await
+            .map_err(|e| ConcurrentGenerateFailed(e.to_string()))?;
+        let n = stream.count().await;
+        if n == 0 {
+            Err(ConcurrentGenerateFailed("stream was empty".to_string()))
+        } else {
+            Ok(())
+        }
+    });
+    for result in futures::future::join_all(futs).await {
+        result?;
+    }
+    Ok(())
+}
+
+async fn check_cancellation_raw<E: RawEngine>(
+    engine: &E,
+    deadline: Duration,
+) -> Result<(), ConformanceFailure> {
+    // Ask for a long stream so an engine that ignores cancellation can't
+    // drain it within the deadline.
+    const LONG_STEPS: u64 = 100_000;
+
+    let ctx = mock_context();
+    let stream = engine
+        .generate(
+            raw_request(Some(LONG_STEPS)),
+            GenerateContext::new(ctx.clone(), None),
+        )
+        .await
+        .map_err(|e| GenerateFailed(e.to_string()))?;
+
+    // Cancel before the first poll, mirroring check_cancellation.
+    ctx.stop_generating();
+
+    // Raw responses carry no finish_reason, so conformance is purely "the
+    // stream terminates promptly". Draining to completion within the deadline
+    // is the success condition.
+    tokio::time::timeout(deadline, async {
+        let mut s = stream;
+        while s.next().await.is_some() {}
+    })
+    .await
+    .map_err(|_| CancellationNotObserved { after: deadline })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +614,68 @@ mod tests {
             dp_ranks: vec![0, 1, 2],
         };
         assert!(check_setup_metrics(&engine).await.is_ok());
+    }
+
+    /// Minimal `RawEngine` for exercising the raw conformance kit itself.
+    /// With `honor_cancel = false`, `generate` ignores `is_stopped()` so the
+    /// cancellation check can be shown to have teeth.
+    struct RawConformanceMock {
+        honor_cancel: bool,
+    }
+
+    #[async_trait]
+    impl RawEngine for RawConformanceMock {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "raw-mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            request: serde_json::Value,
+            context: GenerateContext,
+        ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError>
+        {
+            let steps = request.get("steps").and_then(|v| v.as_u64()).unwrap_or(2);
+            let honor = self.honor_cancel;
+            let ctx = context.inner_arc();
+            Ok(Box::pin(async_stream::stream! {
+                for i in 0..steps {
+                    if honor && ctx.is_stopped() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    yield Ok(serde_json::json!({ "progress": i }));
+                }
+                yield Ok(serde_json::json!({ "data": [{ "url": "data:," }] }));
+            }))
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_mock_satisfies_conformance() {
+        run_raw_conformance(|| RawConformanceMock { honor_cancel: true })
+            .await
+            .expect("raw conformance");
+    }
+
+    #[tokio::test]
+    async fn raw_conformance_flags_ignored_cancellation() {
+        // An engine that never checks is_stopped() can't drain LONG_STEPS
+        // within the deadline, so the cancellation check must fail.
+        let engine = RawConformanceMock {
+            honor_cancel: false,
+        };
+        let result = check_cancellation_raw(&engine, Duration::from_millis(150)).await;
+        assert!(
+            matches!(result, Err(CancellationNotObserved { .. })),
+            "expected CancellationNotObserved, got {result:?}"
+        );
     }
 }

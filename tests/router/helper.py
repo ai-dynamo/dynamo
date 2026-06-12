@@ -8,7 +8,8 @@ import os
 import random
 import string
 import sys
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
@@ -35,6 +36,14 @@ def generate_random_suffix() -> str:
 def get_kv_indexer_command() -> list[str]:
     """Return the preferred standalone indexer command for the current Python env."""
     return [sys.executable, "-m", "dynamo.indexer"]
+
+
+def get_kv_indexer_test_env() -> Dict[str, str]:
+    """Indexer launch env that enables the listener-control test endpoints
+    (gated off by default; used by the ZMQ replay scenario)."""
+    env = os.environ.copy()
+    env["DYN_KV_INDEXER_TEST_ENDPOINTS"] = "1"
+    return env
 
 
 def assert_event_dumps_equal(
@@ -161,7 +170,10 @@ def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) ->
 
 
 async def wait_for_frontend_ready(
-    frontend_url: str, expected_num_workers: int = 2, timeout: int = 120
+    frontend_url: str,
+    expected_num_workers: int = 2,
+    timeout: int = 120,
+    test_payload: dict[str, Any] | None = None,
 ):
     """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
 
@@ -176,6 +188,8 @@ async def wait_for_frontend_ready(
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
         expected_num_workers: Number of workers to wait for (currently logs but doesn't enforce)
         timeout: Maximum time to wait in seconds for both phases combined
+        test_payload: Optional chat completions payload for the phase 2 readiness probe.
+            Use this when readiness must satisfy the same routing constraints as the test.
 
     Raises:
         TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
@@ -224,12 +238,16 @@ async def wait_for_frontend_ready(
 
     # Phase 2: Wait for chat completions pipeline to be ready
     logger.info("Waiting for chat completions pipeline to be built...")
-    test_payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": "test"}],
-        "max_tokens": 1,
-        "stream": False,
-    }
+    if test_payload is None:
+        test_payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+    else:
+        test_payload = {**test_payload}
+        test_payload.setdefault("model", model_name)
 
     while True:
         elapsed = asyncio.get_event_loop().time() - start_time
@@ -657,11 +675,13 @@ async def send_request_via_python_kv_router(
                     f"Stream finished with reason: {response['finish_reason']}"
                 )
 
-            # Extract worker IDs and dp_ranks from disaggregated_params if present
-            if return_worker_ids and "disaggregated_params" in response:
-                disagg_params = response["disaggregated_params"]
-                if isinstance(disagg_params, dict) and "worker_id" in disagg_params:
-                    worker_id_info = disagg_params["worker_id"]
+            # Extract worker IDs and dp_ranks from routing_data if present. The KvRouter
+            # binding forwards worker attribution on the typed ``routing_data.worker_id``
+            # field rather than the legacy ``disaggregated_params`` JSON blob.
+            if return_worker_ids and "routing_data" in response:
+                routing_data = response["routing_data"]
+                if isinstance(routing_data, dict) and "worker_id" in routing_data:
+                    worker_id_info = routing_data["worker_id"]
                     if isinstance(worker_id_info, dict):
                         if "prefill_worker_id" in worker_id_info:
                             prefill_worker_id = worker_id_info["prefill_worker_id"]
@@ -699,3 +719,24 @@ async def send_request_via_python_kv_router(
         }
 
     return True
+
+
+def topology_env(
+    tmp_path: Path,
+    name: str,
+    topology_domains: Dict[str, str],
+    *,
+    transfer_domain: str = "zone",
+    enforcement: str = "required",
+) -> Dict[str, str]:
+    topology_dir = tmp_path / name
+    topology_dir.mkdir()
+    for domain, value in topology_domains.items():
+        (topology_dir / domain).write_text(value)
+
+    return {
+        "DYN_TOPOLOGY_ENABLED": "true",
+        "DYN_TOPOLOGY_MOUNT_PATH": str(topology_dir),
+        "DYN_KV_TRANSFER_DOMAIN": transfer_domain,
+        "DYN_KV_TRANSFER_ENFORCEMENT": enforcement,
+    }

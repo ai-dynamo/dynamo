@@ -51,7 +51,7 @@ pub fn find_tool_call_end_position_json(
     config: &JsonParserConfig,
 ) -> usize {
     match parser {
-        "hermes" | "nemotron_deci" => {
+        "hermes" | "nemotron_deci" | "qwen25" => {
             let start_token = config.tool_call_start_tokens.first().map(|s| s.as_str());
             if let Some(end_token) = config.tool_call_end_tokens.first() {
                 let Some(first_end) = chunk.find(end_token.as_str()) else {
@@ -85,6 +85,47 @@ pub fn find_tool_call_end_position_json(
         "mistral" | "phi4" => {
             if let Some(pos) = chunk.rfind(']') {
                 pos + 1
+            } else {
+                chunk.len()
+            }
+        }
+        "deepseek_v3" | "deepseek_v3_1" => {
+            if config
+                .tool_call_start_tokens
+                .iter()
+                .any(|token| !token.is_empty() && chunk.contains(token.as_str()))
+            {
+                return config
+                    .tool_call_end_tokens
+                    .iter()
+                    .find(|token| !token.is_empty())
+                    .and_then(|token| chunk.find(token.as_str()).map(|pos| pos + token.len()))
+                    .unwrap_or(chunk.len());
+            }
+            let begin_token = "<｜tool▁call▁begin｜>";
+            let end_token = "<｜tool▁call▁end｜>";
+            if let Some(pos) = chunk.find(end_token) {
+                let mut cursor = pos + end_token.len();
+                loop {
+                    let rest = &chunk[cursor..];
+                    let trimmed = rest.trim_start();
+                    let trim_offset = rest.len() - trimmed.len();
+                    if trimmed.starts_with(end_token) {
+                        // Orphan repeated close marker — consume it.
+                        cursor += trim_offset + end_token.len();
+                    } else if trimmed.starts_with(begin_token) {
+                        // Another complete bare call follows in the same buffer;
+                        // advance past its close marker so a multi-call buffer is
+                        // not split after the first recovered call.
+                        match trimmed.find(end_token) {
+                            Some(next_end) => cursor += trim_offset + next_end + end_token.len(),
+                            None => break,
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                cursor
             } else {
                 chunk.len()
             }
@@ -147,6 +188,75 @@ mod tests {
         assert_eq!(
             pos_inc, first_end,
             "should stop at end of first complete call when second is incomplete"
+        );
+    }
+
+    // qwen25 aliases the hermes config and must share its jail behavior: two
+    // parallel <tool_call> blocks must be captured as one region, otherwise the
+    // second call's opener leaks into normal_text when split across stream
+    // chunks (e.g. `ol_call>...`). Regression for the qwen25 streaming leak.
+    #[test] // TOOLCALLING.stream.2: qwen25 parallel-call end-position
+    fn test_find_tool_call_end_position_parallel_calls_qwen25() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+
+        // Two parallel calls in the qwen2.5 newline-delimited form.
+        let two_calls = concat!(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}\n</tool_call>\n",
+            "<tool_call>\n{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"EST\"}}\n</tool_call>",
+            "trailing"
+        );
+        let pos = find_tool_call_end_position_json(two_calls, "qwen25", &config);
+        assert!(
+            two_calls[..pos].ends_with("</tool_call>"),
+            "qwen25 should end at last </tool_call>, got: {:?}",
+            &two_calls[..pos]
+        );
+        assert_eq!(&two_calls[pos..], "trailing");
+    }
+
+    // Bare DeepSeek inner calls (no outer <｜tool▁calls▁begin｜> wrapper) arriving
+    // in one streaming buffer must all be captured, not split after the first
+    // <｜tool▁call▁end｜>, so the jail hands the whole group to the parser.
+    #[test] // TOOLCALLING.stream.4 — deepseek bare multi-call end-position
+    fn test_find_tool_call_end_position_deepseek_bare_multi_call() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+            tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+            ..Default::default()
+        };
+
+        // Two bare inner calls back-to-back, then trailing text.
+        let two = concat!(
+            "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"location\":\"NYC\"}<｜tool▁call▁end｜>",
+            "<｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{\"tz\":\"EST\"}<｜tool▁call▁end｜>",
+            "trailing"
+        );
+        let pos = find_tool_call_end_position_json(two, "deepseek_v3", &config);
+        assert!(
+            two[..pos].ends_with("<｜tool▁call▁end｜>"),
+            "should end at last call_end, got: {:?}",
+            &two[..pos]
+        );
+        assert_eq!(
+            &two[pos..],
+            "trailing",
+            "must span BOTH bare calls, not split after the first"
+        );
+
+        // Incomplete second bare call — stop after the first complete one.
+        let incomplete = concat!(
+            "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"location\":\"NYC\"}<｜tool▁call▁end｜>",
+            "<｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{\"tz\":"
+        );
+        let pos_inc = find_tool_call_end_position_json(incomplete, "deepseek_v3", &config);
+        assert!(incomplete[..pos_inc].ends_with("<｜tool▁call▁end｜>"));
+        assert!(
+            incomplete[pos_inc..].starts_with("<｜tool▁call▁begin｜>"),
+            "incomplete trailing call must remain unconsumed"
         );
     }
 
@@ -222,6 +332,8 @@ mod tests {
         JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            // Mirror the production nemotron_deci config (Config::nemotron_deci).
+            strip_markup_on_recovery: true,
             ..Default::default()
         }
     }
@@ -252,6 +364,39 @@ mod tests {
         assert_eq!(calls[0].function.name, "current_time");
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args, serde_json::json!({}));
+    }
+
+    /// Strict recovery with a leading preamble + orphan close tag. The model
+    /// emits prose, then a complete JSON array, then a stray `</TOOLCALL>` with
+    /// no opener: `Let me check.[{...}]</TOOLCALL>`. The extraction stages split
+    /// this into normal_text="Let me check." and json="[{...}]</TOOLCALL>", so
+    /// recovery must strip markers off `json` (not the re-glued full message) to
+    /// salvage the call. Regression for dropping recoverable calls when a
+    /// preamble is present.
+    #[test]
+    fn test_parse_nemotron_deci_preamble_orphan_close_recovers() {
+        // Mirror the finalize/batch path: the with-recovery dispatcher flips
+        // `allow_eof_recovery=true`, which is the only path strict recovery runs on.
+        let config = JsonParserConfig {
+            allow_eof_recovery: true,
+            ..nemotron_deci_config()
+        };
+        let input =
+            r#"Let me check.[{"name":"get_weather","arguments":{"location":"NYC"}}]</TOOLCALL>"#;
+        let (calls, normal) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "preamble must not drop the recoverable call"
+        );
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"location": "NYC"}));
+        assert_eq!(
+            normal.as_deref(),
+            Some(""),
+            "wrapper markers and preamble are stripped, not leaked into normal_text"
+        );
     }
 
     /// TOOLCALLING.batch.9 — empty / null content variants. Truly-empty (zero bytes)

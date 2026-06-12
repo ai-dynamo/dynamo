@@ -112,6 +112,10 @@ content.
 - **`REASONING.batch.2.f`** Complex reasoning body — large blocks, multi-paragraph, special characters, Unicode, newlines, and marker-looking strings inside the reasoning body.
 - **`REASONING.batch.3.a`** Closed reasoning followed by downstream tool-call text — reasoning parser must extract the think content **and leave a valid paired-parser tool-call payload intact in `normal_text`** for the downstream tool-call parser to consume.
 - **`REASONING.batch.3.b`** Open reasoning interrupted by downstream tool-call text — tool-call markers can terminate or escape an open reasoning span for families that define that boundary.
+- **`REASONING.batch.3.c`** Recipientless downstream channel text — format-specific non-tool commentary or equivalent content should remain visible as normal text.
+- **`REASONING.batch.3.d`** Directed downstream tool-call channel without reasoning — parser must suppress tool-call payload from visible normal text when that payload belongs to the downstream tool parser.
+- **`REASONING.batch.3.e`** Directed reasoning-channel tool-call payload — a directed call (`to=functions.*`) is a tool call regardless of the channel label, so the parser must hand its payload off to the downstream tool-call parser (in `normal_text`), not keep it in reasoning. For GPT-OSS/Harmony this covers the `analysis to=functions.* … <|call|>` form the engine emits for a large fraction of real tool calls. (Supersedes the prior #10111 contract that kept the analysis-channel payload in `reasoning_text`; that dropped/leaked those calls.)
+- **`REASONING.batch.3.f`** Reasoning, downstream directed tool call, then final answer — parser must extract reasoning, suppress downstream tool payload from visible normal text, and preserve later final text.
 - **`REASONING.batch.4`** Malformed reasoning marker syntax — dangling close marker, invalid channel marker, or marker that does not belong to the family grammar.
 - **`REASONING.batch.5`** Missing end-marker recovery — engine hit `max_tokens` mid-think; pin behavior: recover partial reasoning, surface as truncated, or treat all as `normal_text`.
 - **`REASONING.batch.6.a`** Multiple reasoning spans, adjacent or separated by normal text — e.g., two `<think>...</think>` blocks in one response. Behavior is impl-defined: concatenate, surface only the first, or document a divergence.
@@ -141,7 +145,7 @@ fixture `ref` field.
 | Source | What exists upstream | Reusable Dynamo categories |
 |---|---|---|
 | [vLLM `tests/reasoning/`](https://github.com/vllm-project/vllm/tree/main/tests/reasoning) | Per-family parser tests for Qwen3, DeepSeek R1/V3, Gemma 4, GPT-OSS, Granite, Kimi K2, MiniMax M2, Mistral, Nemotron V3, and shared base thinking parsers. | Strong source for `REASONING.batch.{1,2,4,5,6}` and `REASONING.stream.{1,2,3,4}`. |
-| [vLLM chat reasoning + tool tests](https://github.com/vllm-project/vllm/blob/main/tests/entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py) | End-to-end streaming and batch chat tests where reasoning and tool calls appear in the same response. | Directly maps to `REASONING.batch.3.*` and streaming tool-boundary cases. |
+| [vLLM chat reasoning + tool tests](https://github.com/vllm-project/vllm/blob/main/tests/entrypoints/openai/chat_completion/test_completion_with_function_calling.py) | End-to-end streaming and batch chat tests where reasoning and tool calls appear in the same response. | Directly maps to `REASONING.batch.3.*` and streaming tool-boundary cases. |
 | [SGLang unit reasoning parser tests](https://github.com/sgl-project/sglang/blob/main/test/registered/unit/parser/test_reasoning_parser.py) | Broad detector coverage: base reasoning, Qwen3, forced Qwen3, Kimi, Kimi K2, GLM45, Hunyuan, Nemotron3, Gemma4, GPT-OSS, MiniMax append-think, buffer-loss regressions, tool-call interaction, and continue-final-message behavior. | Strong source for delimiter grouping, partial marker splits, tool-interrupt cases, and no-stream behavior. |
 | [SGLang reasoning kit](https://github.com/sgl-project/sglang/blob/main/python/sglang/test/kits/reasoning_kit.py) and [registered reasoning tests](https://github.com/sgl-project/sglang/tree/main/test/registered/reasoning) | API-level reasoning-content behavior, streaming response checks, and model-facing integration tests. | Useful for expected OpenAI response shape, less reusable as pure parser fixtures. |
 
@@ -223,6 +227,7 @@ extract the reasoning content and preserve the tool-call-shaped text in
   closed before downstream tool-call text begins.
 - `3.b` applies only to parser families that intentionally configure a
   downstream boundary while reasoning is still open.
+- `3.c` through `3.f` pin format-specific downstream channel behavior: visible recipientless channel text, directed tool-call handoff preservation, directed reasoning/analysis-channel tool-call handoff, and final-text recovery after a directed downstream tool call.
 - Failure mode: greedy reasoning parser eats the tool-call content
   that follows. Pin the boundary explicitly.
 
@@ -283,6 +288,10 @@ the right boundary and preserve the downstream parser's input.
 - Applies only to reasoning parser families with an explicit downstream
   boundary. For other families, this bucket is an N/A stub until the
   production path wires such a boundary.
+- **`REASONING.stream.4.a`** Harmony start marker split across chunks — partial `<|channel|>` at a chunk boundary must buffer rather than flush, completing the match when the next chunk arrives.
+- **`REASONING.stream.4.b`** Directed Harmony commentary tool recipient split across chunks — the `to=functions.NAME` header can straddle a chunk boundary; the complete envelope must still reach `normal_text` intact for the downstream jail.
+- **`REASONING.stream.4.c`** Partial Harmony channel marker prefix that resolves to non-channel text — `<|chan` that becomes `chance` must not hold back the preceding visible text indefinitely.
+- **`REASONING.stream.4.d`** Directed Harmony analysis-channel tool call split across chunks — a `to=functions.*` recipient on the `analysis` channel is a tool call; the complete envelope (header + body + `<|call|>`) must reach `normal_text` intact even when `<|call|>` arrives in a later chunk than the header. The parser persists the channel/recipient across the chunk boundary and reconstructs the clean envelope from the cumulative token buffer on the `<|call|>` chunk.
 
 ---
 

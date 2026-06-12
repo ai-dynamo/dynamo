@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use super::config::ToolCallConfig;
-pub use super::parsers::{
-    detect_and_parse_tool_call, detect_and_parse_tool_call_with_recovery,
-    detect_and_parse_tool_call_with_stream_finalize_recovery,
-};
+#[allow(deprecated)]
+pub use super::parsers::detect_and_parse_tool_call_with_stream_finalize_recovery;
+pub use super::parsers::{detect_and_parse_tool_call, detect_and_parse_tool_call_with_recovery};
 pub use super::response::{
     CalledFunctionStream, ToolCallResponse, ToolCallResponseChunk, ToolCallType,
 };
@@ -37,11 +36,11 @@ pub async fn try_tool_call_parse_aggregate(
 }
 
 /// Finalize-only variant of [`try_tool_call_parse_aggregate`] that enables
-/// the common EOF recovery paths (missing outer end-token, truncated JSON args).
-/// Use this from non-streaming aggregator paths — never from streaming jail
-/// early-exit logic. Stream-end jail finalization uses
-/// [`try_tool_call_parse_aggregate_stream_finalize`] so DSML can salvage
-/// completed invokes without changing batch/non-streaming behavior.
+/// the common EOF recovery paths (missing outer end-token, truncated JSON
+/// args, and — for DSML/DeepSeek V4 — a missing outer `</｜DSML｜tool_calls>`
+/// wrapper). Use this from finalize paths: both non-streaming aggregate and
+/// stream-end jail finalization. Never use it from streaming jail early-exit
+/// logic, which must keep `allow_eof_recovery=false`.
 pub async fn try_tool_call_parse_aggregate_finalize(
     message: &str,
     parser_str: Option<&str>,
@@ -55,23 +54,18 @@ pub async fn try_tool_call_parse_aggregate_finalize(
     Ok((parsed, content))
 }
 
-/// Stream-end variant of [`try_tool_call_parse_aggregate_finalize`].
-///
-/// It keeps the normal finalize recovery for JSON/XML and additionally lets
-/// DSML recover complete invokes from an unterminated outer wrapper. This is
-/// intentionally not used by batch/non-streaming aggregate paths.
+/// Deprecated compatibility shim retained for the published `dynamo-parsers`
+/// API. Batch/non-streaming and stream-end finalize now share one recovery
+/// path; call [`try_tool_call_parse_aggregate_finalize`] directly.
+#[deprecated(
+    note = "batch and stream finalize now share one recovery path; use try_tool_call_parse_aggregate_finalize"
+)]
 pub async fn try_tool_call_parse_aggregate_stream_finalize(
     message: &str,
     parser_str: Option<&str>,
     tools: Option<&[super::ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let (parsed, content) =
-        detect_and_parse_tool_call_with_stream_finalize_recovery(message, parser_str, tools)
-            .await?;
-    if parsed.is_empty() {
-        return Ok((vec![], content));
-    }
-    Ok((parsed, content))
+    try_tool_call_parse_aggregate_finalize(message, parser_str, tools).await
 }
 
 /// Try parsing a string as a structured tool call, for streaming (delta) usage.

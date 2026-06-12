@@ -22,8 +22,10 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -323,21 +325,33 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        assert chunks == [
-            {
-                "id": "request-id",
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": "x"},
-                        "finish_reason": None,
-                    }
-                ],
-                "created": chunks[0]["created"],
-                "model": MODEL,
-                "object": "chat.completion.chunk",
-            }
-        ]
+        # One annotated envelope per iteration carries both data and the
+        # llm_metrics annotation; observer strips the annotation before SSE.
+        assert len(chunks) == 1
+        envelope = chunks[0]
+
+        assert envelope["_dynamo_annotated"] is True
+        assert envelope["data"] == {
+            "id": "request-id",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "x"},
+                    "finish_reason": None,
+                }
+            ],
+            "created": envelope["data"]["created"],
+            "model": MODEL,
+            "object": "chat.completion.chunk",
+        }
+
+        assert envelope["event"] == "llm_metrics"
+        assert len(envelope["comment"]) == 1
+        assert json.loads(envelope["comment"][0]) == {
+            "input_tokens": 3,
+            "output_tokens": 1,
+            "chunk_tokens": 1,
+        }
 
 
 OBJECT_TYPED_TOOL_REQUEST = {

@@ -27,6 +27,7 @@ type RestoreRequest struct {
 	CheckpointID                string
 	CheckpointLocation          string
 	ContainerCheckpointLocation string
+	ContainerID                 string
 	StartedAt                   time.Time
 	NSRestorePath               string
 	PodName                     string
@@ -130,7 +131,12 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		containerName = "main"
 	}
 
-	placeholderPID, _, err := rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
+	var placeholderPID int
+	if req.ContainerID != "" {
+		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
+	} else {
+		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}

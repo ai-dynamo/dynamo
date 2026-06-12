@@ -165,7 +165,25 @@ impl ReasoningParser for Gemma4ReasoningParser {
         let mut reasoning = String::new();
         let mut cursor = 0;
 
-        while let Some(start_rel) = text[cursor..].find(START_TOKEN) {
+        loop {
+            let next_start = text[cursor..].find(START_TOKEN);
+            let stray_end = text[cursor..].find(END_TOKEN);
+
+            // Stray END_TOKEN appears before the next START_TOKEN (or no next start).
+            // Drop it per the lossless-split contract: parser-owned syntax must never
+            // reach normal_text.
+            if let Some(e_rel) = stray_end
+                && next_start.is_none_or(|s_rel| e_rel < s_rel)
+            {
+                let e = cursor + e_rel;
+                normal.push_str(&text[cursor..e]);
+                cursor = e + END_TOKEN.len();
+                continue;
+            }
+
+            let Some(start_rel) = next_start else {
+                break;
+            };
             let start = cursor + start_rel;
             normal.push_str(&text[cursor..start]);
 
@@ -204,9 +222,21 @@ impl ReasoningParser for Gemma4ReasoningParser {
 
         loop {
             if !self.in_reasoning {
-                // Look for either the full start marker or a partial-prefix at
-                // the buffer's end (which we must hold back).
-                if let Some(idx) = work.find(START_TOKEN) {
+                // Look for the next start marker, but also drop any stray end
+                // marker that appears before a start (lossless-split contract).
+                // Prefer the earlier of the two.
+                let next_start = work.find(START_TOKEN);
+                let stray_end = work.find(END_TOKEN);
+
+                if let Some(e_idx) = stray_end
+                    && next_start.is_none_or(|s_idx| e_idx < s_idx)
+                {
+                    normal.push_str(&work[..e_idx]);
+                    work = work[e_idx + END_TOKEN.len()..].to_string();
+                    continue;
+                }
+
+                if let Some(idx) = next_start {
                     normal.push_str(&work[..idx]);
                     work = work[idx + START_TOKEN.len()..].to_string();
                     self.in_reasoning = true;
@@ -214,7 +244,12 @@ impl ReasoningParser for Gemma4ReasoningParser {
                     self.reasoning_accum.clear();
                     continue;
                 }
-                let lap = overlap(&work, START_TOKEN);
+                // No complete marker — check for partial at end of buffer.
+                // The partial could be a prefix of either START_TOKEN or
+                // END_TOKEN (both begin with `<`), so use the wider overlap.
+                let lap_start = overlap(&work, START_TOKEN);
+                let lap_end = overlap(&work, END_TOKEN);
+                let lap = lap_start.max(lap_end);
                 if lap > 0 {
                     let split = work.len() - lap;
                     normal.push_str(&work[..split]);
