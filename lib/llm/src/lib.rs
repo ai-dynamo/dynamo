@@ -7,6 +7,7 @@
 //! distributed LLM inference solutions.
 
 pub mod agents;
+pub mod audit;
 pub mod backend;
 pub mod common;
 pub mod discovery;
@@ -17,8 +18,8 @@ pub mod fpm_publisher;
 pub mod grpc;
 pub mod http;
 pub mod hub;
-// pub mod key_value_store;
-pub mod audit;
+// Async key-value storage for frontend-owned state.
+pub mod key_value_store;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;

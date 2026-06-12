@@ -37,8 +37,8 @@ nvtx = ["dynamo-runtime/nvtx"]
 # recipes pass this flag explicitly; the dev container's
 # `.devcontainer/post-create.sh` also enables it for local workflows.
 mm-routing = ["dynamo-llm/mm-routing"]
-stateful-responses-redb = ["dynamo-llm/stateful-responses-redb"]
-stateful-responses-tikv = ["dynamo-llm/stateful-responses-tikv"]
+key-value-store-redis = ["dynamo-llm/key-value-store-redis"]
+key-value-store-postgres = ["dynamo-llm/key-value-store-postgres"]
 
 [dependencies]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "69b3cff352303b95e5196a28966ae1ee4a3a3955", package = "aiconfigurator-core", optional = true }

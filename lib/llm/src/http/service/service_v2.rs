@@ -62,7 +62,7 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
-    responses_context_store: ResponseContextStoreManager,
+    responses_context_store: Arc<ResponseContextStoreManager>,
     nvext_enabled: bool,
 }
 
@@ -144,10 +144,26 @@ impl State {
         cancel_token: CancellationToken,
         nvext_enabled: bool,
     ) -> anyhow::Result<Self> {
-        let responses_context_store =
-            ResponseContextStoreManager::from_env_with_shutdown(cancel_token.child_token())?;
+        let responses_context_store = Arc::new(
+            ResponseContextStoreManager::from_env_with_shutdown(cancel_token.child_token())?,
+        );
+        Ok(Self::new_with_responses_context_store(
+            manager,
+            discovery_client,
+            cancel_token,
+            nvext_enabled,
+            responses_context_store,
+        ))
+    }
 
-        Ok(Self {
+    pub fn new_with_responses_context_store(
+        manager: Arc<ModelManager>,
+        discovery_client: Arc<dyn Discovery>,
+        cancel_token: CancellationToken,
+        nvext_enabled: bool,
+        responses_context_store: Arc<ResponseContextStoreManager>,
+    ) -> Self {
+        Self {
             manager,
             metrics: Arc::new(Metrics::default()),
             discovery_client,
@@ -165,7 +181,7 @@ impl State {
             },
             cancel_token,
             responses_context_store,
-        })
+        }
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -203,7 +219,7 @@ impl State {
     }
 
     pub fn responses_context_store(&self) -> &ResponseContextStoreManager {
-        &self.responses_context_store
+        self.responses_context_store.as_ref()
     }
 
     // TODO
@@ -292,6 +308,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     cancel_token: Option<CancellationToken>,
+
+    #[builder(setter(strip_option), default = "None")]
+    responses_context_store: Option<Arc<ResponseContextStoreManager>>,
 
     /// When set, the `/metrics` endpoint will also expose metrics from the
     /// DRT's registry tree (anything created via `metrics().create*()`).
@@ -624,12 +643,19 @@ impl HttpServiceConfigBuilder {
         let admin_api_enabled =
             config.enable_admin_api && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
 
-        let state = Arc::new(State::new_with_nvext_enabled(
+        let responses_context_store = match config.responses_context_store {
+            Some(store) => store,
+            None => Arc::new(ResponseContextStoreManager::from_env_with_shutdown(
+                cancel_token.child_token(),
+            )?),
+        };
+        let state = Arc::new(State::new_with_responses_context_store(
             model_manager,
             discovery_client,
             cancel_token,
             nvext_enabled,
-        )?);
+            responses_context_store,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -934,14 +960,38 @@ mod tests {
         handle.abort();
     }
 
-    #[cfg(feature = "stateful-responses-redb")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn custom_responses_store_bypasses_url_initialization() {
+        temp_env::async_with_vars(
+            [(
+                "DYN_STATEFUL_RESPONSES_STORE_URL",
+                Some("unsupported://store"),
+            )],
+            async {
+                let manager = Arc::new(ResponseContextStoreManager::from_store(
+                    Arc::new(crate::key_value_store::MemoryKeyValueStore::new()),
+                    None,
+                    None,
+                    CancellationToken::new(),
+                ));
+                let service = HttpService::builder()
+                    .responses_context_store(manager)
+                    .build()
+                    .unwrap();
+                service.warmup().await.unwrap();
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "key-value-store-redis")]
     #[tokio::test]
     #[serial_test::serial]
     async fn responses_store_init_failure_fails_startup() {
         const STORE_URL_ENV: &str = "DYN_STATEFUL_RESPONSES_STORE_URL";
 
-        let db_dir = tempfile::tempdir().unwrap();
-        let store_url = format!("redb:{}", db_dir.path().display());
+        let store_url = "redis://[".to_string();
 
         temp_env::async_with_vars([(STORE_URL_ENV, Some(store_url.as_str()))], async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -955,7 +1005,7 @@ mod tests {
             let err = service
                 .run_with_listener(CancellationToken::new(), listener)
                 .await
-                .expect_err("bad redb store should fail before serving");
+                .expect_err("bad Redis store should fail before serving");
             assert!(
                 err.to_string()
                     .contains("failed to initialize stateful Responses store"),
