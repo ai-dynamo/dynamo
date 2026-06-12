@@ -1,25 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""ModelExpress v2 refit receiver, as a vLLM v1 ``worker_extension_cls``.
 
-Registered into the vLLM ``Worker`` class via ``parallel_config.worker_extension_cls``
-so its methods become callable through ``AsyncLLM.collective_rpc``. Each method
-runs **inside the worker process**, where ``self.model_runner.model`` and
-``self.device`` are available.
+"""Dynamo vLLM MX refit extension with Megatron publisher support.
 
-Lifetime model (mirrors ``VllmInternalWorkerExtension``):
-
-  * ``prepare_refit_info(state_dict_info)`` is called once per worker before the
-    first refit. Stores per-tensor (shape, dtype) for asserts and FP8 paths.
-  * ``update_weights_via_mx(version, mx_config)`` is called every refit cycle.
-    Lazy-initializes an :class:`modelexpress.MxV2RefitReceiver` on first call,
-    registers ``model.named_parameters()`` as NIXL receive buffers, then for
-    every subsequent cycle: discover same-rank source → RDMA receive → call
-    ``_load_weights`` → optionally republish as inference_replica for tree
-    fan-out.
-
-The Dynamo handler in ``components/src/dynamo/vllm/handlers.py`` invokes this
-via ``await self.engine_client.collective_rpc("update_weights_via_mx", kwargs=...)``.
+The DTensor path receives HF-named tensors from NeMo-RL publishers. The
+Megatron path consumes Modelexpress Megatron metadata and translates
+Megatron-native trainer shards into HF-named tensors before calling vLLM's
+loader.
 """
 
 from __future__ import annotations
@@ -27,6 +14,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import socket
 import traceback
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,19 +24,9 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# MxConfig — wire-compatible with nemo_rl.distributed.mx_helpers.MxConfig
-# =============================================================================
-
-
 @dataclass
 class MxConfig:
-    """Subset of nemo-rl's MxConfig needed on the receiver side.
-
-    The trainer sends this as a dict over the Dynamo Endpoint RPC; we parse it
-    with :meth:`from_dict`. Field names and defaults must stay in sync with
-    nemo_rl.distributed.mx_helpers.MxConfig.
-    """
+    """Wire-compatible subset of ``nemo_rl.distributed.mx_helpers.MxConfig``."""
 
     enabled: bool = True
     mx_server_url: str = "modelexpress-server:8001"
@@ -77,18 +55,7 @@ class MxConfig:
         )
 
 
-# =============================================================================
-# NIC pinning (port of nemo_rl.distributed.mx_helpers.pin_local_nic)
-# =============================================================================
-
-
 def _pin_local_nic(*, device_id: int, mode: str = "auto") -> None:
-    """Best-effort NUMA-local NIC pinning before NIXL initializes.
-
-    On multi-NIC RDMA fabrics (e.g. GB200/GCP four-subnet RoCE) each rank's
-    NIXL agent must bind to the NIC NUMA-closest to its GPU; cross-NIC writes
-    are unrouted. Delegated to modelexpress's helper.
-    """
     if mode == "off":
         return
     try:
@@ -105,73 +72,198 @@ def _pin_local_nic(*, device_id: int, mode: str = "auto") -> None:
         logger.warning("[mx] NIC pin failed (mode=%s): %s", mode, exc)
 
 
-# =============================================================================
-# Worker extension class — injected into vLLM Worker via worker_extension_cls
-# =============================================================================
+def _device_index(device: Any) -> int:
+    index = getattr(device, "index", None)
+    if index is not None:
+        return int(index)
+    if isinstance(device, int):
+        return device
+    return int(torch.cuda.current_device())
+
+
+def _model_name(worker: Any) -> str:
+    vllm_config = getattr(worker.model_runner, "vllm_config", None)
+    model_config = getattr(vllm_config, "model_config", None)
+    return str(getattr(model_config, "model", "unknown"))
+
+
+def _parallel_config(worker: Any) -> Any:
+    if hasattr(worker, "parallel_config"):
+        return worker.parallel_config
+    vllm_config = getattr(worker.model_runner, "vllm_config", None)
+    return getattr(vllm_config, "parallel_config", None)
+
+
+def _target_tp(worker: Any) -> tuple[int, int]:
+    parallel_config = _parallel_config(worker)
+    tp_size = int(getattr(parallel_config, "tensor_parallel_size", 1) or 1)
+    if tp_size <= 1 and torch.distributed.is_initialized():
+        tp_size = int(torch.distributed.get_world_size())
+    if torch.distributed.is_initialized():
+        # Dynamo vLLM workers are single-DP in this smoke. For TP>1, global
+        # rank modulo TP gives the worker's TP rank.
+        tp_rank = int(torch.distributed.get_rank() % tp_size)
+    else:
+        tp_rank = 0
+    return tp_size, tp_rank
+
+
+def _param_for_loaded_weight(
+    name: str,
+    params: dict[str, torch.Tensor],
+) -> torch.Tensor | None:
+    candidates = [name]
+    if name.startswith("backbone."):
+        candidates.append(f"model.{name[len('backbone.'):]}")
+    for candidate in candidates:
+        param = params.get(candidate)
+        if param is not None:
+            return param
+
+    # vLLM maps separate q/k/v checkpoint names onto qkv_proj internally.
+    # The shape adapter below still needs to inspect the fused parameter.
+    for candidate in candidates:
+        for shard_name in ("q_proj", "k_proj", "v_proj"):
+            if shard_name not in candidate:
+                continue
+            mapped_name = candidate.replace(shard_name, "qkv_proj")
+            param = params.get(mapped_name)
+            if param is not None:
+                return param
+    return None
+
+
+def _maybe_copy_tp_local_weight(
+    *,
+    name: str,
+    weight: torch.Tensor,
+    params: dict[str, torch.Tensor],
+) -> bool:
+    """Copy exact TP-local linear shards directly.
+
+    The Megatron matched-TP path receives local shards. vLLM's standard
+    loaders usually expect checkpoint-global tensors and slice again, which
+    is wrong for exact-shaped row-parallel and fused local layouts such as
+    Nemotron-H Mamba ``conv1d``/``in_proj``.
+    """
+    param = _param_for_loaded_weight(name, params)
+    if param is None or tuple(param.shape) != tuple(weight.shape):
+        return False
+    if ".experts." in name:
+        return False
+
+    is_linear_shard = (
+        getattr(param, "input_dim", None) is not None
+        or getattr(param, "output_dim", None) is not None
+    )
+    if not is_linear_shard:
+        return False
+
+    with torch.no_grad():
+        param.copy_(weight, non_blocking=True)
+    return True
+
+
+def _maybe_expand_tp_local_weight(
+    *,
+    name: str,
+    weight: torch.Tensor,
+    params: dict[str, torch.Tensor],
+    tp_size: int,
+    tp_rank: int,
+) -> torch.Tensor:
+    """Wrap a local TP shard in a checkpoint-global tensor for vLLM loaders."""
+    if tp_size <= 1 or weight.ndim == 0:
+        return weight
+
+    param = _param_for_loaded_weight(name, params)
+    if param is None:
+        return weight
+
+    is_sharded_weight = bool(getattr(param, "is_sharded_weight", False))
+    use_bitsandbytes_4bit = bool(getattr(param, "use_bitsandbytes_4bit", False))
+    if is_sharded_weight or use_bitsandbytes_4bit:
+        return weight
+
+    dim = getattr(param, "output_dim", None)
+    if dim is None:
+        dim = getattr(param, "input_dim", None)
+    if dim is None:
+        return weight
+    dim = int(dim)
+    if dim < 0:
+        dim += weight.ndim
+    if dim < 0 or dim >= weight.ndim:
+        return weight
+
+    local_extent = int(weight.shape[dim])
+    if dim < param.ndim and local_extent > int(param.shape[dim]):
+        return weight
+
+    expanded_shape = list(weight.shape)
+    expanded_shape[dim] = local_extent * tp_size
+    expanded = torch.empty(
+        expanded_shape,
+        dtype=weight.dtype,
+        device=weight.device,
+    )
+    expanded.narrow(dim, tp_rank * local_extent, local_extent).copy_(
+        weight,
+        non_blocking=True,
+    )
+    return expanded
+
+
+def _torch_dtype(dtype_name: str) -> torch.dtype:
+    dtype_name = str(dtype_name).removeprefix("torch.")
+    return {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "half": torch.float16,
+        "float32": torch.float32,
+        "float": torch.float32,
+    }.get(dtype_name, torch.bfloat16)
 
 
 class MxRefitWorkerExtension:
-    """Methods added to vLLM's ``Worker`` class via ``worker_extension_cls``.
+    """Methods injected into vLLM's Worker via ``worker_extension_cls``."""
 
-    Has no ``__init__``: vLLM merges this class's methods into the existing
-    ``Worker`` via ``__bases__``, and any state we need is stashed on ``self``
-    lazily inside the methods themselves (``self._mx_receiver``,
-    ``self._mx_recv_buffers``, ``self._mx_state_dict_info``). No conflict
-    checks fire because all our attribute names use the ``_mx_`` prefix.
-    """
-
-    # ------------------------------------------------------------------ #
-    # Refit-info preparation
-    # ------------------------------------------------------------------ #
     def prepare_refit_info(self, state_dict_info: dict[str, Any]) -> None:
-        """Record per-tensor (shape, dtype) info from the trainer.
-
-        Called once by the trainer driver before the first refit cycle.
-        Mirrors :py:meth:`VllmInternalWorkerExtension.prepare_refit_info` on
-        the NeMo-RL side — assigns an instance attribute used by the FP8 path
-        and for assertion checks. No-op for now if the worker class already
-        had this attribute (the IPC-ZMQ path also stores it).
-        """
-        self._mx_state_dict_info = state_dict_info  # noqa: SLF001
+        self._mx_state_dict_info = state_dict_info
         if not hasattr(self, "state_dict_info"):
             self.state_dict_info = state_dict_info
 
-    # ------------------------------------------------------------------ #
-    # Weight loading (minimal — adds GPT-OSS / FP8 / draft handling later)
-    # ------------------------------------------------------------------ #
     def _mx_load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
-        """Push refitted weights into the running vLLM model.
-
-        Initial implementation covers the dense BF16/FP16 path only. GPT-OSS
-        transpose, FP8 KV-cache post-processing, and Eagle3 draft-weight
-        splitting are TODOs — see the NeMo-RL reference
-        (``nemo_rl/models/generation/vllm/vllm_backend.py:_load_weights``)
-        for those branches.
-        """
-        # The model parameters are the same buffers we registered with NIXL,
-        # so by the time we get here the bytes are already in place. The call
-        # below still runs vLLM's model-specific weight loader so any
-        # per-tensor renaming / reshape / quant-state updates happen
-        # consistently across paths.
+        tp_size, tp_rank = _target_tp(self)
+        if tp_size > 1:
+            params = dict(self.model_runner.model.named_parameters())
+            adapted_weights = []
+            for name, weight in weights:
+                if _maybe_copy_tp_local_weight(
+                    name=name,
+                    weight=weight,
+                    params=params,
+                ):
+                    continue
+                adapted_weights.append(
+                    (
+                        name,
+                        _maybe_expand_tp_local_weight(
+                            name=name,
+                            weight=weight,
+                            params=params,
+                            tp_size=tp_size,
+                            tp_rank=tp_rank,
+                        ),
+                    )
+                )
+            weights = adapted_weights
         self.model_runner.model.load_weights(weights=weights)
 
     def _mx_maybe_process_fp8_kv_cache(self) -> None:
-        """If the model uses FP8 KV cache, re-run vLLM's weight-loading hook.
-
-        Static FP8 KV scales are computed in ``process_weights_after_loading``;
-        they need to be recomputed after every refit so the scales match the
-        new weights. Skipped silently for non-FP8 KV cache configurations.
-        """
-        use_fp8_kv_cache = False
-        if hasattr(self.model_runner.vllm_config, "cache_config"):
-            kv_cache_dtype = getattr(
-                self.model_runner.vllm_config.cache_config, "cache_dtype", None
-            )
-            use_fp8_kv_cache = (
-                kv_cache_dtype is not None and "fp8" in str(kv_cache_dtype).lower()
-            )
-
-        if not use_fp8_kv_cache:
+        cache_config = getattr(self.model_runner.vllm_config, "cache_config", None)
+        kv_cache_dtype = getattr(cache_config, "cache_dtype", None)
+        if kv_cache_dtype is None or "fp8" not in str(kv_cache_dtype).lower():
             return
 
         from vllm.model_executor.model_loader.utils import (
@@ -185,106 +277,49 @@ class MxRefitWorkerExtension:
             target_device,
         )
 
-    # ------------------------------------------------------------------ #
-    # The refit RPC entry point
-    # ------------------------------------------------------------------ #
+    def _mx_init_receiver(self, mx_config: MxConfig) -> None:
+        if getattr(self, "_mx_receiver", None):
+            return
+
+        from modelexpress import MxV2RefitReceiver
+
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        device_id = _device_index(self.device)
+        _pin_local_nic(device_id=device_id, mode=mx_config.nic_pin)
+        pod_hostname = socket.gethostname()
+        self._mx_receiver = MxV2RefitReceiver(
+            agent_name=f"dynamo-vllm-{pod_hostname}-r{rank}",
+            device_id=device_id,
+            mx_server_url=mx_config.mx_server_url,
+            worker_rank=rank,
+        )
+
+        publish_tensors = (
+            dict(self.model_runner.model.named_parameters())
+            if mx_config.tree_scale_out
+            else None
+        )
+        self._mx_receiver.initialize(model_tensors=publish_tensors)
+        logger.info(
+            "[mx] receiver initialized rank=%d device=%d publish_buffers=%d",
+            rank,
+            device_id,
+            len(publish_tensors or {}),
+        )
+
     def update_weights_via_mx(
         self,
         *,
         version: int,
         mx_config: Any = None,
     ) -> bool:
-        """Receive weights via NIXL RDMA from the MX server (v2 path).
-
-        Mirrors ``VllmInternalWorkerExtension.update_weights_via_mx`` in
-        NeMo-RL. The lazy-init path runs on first call per worker; subsequent
-        calls reuse the registered NIXL buffers.
-
-        Args:
-            version: monotonically-increasing training-step counter; the
-                receiver picks sources whose ``training_step >= version``.
-            mx_config: an ``MxConfig`` instance or a dict matching its fields.
-                The trainer typically sends a dict over the Dynamo Endpoint
-                RPC and we parse it here.
-
-        Returns:
-            True on successful refit, False on recoverable failures
-            (no source found, source doesn't cover required experts).
-            Unrecoverable errors are logged with a traceback and return False
-            so the caller can decide whether to retry.
-        """
         try:
-            # Allow dict input — the handler may pass through unparsed JSON
             if not isinstance(mx_config, MxConfig):
                 mx_config = MxConfig.from_dict(mx_config or {})
 
-            # ---- Lazy-init receiver (no pre-registered buffers; scratch path) ----
-            # We use ``MxRefitReceiver.receive_weights_scratch`` rather than the
-            # pre-registered-buffer path because the trainer publishes HF
-            # state_dict names (``q_proj``, ``k_proj``, ``v_proj``) but vLLM's
-            # internal params are fused (``qkv_proj``). Registering vLLM's
-            # ``named_parameters()`` as receive buffers gives a name mismatch
-            # that breaks ``model.load_weights`` (it does the HF→fused merge
-            # itself, and if you feed it ``qkv_proj`` it produces ``qkqkv_proj``
-            # via its stacked_params_mapping). The scratch path allocates temp
-            # CUDA buffers sized to the publisher's tensor list, RDMA-pulls
-            # into them, and yields ``(hf_name, tensor)`` pairs that
-            # ``load_weights`` consumes correctly. Extra GPU memory cost:
-            # ~1× model size briefly per refit, freed at end.
-            if not getattr(self, "_mx_receiver", None):
-                # Import here so workers that never refit via MX don't pay
-                # the modelexpress import cost.
-                from modelexpress import MxV2RefitReceiver
-
-                rank = (
-                    torch.distributed.get_rank()
-                    if torch.distributed.is_initialized()
-                    else 0
-                )
-                _pin_local_nic(
-                    device_id=self.device.index, mode=mx_config.nic_pin
-                )
-                # Agent name must be pod-globally unique. When tree_scale_out
-                # is on, receivers pull from each other — NIXL rejects
-                # loadRemoteMD with NIXL_ERR_INVALID_PARAM ("remote agent
-                # name same as local agent") if any two receivers share an
-                # agent_name. Hostname is pod-unique on K8s; rank
-                # disambiguates the 2 TP processes per pod.
-                import socket
-                pod_hostname = socket.gethostname()
-                self._mx_receiver = MxV2RefitReceiver(  # noqa: SLF001
-                    agent_name=f"dynamo-vllm-{pod_hostname}-r{rank}",
-                    device_id=self.device.index,
-                    mx_server_url=mx_config.mx_server_url,
-                    worker_rank=rank,
-                )
-                # When tree_scale_out is on, register the model's
-                # named_parameters with NIXL at init so the post-refit
-                # publish_self_as_source has buffers to advertise.
-                # receive_weights_scratch still allocates its own temp
-                # buffers — the registered ones are read-only from the
-                # receiver's perspective until we republish ourselves
-                # as a v2 inference_replica.
-                self_publish_tensors = (
-                    dict(self.model_runner.model.named_parameters())
-                    if mx_config.tree_scale_out
-                    else None
-                )
-                self._mx_receiver.initialize(model_tensors=self_publish_tensors)
-                logger.info(
-                    "[mx] receiver initialized (scratch path): rank=%d device=%d "
-                    "publish_buffers=%d",
-                    rank,
-                    self.device.index,
-                    len(self_publish_tensors or {}),
-                )
-
-            # ---- Discover, pick source, RDMA pull ----
-            model_name = getattr(
-                self.model_runner.vllm_config.model_config, "model", "unknown"
-            )
+            self._mx_init_receiver(mx_config)
             candidates = self._mx_receiver.discover_v2_sources(
-                model_name=model_name,
+                model_name=_model_name(self),
                 min_version=int(version),
                 same_rank_only=mx_config.same_rank_only,
                 include_replicas=mx_config.tree_scale_out,
@@ -297,233 +332,300 @@ class MxRefitWorkerExtension:
                 )
                 return False
 
-            chosen = self._mx_receiver.pick_best_source(candidates)
-            if chosen is None:
-                logger.warning(
-                    "[mx] no candidate covers required experts on rank %d",
-                    self._mx_receiver.worker_rank,
+            if any(c.megatron_meta is not None for c in candidates):
+                return self._mx_update_weights_via_mx_megatron(
+                    candidates=candidates,
+                    version=int(version),
+                    mx_config=mx_config,
                 )
-                return False
-            logger.info(
-                "[mx] rank=%d chosen role=%s src_rank=%d version=%s",
-                self._mx_receiver.worker_rank,
-                chosen.role,
-                chosen.worker_rank,
-                chosen.ref.training_step,
+
+            return self._mx_update_weights_via_mx_dtensor(
+                candidates=candidates,
+                version=int(version),
+                mx_config=mx_config,
             )
-
-            # Scratch path: allocate temp buffers, RDMA-pull, collect HF-named
-            # tensors. ``receive_weights_scratch`` lives on the inner
-            # ``MxRefitReceiver``; ``MxV2RefitReceiver.receive_from`` wraps the
-            # non-scratch ``receive_weights`` which assumes name parity.
-            #
-            # Build a tensor_shapes dict from the v2 candidate's registry so
-            # the yielded tensors come back with their original shape (not
-            # flat 1D). vLLM's ``load_weights`` calls ``.copy_(t)`` into the
-            # model param, so shape must match (or .view() must succeed).
-            from modelexpress.nemo_rl_v2 import ROLE_INFERENCE_REPLICA
-
-            tensor_shapes: dict[str, tuple[int, ...]] = {}
-            registry = getattr(chosen, "registry", None)
-            if registry:
-                for td in registry.get("tensors", []):
-                    tensor_shapes[td.name] = tuple(int(s) for s in td.global_shape)
-            # Replicas don't publish a shape_registry (publish_self_as_source
-            # only emits role/version/rank). Fall back to the receiver's own
-            # named_parameters layout — by construction, source replica and
-            # this receiver are both vLLM TP=N instances at the same rank,
-            # so the local shapes line up tensor-for-tensor.
-            if chosen.role == ROLE_INFERENCE_REPLICA and not tensor_shapes:
-                tensor_shapes = {
-                    name: tuple(p.shape)
-                    for name, p in self.model_runner.model.named_parameters()
-                }
-            weights: list[tuple[str, torch.Tensor]] = list(
-                self._mx_receiver._receiver.receive_weights_scratch(
-                    chosen.ref,
-                    timeout_seconds=mx_config.timeout_seconds,
-                    tensor_shapes=tensor_shapes or None,
-                )
-            )
-
-            # ---- Load: HF→fused merge (trainer) vs direct copy (replica) ----
-            # Trainer publishes HF state_dict (q_proj/k_proj/v_proj separately
-            # at GLOBAL shapes) so vLLM's load_weights fuses into qkv_proj and
-            # re-shards to local TP. Inference_replicas publish their own
-            # named_parameters — already fused, already locally TP-sharded.
-            # Feeding those to load_weights triggers the stacked-params merger
-            # against an already-merged tensor → shape assert in
-            # vocab_parallel_embedding ("loaded_weight.shape[0] != org_vocab_size").
-            # For replicas, byte-copy straight into the matching named_param —
-            # same trick MxModelLoader uses on the autoscaling boot path.
-            if chosen.role == ROLE_INFERENCE_REPLICA:
-                model_params = dict(
-                    self.model_runner.model.named_parameters()
-                )
-                copied = 0
-                for name, tensor in weights:
-                    param = model_params.get(name)
-                    if param is None:
-                        logger.warning(
-                            "[mx] replica direct-copy: unknown param %s; "
-                            "skipping",
-                            name,
-                        )
-                        continue
-                    with torch.no_grad():
-                        param.copy_(tensor, non_blocking=True)
-                    copied += 1
-                logger.info(
-                    "[mx] replica direct-copy: %d/%d tensors loaded",
-                    copied,
-                    len(weights),
-                )
-            else:
-                self._mx_load_weights(weights)
-            torch.cuda.current_stream().synchronize()
-            self._mx_maybe_process_fp8_kv_cache()
-
-            # ---- Tree fan-out: republish self as inference_replica ----
-            if mx_config.tree_scale_out:
-                try:
-                    self._mx_receiver.publish_self_as_source(
-                        version=int(version),
-                        model_name=model_name,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # Non-fatal: refit succeeded, we just can't serve as a
-                    # source for downstream receivers this cycle.
-                    logger.warning(
-                        "[mx] tree-scale-out republish failed: %s", exc
-                    )
-
-            gc.collect()
-            torch.cuda.empty_cache()
-            return True
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "[mx] update_weights_via_mx failed on rank=%d: %s\n%s",
-                getattr(
-                    getattr(self, "_mx_receiver", None), "worker_rank", -1
-                ),
+                "[mx] update_weights_via_mx failed on rank=%s: %s\n%s",
+                getattr(getattr(self, "_mx_receiver", None), "worker_rank", -1),
                 exc,
                 traceback.format_exc(),
             )
             return False
 
-    # ------------------------------------------------------------------ #
-    # Receiver-side polling — the trainer publishes to MX without sending
-    # any trigger RPC, so the worker watches the MX server itself and
-    # refits whenever a newer version appears for its model_name.
-    # ------------------------------------------------------------------ #
-    def start_mx_refit_poller(
+    def _mx_update_weights_via_mx_dtensor(
         self,
         *,
-        mx_config: Any = None,
-        poll_interval_s: float = 5.0,
+        candidates: list[Any],
+        version: int,
+        mx_config: MxConfig,
     ) -> bool:
-        """Spawn a background thread that watches MX for new versions.
+        chosen = self._mx_receiver.pick_best_source(candidates)
+        if chosen is None:
+            logger.warning(
+                "[mx] no candidate covers required experts on rank %d",
+                self._mx_receiver.worker_rank,
+            )
+            return False
 
-        Called once per worker at startup (or on first publish-detection),
-        from the dynamo handler. The thread:
-          1. Builds an MxConfig (defaults are fine for the smoke).
-          2. Loops on ``discover_v2_sources(min_version=last_seen+1)``.
-          3. When a new version appears, calls ``update_weights_via_mx``
-             with the new version. That method's lazy-init flow registers
-             NIXL buffers on first call.
-          4. Sleeps ``poll_interval_s`` between polls.
+        tensor_shapes: dict[str, tuple[int, ...]] = {}
+        registry = getattr(chosen, "registry", None)
+        if registry:
+            for td in registry.get("tensors", []):
+                tensor_shapes[td.name] = tuple(int(s) for s in td.global_shape)
 
-        Returns True if the thread was started (or was already running).
-        Idempotent — repeated calls are no-ops.
-        """
-        if getattr(self, "_mx_poller_thread", None) is not None:
-            return True
+        from modelexpress.nemo_rl_v2 import ROLE_INFERENCE_REPLICA
 
-        import threading
+        if chosen.role == ROLE_INFERENCE_REPLICA and not tensor_shapes:
+            tensor_shapes = {
+                name: tuple(p.shape)
+                for name, p in self.model_runner.model.named_parameters()
+            }
 
-        cfg = (
-            mx_config
-            if isinstance(mx_config, MxConfig)
-            else MxConfig.from_dict(mx_config or {})
+        weights = list(
+            self._mx_receiver._receiver.receive_weights_scratch(
+                chosen.ref,
+                timeout_seconds=mx_config.timeout_seconds,
+                tensor_shapes=tensor_shapes or None,
+            )
         )
-        self._mx_poller_stop = threading.Event()
-        self._mx_poller_last_version: int = 0
-        self._mx_poller_cfg = cfg
-        self._mx_poller_interval = float(poll_interval_s)
 
-        def _poll_loop() -> None:
-            from modelexpress import MxV2RefitReceiver
+        if chosen.role == ROLE_INFERENCE_REPLICA:
+            model_params = dict(self.model_runner.model.named_parameters())
+            for name, tensor in weights:
+                param = model_params.get(name)
+                if param is not None:
+                    with torch.no_grad():
+                        param.copy_(tensor, non_blocking=True)
+        else:
+            self._mx_load_weights(weights)
 
-            model_name = getattr(
-                self.model_runner.vllm_config.model_config, "model", "unknown"
+        torch.cuda.current_stream().synchronize()
+        self._mx_maybe_process_fp8_kv_cache()
+        if mx_config.tree_scale_out:
+            self._mx_receiver.publish_self_as_source(
+                version=int(version),
+                model_name=_model_name(self),
             )
-            rank = (
-                torch.distributed.get_rank()
-                if torch.distributed.is_initialized()
-                else 0
-            )
-            logger.info(
-                "[mx-poller] started: rank=%d model=%s interval=%.1fs",
-                rank,
-                model_name,
-                self._mx_poller_interval,
-            )
-            # Lazy receiver just for discovery — the refit path lazy-inits
-            # its own receiver against the same MX server. We call
-            # ``initialize(model_tensors=None)`` to wire the NIXL agent +
-            # gRPC client without registering receive buffers (we don't
-            # use this receiver to pull; only to poll for new versions).
-            discover_only = MxV2RefitReceiver(
-                agent_name=f"dynamo-vllm-poller-r{rank}",
-                device_id=self.device.index,
-                mx_server_url=cfg.mx_server_url,
-                worker_rank=rank,
-            )
-            try:
-                discover_only.initialize(model_tensors=None)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "[mx-poller] discover-receiver initialize() failed: %s; "
-                    "polling thread will not start", exc,
-                )
-                return
-            while not self._mx_poller_stop.is_set():
-                try:
-                    candidates = discover_only.discover_v2_sources(
-                        model_name=model_name,
-                        min_version=int(self._mx_poller_last_version) + 1,
-                        same_rank_only=cfg.same_rank_only,
-                        include_replicas=cfg.tree_scale_out,
-                    )
-                    if candidates:
-                        latest = max(
-                            int(c.ref.training_step) for c in candidates
-                        )
-                        logger.info(
-                            "[mx-poller] new version detected: %d (last=%d)",
-                            latest,
-                            self._mx_poller_last_version,
-                        )
-                        ok = self.update_weights_via_mx(
-                            version=latest, mx_config=cfg
-                        )
-                        if ok:
-                            self._mx_poller_last_version = latest
-                            logger.info(
-                                "[mx-poller] refit OK to version %d", latest
-                            )
-                        else:
-                            logger.warning(
-                                "[mx-poller] refit failed for version %d; will retry",
-                                latest,
-                            )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[mx-poller] poll error: %s", exc)
-                self._mx_poller_stop.wait(self._mx_poller_interval)
-            logger.info("[mx-poller] stopped on rank=%d", rank)
-
-        self._mx_poller_thread = threading.Thread(
-            target=_poll_loop, name="mx-refit-poller", daemon=True
-        )
-        self._mx_poller_thread.start()
+        gc.collect()
+        torch.cuda.empty_cache()
         return True
+
+    def _build_megatron_context(self, candidates: list[Any]) -> Any:
+        from modelexpress.megatron_translator import (
+            MegatronReceiverContext,
+            ReceiveSpec,
+            discover_megatron_context,
+        )
+        from modelexpress.nemo_rl_v2 import (
+            ROLE_MEGATRON_VOCAB_PARALLEL,
+            TargetTpLayout,
+        )
+
+        cfg, name_map = discover_megatron_context(candidates)
+        if cfg is None:
+            raise RuntimeError(
+                "Megatron MX sources did not publish megatron_transformer_config"
+            )
+
+        tp_size, tp_rank = _target_tp(self)
+        receive_specs: dict[str, ReceiveSpec] = {}
+        for cand in candidates:
+            if cand.megatron_meta is None or cand.registry is None:
+                continue
+            for td in cand.registry.get("tensors", []):
+                if td.name in receive_specs or not td.megatron_role:
+                    continue
+                lookup_name = (
+                    td.name[len("module."):] if td.name.startswith("module.") else td.name
+                )
+                hf_names = name_map.get(lookup_name, name_map.get(td.name, [td.name]))
+                receive_specs[td.name] = ReceiveSpec(
+                    megatron_name=td.name,
+                    hf_names=list(hf_names),
+                    role=td.megatron_role,
+                    target_shape=tuple(int(s) for s in td.global_shape),
+                    target_dtype=td.dtype,
+                    shard_axis=int(td.shard_axis),
+                    pp_rank=cand.megatron_meta.pp_rank,
+                    role_descriptor=dict(td.megatron_extras or {}),
+                )
+
+        logger.info(
+            "[mx-megatron] built context tp=%d rank=%d tensors=%d",
+            tp_size,
+            tp_rank,
+            len(receive_specs),
+        )
+        return MegatronReceiverContext(
+            target_tp_layout=TargetTpLayout(tp_size=tp_size, tp_rank=tp_rank),
+            transformer_config=cfg,
+            hf_name_map=name_map,
+            receive_specs=receive_specs,
+        )
+
+    def _mx_pull_megatron_vocab_buffers(
+        self,
+        *,
+        candidates: list[Any],
+        ctx: Any,
+        mx_config: MxConfig,
+    ) -> None:
+        vocab_buffers = getattr(self, "_mx_megatron_vocab_buffers", {})
+        if not vocab_buffers:
+            return
+
+        megatron_cands = sorted(
+            [c for c in candidates if c.megatron_meta is not None],
+            key=lambda c: c.megatron_meta.tp_rank,
+        )
+        for cand in megatron_cands:
+            batch = []
+            for name, dest in vocab_buffers.items():
+                spec = ctx.receive_specs[name]
+                axis = int(spec.shard_axis)
+                if axis != 0:
+                    raise RuntimeError(
+                        f"vocab_parallel tensor {name!r} uses unsupported "
+                        f"shard_axis={axis}; expected 0"
+                    )
+                rows = int(spec.target_shape[axis])
+                lo = int(cand.megatron_meta.tp_rank) * rows
+                view = dest.narrow(axis, lo, rows)
+                if not view.is_contiguous():
+                    raise RuntimeError(
+                        f"vocab_parallel destination for {name!r} is not contiguous"
+                    )
+                batch.append((name, None, view))
+            if batch:
+                self._mx_receiver._receiver.pull_to(
+                    cand.ref,
+                    batch,
+                    timeout_seconds=mx_config.timeout_seconds,
+                )
+
+    def _mx_update_weights_via_mx_megatron(
+        self,
+        *,
+        candidates: list[Any],
+        version: int,
+        mx_config: MxConfig,
+    ) -> bool:
+        from modelexpress.megatron_translator import run_refit_cycle
+        from modelexpress.nemo_rl_v2 import ROLE_MEGATRON_VOCAB_PARALLEL
+
+        if not getattr(self, "_mx_megatron_ctx", None):
+            self._mx_megatron_ctx = self._build_megatron_context(candidates)
+
+        ctx = self._mx_megatron_ctx
+        if not hasattr(self, "_mx_megatron_buffers"):
+            buffers: dict[str, torch.Tensor] = {}
+            vocab_buffers: dict[str, torch.Tensor] = {}
+            source_tp_size = next(
+                (
+                    c.megatron_meta.tp_size
+                    for c in candidates
+                    if c.megatron_meta is not None and c.megatron_meta.tp_size > 0
+                ),
+                ctx.target_tp_layout.tp_size,
+            )
+            for spec in ctx.receive_specs.values():
+                if spec.role.startswith("expert_"):
+                    continue
+                shape = list(spec.target_shape)
+                target = buffers
+                if spec.role == ROLE_MEGATRON_VOCAB_PARALLEL:
+                    shape[int(spec.shard_axis)] *= int(source_tp_size)
+                    target = vocab_buffers
+                # The Megatron registry shape reflects the published buffer
+                # shape. Vocab tensors are the exception: vLLM's loader wants
+                # the full vocab tensor and slices it internally for TP.
+                target[spec.megatron_name] = torch.empty(
+                    shape,
+                    dtype=_torch_dtype(spec.target_dtype),
+                    device=self.device,
+                )
+            all_buffers = dict(buffers)
+            all_buffers.update(vocab_buffers)
+            if all_buffers:
+                self._mx_receiver._receiver._nixl.register_tensors(all_buffers)
+            self._mx_megatron_buffers = buffers
+            self._mx_megatron_vocab_buffers = vocab_buffers
+            logger.info(
+                "[mx-megatron] registered %d per-rank buffers and %d full-vocab buffers",
+                len(buffers),
+                len(vocab_buffers),
+            )
+
+        matched = next(
+            (
+                c
+                for c in candidates
+                if c.megatron_meta is not None
+                and c.megatron_meta.tp_rank == ctx.target_tp_layout.tp_rank
+            ),
+            None,
+        )
+        source_tp_size = next(
+            (
+                c.megatron_meta.tp_size
+                for c in candidates
+                if c.megatron_meta is not None and c.megatron_meta.tp_size > 0
+            ),
+            None,
+        )
+        if matched is None or (
+            source_tp_size is not None
+            and source_tp_size != ctx.target_tp_layout.tp_size
+        ):
+            raise RuntimeError(
+                "Dynamo Megatron MX refit currently supports matched TP only "
+                f"(target_tp={ctx.target_tp_layout.tp_size}, source_tp={source_tp_size})."
+            )
+
+        self._mx_receiver._receiver._nixl.rebind_tensors(self._mx_megatron_buffers)
+        for _name, _tensor in self._mx_receiver.receive_from(
+            matched,
+            timeout_seconds=mx_config.timeout_seconds,
+        ):
+            pass
+
+        self._mx_pull_megatron_vocab_buffers(
+            candidates=candidates,
+            ctx=ctx,
+            mx_config=mx_config,
+        )
+
+        def _noop_pull(_src: Any, _dest: torch.Tensor) -> None:
+            return
+
+        pre_assembled_buffers = dict(self._mx_megatron_buffers)
+        pre_assembled_buffers.update(self._mx_megatron_vocab_buffers)
+        weights = list(
+            run_refit_cycle(
+                self._mx_receiver,
+                candidates=candidates,
+                context=ctx,
+                pull=_noop_pull,
+                device=self.device,
+                pre_assembled_buffers=pre_assembled_buffers,
+            )
+        )
+        if not weights:
+            logger.warning("[mx-megatron] no translated tensors for version %d", version)
+            return False
+
+        self._mx_load_weights(weights)
+        torch.cuda.current_stream().synchronize()
+        self._mx_maybe_process_fp8_kv_cache()
+        if mx_config.tree_scale_out:
+            self._mx_receiver.publish_self_as_source(
+                version=int(version),
+                model_name=_model_name(self),
+            )
+        gc.collect()
+        torch.cuda.empty_cache()
+        return True
+
+
+__all__ = ["MxConfig", "MxRefitWorkerExtension"]
