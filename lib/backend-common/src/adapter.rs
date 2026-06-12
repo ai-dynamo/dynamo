@@ -1233,23 +1233,14 @@ mod tests {
 
     /// Force-enable the recording fast-path and install a fresh subscriber
     /// that captures every `engine.generate` field write into a shared map.
-    /// Ensure the test binary has a process-global default subscriber so the
-    /// `engine.generate` span callsite stays enabled for the whole run.
+    /// Pin a global default `tracing` subscriber for the whole test binary.
     ///
-    /// `tracing` caches per-callsite interest in a single process-global table.
-    /// When tests install and drop thread-local subscribers (`set_default`) in
-    /// parallel, that table is recomputed against whichever dispatchers are live
-    /// at the instant of the rebuild. If the `engine.generate` callsite is ever
-    /// evaluated with only the empty global default in scope, it can be cached
-    /// as disabled; the trace-context tests then never see the span born, so
-    /// `worker_trace_link` comes back `None` and they flake non-deterministically
-    /// under parallel execution.
-    ///
-    /// Installing a real (empty) registry as the *global* default keeps that
-    /// callsite enabled binary-wide: every interest rebuild now combines an
-    /// always-enabled dispatcher, so it can never collapse to disabled. Per-test
-    /// `set_default` subscribers still override this on their own thread, so the
-    /// capture / injection behaviour the tests assert on is unchanged.
+    /// `tracing` caches "is this span enabled?" per callsite in one global
+    /// table. With tests installing and dropping subscribers in parallel, the
+    /// `engine.generate` callsite can briefly be cached as disabled, so the
+    /// trace-context tests miss their span and flake. An always-present global
+    /// default keeps it enabled; per-test `set_default` subscribers still take
+    /// over on their own thread, so what the tests assert on is unchanged.
     fn ensure_global_test_subscriber() {
         use std::sync::Once;
         static INIT: Once = Once::new();
