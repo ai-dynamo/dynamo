@@ -1034,7 +1034,7 @@ def test_sglang_aggregated_s3_model_path(
         script_args=["--model-path", minio_config.get_s3_uri()],
         timeout=180,
         env=minio_config.get_env_vars(),
-        request_payloads=[chat_payload_default(model="Qwen/Qwen3-0.6B")],
+        request_payloads=[chat_payload_default()],
     )
 
     config = dataclasses.replace(
