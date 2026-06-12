@@ -62,7 +62,7 @@ Use this layer when a feature changes router behavior over time, depends on real
 
 ## 3. Full Router E2E Process Tests
 
-Use the Python tests in `tests/router` when you need the full request plane and event plane in play. These tests launch router and mocker or backend processes and exercise cross-process behavior that bench-backed replay cannot cover.
+Use the Python tests in `tests/router` when you need the full request plane and event plane in play. These tests launch router, mocker, or backend processes and exercise cross-process behavior that bench-backed replay cannot cover.
 
 Current entry points include:
 
