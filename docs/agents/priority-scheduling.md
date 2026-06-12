@@ -57,8 +57,9 @@ higher-priority requests are selected according to the queue key:
 (strict_priority, configured_policy_key)
 ```
 
-The strict tier is compared first. FCFS, LCFS, or WSPT still computes the
-secondary key and orders requests within the same tier.
+The strict tier is compared first. FCFS, LCFS, or Weighted Shortest Processing
+Time (WSPT) still computes the secondary key and orders requests within the same
+tier.
 
 The default policy is `fcfs`, which uses the priority value as a positive
 arrival-time bump. Higher values move the request earlier in the queue. Negative
