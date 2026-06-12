@@ -544,14 +544,6 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
-    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
-    # Dynamo does not register loaders or set a custom worker class here.
-
-    # Load default sampling params from `generation_config.json`
-    default_sampling_params = (
-        engine_args.create_model_config().get_diff_sampling_param()
-    )
-
     # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
     # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
     if (
@@ -581,6 +573,7 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None
