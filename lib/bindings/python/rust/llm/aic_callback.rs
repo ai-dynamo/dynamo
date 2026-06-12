@@ -101,15 +101,34 @@ fn build_rust_engine(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
+    nextn: Option<usize>,
+    nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<AicEngine>> {
+    // Speculative (MTP) decoding: forward the mocker's nextn / accept-rates to
+    // the engine build, mirroring the Python AicSession path. Dense models pass
+    // nextn=0 and no rates. accept-rates arrive comma-separated from the caller.
+    let nextn = nextn.unwrap_or(0) as u32;
+    let nextn_accept_rates: Option<Vec<f64>> = match nextn_accept_rates {
+        Some(s) if !s.trim().is_empty() => Some(
+            s.split(',')
+                .map(|x| x.trim().parse::<f64>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "AIC: invalid nextn_accept_rates {s:?}: {e}"
+                    ))
+                })?,
+        ),
+        _ => None,
+    };
     // Cache the compiled engine per identity. build_aic_engine compiles the
     // model (Python) and loads the perf DB (Rust parquet) — a one-time startup
     // cost, but callers may construct several callbacks (per-worker,
     // prefill+decode). Mirror the Python `_cached_engine_handle` so the build is
-    // paid once per unique config.
+    // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}"
+        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{nextn}|{nextn_accept_rates:?}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
@@ -134,15 +153,15 @@ fn build_rust_engine(
         attention_dp_size.unwrap_or(1) as u32,
         moe_tp_size.map(|x| x as u32),
         moe_ep_size.map(|x| x as u32),
-        None, // gemm_quant_mode (inferred by compile_engine)
-        None, // moe_quant_mode
-        None, // kvcache_quant_mode
-        None, // fmha_quant_mode
-        None, // comm_quant_mode
-        0,    // nextn (dense models; MTP models would set this)
-        None, // nextn_accept_rates
-        None, // kv_block_size
-        None, // systems_path (resolved via env above / build-time default)
+        None,               // gemm_quant_mode (inferred by compile_engine)
+        None,               // moe_quant_mode
+        None,               // kvcache_quant_mode
+        None,               // fmha_quant_mode
+        None,               // comm_quant_mode
+        nextn,              // speculative (MTP) tokens; 0 for dense
+        nextn_accept_rates, // per-position accept rates
+        None,               // kv_block_size
+        None,               // systems_path (resolved via env above / build-time default)
     )
     .map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -157,11 +176,8 @@ fn build_rust_engine(
 
 /// Build the AIC latency callback. Called once at mocker startup when
 /// `--aic-perf-model` is requested. Requires the `aic-forward-pass` feature.
-///
-/// `nextn` / `nextn_accept_rates` are accepted for caller/signature stability;
-/// the Rust engine currently builds dense (`nextn=0`). Threading speculative
-/// (MTP) decoding into `build_rust_engine` is a follow-up.
-#[allow(clippy::too_many_arguments, unused_variables)]
+#[cfg_attr(not(feature = "aic-forward-pass"), allow(unused_variables))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_aic_callback(
     py: Python<'_>,
     backend_name: &str,
@@ -187,6 +203,8 @@ pub(super) fn create_aic_callback(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
+            nextn,
+            nextn_accept_rates,
         )?;
         Ok(Arc::new(RustAicCallback { engine }))
     }
@@ -198,7 +216,8 @@ pub(super) fn create_aic_callback(
 
 /// Build the AIC prefill-load estimator for the KV router / live path. Requires
 /// the `aic-forward-pass` feature; a build failure is a hard error (no fallback).
-#[allow(clippy::too_many_arguments, unused_variables)]
+#[cfg_attr(not(feature = "aic-forward-pass"), allow(unused_variables))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_aic_prefill_load_estimator(
     py: Python<'_>,
     backend_name: &str,
@@ -224,6 +243,8 @@ pub(super) fn create_aic_prefill_load_estimator(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
+            nextn,
+            nextn_accept_rates,
         )?;
         Ok(Arc::new(RustAicCallback { engine }))
     }

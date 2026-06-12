@@ -34,6 +34,8 @@ import os
 import threading
 import time
 
+from dynamo._internal.aic import create_session
+
 MODEL = "Qwen/Qwen3-32B"
 SYSTEM = "h200_sxm"
 BACKEND = "vllm"
@@ -44,8 +46,6 @@ THREAD_COUNTS = (1, 2, 4, 8, 12, 16, 24)
 
 
 def _make_session():
-    from dynamo._internal.aic import create_session
-
     return create_session(BACKEND, SYSTEM, MODEL, 1, backend_version=BACKEND_VERSION)
 
 

@@ -57,6 +57,9 @@ import subprocess
 import sys
 import time
 
+from dynamo.mocker import MockEngineArgs
+from dynamo.replay import run_synthetic_trace_replay
+
 # AIC tuple — matches components/.../tests/unit/test_replay_aic_parity.py so the
 # perf database is one already exercised by CI.
 MODEL = "Qwen/Qwen3-32B"
@@ -80,8 +83,6 @@ EQUIV_REL_TOL = 1e-6
 
 
 def _engine_args():
-    from dynamo.mocker import MockEngineArgs
-
     payload = {
         "block_size": 512,
         "enable_prefix_caching": True,
@@ -101,8 +102,6 @@ def _engine_args():
 
 def _run_one(isl, osl, request_count, concurrency, num_workers):
     """Run a single replay, return (report, wall_clock_seconds)."""
-    from dynamo.replay import run_synthetic_trace_replay
-
     args = _engine_args()
     start = time.perf_counter()
     report = run_synthetic_trace_replay(

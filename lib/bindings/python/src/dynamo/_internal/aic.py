@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +191,6 @@ class AicSession:
     def _build_compiled_engine(self):
         """Build a cached aiconfigurator_core EngineHandle from the already-built
         model, or return None to fall back to the Python op-walk."""
-        import os
-
         if os.environ.get("DYNAMO_AIC_DISABLE_COMPILED_ENGINE"):
             logger.info(
                 "AIC compiled-engine path disabled via env; using Python op-walk."
