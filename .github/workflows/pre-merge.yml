@@ -47,7 +47,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, fern-check, fern-broken-links, operator, snapshot, rust-tests, rust-clippy]
+    needs: [changed-files, pre-commit, fern-kubectl-doc, fern-check, fern-broken-links, operator, snapshot, rust-tests, rust-clippy]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -63,6 +63,21 @@ jobs:
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       timeout-minutes: 3
+
+  fern-kubectl-doc:
+    name: Fern kubectl-doc Check
+    needs: changed-files
+    if: needs.changed-files.outputs.docs == 'true' || needs.changed-files.outputs.operator == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      with:
+        go-version: '1.26.0'
+    - name: Check generated kubectl-doc API reference
+      run: make -C fern check-generated
 
   # Safe Fern docs checks run in pre-merge with read-only permissions.
   fern-check:
