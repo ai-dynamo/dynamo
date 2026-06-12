@@ -74,13 +74,18 @@ impl PrefillRouter {
             (id, dp_rank)
         } else {
             // Use shared worker selection logic (update_states=false for peek behavior)
-            // Extract LORA name and priority jump from routing hints
+            // Extract queue and request metadata from routing hints.
             let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
             let priority_jump = req
                 .routing
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
+            let strict_priority = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.strict_priority)
+                .unwrap_or(0);
             let allowed_worker_ids = req
                 .routing
                 .as_ref()
@@ -98,6 +103,7 @@ impl PrefillRouter {
                     false,
                     lora_name,
                     priority_jump,
+                    strict_priority,
                     allowed_worker_ids,
                     routing_constraints,
                 )
@@ -350,6 +356,7 @@ impl PrefillRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillQueryOutcome> {
@@ -371,6 +378,7 @@ impl PrefillRouter {
                         false,
                         lora_name,
                         priority_jump,
+                        strict_priority,
                         None,
                         None,
                         allowed_worker_ids,

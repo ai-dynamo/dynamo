@@ -246,6 +246,7 @@ impl KvReplayRouter {
                 true,
                 None,
                 0.0,
+                0,
                 Some(
                     u32::try_from(request.max_output_tokens)
                         .context("max_output_tokens does not fit into u32")?,
