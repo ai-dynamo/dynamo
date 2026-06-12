@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_media_urls,
@@ -130,6 +131,17 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     assert _openai_stop_sampling_params({"stop_token_ids": [32, 34]}) == {
         "stop_token_ids": [32, 34]
     }
+
+
+@pytest.mark.parametrize("require_reasoning", [True, False])
+def test_reasoning_kwargs_forwards_require_reasoning(require_reasoning):
+    assert BaseWorkerHandler._reasoning_kwargs(
+        {"require_reasoning": require_reasoning}
+    ) == {"require_reasoning": require_reasoning}
+
+
+def test_reasoning_kwargs_omits_absent_field():
+    assert BaseWorkerHandler._reasoning_kwargs({}) == {}
 
 
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):

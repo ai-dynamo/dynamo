@@ -150,6 +150,18 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             "json": {"type": "object"}
         }
 
+    @pytest.mark.parametrize("require_reasoning", [True, False])
+    def test_require_reasoning_passthrough(self, require_reasoning):
+        result = _build_dynamo_preproc(
+            {"model": "test"},
+            prompt_token_ids=[1, 2, 3],
+            model_name="test",
+            eos_token_id=None,
+            require_reasoning=require_reasoning,
+        )
+
+        assert result["require_reasoning"] is require_reasoning
+
     def test_stop_conditions_string(self):
         """Single stop string is wrapped in a list."""
         result = _build_dynamo_preproc(
@@ -1493,6 +1505,54 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["kwargs"]["thinking"] is True
         assert result.request["chat_template_kwargs"]["thinking"] is True
         assert "chat_template_kwargs" not in request
+
+    def test_preprocess_uses_sglang_reasoning_resolver_when_available(
+        self, monkeypatch
+    ):
+        calls = []
+
+        def fake_resolve(reasoning_parser, *, chat_template_kwargs, reasoning_effort):
+            calls.append(
+                {
+                    "reasoning_parser": reasoning_parser,
+                    "chat_template_kwargs": chat_template_kwargs,
+                    "reasoning_effort": reasoning_effort,
+                }
+            )
+            return False
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                return [1, 2, 3]
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "_sglang_resolve_require_reasoning",
+            fake_resolve,
+        )
+
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"enable_thinking": True},
+                "reasoning_effort": "high",
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+        )
+
+        assert result.force_reasoning is False
+        assert calls == [
+            {
+                "reasoning_parser": "qwen3",
+                "chat_template_kwargs": {"enable_thinking": True},
+                "reasoning_effort": "high",
+            }
+        ]
 
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}

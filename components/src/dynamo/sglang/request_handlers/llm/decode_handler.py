@@ -358,6 +358,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
+        reasoning_kwargs = filter_supported_async_generate_kwargs(
+            self.engine, self._reasoning_kwargs(request)
+        )
 
         output_options = request.get("output_options", {})
         return_tokens_as_token_ids = bool(
@@ -405,6 +408,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
+                **reasoning_kwargs,
                 **self._priority_kwargs(priority),
             )
 
@@ -472,6 +476,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
+                **reasoning_kwargs,
                 **self._priority_kwargs(priority),
             )
             if not self.use_sglang_tokenizer:
