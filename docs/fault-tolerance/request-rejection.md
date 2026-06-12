@@ -304,7 +304,7 @@ before (a large pool plus a large overflow queue, no rejection).
 | Flag | Env var | Meaning |
 | --- | --- | --- |
 | `--engine-request-limit N` | `DYN_ENGINE_REQUEST_LIMIT` | Max requests handled **concurrently by the engine** (the worker-pool semaphore size). Setting this enables worker-side rejection. |
-| `--dynamo-request-queue-limit Q` | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Max requests **waiting in Dynamo** (not yet in the engine) — the overflow queue size. Only takes effect when the engine limit is set; defaults to **16**. Must be **≥ 2**. |
+| _(env-only)_ | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Max requests **waiting in Dynamo** (not yet in the engine) — the overflow queue size. Not a CLI knob; a small fixed burst defaulting to **16** (hard cap `N + 16`). Only takes effect when the engine limit is set. Advanced override only; must be **≥ 2**. |
 
 When `--engine-request-limit` is set, the worker accepts a request directly into
 the engine while a slot is free; once all `N` engine slots are busy, further

@@ -47,7 +47,6 @@ class DynamoRuntimeConfig(ConfigBase):
     # default; when set, these surface env vars that the Rust runtime reads
     # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
     engine_request_limit: Optional[int] = None
-    dynamo_request_queue_limit: Optional[int] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -59,15 +58,6 @@ class DynamoRuntimeConfig(ConfigBase):
         if self.engine_request_limit is not None and self.engine_request_limit <= 0:
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
-            )
-        # The overflow channel is sized to limit-1 (the single dispatcher holds one
-        # request in transit to the engine), so the cap is exact only for limit >= 2.
-        if (
-            self.dynamo_request_queue_limit is not None
-            and self.dynamo_request_queue_limit < 2
-        ):
-            raise ValueError(
-                f"--dynamo-request-queue-limit must be >= 2 for an exact cap, got {self.dynamo_request_queue_limit}"
             )
 
     def _validate_output_modalities(self) -> None:
@@ -283,10 +273,12 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "default health_check_payload(). Unified backend only.",
         )
 
-        # Worker-side request admission/rejection. Both default to None
-        # (disabled); when unset the worker behaves exactly as before. These only
-        # surface env vars — the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT /
-        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT directly.
+        # Worker-side request admission/rejection. Defaults to None (disabled);
+        # when unset the worker behaves exactly as before. Surfaces an env var —
+        # the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT directly. The Dynamo-side
+        # overflow queue is a small fixed burst (default 16, hard cap N+16) and is
+        # not a user-facing knob; advanced users may override it via the
+        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT env var.
         add_argument(
             g,
             flag_name="--engine-request-limit",
@@ -296,15 +288,4 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Max requests handled concurrently by the engine (worker-pool "
             "semaphore size). Enables worker-side request rejection when set. "
             "Disabled by default.",
-        )
-        add_argument(
-            g,
-            flag_name="--dynamo-request-queue-limit",
-            env_var="DYN_DYNAMO_REQUEST_QUEUE_LIMIT",
-            default=None,
-            arg_type=int,
-            help="Max requests waiting in Dynamo (not yet in the engine) before "
-            "rejection — the overflow queue size. Only takes effect when "
-            "--engine-request-limit is set; defaults to 16 in that case. "
-            "Must be >= 2 (the cap is exact only for >= 2; see docs).",
         )
