@@ -376,7 +376,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      dd_env: staging
+      dd_env: post-merge
       test_suite_name: vllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -399,7 +399,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      dd_env: staging
+      dd_env: post-merge
       test_suite_name: vllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -417,7 +417,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      dd_env: staging
+      dd_env: post-merge
       test_suite_name: sglang
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -440,7 +440,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      dd_env: staging
+      dd_env: post-merge
       test_suite_name: sglang
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -458,7 +458,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      dd_env: staging
+      dd_env: post-merge
       test_suite_name: trtllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -481,7 +481,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      dd_env: staging
+      dd_env: post-merge
       test_suite_name: trtllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -499,7 +499,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
-      dd_env: staging
+      dd_env: post-merge
       test_suite_name: planner
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2
