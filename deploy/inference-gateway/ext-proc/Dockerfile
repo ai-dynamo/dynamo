@@ -94,7 +94,16 @@ WORKDIR /
 
 COPY --from=builder /dynamo-ext-proc /dynamo-ext-proc
 
-RUN useradd -r -u 65532 -g nogroup nonroot
+RUN useradd -r -u 65532 -g nogroup nonroot \
+    && mkdir -p /home/nonroot/.cache/huggingface \
+    && chown -R 65532:65534 /home/nonroot
+
+# Router-only mode builds the tokenizer/preprocessor offline at startup, which
+# writes to the HuggingFace cache. The container runs as non-root, so give it a
+# writable HOME + HF cache; otherwise HF cannot create ~/.cache and the EPP
+# crashes on startup. Deployments may override HF_HOME to a mounted volume.
+ENV HF_HOME=/home/nonroot/.cache/huggingface
+
 USER 65532:65534
 
 ENTRYPOINT ["/dynamo-ext-proc"]
