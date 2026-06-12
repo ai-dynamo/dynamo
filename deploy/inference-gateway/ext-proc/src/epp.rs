@@ -24,7 +24,11 @@ use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
+use crate::kv_republisher::KvRepublisher;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::router_only::RouterOnlyConfig;
+use crate::router_only_reflector::RouterOnlyPodReflector;
+use crate::router_only_runtime::RouterOnlyParts;
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -83,8 +87,136 @@ pub struct Router {
     decode_router: Arc<KvRouter>,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
-    pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
-    pod_store_ready: Arc<AtomicBool>,
+    discovery: Discovery,
+}
+
+/// Endpoint-discovery source backing a `Router`.
+///
+/// Dynamo mode reflects operator-labeled worker pods and resolves the container
+/// port named `http`; router-only ("on-ramp") mode reflects raw `vllm serve` pods
+/// by an arbitrary selector and resolves an explicit target port. Both stamp
+/// `worker_id = hash_pod_name(pod)`.
+enum Discovery {
+    Dynamo {
+        pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
+        ready: Arc<AtomicBool>,
+    },
+    RouterOnly {
+        reflector: Arc<RouterOnlyPodReflector>,
+        /// Held so the per-pod ZMQ listeners + event-plane publisher stay alive
+        /// for the lifetime of the router.
+        _republisher: Arc<KvRepublisher>,
+    },
+}
+
+impl Discovery {
+    fn is_ready(&self) -> bool {
+        match self {
+            Discovery::Dynamo { ready, .. } => ready.load(Ordering::Acquire),
+            Discovery::RouterOnly { reflector, .. } => reflector.is_ready(),
+        }
+    }
+
+    fn ready_flag(&self) -> Arc<AtomicBool> {
+        match self {
+            Discovery::Dynamo { ready, .. } => ready.clone(),
+            Discovery::RouterOnly { reflector, .. } => reflector.ready_flag(),
+        }
+    }
+
+    fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
+        match self {
+            Discovery::Dynamo { pod_store, .. } => {
+                for pod in pod_store.state() {
+                    let Some(pod_name) = pod.metadata.name.as_deref() else {
+                        continue;
+                    };
+                    if hash_pod_name(pod_name) == worker_id {
+                        return pod_endpoint_address(&pod);
+                    }
+                }
+                None
+            }
+            Discovery::RouterOnly { reflector, .. } => reflector.resolve_worker_endpoint(worker_id),
+        }
+    }
+
+    fn resolve_any_worker_endpoint(&self) -> Option<String> {
+        match self {
+            Discovery::Dynamo { pod_store, .. } => pod_store
+                .state()
+                .iter()
+                .find_map(|pod| pod_endpoint_address(pod)),
+            Discovery::RouterOnly { reflector, .. } => reflector.resolve_any_worker_endpoint(),
+        }
+    }
+
+    fn resolve_any_worker_endpoint_in_subset(&self, allowed: &HashSet<u64>) -> Option<String> {
+        match self {
+            Discovery::Dynamo { pod_store, .. } => {
+                for pod in pod_store.state() {
+                    let Some(pod_name) = pod.metadata.name.as_deref() else {
+                        continue;
+                    };
+                    if allowed.contains(&hash_pod_name(pod_name))
+                        && let Some(addr) = pod_endpoint_address(&pod)
+                    {
+                        return Some(addr);
+                    }
+                }
+                None
+            }
+            Discovery::RouterOnly { reflector, .. } => reflector
+                .ready_workers()
+                .into_iter()
+                .find(|(id, _)| allowed.contains(id))
+                .map(|(_, endpoint)| endpoint),
+        }
+    }
+
+    fn subset_to_worker_ids(&self, candidate_subset: &[String]) -> HashSet<u64> {
+        let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
+        let mut ids = HashSet::new();
+        let matches =
+            |addr_port: &str, ip: &str| candidates.contains(addr_port) || candidates.contains(ip);
+        match self {
+            Discovery::Dynamo { pod_store, .. } => {
+                for pod in pod_store.state() {
+                    let Some(pod_name) = pod.metadata.name.as_deref() else {
+                        continue;
+                    };
+                    let Some(addr_port) = pod_endpoint_address(&pod) else {
+                        continue;
+                    };
+                    let ip = addr_port.split(':').next().unwrap_or("");
+                    if matches(addr_port.as_str(), ip) {
+                        ids.insert(hash_pod_name(pod_name));
+                    }
+                }
+            }
+            Discovery::RouterOnly { reflector, .. } => {
+                for (id, addr_port) in reflector.ready_workers() {
+                    let ip = addr_port.split(':').next().unwrap_or("");
+                    if matches(addr_port.as_str(), ip) {
+                        ids.insert(id);
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    /// Default scheduler admission set when there is no Envoy subset hint.
+    ///
+    /// Dynamo mode lets the scheduler use all discovery-registered workers
+    /// (`None`); router-only mode must explicitly admit the Ready raw-vLLM pods,
+    /// because they never register in Dynamo discovery.
+    fn default_allowed_worker_ids(&self) -> Option<HashSet<u64>> {
+        match self {
+            Discovery::Dynamo { .. } => None,
+            Discovery::RouterOnly { reflector, .. } => Some(reflector.ready_worker_ids()),
+        }
+    }
 }
 
 impl Router {
@@ -191,8 +323,43 @@ impl Router {
             decode_router,
             preprocessor: bootstrap.preprocessor,
             runtime,
-            pod_store,
-            pod_store_ready,
+            discovery: Discovery::Dynamo {
+                pod_store,
+                ready: pod_store_ready,
+            },
+        })
+    }
+
+    /// Initialize the router in router-only ("on-ramp") mode.
+    ///
+    /// Fronts a fleet of raw `vllm serve` pods with no Dynamo control plane:
+    /// an inert `mem`-backed runtime (no etcd/NATS), an offline preprocessor
+    /// built from `DYN_MODEL_NAME`, a label-selector pod reflector, and a ZMQ
+    /// republisher that feeds each pod's native vLLM KV events into the embedded
+    /// router's event plane. See [`crate::router_only_runtime`] and
+    /// `deploy/inference-gateway/ext-proc/examples/onramp/`.
+    ///
+    /// This is the aggregated path; the `PrefillRouter` is built inactive so
+    /// prefill routing falls back to decode-only.
+    pub async fn from_router_only(cfg: RouterOnlyConfig) -> Result<Self> {
+        let RouterOnlyParts {
+            runtime,
+            preprocessor,
+            decode_router,
+            prefill_router,
+            reflector,
+            republisher,
+        } = crate::router_only_runtime::build_router_only(&cfg).await?;
+
+        Ok(Self {
+            prefill_router,
+            decode_router,
+            preprocessor,
+            runtime,
+            discovery: Discovery::RouterOnly {
+                reflector,
+                _republisher: republisher,
+            },
         })
     }
 
@@ -225,41 +392,21 @@ impl Router {
     /// Lock-free read from the in-memory reflector store — no K8s API calls.
     /// Port is read from the pod's Dynamo HTTP container port.
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
-        for pod in self.pod_store.state() {
-            let Some(pod_name) = pod.metadata.name.as_deref() else {
-                continue;
-            };
-            if hash_pod_name(pod_name) == worker_id {
-                return pod_endpoint_address(&pod);
-            }
-        }
-        None
+        self.discovery.resolve_worker_endpoint(worker_id)
     }
 
     /// Resolve any available worker to its endpoint address (ip:port).
     /// Used for body-less requests (GET /v1/models) where we just need any backend.
     pub fn resolve_any_worker_endpoint(&self) -> Option<String> {
-        self.pod_store
-            .state()
-            .iter()
-            .find_map(|pod| pod_endpoint_address(pod))
+        self.discovery.resolve_any_worker_endpoint()
     }
 
     /// Resolve any reflected worker whose worker_id is in `allowed`.
     /// Used for body-less requests that still carry an Envoy subset hint, so
     /// we never resolve a backend outside the requested subset.
     fn resolve_any_worker_endpoint_in_subset(&self, allowed: &HashSet<u64>) -> Option<String> {
-        for pod in self.pod_store.state() {
-            let Some(pod_name) = pod.metadata.name.as_deref() else {
-                continue;
-            };
-            if allowed.contains(&hash_pod_name(pod_name))
-                && let Some(addr) = pod_endpoint_address(&pod)
-            {
-                return Some(addr);
-            }
-        }
-        None
+        self.discovery
+            .resolve_any_worker_endpoint_in_subset(allowed)
     }
 
     /// Map an Envoy `candidate_subset` (endpoint addresses, "ip:port" or bare
@@ -271,21 +418,7 @@ impl Router {
     /// pod reflector rather than a caller-supplied slice. An empty result for
     /// a non-empty subset means no reflected pod matched the hint.
     fn subset_to_worker_ids(&self, candidate_subset: &[String]) -> HashSet<u64> {
-        let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
-        let mut ids = HashSet::new();
-        for pod in self.pod_store.state() {
-            let Some(pod_name) = pod.metadata.name.as_deref() else {
-                continue;
-            };
-            let Some(addr_port) = pod_endpoint_address(&pod) else {
-                continue;
-            };
-            let ip = addr_port.split(':').next().unwrap_or("");
-            if candidates.contains(addr_port.as_str()) || candidates.contains(ip) {
-                ids.insert(hash_pod_name(pod_name));
-            }
-        }
-        ids
+        self.discovery.subset_to_worker_ids(candidate_subset)
     }
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
@@ -458,7 +591,7 @@ impl Router {
     /// the gRPC health reporter) can gate their SERVING status on it to avoid
     /// advertising readiness while routing would still 503.
     pub fn pod_store_ready(&self) -> Arc<AtomicBool> {
-        self.pod_store_ready.clone()
+        self.discovery.ready_flag()
     }
 }
 
@@ -829,7 +962,7 @@ impl EndpointPicker for Router {
         req: &RequestInfo,
         endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError> {
-        if !self.pod_store_ready.load(Ordering::Acquire) {
+        if !self.discovery.is_ready() {
             return Err(PickError::RoutingFailed(
                 "Pod reflector is not ready yet; endpoint cache is still syncing".to_string(),
             ));
@@ -847,7 +980,10 @@ impl EndpointPicker for Router {
         // subset.
         let (allowed_worker_ids, worker_map) = if endpoints.is_empty() {
             if req.candidate_subset.is_empty() {
-                (None, Vec::new())
+                // No subset hint: Dynamo mode lets the scheduler use all
+                // discovery-registered workers (None); router-only mode admits the
+                // Ready raw-vLLM pods, which never register in Dynamo discovery.
+                (self.discovery.default_allowed_worker_ids(), Vec::new())
             } else {
                 let ids = self.subset_to_worker_ids(&req.candidate_subset);
                 if ids.is_empty() {

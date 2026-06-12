@@ -19,6 +19,7 @@ pub mod picker;
 pub mod proto;
 pub mod router_only;
 pub mod router_only_reflector;
+pub mod router_only_runtime;
 pub mod server;
 
 pub use epp::Router;
