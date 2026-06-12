@@ -55,8 +55,11 @@ impl MultimodalEmbeddingCachePublisher {
         }
 
         let worker_id = component.drt().connection_id();
-        let publisher =
-            EventPublisher::for_component(&component, MULTIMODAL_EMBEDDING_CACHE_SUBJECT).await?;
+        let publisher = EventPublisher::for_namespace(
+            component.namespace(),
+            MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
+        )
+        .await?;
         let (tx, rx) = mpsc::unbounded_channel();
         let cancellation_token = self.cancellation_token.clone();
 
