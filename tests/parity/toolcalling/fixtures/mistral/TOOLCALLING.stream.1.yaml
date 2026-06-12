@@ -44,13 +44,20 @@ cases:
       finish_reason: tool_calls
     tools: *id001
     expected:
-      dynamo: &id002
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang's Mistral detector emits no tool call when the [TOOL_CALLS] payload is split across streaming chunks; Dynamo buffers the fragments and recovers the call.
+      vllm:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: '[/TOOL_CALLS]'
-      sglang:
-        calls: []
-        normal_text: ''
-      vllm: *id002
+        reason: vLLM's streaming Mistral parser leaks the trailing [/TOOL_CALLS] close marker into content; Dynamo now keeps the jail open until the marker arrives and consumes it, so normal_text is empty.

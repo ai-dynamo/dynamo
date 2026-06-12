@@ -260,7 +260,8 @@ Returns:
     "worker_id": 7,
     "dp_rank": 0,
     "potential_prefill_tokens": 96,
-    "potential_decode_blocks": 4
+    "potential_decode_blocks": 4,
+    "active_requests": 2
   }
 ]
 ```
