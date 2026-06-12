@@ -56,8 +56,7 @@ fn direct_request(tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
         uuid: None,
         dp_rank: 0,
         arrival_timestamp_ms: None,
-        priority: 0,
-        strict_priority: 0,
+        ..Default::default()
     }
 }
 
@@ -116,8 +115,7 @@ mod scheduling {
                 uuid: None,
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -526,8 +524,7 @@ mod core_behavior {
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let pass = core.execute_pass_internal(None, 0.0);
@@ -566,8 +563,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -652,8 +648,7 @@ async fn assert_sglang_scheduler_completes_all(
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
     }
 
@@ -1067,8 +1062,7 @@ mod router_events {
             uuid: Some(Uuid::from_u128(91)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1112,8 +1106,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1144,8 +1137,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1162,8 +1154,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         // Pass 2: r2 prefill + decode step runs on all running (r1 + r2)
@@ -1189,8 +1180,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1204,8 +1194,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let pass2 = core.execute_pass(&mut collector, pass1.end_ms);
@@ -1260,8 +1249,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -1269,8 +1257,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1315,8 +1302,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..112).collect(), // prompt_len = 12
@@ -1324,8 +1310,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1368,8 +1353,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1432,8 +1416,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..104).collect(),
@@ -1441,8 +1424,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         // Run several passes to build up KV pressure
@@ -1457,8 +1439,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(3)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         // Run more passes — at some point retraction should occur
@@ -1526,8 +1507,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         // Wait for at least one output signal — ensures the scheduler has

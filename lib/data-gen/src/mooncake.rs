@@ -34,7 +34,7 @@ use std::path::Path;
 /// producers and consumers. Field-level aliases on deserialization accept the
 /// upstream Mooncake field names (`input_tokens`, `output_tokens`,
 /// `created_time`, `delay_ms`) without requiring producers to emit them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MooncakeRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -66,7 +66,7 @@ pub struct MooncakeRow {
 /// eligible. Once all dependencies are satisfied, replay waits `delay` plus
 /// `tool_wait_ms` before dispatching the request. Rows with no dependencies
 /// use `timestamp` as their open-loop start time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgenticMooncakeRow {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -521,8 +521,7 @@ mod tests {
             hash_ids: Some(vec![0, 1]),
             timestamp: None,
             delay: None,
-            priority: None,
-            strict_priority: None,
+            ..Default::default()
         };
         let rendered: Value = serde_json::to_value(&row).unwrap();
         assert!(rendered.get("timestamp").is_none());
@@ -539,8 +538,7 @@ mod tests {
             hash_ids: Some(vec![]),
             timestamp: Some(0.0),
             delay: None,
-            priority: None,
-            strict_priority: None,
+            ..Default::default()
         };
         let with_delay = MooncakeRow {
             session_id: Some("s".to_string()),
@@ -549,8 +547,7 @@ mod tests {
             hash_ids: Some(vec![]),
             timestamp: None,
             delay: Some(123.0),
-            priority: None,
-            strict_priority: None,
+            ..Default::default()
         };
         let v_ts: Value = serde_json::to_value(&with_timestamp).unwrap();
         let v_dl: Value = serde_json::to_value(&with_delay).unwrap();
@@ -698,13 +695,11 @@ mod tests {
             hash_ids: Some(vec![0, 1]),
             timestamp: Some(20.0),
             delay: Some(3.0),
-            priority: None,
-            strict_priority: None,
             wait_for: vec!["r1".to_string()],
             branches: vec!["r3".to_string()],
             prefix_reset: Some(false),
             tool_wait_ms: Some(7.0),
-            tool_events: Vec::new(),
+            ..Default::default()
         };
 
         assert_eq!(row.dependency_delay_ms(), 10.0);
@@ -728,8 +723,6 @@ mod tests {
             delay: Some(0.0),
             priority: Some(5),
             strict_priority: Some(6),
-            wait_for: Vec::new(),
-            branches: Vec::new(),
             prefix_reset: Some(true),
             tool_wait_ms: Some(8.0),
             tool_events: vec![AgenticToolEvent {
@@ -743,6 +736,7 @@ mod tests {
                 output_tokens: None,
                 error_type: None,
             }],
+            ..Default::default()
         };
 
         let rendered = serde_json::to_string(&row).unwrap();
@@ -769,8 +763,7 @@ mod tests {
                 hash_ids: Some(vec![0]),
                 timestamp: Some(0.0),
                 delay: None,
-                priority: None,
-                strict_priority: None,
+                ..Default::default()
             })
             .unwrap();
         writer.write_sidecar(&json!({"k": "v"})).unwrap();
@@ -809,13 +802,8 @@ mod tests {
                 hash_ids: Some(vec![0]),
                 timestamp: Some(0.0),
                 delay: None,
-                priority: None,
-                strict_priority: None,
-                wait_for: Vec::new(),
-                branches: Vec::new(),
                 prefix_reset: Some(true),
-                tool_wait_ms: None,
-                tool_events: Vec::new(),
+                ..Default::default()
             })
             .unwrap();
         let stats = writer.finish().unwrap();

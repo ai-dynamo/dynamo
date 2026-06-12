@@ -701,16 +701,14 @@ mod tests {
                             max_output_tokens: 1,
                             hash_ids: vec![1, 2],
                             delay_after_previous_ms: 0.0,
-                            priority: 0,
-                            strict_priority: 0,
+                            ..Default::default()
                         },
                         TurnTrace {
                             input_length: 2,
                             max_output_tokens: 1,
                             hash_ids: vec![3, 4],
                             delay_after_previous_ms: 5.0,
-                            priority: 0,
-                            strict_priority: 0,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -722,8 +720,7 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![5, 6],
                         delay_after_previous_ms: 0.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -742,8 +739,7 @@ mod tests {
                 max_output_tokens: 1,
                 hash_ids: vec![7, 8],
                 delay_after_previous_ms: 0.0,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             }],
         });
         trace
@@ -1109,8 +1105,7 @@ mod tests {
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
                     prefix_reset: true,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "r2".into(),
@@ -1122,8 +1117,7 @@ mod tests {
                     delay_after_dependencies_ms: 5.0,
                     wait_for: vec!["r1".into()],
                     prefix_reset: false,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
             ],
         };
@@ -1157,8 +1151,7 @@ mod tests {
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
                     prefix_reset: true,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "r2".into(),
@@ -1170,8 +1163,7 @@ mod tests {
                     delay_after_dependencies_ms: 5.0,
                     wait_for: vec!["r1".into()],
                     prefix_reset: true,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
             ],
         };
@@ -1203,8 +1195,7 @@ mod tests {
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
                     prefix_reset: true,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "b".into(),
@@ -1216,8 +1207,7 @@ mod tests {
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
                     prefix_reset: true,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "join".into(),
@@ -1229,8 +1219,7 @@ mod tests {
                     delay_after_dependencies_ms: 2.0,
                     wait_for: vec!["a".into(), "b".into()],
                     prefix_reset: false,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
             ],
         };

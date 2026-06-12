@@ -328,8 +328,7 @@ pub(crate) async fn assert_scheduler_completes_all(
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
     }
 

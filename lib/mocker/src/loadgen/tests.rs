@@ -260,8 +260,7 @@ fn test_turn_replay_hashes_match_full_blocks_only() {
         max_output_tokens: 3,
         hash_ids: vec![1, 2],
         delay_after_previous_ms: 0.0,
-        priority: 0,
-        strict_priority: 0,
+        ..Default::default()
     };
 
     let request = turn
@@ -286,8 +285,7 @@ fn test_turn_replay_hashes_support_distinct_trace_and_engine_block_sizes() {
         max_output_tokens: 3,
         hash_ids: vec![1, 2],
         delay_after_previous_ms: 0.0,
-        priority: 0,
-        strict_priority: 0,
+        ..Default::default()
     };
 
     let request = turn
@@ -383,8 +381,7 @@ fn test_expand_hash_prefix_depth_scales_hashes_and_input_length() {
                 max_output_tokens: 2,
                 hash_ids: vec![7, 8],
                 delay_after_previous_ms: 0.0,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             }],
         }],
     }
@@ -414,16 +411,14 @@ fn test_rescale_ready_span_scales_session_starts_and_inter_turn_delays() {
                         max_output_tokens: 1,
                         hash_ids: vec![1],
                         delay_after_previous_ms: 0.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![2],
                         delay_after_previous_ms: 20.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     },
                 ],
             },
@@ -435,8 +430,7 @@ fn test_rescale_ready_span_scales_session_starts_and_inter_turn_delays() {
                     max_output_tokens: 1,
                     hash_ids: vec![3],
                     delay_after_previous_ms: 0.0,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 }],
             },
         ],
@@ -462,16 +456,14 @@ fn test_driver_requires_completion_before_follow_up_turn() {
                     max_output_tokens: 1,
                     hash_ids: vec![1],
                     delay_after_previous_ms: 0.0,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
                 TurnTrace {
                     input_length: 4,
                     max_output_tokens: 1,
                     hash_ids: vec![2],
                     delay_after_previous_ms: 10.0,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 },
             ],
         }],
@@ -503,16 +495,14 @@ fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
                         max_output_tokens: 1,
                         hash_ids: vec![1],
                         delay_after_previous_ms: 0.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![2],
                         delay_after_previous_ms: 5.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     },
                 ],
             },
@@ -524,8 +514,7 @@ fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
                     max_output_tokens: 1,
                     hash_ids: vec![3],
                     delay_after_previous_ms: 0.0,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 }],
             },
         ],
@@ -560,16 +549,14 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
                         max_output_tokens: 2,
                         hash_ids: vec![1, 2],
                         delay_after_previous_ms: 0.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 2,
                         max_output_tokens: 3,
                         hash_ids: vec![3],
                         delay_after_previous_ms: 5.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     },
                 ],
             },
@@ -581,8 +568,7 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
                     max_output_tokens: 1,
                     hash_ids: vec![4],
                     delay_after_previous_ms: 0.0,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 }],
             },
         ],
@@ -706,8 +692,7 @@ fn test_trace_driver_rechunks_trace_blocks_into_engine_blocks() {
                 max_output_tokens: 2,
                 hash_ids: vec![1, 2],
                 delay_after_previous_ms: 0.0,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             }],
         }],
     };
@@ -725,8 +710,7 @@ fn test_trace_driver_rechunks_trace_blocks_into_engine_blocks() {
                 max_output_tokens: 2,
                 hash_ids: vec![1, 2],
                 delay_after_previous_ms: 0.0,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             }
             .to_replay_hashes(4, 2)
             .unwrap()

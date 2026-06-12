@@ -210,13 +210,12 @@ pub fn build_agentic_mooncake_rows(
             hash_ids: Some(hash_ids),
             timestamp: Some((request.start_ms - global_start_ms) as f64),
             delay,
-            priority: None,
-            strict_priority: None,
             wait_for: std::mem::take(&mut wait_for[idx]),
             branches: std::mem::take(&mut branches[idx]),
             prefix_reset: Some(prefix_reset[idx]),
             tool_wait_ms,
             tool_events,
+            ..Default::default()
         });
     }
 

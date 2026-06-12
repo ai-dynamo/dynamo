@@ -207,7 +207,7 @@ pub enum MoveBlockResponse {
     Remove(Vec<SequenceHash>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DirectRequest {
     pub tokens: Vec<Token>,
     pub max_output_tokens: usize,

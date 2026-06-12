@@ -1069,16 +1069,14 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![1, 2],
                         delay_after_previous_ms: 0.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 2,
                         hash_ids: vec![3, 4],
                         delay_after_previous_ms: 5.0,
-                        priority: 0,
-                        strict_priority: 0,
+                        ..Default::default()
                     },
                 ],
             }],
@@ -1132,8 +1130,7 @@ mod tests {
                     max_output_tokens: 5,
                     hash_ids: vec![1, 2],
                     delay_after_previous_ms: 0.0,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 }],
             }],
         };

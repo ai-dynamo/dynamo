@@ -93,8 +93,7 @@ mod core_behavior {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -102,8 +101,7 @@ mod core_behavior {
             uuid: Some(r2),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -160,8 +158,7 @@ mod core_behavior {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -169,8 +166,7 @@ mod core_behavior {
             uuid: Some(r2),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -207,8 +203,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -268,8 +263,7 @@ mod core_behavior {
             uuid: Some(Uuid::from_u128(81)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -293,8 +287,7 @@ mod core_behavior {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -337,8 +330,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -384,8 +376,7 @@ mod core_behavior {
             uuid: Some(holder),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..112).collect(),
@@ -393,8 +384,7 @@ mod core_behavior {
             uuid: Some(blocked),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (200..204).collect(),
@@ -402,8 +392,7 @@ mod core_behavior {
             uuid: Some(follower),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -474,8 +463,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -564,8 +552,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -601,8 +588,7 @@ mod core_behavior {
             uuid: Some(short),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..104).collect(),
@@ -610,8 +596,7 @@ mod core_behavior {
             uuid: Some(long),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -665,8 +650,7 @@ mod core_behavior {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -695,8 +679,7 @@ mod router_events {
             uuid: Some(Uuid::from_u128(71)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -725,8 +708,7 @@ mod router_events {
             uuid: Some(Uuid::from_u128(41)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -770,8 +752,7 @@ mod router_events {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -848,8 +829,7 @@ mod router_events {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -1054,8 +1034,7 @@ mod live_scheduler {
                 uuid: None,
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1111,8 +1090,7 @@ mod live_scheduler {
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut received_count = 0;
@@ -1171,8 +1149,7 @@ mod live_scheduler {
             uuid: Some(Uuid::from_u128(72)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let output_batch = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
@@ -1229,8 +1206,7 @@ mod live_scheduler {
                 uuid: None,
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
         }
 
@@ -1291,8 +1267,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1320,8 +1295,7 @@ mod forward_pass_metrics {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1340,8 +1314,7 @@ mod forward_pass_metrics {
             uuid: Some(r2),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         // Pass 2: r1 decode + r2 prefill (mixed batch)
@@ -1371,8 +1344,7 @@ mod forward_pass_metrics {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1412,8 +1384,7 @@ mod forward_pass_metrics {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1458,8 +1429,7 @@ mod forward_pass_metrics {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -1467,8 +1437,7 @@ mod forward_pass_metrics {
             uuid: Some(r2),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1506,8 +1475,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..112).collect(), // prompt_len = 12
@@ -1515,8 +1483,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1555,8 +1522,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1626,8 +1592,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         // Prefill r1 and decode a few tokens to build up KV
@@ -1642,8 +1607,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         // This pass should trigger preemption
@@ -1704,8 +1668,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         // Wait for at least one output signal — ensures the scheduler has
@@ -1826,8 +1789,7 @@ mod offload {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         let plhs = core
             .state
@@ -1902,8 +1864,7 @@ mod offload {
             uuid: Some(hit_uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         let cold_uuid = Uuid::new_v4();
         core.receive(DirectRequest {
@@ -1912,8 +1873,7 @@ mod offload {
             uuid: Some(cold_uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         let plhs = core
             .state
@@ -1994,8 +1954,7 @@ mod offload {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         let plhs = core
             .state
@@ -2065,8 +2024,7 @@ mod offload {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         let (prefix_signal, plhs) = {
             let request = core.state.requests.get(&uuid).unwrap();
@@ -2134,8 +2092,7 @@ mod offload {
             uuid: Some(first_hit),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         let second_hit = Uuid::from_u128(2);
         core.receive(DirectRequest {
@@ -2144,8 +2101,7 @@ mod offload {
             uuid: Some(second_hit),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         let cold = Uuid::from_u128(3);
         core.receive(DirectRequest {
@@ -2154,8 +2110,7 @@ mod offload {
             uuid: Some(cold),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
 
         let mut hit_plhs = Vec::new();
@@ -2247,8 +2202,7 @@ mod offload {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
-            priority: 0,
-            strict_priority: 0,
+            ..Default::default()
         });
         let plhs = core
             .state
@@ -2389,8 +2343,7 @@ mod offload {
                     uuid: Some(uuid),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 });
                 uuids.push(uuid);
             }
@@ -2401,8 +2354,7 @@ mod offload {
                 uuid: Some(r4),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
             uuids.push(r4);
 

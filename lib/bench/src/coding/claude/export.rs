@@ -221,8 +221,7 @@ where
                 .is_none()
                 .then_some((turn.assistant_start_ms - global_trace_start_ms) as f64),
             delay: turn.delay_ms.map(|delay| delay as f64),
-            priority: None,
-            strict_priority: None,
+            ..Default::default()
         };
 
         writer.write_row(&row)?;

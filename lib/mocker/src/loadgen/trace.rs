@@ -412,8 +412,7 @@ impl Trace {
                     max_output_tokens: raw.assistant_response_length[turn_idx],
                     hash_ids: hash_ids.clone(),
                     delay_after_previous_ms: next_turn_delay_ms,
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 });
 
                 current_input_length = current_input_length
@@ -441,8 +440,7 @@ impl Trace {
                 max_output_tokens: raw.final_assistant_response_length,
                 hash_ids,
                 delay_after_previous_ms: next_turn_delay_ms,
-                priority: 0,
-                strict_priority: 0,
+                ..Default::default()
             });
 
             sessions.push(SessionTrace {
@@ -534,8 +532,7 @@ impl Trace {
                     } else {
                         sample_delay_ms(&spec.inter_turn_delays, &mut rng)?
                     },
-                    priority: 0,
-                    strict_priority: 0,
+                    ..Default::default()
                 });
             }
 
