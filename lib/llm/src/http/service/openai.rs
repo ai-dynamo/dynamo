@@ -534,6 +534,31 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
 }
 
+/// Warn (once per request) when nvext data is dropped because the extension is
+/// disabled. Only called from the disabled branch, so the default path is free.
+fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
+    use crate::protocols::openai::nvext::{
+        HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID,
+    };
+    let header_present = [
+        HEADER_WORKER_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID,
+        HEADER_DP_RANK,
+        HEADER_DP_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK,
+    ]
+    .iter()
+    .any(|h| headers.contains_key(*h));
+
+    if nvext_present || header_present {
+        tracing::warn!(
+            endpoint,
+            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+        );
+    }
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -551,7 +576,12 @@ async fn handler_completions(
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("completions", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -971,11 +1001,16 @@ async fn completions_batch(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateEmbeddingRequest>,
+    Json(mut request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("embeddings", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -1142,7 +1177,12 @@ async fn handler_chat_completions(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("chat_completions", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -1891,7 +1931,12 @@ async fn handler_responses(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("responses", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -2335,18 +2380,11 @@ async fn list_models_openai(
 
     let mut data = Vec::new();
 
-    let models: HashSet<String> = state.manager().model_display_names();
+    // Only list models whose worker set is complete in at least one namespace.
+    // A registered-but-broken deployment (e.g. decode-only with no prefill peer)
+    // is hidden until a peer joins.
+    let models: HashSet<String> = state.manager().serving_ready_display_names();
     for model_name in models {
-        // Only list models whose worker set is complete in at least one
-        // namespace. A registered-but-broken deployment (e.g. decode-only
-        // with no prefill peer) is hidden until a peer joins.
-        let serving_ready = state
-            .manager()
-            .get_model(&model_name)
-            .is_some_and(|m| m.has_ready_workers());
-        if !serving_ready {
-            continue;
-        }
         let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
@@ -2961,11 +2999,14 @@ async fn audio_speech(
 
     let streaming = false;
 
-    // model is optional in the request; fall back to the first registered model
+    // model is optional in the request; fall back to a model that can actually
+    // serve right now (complete worker set), not just any displayable one, so
+    // an incomplete deployment doesn't get picked as the implicit default while
+    // a ready model exists.
     let model = request.model.clone().unwrap_or_else(|| {
         state
             .manager()
-            .model_display_names()
+            .serving_ready_display_names()
             .into_iter()
             .next()
             .unwrap_or_default()

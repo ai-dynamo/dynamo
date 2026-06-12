@@ -18,6 +18,20 @@ pub fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
     if let Some(arr) = tools.as_array() {
         for tool in arr {
             let mut tool = tool.clone();
+            if let Some(function) = tool.get_mut("function") {
+                // Backfill a missing/null `description`. It's optional in the
+                // OpenAI tool schema, but some chat templates (e.g. gpt-oss
+                // harmony) concatenate it unconditionally and fail on an
+                // `undefined`/null value.
+                if let Some(obj) = function.as_object_mut()
+                    && !matches!(obj.get("description"), Some(serde_json::Value::String(_)))
+                {
+                    obj.insert(
+                        "description".to_string(),
+                        serde_json::Value::String(String::new()),
+                    );
+                }
+            }
             if let Some(function) = tool.get_mut("function")
                 && let Some(parameters) = function.get_mut("parameters")
             {
@@ -886,6 +900,96 @@ mod tests {
             serde_json::Value::Object(Default::default())
         );
         assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_missing_description() {
+        // `description` is optional in the OpenAI tool schema, but some chat
+        // templates (e.g. gpt-oss harmony) concatenate it unconditionally and
+        // fail on an `undefined`/null value. It must be backfilled to "".
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "parameters": {
+                            "type": "object",
+                            "properties": { "x": { "type": "string" } },
+                            "required": ["x"],
+                            "additionalProperties": false
+                        },
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            serde_json::Value::String(String::new())
+        );
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_null_description() {
+        // An explicit null `description` must also be normalized to "".
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "description": null,
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            serde_json::Value::String(String::new())
+        );
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_preserves_description() {
+        // A present `description` must be left untouched.
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get the current weather in a given location",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            "Get the current weather in a given location"
+        );
     }
 
     /// Tests that content arrays (containing only text parts) are correctly concatenated.

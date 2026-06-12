@@ -3,25 +3,105 @@
 
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use super::RemoveOutcome;
 use crate::protocols::*;
 
+pub(crate) fn append_dump_events(
+    events: &mut Vec<RouterEvent>,
+    event_id: &mut u64,
+    parent_hash: Option<ExternalSequenceBlockHash>,
+    edge: &[(LocalBlockHash, ExternalSequenceBlockHash)],
+    full_workers: &[WorkerWithDpRank],
+    worker_cutoffs: &[(WorkerWithDpRank, usize)],
+) {
+    let blocks = edge
+        .iter()
+        .map(|&(tokens_hash, block_hash)| KvCacheStoredBlockData {
+            block_hash,
+            tokens_hash,
+            mm_extra_info: None,
+        })
+        .collect::<Vec<_>>();
+
+    for &worker in full_workers {
+        events.push(dump_event(worker, *event_id, parent_hash, blocks.clone()));
+        *event_id += 1;
+    }
+    for &(worker, cutoff) in worker_cutoffs {
+        events.push(dump_event(
+            worker,
+            *event_id,
+            parent_hash,
+            blocks[..cutoff].to_vec(),
+        ));
+        *event_id += 1;
+    }
+}
+
+fn dump_event(
+    worker: WorkerWithDpRank,
+    event_id: u64,
+    parent_hash: Option<ExternalSequenceBlockHash>,
+    blocks: Vec<KvCacheStoredBlockData>,
+) -> RouterEvent {
+    RouterEvent::new(
+        worker.worker_id,
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash,
+                start_position: None,
+                blocks,
+            }),
+            dp_rank: worker.dp_rank,
+        },
+    )
+}
+
+pub(crate) struct RemoveOutcome {
+    pub(crate) stale_hashes: Vec<ExternalSequenceBlockHash>,
+}
+
 #[derive(Debug)]
-pub(super) struct NodeState {
+pub(crate) struct NodeState {
     /// Compressed edge: sequence of `(LocalBlockHash, ExternalSequenceBlockHash)` pairs.
     /// Empty for the root node; non-empty for all other nodes.
-    pub(super) edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)>,
+    pub(crate) edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)>,
     /// Reverse index: `ExternalSequenceBlockHash` -> position in `edge`.
-    pub(super) edge_index: FxHashMap<ExternalSequenceBlockHash, usize>,
+    pub(crate) edge_index: FxHashMap<ExternalSequenceBlockHash, usize>,
     /// Workers with partial edge coverage. `worker_cutoffs[w] = k` means worker `w`
     /// has cached `edge[0..k]`, where `0 < k < edge.len()`.
-    pub(super) worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
-    /// Workers with full edge coverage (match index == edge.len()).
-    pub(super) full_edge_workers: FxHashSet<WorkerWithDpRank>,
+    pub(crate) worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
+    /// Workers with full edge coverage.
+    pub(crate) full_edge_workers: FxHashSet<WorkerWithDpRank>,
 }
 
 impl NodeState {
-    pub(super) fn edge_index_for(
+    pub(crate) fn empty() -> Self {
+        Self {
+            edge: Vec::new(),
+            edge_index: FxHashMap::default(),
+            worker_cutoffs: FxHashMap::default(),
+            full_edge_workers: FxHashSet::default(),
+        }
+    }
+
+    pub(crate) fn for_blocks(blocks: &[KvCacheStoredBlockData], worker: WorkerWithDpRank) -> Self {
+        let edge = blocks
+            .iter()
+            .map(|block| (block.tokens_hash, block.block_hash))
+            .collect::<Vec<_>>();
+        let mut full_edge_workers = FxHashSet::with_capacity_and_hasher(1, FxBuildHasher);
+        full_edge_workers.insert(worker);
+
+        Self {
+            edge_index: Self::edge_index_for(&edge),
+            edge,
+            worker_cutoffs: FxHashMap::default(),
+            full_edge_workers,
+        }
+    }
+
+    pub(crate) fn edge_index_for(
         edge: &[(LocalBlockHash, ExternalSequenceBlockHash)],
     ) -> FxHashMap<ExternalSequenceBlockHash, usize> {
         let mut edge_index = FxHashMap::with_capacity_and_hasher(edge.len(), FxBuildHasher);
@@ -32,7 +112,7 @@ impl NodeState {
     }
 
     #[inline]
-    pub(super) fn current_cutoff(&self, worker: WorkerWithDpRank) -> usize {
+    pub(crate) fn current_cutoff(&self, worker: WorkerWithDpRank) -> usize {
         if self.full_edge_workers.contains(&worker) {
             self.edge.len()
         } else {
@@ -41,7 +121,7 @@ impl NodeState {
     }
 
     #[inline]
-    pub(super) fn covers_pos(&self, worker: WorkerWithDpRank, pos: usize) -> bool {
+    pub(crate) fn covers_pos(&self, worker: WorkerWithDpRank, pos: usize) -> bool {
         self.full_edge_workers.contains(&worker)
             || matches!(self.worker_cutoffs.get(&worker), Some(&cutoff) if pos < cutoff)
     }
@@ -52,23 +132,23 @@ impl NodeState {
     }
 
     #[inline]
-    pub(super) fn drop_worker(&mut self, worker: WorkerWithDpRank) {
+    pub(crate) fn drop_worker(&mut self, worker: WorkerWithDpRank) {
         self.full_edge_workers.remove(&worker);
         self.worker_cutoffs.remove(&worker);
     }
 
     #[inline]
-    pub(super) fn promote_to_full(&mut self, worker: WorkerWithDpRank) -> bool {
-        if !self.full_edge_workers.contains(&worker) {
-            self.worker_cutoffs.remove(&worker);
-            self.full_edge_workers.insert(worker);
-            true
-        } else {
-            false
+    pub(crate) fn promote_to_full(&mut self, worker: WorkerWithDpRank) -> bool {
+        if self.full_edge_workers.contains(&worker) {
+            return false;
         }
+
+        self.worker_cutoffs.remove(&worker);
+        self.full_edge_workers.insert(worker);
+        true
     }
 
-    pub(super) fn cover_prefix_for_worker(
+    pub(crate) fn cover_prefix_for_worker(
         &mut self,
         worker: WorkerWithDpRank,
         cutoff: usize,
@@ -97,13 +177,13 @@ impl NodeState {
         }
     }
 
-    pub(super) fn tail_hash_is(&self, hash: ExternalSequenceBlockHash) -> bool {
+    pub(crate) fn tail_hash_is(&self, hash: ExternalSequenceBlockHash) -> bool {
         self.edge
             .last()
             .is_some_and(|&(_, edge_hash)| edge_hash == hash)
     }
 
-    pub(super) fn suffix_matches_store(
+    pub(crate) fn suffix_matches_store(
         &self,
         parent_pos: usize,
         blocks: &[KvCacheStoredBlockData],
@@ -114,16 +194,16 @@ impl NodeState {
         if blocks.len() > suffix.len() {
             return false;
         }
-        for (&(local_hash, block_hash), block) in suffix.iter().zip(blocks) {
-            if local_hash != block.tokens_hash || block_hash != block.block_hash {
-                return false;
-            }
-        }
 
-        true
+        suffix
+            .iter()
+            .zip(blocks)
+            .all(|(&(local_hash, block_hash), block)| {
+                local_hash == block.tokens_hash && block_hash == block.block_hash
+            })
     }
 
-    pub(super) fn store_starts_with_suffix(
+    pub(crate) fn store_starts_with_suffix(
         &self,
         parent_pos: usize,
         blocks: &[KvCacheStoredBlockData],
@@ -132,16 +212,20 @@ impl NodeState {
         if blocks.len() <= suffix.len() {
             return None;
         }
-        for (&(local_hash, block_hash), block) in suffix.iter().zip(blocks) {
-            if local_hash != block.tokens_hash || block_hash != block.block_hash {
-                return None;
-            }
+        if !suffix
+            .iter()
+            .zip(blocks)
+            .all(|(&(local_hash, block_hash), block)| {
+                local_hash == block.tokens_hash && block_hash == block.block_hash
+            })
+        {
+            return None;
         }
 
         Some(suffix.len())
     }
 
-    pub(super) fn append_blocks_to_leaf(
+    pub(crate) fn append_blocks_to_leaf(
         &mut self,
         worker: WorkerWithDpRank,
         blocks: &[KvCacheStoredBlockData],
@@ -149,12 +233,12 @@ impl NodeState {
         debug_assert!(!blocks.is_empty());
 
         let old_len = self.edge.len();
-        let downgraded_workers: Vec<WorkerWithDpRank> = self
+        let downgraded_workers = self
             .full_edge_workers
             .iter()
             .copied()
             .filter(|&full_worker| full_worker != worker)
-            .collect();
+            .collect::<Vec<_>>();
         for downgraded_worker in downgraded_workers {
             self.full_edge_workers.remove(&downgraded_worker);
             self.worker_cutoffs.insert(downgraded_worker, old_len);
@@ -169,7 +253,7 @@ impl NodeState {
         }
     }
 
-    pub(super) fn remove_worker_at_pos(
+    pub(crate) fn remove_worker_at_pos(
         &mut self,
         worker: WorkerWithDpRank,
         pos: usize,
@@ -195,7 +279,7 @@ impl NodeState {
         RemoveOutcome { stale_hashes }
     }
 
-    pub(super) fn has_any_workers(&self) -> bool {
+    pub(crate) fn has_any_workers(&self) -> bool {
         !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
     }
 }

@@ -66,7 +66,7 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 
 - **Throughput-based scaling** should be enabled for SLA mode when you want stable, prediction-based capacity planning. Native AIC or bootstrap FPMs make it ready sooner; otherwise it warms from live FPMs.
 - **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring pre-deployment data.
-- **Both modes together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `--adjustment-interval` for throughput-based scaling.
+- **Both modes together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `throughput_adjustment_interval_seconds` than `load_adjustment_interval_seconds`.
 
 ## Quick Start
 
@@ -132,7 +132,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 ### General
 
-**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** Set `--min-endpoint` to a value that avoids scaling below your steady-state traffic floor, and use a lower `--loadbased-scaling-down-sensitivity` value to reduce the frequency of scale-down events.
+**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** Set `min_endpoint` to a value that avoids scaling below your steady-state traffic floor, and use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
 
 ## Documentation
 
@@ -145,36 +145,45 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 ## Configuration Reference
 
-### Key Arguments
+### Key PlannerConfig Fields
 
-| Argument | Default | Description |
-|----------|---------|-------------|
+The planner process is launched with `--config /path/to/planner_config.json`.
+DGDR planner features and generated ConfigMaps are materialized into these
+`PlannerConfig` fields.
+
+| Field | Default | Description |
+|-------|---------|-------------|
 | **Common** | | |
-| `--namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
-| `--backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
-| `--mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
-| `--optimization-target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `sla` (Rust engine perf model SLA targeting) |
-| `--environment` | `kubernetes` | Deployment environment |
+| `namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
+| `backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
+| `mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
+| `optimization_target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `sla` (Rust engine perf model SLA targeting) |
+| `environment` | `kubernetes` | Deployment environment |
 | `ttft_ms` | `500.0` | Target Time To First Token (ms) |
 | `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
-| `--max-gpu-budget` | `8` | Maximum GPUs across all workers |
-| `--min-endpoint` | `1` | Minimum replicas per worker type |
-| `--decode-engine-num-gpu` | `1` | GPUs per decode engine |
-| `--prefill-engine-num-gpu` | `1` | GPUs per prefill engine |
+| `max_gpu_budget` | `8` | Maximum GPUs across all workers |
+| `min_endpoint` | `1` | Minimum replicas per worker type |
+| `decode_engine_num_gpu` | `1` | GPUs per decode engine |
+| `prefill_engine_num_gpu` | `1` | GPUs per prefill engine |
 | `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |
 | **Throughput-based scaling** | | |
-| `--enable-throughput-scaling` | `true` | Enable throughput-based scaling |
-| `--adjustment-interval` | `180` | Seconds between throughput-based scaling decisions |
-| `--profile-results-dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
-| `--load-predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
+| `enable_throughput_scaling` | `true` | Enable throughput-based scaling |
+| `throughput_adjustment_interval_seconds` | `180` | Seconds between throughput-based scaling decisions |
+| `profile_results_dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
+| `load_predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
 | **Load-based scaling** | | |
-| `--enable-loadbased-scaling` | `false` | Enable load-based scaling |
-| `--loadbased-adjustment-interval` | `5` | Seconds between FPM tuning updates and load-based scaling decisions |
-| `--max-num-fpm-samples` | `64` | Maximum retained FPM observations for online tuning or regression |
-| `--fpm-sample-bucket-size` | `16` | Number of buckets for observation retirement (must be perfect square) |
-| `--loadbased-scaling-down-sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
-| `--loadbased-metric-samples` | `10` | Number of metric samples per adjustment interval |
-| `--loadbased-min-observations` | `5` | Minimum observations before regression activates |
+| `enable_load_scaling` | `false` | Enable load-based scaling |
+| `load_adjustment_interval_seconds` | `5` | Seconds between FPM tuning updates and load-based scaling decisions |
+| `max_num_fpm_samples` | `64` | Maximum retained FPM observations for online tuning or regression |
+| `fpm_sample_bucket_size` | `16` | Number of buckets for observation retirement (must be perfect square) |
+| `load_scaling_down_sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
+| `load_min_observations` | `5` | Minimum observations before regression activates |
+| `prefill_scale_up_queue_tokens` / `prefill_scale_down_queue_tokens` | `null` | Queue token thresholds for `optimization_target: load` prefill scaling. |
+| `decode_scale_up_kv_rate` / `decode_scale_down_kv_rate` | `null` | Decode KV utilization thresholds for `optimization_target: load` decode scaling. |
+| **Plugin pipeline** | | |
+| `scheduling.scale_interval_seconds` | gcd of enabled builtin intervals | Base pipeline cadence. Plugins fire according to their own execution intervals. |
+| `scheduling.tick_max_duration_seconds` | `30.0` | Deadline for one full plugin pipeline tick. |
+| `plugin_registration.transport.request_timeout_seconds` | `5.0` | Per-plugin RPC timeout. |
 
 ### Environment Variables
 

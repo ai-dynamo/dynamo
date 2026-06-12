@@ -24,6 +24,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
@@ -40,6 +41,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.6.c:
     description: No arguments key
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L514
@@ -55,4 +57,5 @@ cases:
         - name: get_time
           arguments: {}
         normal_text: ''
+        reason: vLLM's mistral_tool_parser fabricates an empty arguments object {} when the 'arguments' key is absent; Dynamo and SGLang drop the call because the required key is missing
       sglang: *id004

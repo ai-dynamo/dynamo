@@ -19,7 +19,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
 from .sglang_prepost import (
@@ -39,10 +39,20 @@ from .utils import (
     make_internal_error,
     nvext_extra_field_requested,
     random_uuid,
+    resolve_chat_template,
     worker_warmup,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _load_tokenizer(source_path: str, trust_remote_code: bool):
+    """Load the SGLang tokenizer, falling back to an on-disk chat template
+    (e.g. chat_template.json) when the tokenizer defines none."""
+    tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
+    if getattr(tokenizer, "chat_template", None) is None:
+        tokenizer.chat_template = resolve_chat_template(source_path)
+    return tokenizer
 
 
 def _runtime_config_parser_name(
@@ -125,7 +135,7 @@ def _init_worker(
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
-    _w_tokenizer = get_tokenizer(model_path, trust_remote_code=trust_remote_code)
+    _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
@@ -249,6 +259,13 @@ def _build_dynamo_preproc(
     mm_data = extract_mm_urls(request.get("messages", []))
     if mm_data:
         preproc["multi_modal_data"] = mm_data
+
+    nvext = request.get("nvext") or {}
+    nvext_passthrough = {
+        key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
+    }
+    if nvext_passthrough:
+        preproc["extra_args"] = {"nvext": nvext_passthrough}
 
     return preproc
 
@@ -512,6 +529,7 @@ class SglangProcessor:
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
+                engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
 
@@ -544,10 +562,17 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
+                        response_nvext: dict[str, Any] = {}
                         if stop_reason is not None and nvext_extra_field_requested(
                             request, "stop_reason"
                         ):
-                            dynamo_out["nvext"] = {"stop_reason": stop_reason}
+                            response_nvext["stop_reason"] = stop_reason
+                        if engine_data is not None and (
+                            nvext_extra_field_requested(request, "engine_data")
+                        ):
+                            response_nvext["engine_data"] = engine_data
+                        if response_nvext:
+                            dynamo_out["nvext"] = response_nvext
 
                         yield dynamo_out
 
@@ -613,15 +638,15 @@ class SglangEngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
-        # instead of re-running fetch_model. The MDC cache already has
-        # blake3-verified copies; this path duplicates the download.
-        source_path = mdc.source_path()
-        if not os.path.exists(source_path):
-            await fetch_model(source_path, ignore_weights=True)
+        local_dir = mdc.local_dir()
+        if not os.path.isdir(local_dir):
+            raise RuntimeError(
+                f"MDC local_dir {local_dir!r} not populated for model {mdc.name()!r}; "
+                f"download_config must run before the engine factory."
+            )
 
-        logger.info("Loading SGLang tokenizer from %s", source_path)
-        tokenizer = get_tokenizer(source_path, trust_remote_code=self.trust_remote_code)
+        logger.info("Loading SGLang tokenizer from %s", local_dir)
+        tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
@@ -652,13 +677,13 @@ class SglangEngineFactory:
             logger.info(
                 "Creating SGLang preprocess worker pool with %d workers for %s",
                 preprocess_workers,
-                source_path,
+                local_dir,
             )
             preprocess_pool = ProcessPoolExecutor(
                 max_workers=preprocess_workers,
                 initializer=_init_worker,
                 initargs=(
-                    source_path,
+                    local_dir,
                     tool_call_parser_name,
                     reasoning_parser_name,
                     self.config.exclude_tools_when_tool_choice_none,

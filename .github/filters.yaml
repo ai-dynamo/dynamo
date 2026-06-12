@@ -161,6 +161,7 @@ vllm:
   - '!**/*.rst'
 
 sglang:
+  - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'

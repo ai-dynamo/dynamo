@@ -39,11 +39,9 @@ from dynamo.planner.plugins.transport.config import TransportConfig
 # is only needed at *runtime* by the build helpers below — not by the
 # Pydantic config schema this module exposes for import-time deserialisation.
 # Keeping the heavy import out of the module top-level lets
-# ``PlannerConfig.scheduling.plugin_registration`` resolve to its schema in
-# a default ``use_orchestrator=False`` deployment without requiring the
+# ``PlannerConfig.plugin_registration`` resolve to its schema without requiring
 # generated proto stubs to be present on disk (the stubs are generated at
-# install / dev-time only; PSM-only deployments must still parse the
-# config tree).
+# install / dev-time only).
 if TYPE_CHECKING:
     from dynamo.planner.plugins.clock import Clock
     from dynamo.planner.plugins.registry.auth.base import AuthValidator
@@ -166,8 +164,8 @@ class PluginRegistrationConfig(BaseModel):
 
 def build_auth_validator(config: AuthConfig) -> "AuthValidator":
     # Heavy auth/registry imports deferred to call time so this module
-    # stays importable in PSM-only deployments without the generated
-    # plugin_pb2 stubs (see TYPE_CHECKING block at module top).
+    # stays importable before generated plugin_pb2 stubs exist (see
+    # TYPE_CHECKING block at module top).
     from dynamo.planner.plugins.registry.auth import (
         AllowUnauthenticatedAuth,
         MultiSourceAuth,
@@ -212,8 +210,8 @@ def build_registry_from_config(
     breaker to other subsystems (scheduler, heartbeat monitor).
     """
     # Heavy registry imports deferred to call time so this module stays
-    # importable in PSM-only deployments without the generated
-    # plugin_pb2 stubs (see TYPE_CHECKING block at module top).
+    # importable before generated plugin_pb2 stubs exist (see TYPE_CHECKING
+    # block at module top).
     from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
     from dynamo.planner.plugins.registry.server import PluginRegistryServer
 
