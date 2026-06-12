@@ -239,18 +239,30 @@ runs:
 
     - name: Wait for operator pod to be ready
       shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
-        echo "::group::Wait for operator pod Ready inside vCluster"
-        # The DGD mutating webhook is served by the operator pod. If the test runs
-        # before the webhook server is up it gets a 500 connection-refused on the
-        # first POST to the DGD API. Wait here so the pod is Ready before the test job
-        # connects. Uses the stable pod-template selector from the operator Deployment.
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          wait pod \
-          -l 'control-plane=controller-manager' \
-          -n default \
-          --for=condition=Ready \
-          --timeout=1800s
+        echo "::group::Wait for operator pod Ready (host namespace)"
+        # Poll the host namespace instead of the vCluster API. The vCluster syncer
+        # on AWS stalls pod-Ready propagation due to a NATS qosClass reconciliation
+        # loop, so kubectl wait against the virtual cluster never returns. The host
+        # pod status is always accurate.
+        end=$((SECONDS + 1800))
+        while true; do
+          STATUS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+            | grep 'dynamo-platform-dynamo-operator-controller-manager' \
+            | awk '{print $2}' | head -1)
+          if [ "${STATUS}" = "1/1" ]; then
+            echo "Operator pod Ready"
+            break
+          fi
+          if [ $SECONDS -ge $end ]; then
+            echo "::error::Operator pod not Ready after 1800s (last status: ${STATUS:-not found})"
+            exit 1
+          fi
+          echo "Waiting for operator pod... status=${STATUS:-not found}"
+          sleep 15
+        done
         echo "::endgroup::"
 
     - name: Debug deployment failure
