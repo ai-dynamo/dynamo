@@ -1193,11 +1193,23 @@ def _probe_overload_503_and_assert(
                         logger.error("Timed out waiting for overload 503")
             finally:
                 stop_event.set()
-                done, pending = await asyncio.wait(tasks, timeout=3)
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
+                # Wait for EVERY scheduled request to finish so the rejection-metric
+                # assertion can't race a late response. Once stop_event is set the
+                # accepted (200) requests unblock and return promptly; the generous
+                # timeout only bounds a genuinely stuck request. Any task still
+                # pending fails the test rather than being silently dropped.
+                done, pending = await asyncio.wait(tasks, timeout=30)
+                if pending:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    raise AssertionError(
+                        f"{len(pending)} overload-probe request(s) did not complete; "
+                        "cannot reliably compare rejection metrics"
+                    )
 
+            # t.result() re-raises if a request task errored, failing the test
+            # (per review: never silently omit a probe).
             return [t.result() for t in done]
 
     results = asyncio.run(exhaust_resources_and_verify_503())

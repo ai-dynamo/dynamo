@@ -11,9 +11,9 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rand::Rng;
 
+use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
-use super::ModelManagerError;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{

@@ -454,7 +454,9 @@ impl KvWorkerMonitor {
         let mut guard = self.prefill_client.write().unwrap();
         *guard = Some(prefill_client);
         self.prefill_client_notify.notify_one();
-        tracing::debug!("KvWorkerMonitor: prefill client attached (overload publish + TTFT cleanup)");
+        tracing::debug!(
+            "KvWorkerMonitor: prefill client attached (overload publish + TTFT cleanup)"
+        );
     }
 
     /// Get the current active decode blocks threshold, if configured.
@@ -1192,8 +1194,9 @@ mod tests {
             ..Default::default()
         };
 
-        let overloaded: HashSet<u64> =
-            compute_overloaded_instances(&states, &cfg).into_iter().collect();
+        let overloaded: HashSet<u64> = compute_overloaded_instances(&states, &cfg)
+            .into_iter()
+            .collect();
         assert_eq!(overloaded, HashSet::from([1]));
     }
 

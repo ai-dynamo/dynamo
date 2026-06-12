@@ -808,6 +808,9 @@ pub unsafe extern "C" fn create_routers(
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,
+            // C bindings construct no KvWorkerMonitor; overload publishing is
+            // unused on this path (matches the prior namespace-lookup miss).
+            None,
         );
 
         // Spawn background discovery watcher for prefill workers.

@@ -23,12 +23,12 @@ from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_background_prefill_sticky_routing,
     _test_disagg_direct_mode,
+    _test_disagg_router_overload_503,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_basic,
     _test_router_decisions,
-    _test_disagg_router_overload_503,
     _test_router_decisions_disagg,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
     _test_router_indexers_sync,
@@ -973,9 +973,7 @@ def test_router_decisions_disagg(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
-@pytest.mark.parametrize(
-    "overload_case", ROUTER_DISAGG_OVERLOAD_503_CASES
-)
+@pytest.mark.parametrize("overload_case", ROUTER_DISAGG_OVERLOAD_503_CASES)
 @pytest.mark.timeout(120)
 def test_mocker_disagg_router_overload_503(
     request,
