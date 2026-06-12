@@ -249,9 +249,18 @@ impl TcpWriteBuffer {
     }
 
     fn advance(&mut self, mut n: usize) {
+        debug_assert!(
+            n <= self.write_buf_len,
+            "TCP writer advanced {n} bytes but only {} bytes are queued",
+            self.write_buf_len
+        );
         self.write_buf_len = self.write_buf_len.saturating_sub(n);
         while n > 0 {
             let Some(front) = self.write_buf.front_mut() else {
+                debug_assert_eq!(
+                    n, 0,
+                    "TCP writer advanced {n} bytes past the end of the chunk queue"
+                );
                 break;
             };
 
