@@ -35,10 +35,28 @@ func TestBuildDeviceMap(t *testing.T) {
 			want:   "GPU-aaa=GPU-bbb",
 		},
 		{
+			name:   "single GPU identity omitted",
+			source: []string{"GPU-aaa"},
+			target: []string{"GPU-aaa"},
+			want:   "",
+		},
+		{
 			name:   "multiple GPUs",
 			source: []string{"GPU-aaa", "GPU-bbb"},
 			target: []string{"GPU-ccc", "GPU-ddd"},
 			want:   "GPU-aaa=GPU-ccc,GPU-bbb=GPU-ddd",
+		},
+		{
+			name:   "multiple GPU identity omitted despite target order",
+			source: []string{"GPU-aaa", "GPU-bbb"},
+			target: []string{"GPU-bbb", "GPU-aaa"},
+			want:   "",
+		},
+		{
+			name:   "partial identity retained for migration",
+			source: []string{"GPU-aaa", "GPU-bbb"},
+			target: []string{"GPU-bbb", "GPU-ccc"},
+			want:   "GPU-aaa=GPU-ccc,GPU-bbb=GPU-bbb",
 		},
 		{
 			name:    "mismatched lengths",

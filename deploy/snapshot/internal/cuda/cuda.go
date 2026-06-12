@@ -171,9 +171,10 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 }
 
 // BuildDeviceMap creates a cuda-checkpoint-helper --device-map value from source and target GPU UUID lists.
-// When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
-// unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
+// When a source UUID exists in the target set, it maps to itself to avoid unnecessary
+// cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
 // Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
+// An all-identity map is omitted so same-GPU restores do not enter the CUDA remap path.
 func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
 		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
@@ -214,8 +215,17 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 	}
 
 	pairs := make([]string, len(sourceUUIDs))
+	identityMap := true
 	for i, src := range sourceUUIDs {
-		pairs[i] = src + "=" + mapping[src]
+		target := mapping[src]
+		if target != src {
+			identityMap = false
+		}
+		pairs[i] = src + "=" + target
+	}
+	if identityMap {
+		log.V(1).Info("Omitting identity CUDA device map", "source_uuids", sourceUUIDs)
+		return "", nil
 	}
 	return strings.Join(pairs, ","), nil
 }
