@@ -34,25 +34,40 @@ The Rust frontend reads these environment variables:
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `DYN_STATEFUL_RESPONSES_STORE_URL` | `memory` | Context store URL. Supported schemes depend on build features; see below. |
+| `DYN_STATEFUL_RESPONSES_STORE_NAMESPACE` | `dynamo/stateful-responses` | Isolates keys when several deployments or features share one database. All replicas serving one deployment must use the same value. |
 | `DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS` | `2592000` (30 days) | Context lifetime. Set to `0`, `false`, `none`, or `never` to disable expiration. |
-| `DYN_STATEFUL_RESPONSES_TTL_SWEEP_SECS` | `3600` (1 hour) | Expired-context sweep interval. Set to `0`, `false`, `none`, or `never` to disable background sweeping. |
+| `DYN_STATEFUL_RESPONSES_TTL_SWEEP_SECS` | `3600` (1 hour) | Expired-context sweep interval for stores without native TTL. Set to `0`, `false`, `none`, or `never` to disable sweeping. |
 
 Store URL schemes:
 
 | URL | Build requirement | Intended use |
 |-----|-------------------|--------------|
-| `memory` | None | Default for development and a single frontend process. State is lost on restart and is not shared across replicas. |
-| `redb:/path/to/context.redb` | `stateful-responses-redb` feature | Persistent storage for a single frontend process. Do not share one redb file between frontend replicas. |
-| `tikv://pd1:2379,pd2:2379/prefix` | `stateful-responses-tikv` feature | Shared storage for multiple frontend replicas. The prefix is optional and defaults to `dynamo/stateful-responses/`. |
+| `memory` | None | Development or a single frontend process. State is lost on restart and is not shared across replicas. |
+| `redis://user:password@host:6379/0` | `key-value-store-redis` feature | Shared Redis or Valkey deployment. Use `rediss://` for TLS. Redis performs expiration natively. |
+| `postgresql://user:password@host/database` | `key-value-store-postgres` feature | Shared PostgreSQL or PostgreSQL-compatible CockroachDB deployment. URL parameters configure TLS. |
 
-For high availability, all frontend replicas must use the same shared store. The `memory` and `redb` stores cannot preserve `previous_response_id` continuity when requests move between replicas.
+For high availability, every frontend replica must use the same shared store and namespace. The memory store cannot preserve `previous_response_id` continuity when requests move between replicas.
 
-The current TiKV configuration accepts PD endpoints and a key prefix only. It does not expose TiKV client TLS or authentication settings. Keep the TiKV connection on a trusted network; deployments that require client TLS or authentication should not use this backend until those settings are supported.
+TTL values are relative durations. Redis applies them natively, while PostgreSQL computes expiry from the database clock, so frontend clock skew does not change retention. Each replica may run cleanup for stores without native TTL; cleanup starts after the configured interval and PostgreSQL deletes at most 1000 expired rows per pass.
 
-Example:
+Redis URLs are passed directly to the Redis client, including ACL username, password, database, and the `rediss://` TLS scheme. TLS uses the host's native certificate roots.
+
+PostgreSQL URLs are passed directly to SQLx. Use `sslmode`, `sslrootcert`, `sslcert`, and `sslkey` URL parameters when TLS or mutual TLS is required. The frontend creates the `dynamo_key_value_store` table and expiry index when the table does not exist. The runtime role needs `CREATE` permission for first-time initialization; a preprovisioned table lets a read/write/delete-only runtime role skip DDL.
+
+Redis example:
 
 ```bash
-export DYN_STATEFUL_RESPONSES_STORE_URL='tikv://tikv-pd-0:2379,tikv-pd-1:2379/dynamo/responses/'
+export DYN_STATEFUL_RESPONSES_STORE_URL="rediss://dynamo:${REDIS_PASSWORD}@redis.example:6380/0"
+export DYN_STATEFUL_RESPONSES_STORE_NAMESPACE='production/responses'
+export DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS=86400
+python -m dynamo.frontend --http-port 8000
+```
+
+PostgreSQL or CockroachDB example:
+
+```bash
+export DYN_STATEFUL_RESPONSES_STORE_URL="postgresql://dynamo:${DB_PASSWORD}@db.example:26257/dynamo?sslmode=verify-full&sslrootcert=/etc/dynamo/ca.crt"
+export DYN_STATEFUL_RESPONSES_STORE_NAMESPACE='production/responses'
 export DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS=86400
 python -m dynamo.frontend --http-port 8000
 ```
