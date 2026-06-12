@@ -1233,7 +1233,35 @@ mod tests {
 
     /// Force-enable the recording fast-path and install a fresh subscriber
     /// that captures every `engine.generate` field write into a shared map.
+    /// Ensure the test binary has a process-global default subscriber so the
+    /// `engine.generate` span callsite stays enabled for the whole run.
+    ///
+    /// `tracing` caches per-callsite interest in a single process-global table.
+    /// When tests install and drop thread-local subscribers (`set_default`) in
+    /// parallel, that table is recomputed against whichever dispatchers are live
+    /// at the instant of the rebuild. If the `engine.generate` callsite is ever
+    /// evaluated with only the empty global default in scope, it can be cached
+    /// as disabled; the trace-context tests then never see the span born, so
+    /// `worker_trace_link` comes back `None` and they flake non-deterministically
+    /// under parallel execution.
+    ///
+    /// Installing a real (empty) registry as the *global* default keeps that
+    /// callsite enabled binary-wide: every interest rebuild now combines an
+    /// always-enabled dispatcher, so it can never collapse to disabled. Per-test
+    /// `set_default` subscribers still override this on their own thread, so the
+    /// capture / injection behaviour the tests assert on is unchanged.
+    fn ensure_global_test_subscriber() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // Ignore the error if a global default was already set elsewhere;
+            // any real subscriber is enough to keep the callsite enabled.
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        });
+    }
+
     fn install_capture() -> (CapturedFields, CaptureGuard) {
+        ensure_global_test_subscriber();
         let otlp = OtlpExportOverride::enable();
         let captured = CapturedFields::default();
         let layer = CaptureLayer {
@@ -1348,6 +1376,7 @@ mod tests {
     #[tokio::test]
     async fn auto_span_fires_without_otlp_override() {
         // Install ONLY the capture layer — no `OtlpExportOverride::enable()`.
+        ensure_global_test_subscriber();
         let captured = CapturedFields::default();
         let layer = CaptureLayer {
             out: captured.clone(),
@@ -1546,6 +1575,7 @@ mod tests {
         const TRACE_ID: &str = "11111111111111111111111111111111";
         const SPAN_ID: &str = "2222222222222222";
 
+        ensure_global_test_subscriber();
         let template = Arc::new(std::sync::OnceLock::new());
         let inject = InjectingTraceContext {
             template: template.clone(),
