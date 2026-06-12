@@ -18,6 +18,10 @@ inputs:
   builder_name:
     description: 'Buildx builder name'
     required: true
+  platforms:
+    description: 'Optional Docker platform override. Defaults to linux/amd64,linux/arm64 for operator and linux/amd64 for snapshot.'
+    required: false
+    default: ''
   aws_default_region:
     description: 'AWS Default Region'
     required: true
@@ -60,8 +64,13 @@ runs:
     - name: Determine build settings
       id: settings
       shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        PLATFORMS: ${{ inputs.platforms }}
       run: |
-        if [[ "${{ inputs.component }}" == "operator" ]]; then
+        if [[ -n "${PLATFORMS}" ]]; then
+          echo "build_platforms=${PLATFORMS}" >> $GITHUB_OUTPUT
+        elif [[ "${COMPONENT}" == "operator" ]]; then
           echo "build_platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
         else
           echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT

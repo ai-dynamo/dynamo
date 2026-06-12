@@ -22,6 +22,26 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_snapshot_agent:
+        description: 'Build and push snapshot-agent image, tagged with branch name'
+        type: boolean
+        default: false
+      build_snapshot_placeholder:
+        description: 'Build and push snapshot placeholder image, tagged with branch name'
+        type: boolean
+        default: false
+      snapshot_platform:
+        description: 'Docker platform for snapshot builds'
+        type: string
+        default: 'linux/arm64'
+      snapshot_helper_only:
+        description: 'Build snapshot images without the amd64-only cuda-checkpoint launcher'
+        type: boolean
+        default: true
+      snapshot_placeholder_base_image:
+        description: 'Base runtime image for the snapshot placeholder target'
+        type: string
+        default: 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3'
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -187,6 +207,68 @@ jobs:
           done
 
   # ============================================================================
+  # SNAPSHOT (build-only)
+  # ============================================================================
+
+  snapshot-agent:
+    needs: [init]
+    if: inputs.build_snapshot_agent
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          platforms: ${{ inputs.snapshot_platform }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
+          extra_build_args: |
+            SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=${{ inputs.snapshot_helper_only && 'false' || 'true' }}
+
+  snapshot-placeholder:
+    needs: [init]
+    if: inputs.build_snapshot_placeholder
+    name: Snapshot Placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder
+          platforms: ${{ inputs.snapshot_platform }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
+          extra_build_args: |
+            SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=${{ inputs.snapshot_helper_only && 'false' || 'true' }}
+            BASE_IMAGE=${{ inputs.snapshot_placeholder_base_image }}
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
 
@@ -194,7 +276,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-agent, snapshot-placeholder]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
