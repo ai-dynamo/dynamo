@@ -632,31 +632,14 @@ recipes:
     expected_performance:
       available: false
       summary: Source README gives directional TTFT/ITL claims and a results video only
-  - id: vllm-agg-kvbm
-    recommended: false
-    hardware:
-      gpu: H200 or B200
-      count: 1
-    runtime:
-      framework: vllm
-    topology: aggregated
-    techniques:
-    - kvbm-host-memory-offload
-    workload:
-      type: deployment-only
-      traffic: Long/repeated prompts with prefix reuse
-    deploy:
-      asset: recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml
-    expected_performance:
-      available: false
-      summary: No checked-in benchmark for this target
   related_benchmarks:
   - qwen3-32b-kv-routing
   maintainer: null
   gaps:
   - No expected performance numbers in source README (directional claims + video only); Expected Performance omitted
-  - agg-kvbm target lacks perf.yaml; Benchmark subsection omitted for it
   - maintainer unknown
+  - 'agg-kvbm single-GPU KVBM walkthrough removed from the recipe (2026-06-12): it is a KVBM feature guide, not a validated
+    recipe target (no benchmark); its tags also polluted landing-page workload filtering. Belongs in KVBM feature docs (R2).'
 - id: qwen3-235b-a22b-fp8
   title: Qwen3-235B-A22B FP8
   page: recipes/qwen3-235b-a22b-fp8.mdx

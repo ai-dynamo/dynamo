@@ -2,50 +2,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Qwen3-32B"
-subtitle: "Serve Qwen3-32B with Dynamo and vLLM, with KV-aware routing or single-GPU KVBM offload."
+subtitle: "Serve Qwen3-32B with Dynamo and vLLM — disaggregated serving with KV-aware routing for multi-turn conversational traffic."
 ---
 
-Two validated vLLM targets for `Qwen/Qwen3-32B` prefix-reuse traffic: a 16x H200 disaggregated deployment with KV-aware routing, benchmarked against a real Mooncake conversation trace (12,031 requests, 12K avg ISL), and a single-GPU aggregated deployment with KVBM host-memory KV offload for long or repeated prompts. Pick your target; every command on this page updates to match.
+This recipe deploys `Qwen/Qwen3-32B` on 16x H200 with prefill/decode disaggregation and KV-aware routing — the winning configuration from the [KV routing A/B benchmark](../benchmarks/qwen3-32b-kv-routing.mdx), validated against a real Mooncake conversation trace (12,031 requests, 12K average input length, 36.64% cache efficiency). It fits multi-turn conversational workloads where requests share long prefixes that KV-aware routing can exploit.
 
-<div className="dynamo-target-picker">
-<p className="dynamo-target-picker-title">Choose your deployment target</p>
-<div className="dynamo-target-picker-row">
-<span className="dynamo-target-picker-dim">Target</span>
-<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" defaultChecked />
-<label htmlFor="recipe-variant-disagg">Disagg + KV router (16x H200) <span className="dynamo-target-picker-hint">Recommended</span></label>
-<input type="radio" id="recipe-variant-kvbm" name="recipe-variant" value="kvbm" />
-<label htmlFor="recipe-variant-kvbm">Aggregated + KVBM (1 GPU)</label>
-</div>
-<div className="dynamo-target-picker-summary" data-variant="disagg">
+<div className="dynamo-target-picker static">
+<p className="dynamo-target-picker-title">Deployment target</p>
+<div className="dynamo-target-picker-summary">
 <span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
 <span><b>Precision</b> BF16</span>
 <span><b>GPUs</b> 16x H200, 2 nodes: 6x TP2 prefill + 2x TP2 decode</span>
 <span><b>Techniques</b> Disaggregated P/D + KV-aware routing</span>
-<span><b>Workload</b> Mooncake conversation, 12K avg ISL / 343 avg OSL</span>
-</div>
-<div className="dynamo-target-picker-summary" data-variant="kvbm">
-<span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
-<span><b>Precision</b> BF16</span>
-<span><b>GPUs</b> 1x H200 or B200</span>
-<span><b>Techniques</b> Aggregated + KVBM host-memory KV offload (100 GB CPU cache)</span>
-<span><b>Workload</b> Long or repeated prompts with prefix reuse</span>
+<span><b>Workload</b> Multi-turn conversation with prefix reuse (Mooncake trace, 12K avg ISL / 343 avg OSL)</span>
+<span><b>SLA</b> Goodput at TTFT 2s / ITL 25ms</span>
 </div>
 </div>
 
 ## Prerequisites
 
-<div data-variant="disagg">
-
 - A Kubernetes cluster with the Dynamo platform installed and **16x H200 across 2 nodes** available.
-
-</div>
-
-<div data-variant="kvbm">
-
-- A Kubernetes cluster with the Dynamo platform installed and **1x H200 or B200** available, on a node with roughly 150 GiB of free host memory for the KVBM CPU cache.
-
-</div>
-
 - A Hugging Face token with access to `Qwen/Qwen3-32B`.
 
 Create the namespace and token secret:
@@ -64,7 +40,7 @@ Edit namespace, storage class, image tags, node selectors, resource claims, Hugg
 
 ## Deploy
 
-Prepare the model cache and download the checkpoint (shared by both targets — `cache.yaml` creates the `model-cache`, `compilation-cache`, and `perf-cache` PVCs):
+Prepare the model cache and download the checkpoint (`cache.yaml` creates the `model-cache`, `compilation-cache`, and `perf-cache` PVCs):
 
 ```bash
 # Edit storageClassName in cache.yaml to match your cluster first.
@@ -75,8 +51,6 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 Then deploy:
 
-<div data-variant="disagg">
-
 ```bash
 kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
 
@@ -85,49 +59,17 @@ kubectl wait --for=condition=ready pod \
   -n ${NAMESPACE} --timeout=1200s
 ```
 
-</div>
-
-<div data-variant="kvbm">
-
-The KV Block Manager offloads cold KV blocks to pinned host memory (`DYN_KVBM_CPU_CACHE_GB=100`). If you raise the cache size, bump the worker's memory requests/limits by the same delta.
-
-```bash
-kubectl apply -f recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml -n ${NAMESPACE}
-
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=agg-kvbm-qwen3-32b \
-  -n ${NAMESPACE} --timeout=1200s
-```
-
-</div>
-
 ## Smoke Test
 
 Send a test request to verify the deployment serves traffic:
 
-<div data-variant="disagg">
-
 ```bash
 kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 -n ${NAMESPACE}
-```
 
-</div>
-
-<div data-variant="kvbm">
-
-```bash
-kubectl port-forward svc/agg-kvbm-qwen3-32b-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-</div>
-
-```bash
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
 ```
-
-<div data-variant="disagg">
 
 ## Benchmark
 
@@ -153,32 +95,18 @@ kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- tmux a -t benchmark
 
 Results land on the `perf-cache` PVC under `/perf-cache/artifacts/`.
 
-</div>
-
-## Compare All Targets
-
-| | Disagg + KV router | Aggregated + KVBM |
-|---|---|---|
-| **GPUs** | 16x H200 (2 nodes) | 1x H200 or B200 |
-| **Workers** | 6x TP2 prefill + 2x TP2 decode | 1 worker |
-| **Technique** | Disaggregated P/D, KV-aware routing | Aggregated, KVBM host-memory KV offload |
-| **Workload** | Mooncake conversation trace, 12K avg ISL | Long or repeated prompts with prefix reuse |
-| **Benchmark** | Trace-replay `perf.yaml` | None checked in |
-
 ## Related Feature Benchmarks
 
-- [Qwen3-32B KV routing A/B](../benchmarks/qwen3-32b-kv-routing.mdx)
+- [Qwen3-32B KV routing A/B](../benchmarks/qwen3-32b-kv-routing.mdx) — the evidence behind this recipe: this configuration vs. aggregated round-robin on the same trace.
 
 ## Notes
 
-- The aggregated round-robin manifest is a benchmark control and lives on the related Feature Benchmarks page, not in the recipe selector.
-- The KVBM target ships a deploy.yaml only; there is no checked-in benchmark for it.
-- Qwen3-32B in BF16 is ~64 GB of weights, so an 80 GB H100 is likely to OOM on the KVBM target under real load. For H100 80 GB, use the [Qwen3-32B FP8 recipe](qwen3-32b-fp8.mdx) instead.
-- KVBM Prometheus metrics are off by default; see the [agg-kvbm README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/README.md) for enabling `DYN_KVBM_METRICS`.
+- The aggregated round-robin manifest is a benchmark control and lives on the related Feature Benchmarks page, not in this recipe.
+- A separate single-GPU KVBM host-memory-offload deployment guide exists at [recipes/qwen3-32b/vllm/agg-kvbm](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/README.md). It is a KVBM feature walkthrough rather than a validated recipe target (no checked-in benchmark), so it is not part of this recipe.
+- For 80 GB GPUs (H100), use the [Qwen3-32B FP8 recipe](qwen3-32b-fp8.mdx) — BF16 weights are ~64 GB and leave little KV headroom.
 
 ## Source
 
 - Source README: [recipes/qwen3-32b/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/README.md)
-- Disagg + KV router: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml)
-- Aggregated + KVBM: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml) and [README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/README.md)
+- Deploy and benchmark: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml)
 - Setup assets: [model-cache/cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/model-cache/cache.yaml) and [model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/model-cache/model-download.yaml)

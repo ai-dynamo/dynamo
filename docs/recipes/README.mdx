@@ -40,7 +40,6 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
 <input className="dynamo-filter-input" type="radio" id="workload-multimodal-reuse" name="workload" />
 <input className="dynamo-filter-input" type="radio" id="workload-static-generation" name="workload" />
 <input className="dynamo-filter-input" type="radio" id="workload-long-output" name="workload" />
-<input className="dynamo-filter-input" type="radio" id="workload-deployment-only" name="workload" />
 
 <div className="dynamo-recipe-browser" aria-label="Dynamo model recipe browser">
   <div className="dynamo-recipe-browser-header">
@@ -50,7 +49,7 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
       <p>Filter by provider, runtime, hardware, serving technique, and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>30</strong>
+      <strong>29</strong>
       <span>Recipe targets</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -87,8 +86,7 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
 <label className="dynamo-recipe-chip" htmlFor="workload-long-context-reuse">Long-context reuse</label>
 <label className="dynamo-recipe-chip" htmlFor="workload-multimodal-reuse">Multimodal reuse</label>
 <label className="dynamo-recipe-chip" htmlFor="workload-static-generation">Static ISL/OSL</label>
-<label className="dynamo-recipe-chip" htmlFor="workload-long-output">Long output</label>
-<label className="dynamo-recipe-chip" htmlFor="workload-deployment-only">Deployment only</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="workload-long-output">Long output</label></div></div>
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
@@ -140,13 +138,13 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
     <p className="dynamo-model-summary">TensorRT-LLM GB200 recipe pair organized by traffic target: aggregated serving and a disaggregated P/D split.</p>
     <div className="dynamo-model-tags"><span>TRT-LLM</span><span>4x GB200</span><span>Static ISL-OSL</span></div>
   </a>
-  <a className="dynamo-model-card" href="/dynamo/dev/recipes/qwen3-32b" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing" data-workload="long-context-reuse deployment-only">
+  <a className="dynamo-model-card" href="/dynamo/dev/recipes/qwen3-32b" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="h200" data-technique="disaggregated kv-routing" data-workload="long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
       <div><h3>Qwen3-32B</h3><p>Qwen</p></div>
     </div>
-    <p className="dynamo-model-summary">Disaggregated vLLM recipe for Mooncake-style conversation traces on 16x H200, plus a separate KVBM deploy target.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>16x H200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
+    <p className="dynamo-model-summary">Disaggregated vLLM serving with KV-aware routing on 16x H200, for multi-turn conversational traffic with prefix reuse.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>16x H200</span><span>Multi-turn conversation</span><span>Related benchmark</span></div>
   </a>
   <a className="dynamo-model-card" href="/dynamo/dev/recipes/qwen3-235b-a22b-fp8" data-recipe-card data-provider="qwen" data-runtime="trtllm" data-hardware="b200 h100 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation">
     <div className="dynamo-model-card-top">

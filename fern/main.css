@@ -1026,11 +1026,11 @@ svg.card-icon{
 }
 
 .dynamo-filter-input {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
+    /* display:none (not visually-hidden positioning): the inputs sit at the
+       top of the form, so if they can receive focus, clicking any filter
+       label scrolls the page back to the top. Label activation still toggles
+       undisplayed inputs, and the :checked sibling selectors still match. */
+    display: none;
 }
 
 .dynamo-search-box {
