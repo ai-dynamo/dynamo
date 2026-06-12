@@ -103,9 +103,12 @@ enum Discovery {
     },
     RouterOnly {
         reflector: Arc<RouterOnlyPodReflector>,
-        /// Held so the per-pod ZMQ listeners + event-plane publisher stay alive
+        /// Emit `x-prefiller-host-port` for the selected prefill worker so a
+        /// decode-side P/D sidecar can run the vLLM KV-transfer handshake.
+        emit_prefiller_host_port: bool,
+        /// Held so the per-pod ZMQ listeners + event-plane publishers stay alive
         /// for the lifetime of the router.
-        _republisher: Arc<KvRepublisher>,
+        _republishers: Vec<Arc<KvRepublisher>>,
     },
 }
 
@@ -206,16 +209,62 @@ impl Discovery {
         ids
     }
 
-    /// Default scheduler admission set when there is no Envoy subset hint.
+    /// Scheduler admission set for decode routing, given an optional subset
+    /// constraint (`None` = no Envoy subset hint).
     ///
-    /// Dynamo mode lets the scheduler use all discovery-registered workers
-    /// (`None`); router-only mode must explicitly admit the Ready raw-vLLM pods,
-    /// because they never register in Dynamo discovery.
-    fn default_allowed_worker_ids(&self) -> Option<HashSet<u64>> {
+    /// Dynamo mode passes the subset straight through (`None` lets the scheduler
+    /// use all discovery-registered workers). Router-only mode admits the Ready
+    /// decode-role pods (all Ready pods when not role-aware), intersected with
+    /// the subset when present, because raw vLLM pods never register in Dynamo
+    /// discovery.
+    fn decode_admission(&self, subset: &Option<HashSet<u64>>) -> Option<HashSet<u64>> {
         match self {
-            Discovery::Dynamo { .. } => None,
-            Discovery::RouterOnly { reflector, .. } => Some(reflector.ready_worker_ids()),
+            Discovery::Dynamo { .. } => subset.clone(),
+            Discovery::RouterOnly { reflector, .. } => {
+                let ids = if reflector.is_role_aware() {
+                    reflector.ready_worker_ids_for_role(crate::router_only_reflector::ROLE_DECODE)
+                } else {
+                    reflector.ready_worker_ids()
+                };
+                Some(intersect_subset(ids, subset))
+            }
         }
+    }
+
+    /// Scheduler admission set for prefill routing. Dynamo mode passes the
+    /// subset through; router-only mode admits Ready prefill-role pods (empty when
+    /// not role-aware, i.e. aggregated), intersected with the subset.
+    fn prefill_admission(&self, subset: &Option<HashSet<u64>>) -> Option<HashSet<u64>> {
+        match self {
+            Discovery::Dynamo { .. } => subset.clone(),
+            Discovery::RouterOnly { reflector, .. } => {
+                let ids = if reflector.is_role_aware() {
+                    reflector.ready_worker_ids_for_role(crate::router_only_reflector::ROLE_PREFILL)
+                } else {
+                    HashSet::new()
+                };
+                Some(intersect_subset(ids, subset))
+            }
+        }
+    }
+
+    /// Whether to emit `x-prefiller-host-port` (router-only disaggregated mode only).
+    fn emit_prefiller_host_port(&self) -> bool {
+        match self {
+            Discovery::Dynamo { .. } => false,
+            Discovery::RouterOnly {
+                emit_prefiller_host_port,
+                ..
+            } => *emit_prefiller_host_port,
+        }
+    }
+}
+
+/// Intersect `ids` with a subset hint when present; otherwise return `ids`.
+fn intersect_subset(ids: HashSet<u64>, subset: &Option<HashSet<u64>>) -> HashSet<u64> {
+    match subset {
+        Some(subset) => ids.intersection(subset).copied().collect(),
+        None => ids,
     }
 }
 
@@ -348,7 +397,7 @@ impl Router {
             decode_router,
             prefill_router,
             reflector,
-            republisher,
+            republishers,
         } = crate::router_only_runtime::build_router_only(&cfg).await?;
 
         Ok(Self {
@@ -358,7 +407,8 @@ impl Router {
             runtime,
             discovery: Discovery::RouterOnly {
                 reflector,
-                _republisher: republisher,
+                emit_prefiller_host_port: cfg.emit_prefiller_host_port,
+                _republishers: republishers,
             },
         })
     }
@@ -980,10 +1030,9 @@ impl EndpointPicker for Router {
         // subset.
         let (allowed_worker_ids, worker_map) = if endpoints.is_empty() {
             if req.candidate_subset.is_empty() {
-                // No subset hint: Dynamo mode lets the scheduler use all
-                // discovery-registered workers (None); router-only mode admits the
-                // Ready raw-vLLM pods, which never register in Dynamo discovery.
-                (self.discovery.default_allowed_worker_ids(), Vec::new())
+                // No subset hint. Role-aware admission (decode vs prefill) is
+                // applied per-router below via decode_admission/prefill_admission.
+                (None, Vec::new())
             } else {
                 let ids = self.subset_to_worker_ids(&req.candidate_subset);
                 if ids.is_empty() {
@@ -1055,7 +1104,11 @@ impl EndpointPicker for Router {
         //   request fail. Silently downgrading to aggregated would defeat
         //   the operator's explicit "strict disagg" policy.
         let prefill_result = self
-            .route_prefill(&tokens, priority_jump, allowed_worker_ids.clone())
+            .route_prefill(
+                &tokens,
+                priority_jump,
+                self.discovery.prefill_admission(&allowed_worker_ids),
+            )
             .await;
 
         let is_disaggregated = match &prefill_result {
@@ -1084,7 +1137,12 @@ impl EndpointPicker for Router {
         // booking ID independent of x-request-id, handle cancellation races, roll
         // back endpoint-resolution failures, and never forward to an unbooked fallback.
         let (decode_worker, _overlap) = self
-            .route_decode(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
+            .route_decode(
+                &tokens,
+                is_disaggregated,
+                priority_jump,
+                self.discovery.decode_admission(&allowed_worker_ids),
+            )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
@@ -1155,6 +1213,13 @@ impl EndpointPicker for Router {
             ));
             if let Some(rank) = prefill_dp_rank {
                 headers.push(("x-prefill-dp-rank".to_string(), rank.to_string()));
+            }
+            // Emit the prefill pod's dialable host:port so a decode-side P/D
+            // sidecar can run vLLM's kv_transfer handshake (router-only disagg).
+            if self.discovery.emit_prefiller_host_port()
+                && let Some(addr) = self.resolve_worker_endpoint(*prefill_worker_id)
+            {
+                headers.push(("x-prefiller-host-port".to_string(), addr));
             }
         } else {
             headers.push((
