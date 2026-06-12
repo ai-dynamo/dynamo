@@ -154,7 +154,7 @@ spec:
   backend: vllm
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1beta1
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
       kind: DynamoGraphDeployment
       spec:
         services:
@@ -181,7 +181,7 @@ state. If worker event publication is not configured, keep
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1beta1
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
       kind: DynamoGraphDeployment
       spec:
         services:
@@ -193,10 +193,16 @@ spec:
                 value: "false"
 ```
 
-When you do want event-driven prefix-cache state, configure the generated
-worker service with backend-specific event publishing flags. Service names
-depend on the selected backend and topology, so inspect the generated DGD
-first, especially when `autoApply: false`.
+When you do want event-driven prefix-cache state, configure event publication
+on the generated worker service that handles prefill. In aggregated serving,
+the single worker handles both prefill and decode, so configure that worker.
+In disaggregated serving, configure prefill workers only; prefix-overlap
+scoring (`dyn-prefill-scorer`) runs at the prefill stage, while decode workers
+are scored on load (`dyn-decode-scorer`) and normally omit KV-event publishing
+flags. For vLLM, that means prefill workers get `--enable-prefix-caching` and
+`--kv-events-config`; decode workers omit both flags. Service names depend on
+the selected backend and topology, so inspect the generated DGD first,
+especially when `autoApply: false`.
 
 For example, a generated vLLM disaggregated deployment may contain a
 `VllmPrefillWorker` service. This override appends the vLLM KV-event publishing
@@ -206,7 +212,7 @@ arguments to that service while enabling the frontend KV router:
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1beta1
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
       kind: DynamoGraphDeployment
       spec:
         services:
@@ -218,6 +224,7 @@ spec:
             extraPodSpec:
               mainContainer:
                 args:
+                  - --enable-prefix-caching
                   - --kv-events-config
                   - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
@@ -227,7 +234,7 @@ Worker KV-event flags are backend-specific. For cross-backend behavior, see
 
 | Backend | Detailed docs | Worker-side event publishing |
 |---|---|---|
-| vLLM | [vLLM Reference Guide](../backends/vllm/vllm-reference-guide.md#argument-reference), [vLLM Examples](../backends/vllm/vllm-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` |
+| vLLM | [vLLM Reference Guide](../backends/vllm/vllm-reference-guide.md#argument-reference), [vLLM Examples](../backends/vllm/vllm-examples.md#aggregated-serving-with-kv-routing) | `--enable-prefix-caching` and `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` on the aggregated worker or disaggregated prefill worker |
 | SGLang | [SGLang KV Events](../backends/sglang/sglang-reference-guide.md#kv-events), [SGLang Examples](../backends/sglang/sglang-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config` with the SGLang event endpoint |
 | TRT-LLM | [TRT-LLM DP Rank Routing](../backends/trtllm/trtllm-dp-rank-routing.md#enabling-dp-rank-routing), [TRT-LLM Observability](../backends/trtllm/trtllm-observability.md) | `--publish-events-and-metrics` |
 

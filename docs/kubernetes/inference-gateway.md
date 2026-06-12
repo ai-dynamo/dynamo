@@ -325,14 +325,14 @@ podTemplate:
   spec:
     containers:
       - name: main
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
         command:
           - /bin/sh
           - -c
         args:
           - python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME
       - name: sidecar-frontend
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
         args:
           - -m
           - dynamo.frontend
