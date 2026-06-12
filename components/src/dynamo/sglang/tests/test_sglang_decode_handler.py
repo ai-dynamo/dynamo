@@ -15,7 +15,10 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _openai_stop_sampling_params,
     _user_stop_token_ids,
 )
-from dynamo.sglang.request_handlers.llm.mm_disagg_utils import extract_media_urls
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    extract_media_urls,
+    raise_if_unextracted_multimodal,
+)
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
@@ -260,6 +263,33 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
     assert sampling_params["min_p"] == 0.01
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
+
+
+class TestMultimodalGuard:
+    """Tests for multimodal guard when frontend extraction is missing."""
+
+    IMAGE_MESSAGE = {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.jpg"}},
+            {"type": "text", "text": "describe image"},
+        ],
+    }
+
+    @pytest.mark.parametrize(
+        "request_factory",
+        [
+            lambda msg: {"token_ids": [1, 2, 3], "messages": [msg]},
+            lambda msg: {"token_ids": [1, 2, 3], "extra_args": {"messages": [msg]}},
+        ],
+        ids=["top_level_messages", "extra_args_messages"],
+    )
+    def test_raises_for_image_url(self, request_factory):
+        with pytest.raises(RuntimeError, match="multi_modal_data"):
+            raise_if_unextracted_multimodal(request_factory(self.IMAGE_MESSAGE))
+
+    def test_text_only_request_bypasses_guard(self):
+        raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
