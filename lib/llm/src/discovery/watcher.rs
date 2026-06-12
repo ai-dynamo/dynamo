@@ -1090,7 +1090,8 @@ impl ModelWatcher {
                 || card.model_type.supports_audios()
                 || card.model_type.supports_videos())
         {
-            let multimodal_cache_indexer = try_build_cache_indexer(client.endpoint.component()).await;
+            let multimodal_cache_indexer =
+                try_build_cache_indexer(client.endpoint.component()).await;
 
             // Image/Audio/Video models can also support chat completions (vLLM omni way)
             if card.model_type.supports_chat() {
@@ -1140,10 +1141,7 @@ impl ModelWatcher {
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
                 >::from_client_with_state(
-                    client.clone(),
-                    router_config.router_mode,
-                    None,
-                    None,
+                    client.clone(), router_config.router_mode, None, None
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));

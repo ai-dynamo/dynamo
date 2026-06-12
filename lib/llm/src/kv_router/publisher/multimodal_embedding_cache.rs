@@ -41,11 +41,7 @@ impl MultimodalEmbeddingCachePublisher {
         }
     }
 
-    pub fn publish_delta(
-        &self,
-        added_keys: Vec<String>,
-        removed_keys: Vec<String>,
-    ) -> Result<()> {
+    pub fn publish_delta(&self, added_keys: Vec<String>, removed_keys: Vec<String>) -> Result<()> {
         if added_keys.is_empty() && removed_keys.is_empty() {
             return Ok(());
         }
@@ -72,13 +68,8 @@ impl MultimodalEmbeddingCachePublisher {
         }
 
         component.drt().runtime().secondary().spawn(async move {
-            run_multimodal_embedding_cache_processor(
-                publisher,
-                worker_id,
-                cancellation_token,
-                rx,
-            )
-            .await;
+            run_multimodal_embedding_cache_processor(publisher, worker_id, cancellation_token, rx)
+                .await;
         });
 
         Ok(())
@@ -88,9 +79,8 @@ impl MultimodalEmbeddingCachePublisher {
         let tx = self.tx.get().ok_or_else(|| {
             anyhow::anyhow!("multimodal embedding cache publisher not initialized")
         })?;
-        tx.send(update).map_err(|_| {
-            anyhow::anyhow!("multimodal embedding cache publisher channel closed")
-        })
+        tx.send(update)
+            .map_err(|_| anyhow::anyhow!("multimodal embedding cache publisher channel closed"))
     }
 }
 
