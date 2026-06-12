@@ -1088,9 +1088,50 @@ pub fn simulate_concurrency_live_workload_with_router_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocols::{EngineType, SglangArgs};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use uuid::Uuid;
+
+    #[test]
+    fn one_worker_sglang_impossible_request_returns_dead_end_error() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(1)
+            .speedup_ratio(1000.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(8),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let request = DirectRequest {
+            tokens: vec![1; 8],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+        };
+
+        let err = simulate_trace_requests_with_router_mode(
+            args,
+            None,
+            None,
+            vec![request],
+            1,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "offline replay reached a dead end with 1 in-flight requests remaining"
+        );
+    }
 
     #[test]
     fn agentic_mooncake_trace_file_loads_and_scales_timing() {

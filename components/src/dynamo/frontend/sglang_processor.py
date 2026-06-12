@@ -260,6 +260,13 @@ def _build_dynamo_preproc(
     if mm_data:
         preproc["multi_modal_data"] = mm_data
 
+    nvext = request.get("nvext") or {}
+    nvext_passthrough = {
+        key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
+    }
+    if nvext_passthrough:
+        preproc["extra_args"] = {"nvext": nvext_passthrough}
+
     return preproc
 
 
@@ -522,6 +529,7 @@ class SglangProcessor:
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
+                engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
 
@@ -554,10 +562,17 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
+                        response_nvext: dict[str, Any] = {}
                         if stop_reason is not None and nvext_extra_field_requested(
                             request, "stop_reason"
                         ):
-                            dynamo_out["nvext"] = {"stop_reason": stop_reason}
+                            response_nvext["stop_reason"] = stop_reason
+                        if engine_data is not None and (
+                            nvext_extra_field_requested(request, "engine_data")
+                        ):
+                            response_nvext["engine_data"] = engine_data
+                        if response_nvext:
+                            dynamo_out["nvext"] = response_nvext
 
                         yield dynamo_out
 
