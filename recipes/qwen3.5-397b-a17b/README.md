@@ -19,8 +19,7 @@ support (Qwen3.5)"*), which is in **vLLM 0.22.0 but NOT 0.20.1**. Dynamo
 So the recipe runs on an image built from Dynamo `main`.
 
 Corruption of the GDN state over NIXL is **silent** — the server stays healthy
-and emits tokens, they are just wrong past the prefill boundary. The GSM8K
-**accuracy canary** (below) is the real correctness gate, not a crash-free run.
+and emits tokens, they are just wrong past the prefill boundary.
 
 ## Topology
 
@@ -60,9 +59,9 @@ node by scheduler placement. Prefill carries `--disaggregation-mode prefill` +
 
 ## Usage
 
-All commands assume `kubectl -n <ns>` (e.g. `-n qiwa`). The deploy / benchmark /
-accuracy YAMLs are templated — source the hardware env, then render each with
-`envsubst` before applying:
+All commands assume `kubectl -n <ns>` (e.g. `-n qiwa`). The deploy / benchmark
+YAMLs are templated — source the hardware env, then render each with `envsubst`
+before applying:
 
 ```bash
 set -a; . hw/h100.env; set +a   # VLLM_IMAGE, HW_NODE_SELECTOR, HW_TOLERATIONS, IMAGE_PULL_SECRET
@@ -104,24 +103,7 @@ envsubst '$HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RU
 kubectl -n <ns> logs -f qwen35-disagg-bench    # aiperf table prints at the end
 ```
 
-**4. Accuracy canary** (GSM8K — the correctness gate):
-```bash
-export BENCH_ACC_POD=qwen35-disagg-acc BENCH_FRONTEND=qwen35-disagg-frontend BENCH_RUN_LABEL=disagg
-envsubst '$HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_ACC_POD $BENCH_FRONTEND $BENCH_RUN_LABEL' \
-  < accuracy-job.yaml | kubectl -n <ns> apply -f -
-kubectl -n <ns> logs -f qwen35-disagg-acc
-```
-
-Run 2-4 for **both** `disagg` and `agg`, then compare GSM8K pass rates:
-
-- `disagg ≈ agg` → NIXL GDN-state transfer is healthy ✅
-- `disagg` materially below `agg` (>2-3 % abs) → PR #41869 path misbehaving ❌
-
-GDN-state corruption over NIXL is **silent** (healthy server, wrong tokens past
-the prefill boundary), so the disagg-vs-agg accuracy delta — not a crash-free
-run — is the real gate.
-
-**5. Retrieve / clean:**
+**4. Retrieve / clean:**
 ```bash
 kubectl -n <ns> cp qwen35-disagg-bench:/perf-cache/artifacts/qwen35_fp8/disagg ./disagg-results
 kubectl -n <ns> delete -f deploy/disagg.yaml      # PVC (model cache) is left intact
@@ -140,7 +122,6 @@ picked an unroutable NIC; set `VLLM_NIXL_SIDE_CHANNEL_HOST` (commented stub in
 - Model weights: PVC root → `/home/dynamo/.cache/huggingface/hub/…` (workers
   mount the root with `HF_HUB_OFFLINE=1`).
 - Bench artifacts: `/perf-cache/artifacts/qwen35_fp8/<cfg>/`.
-- Accuracy results: `/perf-cache/accuracy/<cfg>/`.
 
 ## Scheduling
 
@@ -174,7 +155,6 @@ qwen3.5-397b-a17b/
 │   └── agg.yaml                # DGD: Frontend + Worker(TP8)
 ├── benchmark/
 │   └── 8k-3k.yaml              # aiperf bench Pod (synthetic 8K ISL / 3K OSL)
-├── accuracy-job.yaml           # GSM8K canary Pod
 └── model-cache/
     └── model-download.yaml
 ```
