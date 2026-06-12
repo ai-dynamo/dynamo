@@ -561,31 +561,15 @@ where
         }
     }
 
-    /// Issue a request to a specific endpoint
+    /// Issue a request to a specific selected endpoint. Routing eligibility is
+    /// decided by the caller before selecting `instance_id`; this method honors
+    /// that selection and lets dispatch/transport return typed failures if the
+    /// selected worker cannot be resolved or reached.
     pub async fn direct(
         &self,
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
-        // When fault detection is disabled, check the raw discovery list
-        // (not filtered by report_instance_down) so transient failures
-        // don't poison the instance for subsequent retries.
-        let found = {
-            if self.fault_detection_enabled {
-                let routing_instances = self.client.routing_instances();
-                routing_instances.routable_ids().contains(&instance_id)
-            } else {
-                self.client.instance_ids().contains(&instance_id)
-            }
-        };
-
-        if !found {
-            return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {}",
-                self.client.endpoint.id()
-            ));
-        }
-
         self.generate_with_fault_detection(instance_id, request)
             .await
     }
@@ -847,11 +831,28 @@ where
             .into())
     }
 
+    fn report_instance_down_if_inhibited(
+        &self,
+        instance_id: u64,
+        err: &(dyn std::error::Error + 'static),
+        reason: &'static str,
+    ) {
+        if self.fault_detection_enabled && is_inhibited(err) {
+            tracing::debug!(
+                instance_id,
+                reason,
+                error = %err,
+                "Reporting instance down due to inhibited error"
+            );
+            self.client.report_instance_down(instance_id);
+        }
+    }
+
     /// Resolve `(instance_id, address, transport_kind_label, Instance)` for
-    /// the selected worker. If the instance has disappeared between selection
-    /// and dispatch, fall back to one other instance from `free_ids` (same
-    /// filter as pre-selection) and return the updated id so the caller can
-    /// `report_instance_down` the right worker on later failures.
+    /// the selected worker. The selected worker is part of the routing contract:
+    /// after a caller selects `instance_id`, transport resolution must either
+    /// dispatch to that worker or return typed worker-unavailability. Retry or
+    /// migration can then re-enter routing with fresh state.
     fn resolve_transport(
         &self,
         instance_id: u64,
@@ -874,38 +875,25 @@ where
                 })
         };
 
-        if let Some((addr, kind, inst)) = lookup(instance_id) {
-            return Ok((instance_id, addr, kind, inst));
-        }
-
-        let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .find(|&id| id != instance_id);
-        match fallback_id {
-            Some(id) => {
-                tracing::warn!(
-                    original_instance = instance_id,
-                    fallback_instance = id,
-                    "Instance disappeared during routing, reselecting"
-                );
-                let (addr, kind, inst) = lookup(id).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Fallback instance {} also not found for endpoint {}",
-                        id,
+        lookup(instance_id)
+            .map(|(addr, kind, inst)| (instance_id, addr, kind, inst))
+            .ok_or_else(|| {
+                DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!(
+                        "instance_id={instance_id} not found for endpoint {}",
                         self.client.endpoint.id()
-                    )
-                })?;
-                Ok((id, addr, kind, inst))
-            }
-            None => Err(anyhow::anyhow!(
-                "Instance {} not found and no other instances available for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            )),
-        }
+                    ))
+                    .build()
+                    .into()
+            })
+            .inspect_err(|err: &anyhow::Error| {
+                self.report_instance_down_if_inhibited(
+                    instance_id,
+                    err.as_ref(),
+                    "transport resolution",
+                );
+            })
     }
 
     /// Wrap a dispatched stream with fault detection + inactivity timeout.
@@ -920,10 +908,7 @@ where
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
-                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
-                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
-                    self.client.report_instance_down(instance_id);
-                }
+                self.report_instance_down_if_inhibited(instance_id, err.as_ref(), "dispatch");
                 return Err(err);
             }
         };
@@ -936,13 +921,14 @@ where
         let client = self.client.clone();
         let client_for_timeout = self.client.clone();
         let stream = stream.map(move |res| {
-            if let Some(err) = res.err()
-                && is_inhibited(&err)
-            {
-                tracing::debug!(
-                    "Reporting instance {instance_id} down due to migratable error: {err}"
-                );
-                client.report_instance_down(instance_id);
+            match res.err() {
+                Some(err) if is_inhibited(&err) => {
+                    tracing::debug!(
+                        "Reporting instance {instance_id} down due to migratable error: {err}"
+                    );
+                    client.report_instance_down(instance_id);
+                }
+                _ => {}
             }
             res
         });
@@ -1682,17 +1668,108 @@ mod tests {
         rt.shutdown();
     }
 
-    /// When the router selects an instance that has deregistered between selection
-    /// and transport resolution, it should fall back to another available instance
-    /// rather than returning a 500 error.
+    /// A stale explicit target should be returned as typed worker-unavailability
+    /// before it can become an unclassified string error.
     #[tokio::test]
-    async fn transport_resolution_falls_back_when_selected_instance_disappears() {
+    async fn direct_call_to_removed_instance_return_cannot_connect_error() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
         let ns = drt
-            .namespace("test_transport_fallback".to_string())
+            .namespace("test_direct_missing_instance".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let stale_id = client.instance_ids()[0] + 1000;
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::Direct)
+            .await
+            .unwrap();
+
+        let result = router.direct(SingleIn::new(42u64), stale_id).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_ref: &(dyn std::error::Error + 'static) = err.as_ref();
+        let msg = format!("{err}");
+        let dynamo_err = err_ref
+            .downcast_ref::<DynamoError>()
+            .expect("missing direct worker should return a typed DynamoError");
+
+        assert_eq!(dynamo_err.error_type(), ErrorType::CannotConnect);
+        assert!(
+            is_inhibited(err_ref),
+            "CannotConnect should be inhibited for fault detection: {msg}"
+        );
+        assert!(
+            match_error_chain(err_ref, &[ErrorType::CannotConnect], &[]),
+            "CannotConnect should be migration-classifiable: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("instance_id={stale_id} not found")),
+            "expected stale direct instance in error, got: {msg}"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Transport lookup is not a local routing-eligibility check. A worker that
+    /// has been locally inhibited can still be resolved if it remains in raw
+    /// discovery; future selection should avoid it, but selected-worker dispatch
+    /// should preserve the chosen target.
+    #[tokio::test]
+    async fn transport_resolution_to_inhibited_instance_goes_through() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_transport_inhibited_but_discovered".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let instance_id = client.instance_ids()[0];
+        client.report_instance_down(instance_id);
+        assert!(
+            !client.instance_ids_avail().contains(&instance_id),
+            "worker should be locally inhibited before transport lookup"
+        );
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::Direct)
+            .await
+            .unwrap();
+
+        let (resolved_id, _address, _transport_kind, _instance) = router
+            .resolve_transport(instance_id)
+            .expect("raw discovery should still resolve the selected worker");
+
+        assert_eq!(resolved_id, instance_id);
+
+        rt.shutdown();
+    }
+
+    /// When a selected worker disappears between selection and transport
+    /// resolution, the router must not silently switch to another worker. It
+    /// should suppress the stale worker locally and return a typed error that
+    /// the migration layer can classify as migratable.
+    #[tokio::test]
+    async fn transport_resolution_to_removed_instance_return_cannot_connect_error() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_transport_missing_selected".to_string())
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
@@ -1710,38 +1787,47 @@ mod tests {
         let stale_id = real_id + 1000;
         client.override_instance_avail(vec![stale_id, real_id]);
 
-        // Build a router and call direct() targeting the *real* instance to
-        // verify the router can still resolve transport for known instances.
         let router =
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
 
-        // Round robin should succeed — even if it picks stale_id first, the
-        // fallback logic should resolve transport via real_id.
-        // We cannot fully test the network send without a worker, but we can
-        // verify it doesn't fail at the transport resolution stage by checking
-        // that the error (if any) is a transport/network error, not
-        // "Instance not found".
-        let request = SingleIn::new(42u64);
-        let result = router.generate(request).await;
+        let result = router.generate(SingleIn::new(42u64)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_ref: &(dyn std::error::Error + 'static) = err.as_ref();
+        let msg = format!("{err}");
+        let dynamo_err = err_ref
+            .downcast_ref::<DynamoError>()
+            .expect("missing selected worker should return a typed DynamoError");
 
-        // The request may fail at the network level (no actual worker), but it
-        // must NOT fail with "Instance X not found" — that would mean the
-        // fallback did not work.
-        if let Err(err) = &result {
-            let msg = format!("{err}");
-            assert!(
-                !msg.contains("not found"),
-                "Transport resolution should have fallen back, but got: {msg}"
-            );
-        }
+        assert_eq!(dynamo_err.error_type(), ErrorType::CannotConnect);
+        assert!(
+            is_inhibited(err_ref),
+            "CannotConnect should be inhibited for fault detection: {msg}"
+        );
+        assert!(
+            match_error_chain(err_ref, &[ErrorType::CannotConnect], &[]),
+            "CannotConnect should be migration-classifiable: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("instance_id={stale_id} not found")),
+            "expected stale selected instance in error, got: {msg}"
+        );
+        assert!(
+            !client.instance_ids_avail().contains(&stale_id),
+            "stale selected worker should be suppressed after typed failure"
+        );
+        assert!(
+            client.instance_ids_avail().contains(&real_id),
+            "other available workers should remain routable"
+        );
 
         rt.shutdown();
     }
 
-    /// When no instances are available at all (both primary and fallback),
-    /// the router should return a clear error.
+    /// When no selected instance can be resolved, the router should return the
+    /// same typed worker-unavailability error and suppress the stale worker.
     #[tokio::test]
     async fn transport_resolution_errors_when_no_instances_available() {
         let rt = Runtime::from_current().unwrap();
@@ -1764,19 +1850,36 @@ mod tests {
                 .await
                 .unwrap();
 
-        // Override avail to contain only a stale ID with no real backing
-        // instance AND no other available fallback.
+        // Override avail to contain only a stale ID with no real backing instance.
         let stale_id = 99999;
         client.override_instance_avail(vec![stale_id]);
 
-        let request = SingleIn::new(42u64);
-        let result = router.generate(request).await;
+        let result = router.generate(SingleIn::new(42u64)).await;
 
         assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
+        let err = result.unwrap_err();
+        let err_ref: &(dyn std::error::Error + 'static) = err.as_ref();
+        let msg = format!("{err}");
+        let dynamo_err = err_ref
+            .downcast_ref::<DynamoError>()
+            .expect("missing selected worker should return a typed DynamoError");
+
+        assert_eq!(dynamo_err.error_type(), ErrorType::CannotConnect);
         assert!(
-            msg.contains("not found") && msg.contains("no other instances available"),
-            "Expected clear error about missing instance with no fallback, got: {msg}"
+            is_inhibited(err_ref),
+            "CannotConnect should be inhibited for fault detection: {msg}"
+        );
+        assert!(
+            match_error_chain(err_ref, &[ErrorType::CannotConnect], &[]),
+            "CannotConnect should be migration-classifiable: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("instance_id={stale_id} not found")),
+            "expected stale selected instance in error, got: {msg}"
+        );
+        assert!(
+            !client.instance_ids_avail().contains(&stale_id),
+            "stale selected worker should be suppressed after typed failure"
         );
 
         rt.shutdown();
