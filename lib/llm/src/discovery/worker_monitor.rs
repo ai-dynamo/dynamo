@@ -451,11 +451,21 @@ impl KvWorkerMonitor {
     /// This method can be called after `start_monitoring` - the monitoring loop will
     /// be immediately notified and start watching the prefill endpoint.
     pub fn attach_prefill_client(&self, prefill_client: Client) {
+        // Synchronously seed the freshly-attached prefill Client with the current
+        // overloaded set BEFORE storing/notifying. Late attachment (prefill router
+        // activates after workers are already overloaded) would otherwise leave a
+        // window — between attach and the monitor loop's notify-driven seed — where
+        // the prefill Client reports an empty overloaded set and admits requests it
+        // should shed.
+        let cfg = self.thresholds.read().unwrap().clone();
+        let overloaded = compute_overloaded_instances(&self.worker_load_states, &cfg);
+        prefill_client.set_overloaded_instances(&overloaded);
+
         let mut guard = self.prefill_client.write().unwrap();
         *guard = Some(prefill_client);
         self.prefill_client_notify.notify_one();
         tracing::debug!(
-            "KvWorkerMonitor: prefill client attached (overload publish + TTFT cleanup)"
+            "KvWorkerMonitor: prefill client attached (seeded overloaded set; overload publish + TTFT cleanup)"
         );
     }
 
@@ -1248,6 +1258,63 @@ mod tests {
         assert_eq!(
             prefill_client.overloaded_instance_ids(),
             Some(HashSet::from([1, 2]))
+        );
+
+        rt.shutdown();
+    }
+
+    /// Late attachment: if prefill workers are already overloaded when the prefill
+    /// router activates, `attach_prefill_client` must seed the new Client with the
+    /// current overloaded set synchronously (not wait for the monitor loop), so the
+    /// attach->seed window cannot admit requests it should shed.
+    #[tokio::test]
+    async fn attach_prefill_client_synchronously_seeds_overloaded_set() {
+        use super::KvWorkerMonitor;
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::collections::HashSet;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let component = drt
+            .namespace("test_attach_seed".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap();
+        let decode_client = component
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+        let prefill_client = component
+            .endpoint("prefill".to_string())
+            .client()
+            .await
+            .unwrap();
+
+        let monitor = KvWorkerMonitor::new(
+            decode_client,
+            LoadThresholdConfig {
+                active_prefill_tokens_threshold: Some(5_000),
+                ..Default::default()
+            },
+        );
+
+        // A prefill worker already over the token threshold, recorded before any
+        // prefill client is attached and without the monitor loop running.
+        monitor
+            .worker_load_states
+            .entry(7)
+            .or_default()
+            .active_prefill_tokens
+            .insert(0, 10_000);
+
+        monitor.attach_prefill_client(prefill_client.clone());
+        assert_eq!(
+            prefill_client.overloaded_instance_ids(),
+            Some(HashSet::from([7])),
+            "attach must seed the prefill client with the current overloaded set"
         );
 
         rt.shutdown();

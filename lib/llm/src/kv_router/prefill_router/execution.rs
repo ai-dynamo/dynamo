@@ -53,6 +53,11 @@ impl PrefillRouter {
             None
         };
 
+        // A pinned selection (caller pin or sticky affinity) bypasses the
+        // overload-aware scheduler query below, so its overload state must be
+        // checked explicitly after selection.
+        let used_pin = sticky_worker.is_some() || preselected_worker.is_some();
+
         // Worker selection
         let (worker_id, dp_rank) = if let Some(worker) = sticky_worker {
             tracing::debug!(
@@ -118,6 +123,18 @@ impl PrefillRouter {
                 Err(e) => return classify_prefill_query_error(e),
             }
         };
+
+        // Pinned/sticky workers skipped the overload-aware query above, so an
+        // already-overloaded pin would otherwise only fail later inside the
+        // detached prefill task (after decode has already proceeded). Reject it
+        // here, through the same typed ResourceExhausted path the query uses.
+        if let Some(rejected) = reject_if_pinned_worker_overloaded(
+            used_pin,
+            worker_id,
+            self.prefill_overloaded_ids().as_ref(),
+        ) {
+            return rejected;
+        }
 
         // Get bootstrap info from ModelManager (works for ANY mode)
         let Some(endpoint) = self
@@ -427,6 +444,37 @@ impl PrefillRouter {
     pub fn enforce_disagg(&self) -> bool {
         self.enforce_disagg
     }
+
+    /// Current overloaded worker-id snapshot from the prefill router's `Client`,
+    /// or `None` if the router has not activated yet. Used to reject pinned
+    /// workers that bypass the overload-aware scheduler query.
+    fn prefill_overloaded_ids(&self) -> Option<HashSet<WorkerId>> {
+        match self.prefill_router.get()? {
+            InnerPrefillRouter::KvRouter(r) => r.chooser.client().overloaded_instance_ids(),
+            InnerPrefillRouter::SimpleRouter(r) => r.client.overloaded_instance_ids(),
+        }
+    }
+}
+
+/// Reject a pinned (preselected/sticky) prefill worker that is currently overloaded,
+/// mapped through the same typed `ResourceExhausted` path the scheduler query uses.
+/// Returns `None` for unpinned selections (the query path already excludes overloaded
+/// workers) or when the pinned worker is not in the overloaded set.
+fn reject_if_pinned_worker_overloaded(
+    used_pin: bool,
+    worker_id: WorkerId,
+    overloaded: Option<&HashSet<WorkerId>>,
+) -> Option<PrefillResolveDecision> {
+    if used_pin && overloaded.is_some_and(|ids| ids.contains(&worker_id)) {
+        return Some(PrefillResolveDecision::Rejected(
+            dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::ResourceExhausted)
+                .message(format!("pinned prefill worker {worker_id} is overloaded"))
+                .build()
+                .into(),
+        ));
+    }
+    None
 }
 
 /// Classify a worker-selection error from `query_prefill_worker`.
@@ -725,6 +773,30 @@ mod tests {
             classify_prefill_query_error(err),
             PrefillResolveDecision::Unavailable
         ));
+    }
+
+    #[test]
+    fn reject_if_pinned_worker_overloaded_rejects_only_overloaded_pins() {
+        let overloaded = HashSet::from([7u64]);
+
+        // Pinned + overloaded -> typed ResourceExhausted rejection.
+        match reject_if_pinned_worker_overloaded(true, 7, Some(&overloaded)) {
+            Some(PrefillResolveDecision::Rejected(e)) => {
+                assert!(dynamo_runtime::error::match_error_chain(
+                    e.as_ref(),
+                    &[dynamo_runtime::error::ErrorType::ResourceExhausted],
+                    &[],
+                ));
+            }
+            _ => panic!("expected Rejected for an overloaded pinned worker"),
+        }
+
+        // Pinned but not overloaded -> no rejection.
+        assert!(reject_if_pinned_worker_overloaded(true, 9, Some(&overloaded)).is_none());
+        // Unpinned: the scheduler query already excludes overloaded workers.
+        assert!(reject_if_pinned_worker_overloaded(false, 7, Some(&overloaded)).is_none());
+        // No overload snapshot available -> no rejection.
+        assert!(reject_if_pinned_worker_overloaded(true, 7, None).is_none());
     }
 }
 
