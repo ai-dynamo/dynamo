@@ -242,7 +242,7 @@ The selected predictor preset is emitted as pinned planner config for the main V
 
 ## Internal Search API
 
-This is a pure internal search API. It takes a search space, an optimization goal, and a sweep config, runs the Vizier + replay sweep, and returns the evaluated candidates ranked by performance. It is decoupled from any orchestration or deployment-request layer — how the search space and goal get populated (from a config file, a CLI, or a test) is out of scope here.
+This is a pure internal search API. It takes a search space, a workload, an optimization goal, and a sweep config, runs the Vizier + replay sweep, and returns the evaluated candidates ranked by performance. It is decoupled from any orchestration or deployment-request layer — how the search space, workload, and goal get populated (from a config file, a CLI, or a test) is out of scope here.
 
 ```python
 # components/src/dynamo/profiler/v2/__init__.py
@@ -397,11 +397,35 @@ class Candidate(BaseModel):
     metrics: dict[str, float]  # replay performance: throughput, ttft, itl, e2e, goodput
 
 
+class Workload(BaseModel):
+    """Traffic every candidate is evaluated against (pinned, never searched).
+    A synthetic static workload, or a replay-ready trace — `trace_path`
+    discriminates. The trace is the dynamic-traffic path the DEP calls for;
+    the synthetic fields cover the static, backward-compatible case."""
+    model_config = ConfigDict(extra="forbid")
+
+    # synthetic static workload (used when trace_path is unset)
+    isl: int | None = None
+    osl: int | None = None
+    concurrency: float | None = None         # set concurrency OR request_rate
+    request_rate: float | None = None
+    request_count: int | None = None
+    shared_prefix_ratio: float = 0.0         # cache-locality / prefix sharing
+    num_prefix_groups: int = 0
+    turns_per_session: int = 1               # multi-turn sessions
+
+    # dynamic trace source (mutually exclusive with the synthetic fields)
+    trace_path: str | None = None
+    trace_format: str = "mooncake"           # replay-ready trace schema
+    arrival_speedup_ratio: float = 1.0       # scale trace inter-arrival times
+
+
 class SmartSearchConfig(BaseModel):
     """Top-level config integrating every search input, so a single YAML file
     drives a whole run (`--config smart_sweep.yaml`)."""
     model_config = ConfigDict(extra="forbid")
     search_space: SearchSpace
+    workload: Workload
     goal: OptimizationGoal = Field(default_factory=OptimizationGoal)
     sweep: SweepConfig = Field(default_factory=SweepConfig)
 
@@ -437,6 +461,9 @@ search_space:
   router_mode: [kv_router, round_robin]
   planner_scaling_policy: [throughput_180_5, hybrid_180_5]
   # other *Candidates omitted -> defaults apply
+workload:
+  trace_path: /data/replay/traffic.jsonl   # or omit and set isl/osl/request_rate
+  trace_format: mooncake
 goal:
   target: goodput_per_gpu
   sla: {ttft_ms: 2000, itl_ms: 30}
@@ -463,7 +490,7 @@ The per-worker `Predictor` cannot express whole-deployment Replay, so AIC adds a
 
 ### Config and output mapping
 
-`SmartSearchConfig` is the single input object (one YAML). Field names are already snake_case to match AIC `Task`; the only remaining step at merge is the `*_candidates` suffix that AIC uses for swept dimensions (e.g. `router_mode` → `router_mode_candidates`, `agg_tp` → `agg_tp_candidates`). Engine/parallel fields reuse AIC's `tp/pp/dp/moe_*` directly; router/planner add new `*_candidates` of the same shape; pinned scalars (`model_name`, `gpu_budget`, `prefill_block_size`, …) map 1:1. The returned `list[Candidate]` maps to AIC's `ColumnsAgg` / `ColumnsDisagg` DataFrame through a thin adapter, so AIC's downstream picking / Pareto views consume it unchanged.
+`SmartSearchConfig` is the single input object (one YAML). Field names are already snake_case to match AIC `Task`; the only remaining step at merge is the `*_candidates` suffix that AIC uses for swept dimensions (e.g. `router_mode` → `router_mode_candidates`, `agg_tp` → `agg_tp_candidates`). Engine/parallel fields reuse AIC's `tp/pp/dp/moe_*` directly; router/planner add new `*_candidates` of the same shape; pinned scalars (`model_name`, `gpu_budget`, `prefill_block_size`, …) map 1:1. The static `workload` (isl/osl/rate) maps onto AIC `Task`'s workload fields; the dynamic `trace_path` is the extension only the Replay evaluator consumes. The returned `list[Candidate]` maps to AIC's `ColumnsAgg` / `ColumnsDisagg` DataFrame through a thin adapter, so AIC's downstream picking / Pareto views consume it unchanged.
 
 ### CLI
 
