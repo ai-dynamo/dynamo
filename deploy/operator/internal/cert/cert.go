@@ -7,9 +7,11 @@ package cert
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/go-logr/logr"
@@ -20,6 +22,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -35,6 +38,11 @@ const (
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
+)
+
+var (
+	errCABundleMissing   = errors.New("ca.crt not found or empty")
+	caBundlePollInterval = 5 * time.Second
 )
 
 // convertibleCRDs is the list of CRDs whose conversion webhook this operator
@@ -219,7 +227,7 @@ func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfigura
 
 // InjectAll reads the CA bundle from the cert secret and injects it into all
 // webhook configurations owned by this operator instance (scoped by namespace
-// label), and into the DGDR CRD conversion webhook.
+// label), and into the multi-version CRD conversion webhooks.
 func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 	caBundle, err := i.readCABundle(ctx)
 	if err != nil {
@@ -240,6 +248,54 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 	return nil
 }
 
+// EnsureCRDConversion patches the CRD conversion webhook endpoint without a
+// CA bundle. This is used when certificates are externally provisioned and may
+// not be present yet; conversion then fails closed until the CA is injected.
+func (i *CABundleInjector) EnsureCRDConversion(ctx context.Context) error {
+	if err := i.ensureCRDConversion(ctx, nil); err != nil {
+		return err
+	}
+	i.logger.Info("CRD conversion webhook configuration ensured")
+	return nil
+}
+
+// InjectCRDConversionCA reads the CA bundle from the cert secret and patches it
+// into the CRD conversion webhook configurations.
+func (i *CABundleInjector) InjectCRDConversionCA(ctx context.Context) error {
+	caBundle, err := i.waitForCABundle(ctx)
+	if err != nil {
+		return err
+	}
+	if err := i.ensureCRDConversion(ctx, caBundle); err != nil {
+		return err
+	}
+	i.logger.Info("CRD conversion webhook CA bundle injected")
+	return nil
+}
+
+func (i *CABundleInjector) waitForCABundle(ctx context.Context) ([]byte, error) {
+	var caBundle []byte
+	err := wait.PollUntilContextCancel(ctx, caBundlePollInterval, true, func(ctx context.Context) (bool, error) {
+		var err error
+		caBundle, err = i.readCABundle(ctx)
+		if err == nil {
+			return true, nil
+		}
+		if apierrors.IsNotFound(err) || errors.Is(err, errCABundleMissing) {
+			i.logger.Info("Waiting for webhook CA bundle",
+				"namespace", i.namespace,
+				"secret", i.cfg.Server.Webhook.SecretName,
+				"error", err.Error())
+			return false, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("waiting for CA bundle in secret %s/%s: %w", i.namespace, i.cfg.Server.Webhook.SecretName, err)
+	}
+	return caBundle, nil
+}
+
 func (i *CABundleInjector) readCABundle(ctx context.Context) ([]byte, error) {
 	secret := &corev1.Secret{}
 	if err := i.client.Get(ctx, types.NamespacedName{Namespace: i.namespace, Name: i.cfg.Server.Webhook.SecretName}, secret); err != nil {
@@ -247,7 +303,7 @@ func (i *CABundleInjector) readCABundle(ctx context.Context) ([]byte, error) {
 	}
 	ca, ok := secret.Data["ca.crt"]
 	if !ok || len(ca) == 0 {
-		return nil, fmt.Errorf("ca.crt not found or empty in secret %s/%s", i.namespace, i.cfg.Server.Webhook.SecretName)
+		return nil, fmt.Errorf("%w in secret %s/%s", errCABundleMissing, i.namespace, i.cfg.Server.Webhook.SecretName)
 	}
 	return ca, nil
 }
@@ -298,10 +354,10 @@ func (i *CABundleInjector) injectIntoMutatingWebhooks(ctx context.Context, caBun
 }
 
 // ensureCRDConversion patches each multi-version CRD owned by this operator
-// with the conversion webhook configuration, setting the CA bundle and
-// service reference to this operator's webhook service. Missing CRDs are
-// tolerated with an info-level log so that a standalone operator image can
-// be brought up before the CRDs are installed (helm install idempotency).
+// with the conversion webhook configuration, setting the CA bundle and service
+// reference to this operator's webhook service. Missing CRDs are tolerated with
+// an info-level log so that a standalone operator image can be brought up
+// before the CRDs are installed (helm install idempotency).
 func (i *CABundleInjector) ensureCRDConversion(ctx context.Context, caBundle []byte) error {
 	for _, name := range convertibleCRDs {
 		if err := i.patchConversion(ctx, name, caBundle); err != nil {

@@ -605,14 +605,27 @@ func main() {
 	go func() {
 		certMgr.WaitReady()
 
+		caInjectorClient := mgr.GetClient()
+		if operatorCfg.Server.Webhook.CertProvisionMode != configv1alpha1.CertProvisionModeAuto {
+			caInjectorClient = directClient
+		}
+		caInjector, err := internalcert.NewCABundleInjector(caInjectorClient, operatorCfg)
+		if err != nil {
+			setupLog.Error(err, "unable to create CA bundle injector")
+			os.Exit(1)
+		}
 		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-			injector, err := internalcert.NewCABundleInjector(mgr.GetClient(), operatorCfg)
-			if err != nil {
-				setupLog.Error(err, "unable to create CA bundle injector")
+			if err := caInjector.InjectAll(mainCtx); err != nil {
+				setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
 				os.Exit(1)
 			}
-			if err := injector.InjectAll(mainCtx); err != nil {
-				setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+		} else {
+			if err := caInjector.EnsureCRDConversion(mainCtx); err != nil {
+				setupLog.Error(err, "failed to configure CRD conversion webhooks")
+				os.Exit(1)
+			}
+			if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
+				setupLog.Error(err, "failed to inject CRD conversion CA bundle")
 				os.Exit(1)
 			}
 		}

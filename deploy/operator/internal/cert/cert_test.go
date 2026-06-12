@@ -7,6 +7,7 @@ package cert
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -378,7 +379,8 @@ func TestEnsureCRDConversion(t *testing.T) {
 			},
 			Scope: apiextensionsv1.NamespaceScoped,
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
-				{Name: "v1beta1", Served: true, Storage: true},
+				{Name: "v1alpha1", Served: true, Storage: true},
+				{Name: "v1beta1", Served: true, Storage: false},
 			},
 		},
 	}
@@ -404,11 +406,160 @@ func TestEnsureCRDConversion(t *testing.T) {
 		t.Errorf("expected Webhook strategy, got %s", updated.Spec.Conversion.Strategy)
 	}
 	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != testServiceName {
-		t.Errorf("expected service name my-operator-webhook-service, got %s",
+		t.Errorf("expected service name %s, got %s",
+			testServiceName,
 			updated.Spec.Conversion.Webhook.ClientConfig.Service.Name)
+	}
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace != testNamespace {
+		t.Errorf("expected service namespace %s, got %s",
+			testNamespace,
+			updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace)
+	}
+	path := "/convert"
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Path == nil ||
+		*updated.Spec.Conversion.Webhook.ClientConfig.Service.Path != path {
+		t.Errorf("expected service path %s, got %v", path,
+			updated.Spec.Conversion.Webhook.ClientConfig.Service.Path)
 	}
 	if string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle) != "test-ca" {
 		t.Errorf("expected CA bundle, got %q", string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle))
+	}
+}
+
+func TestEnsureCRDConversionWithoutCABundle(t *testing.T) {
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dgdCRDName,
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "nvidia.com",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "dynamographdeployments",
+				Singular: "dynamographdeployment",
+				Kind:     "DynamoGraphDeployment",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{Name: "v1alpha1", Served: true, Storage: true},
+				{Name: "v1beta1", Served: true, Storage: false},
+			},
+		},
+	}
+
+	cfg := &configv1alpha1.OperatorConfiguration{}
+	cfg.Server.Webhook.ServiceName = testServiceName
+	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
+	ctx := context.Background()
+
+	if err := injector.EnsureCRDConversion(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &apiextensionsv1.CustomResourceDefinition{}
+	if err := injector.client.Get(ctx, types.NamespacedName{Name: dgdCRDName}, updated); err != nil {
+		t.Fatalf("failed to get CRD: %v", err)
+	}
+	if updated.Spec.Conversion == nil {
+		t.Fatal("expected conversion config to be set")
+	}
+	if len(updated.Spec.Conversion.Webhook.ClientConfig.CABundle) != 0 {
+		t.Errorf("expected empty CA bundle, got %q", string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle))
+	}
+}
+
+func TestInjectCRDConversionCA_ReadsCABundleAndPatchesDGD(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testSecretName,
+		},
+		Data: map[string][]byte{
+			"tls.crt": []byte("cert-data"),
+			"tls.key": []byte("key-data"),
+			"ca.crt":  []byte("manual-ca"),
+		},
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dgdCRDName,
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "nvidia.com",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "dynamographdeployments",
+				Singular: "dynamographdeployment",
+				Kind:     "DynamoGraphDeployment",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{Name: "v1alpha1", Served: true, Storage: true},
+				{Name: "v1beta1", Served: true, Storage: false},
+			},
+		},
+	}
+
+	cfg := &configv1alpha1.OperatorConfiguration{}
+	cfg.Server.Webhook.SecretName = testSecretName
+	cfg.Server.Webhook.ServiceName = testServiceName
+	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret, crd), cfg)
+	ctx := context.Background()
+
+	if err := injector.InjectCRDConversionCA(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &apiextensionsv1.CustomResourceDefinition{}
+	if err := injector.client.Get(ctx, types.NamespacedName{Name: dgdCRDName}, updated); err != nil {
+		t.Fatalf("failed to get CRD: %v", err)
+	}
+
+	if updated.Spec.Conversion == nil {
+		t.Fatal("expected conversion config to be set")
+	}
+	if updated.Spec.Conversion.Strategy != apiextensionsv1.WebhookConverter {
+		t.Errorf("expected Webhook strategy, got %s", updated.Spec.Conversion.Strategy)
+	}
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != testServiceName {
+		t.Errorf("expected service name %s, got %s",
+			testServiceName,
+			updated.Spec.Conversion.Webhook.ClientConfig.Service.Name)
+	}
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace != testNamespace {
+		t.Errorf("expected service namespace %s, got %s",
+			testNamespace,
+			updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace)
+	}
+	path := "/convert"
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Path == nil ||
+		*updated.Spec.Conversion.Webhook.ClientConfig.Service.Path != path {
+		t.Errorf("expected service path %s, got %v", path,
+			updated.Spec.Conversion.Webhook.ClientConfig.Service.Path)
+	}
+	if string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle) != "manual-ca" {
+		t.Errorf("expected CA bundle, got %q", string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle))
+	}
+}
+
+func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
+	oldPollInterval := caBundlePollInterval
+	caBundlePollInterval = 10 * time.Millisecond
+	defer func() {
+		caBundlePollInterval = oldPollInterval
+	}()
+
+	cfg := &configv1alpha1.OperatorConfiguration{}
+	cfg.Server.Webhook.SecretName = testSecretName
+	cfg.Server.Webhook.ServiceName = testServiceName
+	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	err := injector.InjectCRDConversionCA(ctx)
+	if err == nil {
+		t.Fatal("expected context timeout while waiting for missing secret")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got: %v", err)
 	}
 }
 
