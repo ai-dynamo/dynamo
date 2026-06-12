@@ -40,6 +40,11 @@ on:
         type: string
         required: false
         default: ''
+      image_full:
+        description: 'Full image reference override (e.g. nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest). When set, skips Azure ACR image construction.'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   deploy-test:
@@ -96,6 +101,6 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ inputs.framework }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ inputs.image_tag || github.sha }}-${{ inputs.image_suffix }}
+          image: ${{ inputs.image_full || format('{0}/ai-dynamo/dynamo:{1}-{2}', secrets.AZURE_ACR_HOSTNAME, inputs.image_tag || github.sha, inputs.image_suffix) }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only

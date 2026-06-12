@@ -54,9 +54,8 @@ jobs:
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
-      profiles: '["disagg"]'
-      image_suffix: vllm-runtime
-      image_tag: main
+      profiles: '["agg"]'
+      image_full: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
