@@ -13,7 +13,7 @@ inputs:
     required: false
     default: ''
   status:
-    description: 'Job status, usually ${{ job.status }}'
+    description: 'Job status from the caller'
     required: true
   output:
     description: 'Path to write the JUnit XML file'
