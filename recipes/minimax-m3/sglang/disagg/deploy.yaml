@@ -42,7 +42,7 @@ spec:
         - operator: Exists
         containers:
         - name: main
-          image: nvcr.io/nvidian/dynamo-dev/kprashanth:minimax-m3-sglang-runtime-cu130-day0cf-frontendfix-sgla206b25-20260611-arm64
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-minimax-m3-dev.1
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -102,7 +102,7 @@ spec:
         - operator: Exists
         containers:
         - name: main
-          image: nvcr.io/nvidian/dynamo-dev/kprashanth:minimax-m3-sglang-runtime-cu130-day0cf-frontendfix-sgla206b25-20260611-arm64
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-minimax-m3-dev.1
           imagePullPolicy: IfNotPresent
           command:
           - /bin/sh
@@ -169,7 +169,7 @@ spec:
         - operator: Exists
         containers:
         - name: main
-          image: nvcr.io/nvidian/dynamo-dev/kprashanth:minimax-m3-sglang-runtime-cu130-day0cf-frontendfix-sgla206b25-20260611-arm64
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-minimax-m3-dev.1
           imagePullPolicy: IfNotPresent
           command:
           - /bin/sh
