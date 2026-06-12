@@ -799,6 +799,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
+                            overloaded_tracker.remove_workers(&removed_workers);
+                            client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
                         known_decode_workers = current_instances;
@@ -848,6 +850,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
+                            overloaded_tracker.remove_workers(&removed_workers);
+                            client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
                         known_prefill_workers = current_instances;
@@ -906,6 +910,11 @@ mod tests {
         assert!(tracker.contains(1));
         assert!(!tracker.contains(3));
         assert!(!tracker.contains(5));
+        assert!(
+            tracker.update_worker(3, true),
+            "rejoined overloaded workers must be republished after removal"
+        );
+        assert!(tracker.contains(3));
 
         assert!(!tracker.remove_workers(&[2, 4]));
     }
