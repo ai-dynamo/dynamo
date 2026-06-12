@@ -163,19 +163,23 @@ impl OtlpProtocol {
     }
 }
 
-fn parse_otlp_protocol(value: Option<&str>) -> OtlpProtocol {
+fn parse_otlp_protocol_for_env(value: Option<&str>, env_name: &str) -> OtlpProtocol {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         None => OtlpProtocol::Grpc,
         Some(value) if value.eq_ignore_ascii_case("grpc") => OtlpProtocol::Grpc,
         Some(value) if value.eq_ignore_ascii_case("http/protobuf") => OtlpProtocol::HttpProtobuf,
         Some(value) => {
             eprintln!(
-                "WARNING: unsupported OTEL_EXPORTER_OTLP_PROTOCOL '{}'; falling back to grpc",
-                value
+                "WARNING: unsupported {} '{}'; falling back to grpc",
+                env_name, value
             );
             OtlpProtocol::Grpc
         }
     }
+}
+
+fn parse_otlp_protocol(value: Option<&str>) -> OtlpProtocol {
+    parse_otlp_protocol_for_env(value, env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
 }
 
 fn otlp_protocol_from_env() -> OtlpProtocol {
@@ -184,6 +188,20 @@ fn otlp_protocol_from_env() -> OtlpProtocol {
             .ok()
             .as_deref(),
     )
+}
+
+fn resolve_signal_otlp_protocol(
+    generic_protocol: OtlpProtocol,
+    signal_protocol: Option<&str>,
+    signal_protocol_env: &str,
+) -> OtlpProtocol {
+    match signal_protocol
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => parse_otlp_protocol_for_env(Some(value), signal_protocol_env),
+        None => generic_protocol,
+    }
 }
 
 fn append_otlp_http_path(endpoint: &str, path: &str) -> String {
@@ -1129,6 +1147,20 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_exporter_enabled() {
             // Export enabled: create OTLP exporters with batch processors
             let protocol = otlp_protocol_from_env();
+            let traces_protocol = resolve_signal_otlp_protocol(
+                protocol,
+                std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL)
+                    .ok()
+                    .as_deref(),
+                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+            );
+            let logs_protocol = resolve_signal_otlp_protocol(
+                protocol,
+                std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL)
+                    .ok()
+                    .as_deref(),
+                env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
+            );
             let generic_endpoint =
                 std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT).ok();
             let traces_endpoint_env =
@@ -1136,19 +1168,23 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             let logs_endpoint_env =
                 std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).ok();
             let traces_endpoint = resolve_otlp_endpoint(
-                protocol,
+                traces_protocol,
                 traces_endpoint_env,
                 generic_endpoint.clone(),
                 "/v1/traces",
             );
-            let logs_endpoint =
-                resolve_otlp_endpoint(protocol, logs_endpoint_env, generic_endpoint, "/v1/logs");
+            let logs_endpoint = resolve_otlp_endpoint(
+                logs_protocol,
+                logs_endpoint_env,
+                generic_endpoint,
+                "/v1/logs",
+            );
 
             let resource = opentelemetry_sdk::Resource::builder_empty()
                 .with_service_name(service_name.clone())
                 .build();
 
-            let span_exporter = build_span_exporter(protocol, &traces_endpoint)?;
+            let span_exporter = build_span_exporter(traces_protocol, &traces_endpoint)?;
 
             let mut tracer_provider_builder =
                 opentelemetry_sdk::trace::SdkTracerProvider::builder()
@@ -1161,7 +1197,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             }
             let tracer_provider = tracer_provider_builder.build();
 
-            let log_exporter = build_log_exporter(protocol, &logs_endpoint)?;
+            let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
 
             let logger_provider = SdkLoggerProvider::builder()
                 .with_batch_exporter(log_exporter)
@@ -1171,7 +1207,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             (
                 tracer_provider,
                 Some(logger_provider),
-                Some((protocol, traces_endpoint)),
+                Some((traces_protocol, traces_endpoint)),
             )
         } else {
             // No export - traces generated locally only (for logging/trace IDs)
@@ -1640,6 +1676,35 @@ pub mod tests {
             OtlpProtocol::HttpProtobuf
         );
         assert_eq!(parse_otlp_protocol(Some("bad")), OtlpProtocol::Grpc);
+    }
+
+    #[test]
+    fn otlp_signal_protocol_overrides_generic_protocol() {
+        let generic_protocol = OtlpProtocol::Grpc;
+        assert_eq!(
+            resolve_signal_otlp_protocol(
+                generic_protocol,
+                Some("http/protobuf"),
+                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+            ),
+            OtlpProtocol::HttpProtobuf
+        );
+        assert_eq!(
+            resolve_signal_otlp_protocol(
+                generic_protocol,
+                Some(""),
+                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+            ),
+            OtlpProtocol::Grpc
+        );
+        assert_eq!(
+            resolve_signal_otlp_protocol(
+                generic_protocol,
+                None,
+                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+            ),
+            OtlpProtocol::Grpc
+        );
     }
 
     #[test]

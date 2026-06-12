@@ -51,6 +51,12 @@ pub mod logging {
         /// OTLP exporter transport protocol. Supported values: "grpc", "http/protobuf".
         pub const OTEL_EXPORTER_OTLP_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_PROTOCOL";
 
+        /// OTLP exporter transport protocol for traces. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
+        pub const OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL";
+
+        /// OTLP exporter transport protocol for logs. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
+        pub const OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL";
+
         /// Generic OTLP exporter endpoint URL used when signal-specific endpoints are unset.
         pub const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
@@ -658,6 +664,8 @@ mod tests {
             logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
+            logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+            logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
             logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
