@@ -232,14 +232,13 @@ class VllmLLMEngine(LLMEngine):
 
         self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
 
-        self._default_sampling_params = (
-            self.engine_args.create_model_config().get_diff_sampling_param()
-        )
-
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
         self._vllm_config = vllm_config
+        self._default_sampling_params = (
+            vllm_config.model_config.get_diff_sampling_param()
+        )
 
         self._dp_range = get_dp_range_for_worker(vllm_config)
         self._stat_logger_factory = _UnifiedStatLoggerFactory()

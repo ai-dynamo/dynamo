@@ -7,9 +7,12 @@ cases:
   TOOLCALLING.batch.8.a:
     description: Narration before tool call only
     ref: dynamo
-    model_text: 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+    model_text: |-
+      I will check the weather. <tool_call>
+      {"name": "get_weather", "arguments": {"location": "NYC"}}
+      </tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,7 +20,7 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -25,18 +28,18 @@ cases:
         normal_text: I will check the weather.
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+      sglang: *id001
   TOOLCALLING.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
-    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Let me know if you need
-      more.'
+    model_text: |-
+      <tool_call>
+      {"name": "get_weather", "arguments": {"location": "NYC"}}
+      </tool_call> Let me know if you need more.
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo:
+      dynamo: &id003
         calls:
         - name: get_weather
           arguments:
@@ -44,19 +47,18 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Let me know if you
-          need more.'
+      sglang: *id003
   TOOLCALLING.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
-    model_text: 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>
-      Let me know if you need more.'
+    model_text: |-
+      I will check the weather. <tool_call>
+      {"name": "get_weather", "arguments": {"location": "NYC"}}
+      </tool_call> Let me know if you need more.
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo:
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -64,19 +66,20 @@ cases:
         normal_text: I will check the weather.
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>
-          Let me know if you need more.'
+      sglang: *id004
   TOOLCALLING.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
-    model_text: 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>
-      Then check LA weather. <tool_call>{"name": "get_weather", "arguments": {"location": "LA"}}</tool_call>'
+    model_text: |-
+      I will check the weather. <tool_call>
+      {"name": "get_weather", "arguments": {"location": "NYC"}}
+      </tool_call> Then check LA weather. <tool_call>
+      {"name": "get_weather", "arguments": {"location": "LA"}}
+      </tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo:
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -87,7 +90,4 @@ cases:
         normal_text: I will check the weather.
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>
-          Then check LA weather. <tool_call>{"name": "get_weather", "arguments": {"location": "LA"}}</tool_call>'
+      sglang: *id005

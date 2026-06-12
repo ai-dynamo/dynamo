@@ -1,0 +1,27 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Runtime-free worker selection service.
+//!
+//! The service owns worker selection and reservation state, but never forwards
+//! model requests and never owns model responses.
+
+mod catalog;
+mod core;
+mod error;
+mod input;
+mod scoring;
+mod server;
+mod types;
+
+#[cfg(test)]
+mod tests;
+
+pub use core::{SelectionCore, SelectionServiceConfig};
+pub use server::{AppState, create_router, run_server};
+pub use types::{
+    ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse,
+    PotentialLoadsRequest, ReadyResponse, ReservationRequest, ReservationResponse,
+    SelectAndReserveRequest, SelectRequest, SelectResponse, SelectionKey, SelectionWorkerConfig,
+    WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore, WorkerPatchRequest, WorkerRequest,
+};

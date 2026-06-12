@@ -40,13 +40,17 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
-    match std::env::var(ENV_SELF_HOST_METADATA) {
-        Ok(v) => matches!(
-            v.trim().to_lowercase().as_str(),
+    let value = std::env::var(ENV_SELF_HOST_METADATA).ok();
+    self_host_metadata_default(value.as_deref())
+}
+
+fn self_host_metadata_default(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
+        )
+    })
 }
 
 pub struct LocalModelBuilder {
@@ -754,24 +758,21 @@ fn harvest_extra_files(
 mod env_self_host_metadata_tests {
     use super::*;
 
-    #[serial_test::serial]
     #[test]
     fn env_default_parsing() {
-        // SAFETY: all env mutations are serialized via serial_test.
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
-        assert!(!env_self_host_metadata_default(), "unset → default OFF");
+        assert!(!self_host_metadata_default(None), "unset → default OFF");
 
         for v in [
             "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
         ] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(!env_self_host_metadata_default(), "expected OFF for {v:?}");
+            assert!(
+                !self_host_metadata_default(Some(v)),
+                "expected OFF for {v:?}"
+            );
         }
         for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(env_self_host_metadata_default(), "expected ON for {v:?}");
+            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
         }
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
     }
 }
 

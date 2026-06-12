@@ -458,6 +458,69 @@ def test_should_register_model_fetch_weights_for_default_load_format():
     assert should_register_model_ignore_weights(config) is False
 
 
+def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
+    from dynamo.vllm import main as vllm_main
+
+    class FakeModelConfig:
+        def get_diff_sampling_param(self):
+            return {"temperature": 0.7}
+
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(block_size=None),
+        model_config=FakeModelConfig(),
+    )
+
+    class FakeEngineArgs:
+        enable_log_requests = False
+        enable_lora = False
+        disable_log_stats = True
+        load_format = "modelexpress"
+
+        def create_model_config(self):
+            raise AssertionError("setup_vllm_engine must not create ModelConfig twice")
+
+        def create_engine_config(self, usage_context):
+            return vllm_config
+
+    engine_client = SimpleNamespace(vllm_config=vllm_config)
+
+    class FakeAsyncLLM:
+        @staticmethod
+        def from_vllm_config(**_kwargs):
+            return engine_client
+
+    class FakeMetrics:
+        def __init__(self, **_kwargs):
+            pass
+
+        def set_model_load_time(self, _load_time):
+            pass
+
+    monkeypatch.setattr(vllm_main, "setup_multiprocess_prometheus", lambda: None)
+    monkeypatch.setattr(vllm_main, "LLMBackendMetrics", FakeMetrics)
+    monkeypatch.setattr(vllm_main, "_uses_dynamo_connector", lambda _args: False)
+    monkeypatch.setattr(vllm_main, "AsyncLLM", FakeAsyncLLM)
+    monkeypatch.setattr(
+        vllm_main,
+        "get_engine_cache_info",
+        lambda _engine: {"block_size": 16},
+    )
+
+    config = SimpleNamespace(
+        component="backend",
+        engine_args=FakeEngineArgs(),
+        gms_shadow_mode=False,
+        multimodal_embedding_cache_capacity_gb=0,
+        route_to_encoder=False,
+        served_model_name="Qwen/Qwen3-0.6B",
+    )
+
+    _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
+
+    assert default_sampling_params == {"temperature": 0.7}
+
+
 # --disaggregation-mode tests
 
 

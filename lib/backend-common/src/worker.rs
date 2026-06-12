@@ -84,15 +84,19 @@ impl RuntimeConfig {
         // runtime threads spawn, matching the convention used by
         // `dynamo-runtime` itself in DistributedConfig::from_settings.
         unsafe {
-            if let Some(ref v) = self.discovery_backend {
-                std::env::set_var("DYN_DISCOVERY_BACKEND", v);
-            }
-            if let Some(ref v) = self.request_plane {
-                std::env::set_var("DYN_REQUEST_PLANE", v);
-            }
-            if let Some(ref v) = self.event_plane {
-                std::env::set_var("DYN_EVENT_PLANE", v);
-            }
+            self.apply_with(|key, value| std::env::set_var(key, value));
+        }
+    }
+
+    fn apply_with(&self, mut set: impl FnMut(&str, &str)) {
+        if let Some(ref value) = self.discovery_backend {
+            set("DYN_DISCOVERY_BACKEND", value);
+        }
+        if let Some(ref value) = self.request_plane {
+            set("DYN_REQUEST_PLANE", value);
+        }
+        if let Some(ref value) = self.event_plane {
+            set("DYN_EVENT_PLANE", value);
         }
     }
 }
@@ -932,11 +936,15 @@ fn graceful_shutdown_timeout() -> Duration {
         DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
     };
 
-    let secs = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(default);
+    let value = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT).ok();
+    let secs = graceful_shutdown_timeout_secs(value.as_deref(), default);
     Duration::from_secs(secs)
+}
+
+fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 /// Compose the post-signal shutdown deadline from the drain+cleanup
@@ -982,16 +990,19 @@ fn stamp_canary_marker(mut value: serde_json::Value) -> Option<serde_json::Value
 /// Returns `None` when the env is unset or the value is invalid; an invalid
 /// value logs a warning so it can't silently disable the engine default.
 fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
-    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())?;
+    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV).ok();
+    load_health_check_payload(raw.as_deref())
+}
+
+fn load_health_check_payload(raw: Option<&str>) -> Option<serde_json::Value> {
+    let raw = raw.filter(|s| !s.is_empty())?;
     let parsed: Result<serde_json::Value, _> = if let Some(path) = raw.strip_prefix('@') {
         std::fs::read_to_string(path).map_or_else(
             |e| Err(format!("read {path}: {e}")),
             |s| serde_json::from_str(&s).map_err(|e| e.to_string()),
         )
     } else {
-        serde_json::from_str(&raw).map_err(|e| e.to_string())
+        serde_json::from_str(raw).map_err(|e| e.to_string())
     };
     match parsed {
         Ok(v) if v.is_object() => Some(v),
@@ -1012,8 +1023,13 @@ fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
 /// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
 /// matching the Python helper. Negative values clamp to 0.
 fn grace_period_secs() -> f64 {
-    match std::env::var(GRACE_PERIOD_ENV) {
-        Ok(s) if !s.is_empty() => match s.parse::<f64>() {
+    let value = std::env::var(GRACE_PERIOD_ENV).ok();
+    grace_period_secs_from(value.as_deref())
+}
+
+fn grace_period_secs_from(value: Option<&str>) -> f64 {
+    match value {
+        Some(s) if !s.is_empty() => match s.parse::<f64>() {
             Ok(v) if v >= 0.0 => v,
             Ok(_) => 0.0,
             Err(_) => {
@@ -2028,82 +2044,32 @@ mod tests {
     // (and therefore `run_engine_shutdown_steps`) ever runs. So we don't
     // pin a contract for run_engine_shutdown_steps in the Stopped state.
 
-    // -------------------------------------------------------------------
-    // grace_period_secs env-var parsing
-    // -------------------------------------------------------------------
-    //
-    // These tests mutate process-wide environment state. tokio::test
-    // marks them async (each runs on its own current-thread runtime) but
-    // they are still serialized by `serial_test`-style discipline within
-    // the test name space — keep them in this single mod and access the
-    // env var only here.
-    //
-    // `ENV_LOCK` serializes all env-mutating tests in this module so cargo's
-    // parallel runner can't interleave a `with_env` setup on one thread with
-    // a read on another. Every helper that touches `std::env` acquires this
-    // lock for the duration of its critical section.
-
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_env<F: FnOnce() -> R, R>(key: &str, value: Option<&str>, f: F) -> R {
-        // Hold the lock for the entire snapshot → set → run → restore
-        // window so concurrent tests can't observe our temporary value or
-        // race the restore.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var(key).ok();
-        // SAFETY: ENV_LOCK serializes all env-mutating tests in this
-        // module; no other test thread reads or writes env state while
-        // this guard is held.
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-        let out = f();
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-        out
-    }
-
     #[test]
     fn grace_period_default_when_unset() {
-        with_env(GRACE_PERIOD_ENV, None, || {
-            assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
-        });
+        assert_eq!(grace_period_secs_from(None), DEFAULT_GRACE_PERIOD_SECS);
     }
 
     #[test]
     fn grace_period_parses_valid_value() {
-        with_env(GRACE_PERIOD_ENV, Some("2.5"), || {
-            assert_eq!(grace_period_secs(), 2.5);
-        });
+        assert_eq!(grace_period_secs_from(Some("2.5")), 2.5);
     }
 
     #[test]
     fn grace_period_clamps_negative_to_zero() {
-        with_env(GRACE_PERIOD_ENV, Some("-1"), || {
-            assert_eq!(grace_period_secs(), 0.0);
-        });
+        assert_eq!(grace_period_secs_from(Some("-1")), 0.0);
     }
 
     #[test]
     fn grace_period_falls_back_to_default_on_parse_error() {
-        with_env(GRACE_PERIOD_ENV, Some("not-a-number"), || {
-            assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
-        });
+        assert_eq!(
+            grace_period_secs_from(Some("not-a-number")),
+            DEFAULT_GRACE_PERIOD_SECS
+        );
     }
 
     #[test]
     fn grace_period_treats_empty_as_unset() {
-        with_env(GRACE_PERIOD_ENV, Some(""), || {
-            assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
-        });
+        assert_eq!(grace_period_secs_from(Some("")), DEFAULT_GRACE_PERIOD_SECS);
     }
 
     // -------------------------------------------------------------------
@@ -2112,21 +2078,13 @@ mod tests {
 
     #[test]
     fn health_check_payload_env_returns_object() {
-        with_env(
-            HEALTH_CHECK_PAYLOAD_ENV,
-            Some(r#"{"token_ids":[1]}"#),
-            || {
-                let got = load_health_check_payload_from_env().unwrap();
-                assert_eq!(got["token_ids"], serde_json::json!([1]));
-            },
-        );
+        let got = load_health_check_payload(Some(r#"{"token_ids":[1]}"#)).unwrap();
+        assert_eq!(got["token_ids"], serde_json::json!([1]));
     }
 
     #[test]
     fn health_check_payload_env_rejects_non_object() {
-        with_env(HEALTH_CHECK_PAYLOAD_ENV, Some("[1,2,3]"), || {
-            assert!(load_health_check_payload_from_env().is_none());
-        });
+        assert!(load_health_check_payload(Some("[1,2,3]")).is_none());
     }
 
     // -------------------------------------------------------------------
@@ -2165,12 +2123,6 @@ mod tests {
     // graceful_shutdown_timeout env-var parsing
     // -------------------------------------------------------------------
 
-    // Reference the same upstream constant the production code reads, so
-    // a rename of the env var in `dynamo-runtime` doesn't silently leave
-    // these tests pointing at a no-longer-honored name.
-    const SHUTDOWN_TIMEOUT_ENV: &str =
-        dynamo_runtime::config::environment_names::worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT;
-
     fn expected_default_timeout_secs() -> u64 {
         if cfg!(debug_assertions) {
             dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
@@ -2181,39 +2133,34 @@ mod tests {
 
     #[test]
     fn shutdown_timeout_default_when_unset() {
-        with_env(SHUTDOWN_TIMEOUT_ENV, None, || {
-            assert_eq!(
-                graceful_shutdown_timeout(),
-                Duration::from_secs(expected_default_timeout_secs())
-            );
-        });
+        assert_eq!(
+            graceful_shutdown_timeout_secs(None, expected_default_timeout_secs()),
+            expected_default_timeout_secs()
+        );
     }
 
     #[test]
     fn shutdown_timeout_parses_valid_value() {
-        with_env(SHUTDOWN_TIMEOUT_ENV, Some("42"), || {
-            assert_eq!(graceful_shutdown_timeout(), Duration::from_secs(42));
-        });
+        assert_eq!(
+            graceful_shutdown_timeout_secs(Some("42"), expected_default_timeout_secs()),
+            42
+        );
     }
 
     #[test]
     fn shutdown_timeout_falls_back_to_default_on_parse_error() {
-        with_env(SHUTDOWN_TIMEOUT_ENV, Some("not-a-number"), || {
-            assert_eq!(
-                graceful_shutdown_timeout(),
-                Duration::from_secs(expected_default_timeout_secs())
-            );
-        });
+        assert_eq!(
+            graceful_shutdown_timeout_secs(Some("not-a-number"), expected_default_timeout_secs()),
+            expected_default_timeout_secs()
+        );
     }
 
     #[test]
     fn shutdown_timeout_treats_empty_as_unset() {
-        with_env(SHUTDOWN_TIMEOUT_ENV, Some(""), || {
-            assert_eq!(
-                graceful_shutdown_timeout(),
-                Duration::from_secs(expected_default_timeout_secs())
-            );
-        });
+        assert_eq!(
+            graceful_shutdown_timeout_secs(Some(""), expected_default_timeout_secs()),
+            expected_default_timeout_secs()
+        );
     }
 
     // -------------------------------------------------------------------
@@ -2307,71 +2254,41 @@ mod tests {
 
     // -------------------------------------------------------------------
     // RuntimeConfig env application
-    //
-    // These tests touch DYN_DISCOVERY_BACKEND / DYN_REQUEST_PLANE /
-    // DYN_EVENT_PLANE directly (without `with_env`), so they must
-    // acquire `ENV_LOCK` themselves to keep parallel runs from racing
-    // each other or the `with_env`-using tests above.
     // -------------------------------------------------------------------
 
     #[test]
     fn runtime_config_apply_to_env_writes_set_fields() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let cfg = RuntimeConfig {
             discovery_backend: Some("file".to_string()),
             request_plane: Some("tcp".to_string()),
             event_plane: Some("zmq".to_string()),
         };
 
-        // Snapshot prior values so we don't leak state to other tests.
-        let prev: Vec<_> = [
-            "DYN_DISCOVERY_BACKEND",
-            "DYN_REQUEST_PLANE",
-            "DYN_EVENT_PLANE",
-        ]
-        .iter()
-        .map(|k| (*k, std::env::var(k).ok()))
-        .collect();
-
-        cfg.apply_to_env();
-        assert_eq!(std::env::var("DYN_DISCOVERY_BACKEND").unwrap(), "file");
-        assert_eq!(std::env::var("DYN_REQUEST_PLANE").unwrap(), "tcp");
-        assert_eq!(std::env::var("DYN_EVENT_PLANE").unwrap(), "zmq");
-
-        for (k, v) in prev {
-            unsafe {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
+        let mut applied = Vec::new();
+        cfg.apply_with(|key, value| applied.push((key.to_string(), value.to_string())));
+        assert_eq!(
+            applied,
+            vec![
+                ("DYN_DISCOVERY_BACKEND".to_string(), "file".to_string()),
+                ("DYN_REQUEST_PLANE".to_string(), "tcp".to_string()),
+                ("DYN_EVENT_PLANE".to_string(), "zmq".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn runtime_config_apply_to_env_leaves_unset_fields_untouched() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let key = "DYN_REQUEST_PLANE";
-        let prev = std::env::var(key).ok();
-        unsafe { std::env::set_var(key, "preexisting") };
-
         let cfg = RuntimeConfig {
             discovery_backend: Some("etcd".to_string()),
             request_plane: None,
             event_plane: None,
         };
-        cfg.apply_to_env();
 
-        // None field must not overwrite an existing value.
-        assert_eq!(std::env::var(key).unwrap(), "preexisting");
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
+        let mut applied = Vec::new();
+        cfg.apply_with(|key, value| applied.push((key.to_string(), value.to_string())));
+        assert_eq!(
+            applied,
+            vec![("DYN_DISCOVERY_BACKEND".to_string(), "etcd".to_string())]
+        );
     }
 }
