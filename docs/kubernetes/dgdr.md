@@ -131,6 +131,141 @@ spec:
 > `overrides.profilingJob` only customizes the profiling Job. Use
 > `overrides.dgd` for settings that must appear on the deployed worker pods.
 
+### Routing
+
+DGDR-generated deployments include a standalone `Frontend` service. That
+frontend runs Dynamo's embedded router and defaults to `round-robin` routing,
+which is often not optimal. Because DGDR does not yet expose a first-class
+router feature, configure the generated frontend with `spec.overrides.dgd`.
+
+For the full router mode and environment variable reference, see
+[Router Guide](../components/router/router-guide.md) and
+[Router Configuration](../components/router/router-configuration.md).
+
+For example, enable KV-aware routing on the generated frontend:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-kv-router
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          Frontend:
+            envs:
+              - name: DYN_ROUTER_MODE
+                value: kv
+```
+
+Use the same `Frontend` override for other frontend router modes, such as
+`random`, `least-loaded`, or `device-aware-weighted`. For normal DGDR
+deployments, use `kv` when you want prefix-cache-aware routing and
+`round-robin` or `least-loaded` when you only want load balancing. Use
+`direct` only when an external router supplies explicit worker IDs in the
+request routing hints. For detailed mode definitions, see
+[Router Guide](../components/router/router-guide.md#routing-modes-router-mode).
+
+KV-aware routing can use event-driven prefix-cache state or approximate
+prefix matching. The frontend still runs in `kv` mode in both cases. If you
+do not configure worker KV-event publication, set
+`DYN_ROUTER_USE_KV_EVENTS=false` to use approximate KV mode:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          Frontend:
+            envs:
+              - name: DYN_ROUTER_MODE
+                value: kv
+              - name: DYN_ROUTER_USE_KV_EVENTS
+                value: "false"
+```
+
+For event-driven prefix-cache state, enable worker event publication only
+where prefill happens: the single worker in aggregated serving, or prefill
+workers in disaggregated serving. Decode workers are scored by load
+(`dyn-decode-scorer`), not prefix overlap (`dyn-prefill-scorer`), so vLLM
+decode workers omit both `--enable-prefix-caching` and `--kv-events-config`.
+Service names depend on the selected backend and topology, so inspect the
+generated DGD first, especially when `autoApply: false`.
+
+For example, a generated vLLM disaggregated deployment may contain a
+`VllmPrefillWorker` service. This override appends the vLLM KV-event publishing
+arguments to that service while enabling the frontend KV router:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          Frontend:
+            envs:
+              - name: DYN_ROUTER_MODE
+                value: kv
+          VllmPrefillWorker:
+            extraPodSpec:
+              mainContainer:
+                args:
+                  - --enable-prefix-caching
+                  - --kv-events-config
+                  - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+```
+
+Worker KV-event flags are backend-specific. For cross-backend behavior, see
+[Router Operations](../components/router/router-operations.md#additional-notes).
+
+| Backend | Detailed docs | Worker-side event publishing |
+|---|---|---|
+| vLLM | [vLLM Reference Guide](../backends/vllm/vllm-reference-guide.md#argument-reference), [vLLM Examples](../backends/vllm/vllm-examples.md#aggregated-serving-with-kv-routing) | `--enable-prefix-caching` and `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` on the aggregated worker or disaggregated prefill worker |
+| SGLang | [SGLang KV Events](../backends/sglang/sglang-reference-guide.md#kv-events), [SGLang Examples](../backends/sglang/sglang-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config` with the SGLang event endpoint |
+| TRT-LLM | [TRT-LLM DP Rank Routing](../backends/trtllm/trtllm-dp-rank-routing.md#enabling-dp-rank-routing), [TRT-LLM Observability](../backends/trtllm/trtllm-observability.md) | `--publish-events-and-metrics` |
+
+In Kubernetes deployments the Dynamo runtime normally uses Kubernetes
+discovery and the NATS event plane. Some backends, such as vLLM and SGLang,
+emit raw KV events over ZMQ; the Dynamo worker consumes those backend events
+and republishes router events through the Dynamo event plane. For the event
+plane model, see [Event Plane](../design-docs/event-plane.md).
+
+### EPP and Gateway Routing
+
+EPP/Gateway routing is a different topology from the standalone frontend that
+DGDR generates:
+
+```text
+client -> Gateway -> EPP selects worker -> worker frontend sidecar -> engine
+```
+
+In this mode the EPP owns worker selection. The worker-local frontend sidecar
+must run with `--router-mode direct` so it honors the worker IDs selected by
+EPP. In the normal Gateway path, the selected endpoint and the frontend sidecar
+are the same worker pod; if they differ, direct mode can still forward to the
+worker ID supplied by EPP.
+
+DGDR does not currently generate EPP components or frontend sidecars. Also,
+`overrides.dgd` only patches services that already exist in the generated DGD,
+so it cannot be used to add a missing `Epp` service to a DGDR-generated
+deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
+For manifests, `frontendSidecar` configuration, direct routing, EPP routing
+variables such as `DYN_USE_KV_EVENTS`, and route setup, see
+[Gateway API Inference Extension](inference-gateway.md). The same guide also
+documents the optional [Rust EPP](inference-gateway.md#4b-build-rust-epp-image-optional--experimental),
+which is currently experimental.
+
 ### SKU Format
 
 When providing hardware configuration manually, use lowercase underscore format:
