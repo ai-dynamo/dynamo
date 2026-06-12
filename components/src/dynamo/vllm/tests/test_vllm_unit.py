@@ -407,6 +407,67 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     assert captured["enable_rl"] is True
 
 
+@pytest.mark.asyncio
+async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
+    """Return the Dynamo-normalized served model name from EngineConfig."""
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    served_model_name = "Qwen/Qwen3-0.6B"
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(num_gpu_blocks=8),
+        model_config=SimpleNamespace(max_model_len=4096),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=8192,
+        ),
+    )
+    engine_args = SimpleNamespace(
+        model=served_model_name,
+        served_model_name=[served_model_name],
+        create_model_config=lambda: SimpleNamespace(get_diff_sampling_param=lambda: {}),
+        create_engine_config=lambda usage_context: vllm_config,
+    )
+    engine_client = SimpleNamespace(vllm_config=vllm_config, shutdown=lambda: None)
+
+    monkeypatch.setattr(
+        llm_engine.AsyncLLM,
+        "from_vllm_config",
+        lambda **kwargs: engine_client,
+    )
+    monkeypatch.setattr(llm_engine, "get_dp_range_for_worker", lambda config: (0, 1))
+    monkeypatch.setattr(llm_engine, "per_rank_kv_blocks", lambda blocks, size: blocks)
+    monkeypatch.setattr(
+        llm_engine,
+        "configure_kv_event_block_size",
+        lambda client, config: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        llm_engine, "get_configured_kv_event_block_size", lambda config: 16
+    )
+    monkeypatch.setattr(
+        llm_engine.VllmLLMEngine,
+        "logits_processor_spec",
+        lambda self: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        llm_engine, "VllmEnginePauseController", lambda client: object()
+    )
+
+    engine = llm_engine.VllmLLMEngine(
+        engine_args,
+        CommonDisaggregationMode.AGGREGATED,
+        served_model_name=served_model_name,
+        component="backend",
+    )
+
+    config = await engine.start(worker_id=0)
+    await engine.cleanup()
+
+    assert engine_args.served_model_name == [served_model_name]
+    assert config.served_model_name == served_model_name
+
+
 def test_should_prefetch_model_for_default_load_format():
     from dynamo.vllm.main import should_prefetch_model
 
