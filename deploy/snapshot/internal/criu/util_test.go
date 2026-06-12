@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
+	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -74,6 +76,77 @@ func TestReadLogTail(t *testing.T) {
 		}
 		if !strings.HasSuffix(got, strings.Repeat("x", dumpLogTailMaxSize)) {
 			t.Fatal("readLogTail() did not keep the log tail")
+		}
+	})
+}
+
+func TestConfigureCUDAPluginRestoreEnv(t *testing.T) {
+	t.Run("non-CUDA checkpoint leaves environment unchanged", func(t *testing.T) {
+		t.Setenv(criuLibsDirEnv, "/existing")
+		m := &types.CheckpointManifest{}
+
+		cleanup, err := configureCUDAPluginRestoreEnv(m, "GPU-a=GPU-b", logr.Discard())
+		if err != nil {
+			t.Fatalf("configureCUDAPluginRestoreEnv: %v", err)
+		}
+		cleanup()
+		if got := os.Getenv(criuLibsDirEnv); got != "/existing" {
+			t.Fatalf("%s = %q, want /existing", criuLibsDirEnv, got)
+		}
+	})
+
+	t.Run("CUDA checkpoint sets plugin environment and restores previous values", func(t *testing.T) {
+		t.Setenv(cuda.CRIUCUDADeviceMapEnv, "old-map")
+		t.Setenv(cuda.CRIUCUDAForceRestorePluginEnv, "old-force")
+		t.Setenv(criuLibsDirEnv, "/old/criu")
+		m := &types.CheckpointManifest{
+			CUDA: types.CUDAManifest{PIDs: []int{1}},
+		}
+
+		cleanup, err := configureCUDAPluginRestoreEnv(m, "GPU-a=GPU-b", logr.Discard())
+		if err != nil {
+			t.Fatalf("configureCUDAPluginRestoreEnv: %v", err)
+		}
+		if got := os.Getenv(cuda.CRIUCUDADeviceMapEnv); got != "GPU-a=GPU-b" {
+			t.Fatalf("%s = %q, want device map", cuda.CRIUCUDADeviceMapEnv, got)
+		}
+		if got := os.Getenv(cuda.CRIUCUDAForceRestorePluginEnv); got != "1" {
+			t.Fatalf("%s = %q, want 1", cuda.CRIUCUDAForceRestorePluginEnv, got)
+		}
+		if got := os.Getenv(criuLibsDirEnv); got != cudaPluginLibDir {
+			t.Fatalf("%s = %q, want %q", criuLibsDirEnv, got, cudaPluginLibDir)
+		}
+
+		cleanup()
+		if got := os.Getenv(cuda.CRIUCUDADeviceMapEnv); got != "old-map" {
+			t.Fatalf("%s after cleanup = %q, want old-map", cuda.CRIUCUDADeviceMapEnv, got)
+		}
+		if got := os.Getenv(cuda.CRIUCUDAForceRestorePluginEnv); got != "old-force" {
+			t.Fatalf("%s after cleanup = %q, want old-force", cuda.CRIUCUDAForceRestorePluginEnv, got)
+		}
+		if got := os.Getenv(criuLibsDirEnv); got != "/old/criu" {
+			t.Fatalf("%s after cleanup = %q, want /old/criu", criuLibsDirEnv, got)
+		}
+	})
+
+	t.Run("CUDA checkpoint uses configured plugin libdir", func(t *testing.T) {
+		m := &types.CheckpointManifest{
+			CRIUDump: types.CRIUDumpManifest{
+				CRIU: types.CRIUSettings{LibDir: "/custom/criu"},
+			},
+			CUDA: types.CUDAManifest{PIDs: []int{1}},
+		}
+
+		cleanup, err := configureCUDAPluginRestoreEnv(m, "", logr.Discard())
+		if err != nil {
+			t.Fatalf("configureCUDAPluginRestoreEnv: %v", err)
+		}
+		defer cleanup()
+		if _, ok := os.LookupEnv(cuda.CRIUCUDADeviceMapEnv); ok {
+			t.Fatalf("%s should be unset for empty device map", cuda.CRIUCUDADeviceMapEnv)
+		}
+		if got := os.Getenv(criuLibsDirEnv); got != "/custom/criu" {
+			t.Fatalf("%s = %q, want /custom/criu", criuLibsDirEnv, got)
 		}
 	})
 }

@@ -16,6 +16,9 @@ import (
 const (
 	cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
 
+	CRIUCUDADeviceMapEnv          = "DYNAMO_CUDA_DEVICE_MAP"
+	CRIUCUDAForceRestorePluginEnv = "DYNAMO_CUDA_FORCE_RESTORE_PLUGIN"
+
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
 	actionRestore    = "restore"

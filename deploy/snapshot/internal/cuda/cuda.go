@@ -254,6 +254,36 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 	return timings, nil
 }
 
+// RestoreAndUnlockProcessTreeIfNeeded restores and unlocks CUDA state for PIDs
+// that remain checkpointed after CRIU restore.
+func RestoreAndUnlockProcessTreeIfNeeded(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
+	var timings RestorePhaseTimings
+
+	start := time.Now()
+	pending := make([]int, 0, len(cudaPIDs))
+	for _, pid := range cudaPIDs {
+		state, err := getState(ctx, pid)
+		if err != nil {
+			timings.TotalDuration = time.Since(start)
+			return timings, err
+		}
+		if state == "running" {
+			log.Info("CUDA process already restored by CRIU plugin", "pid", pid)
+			continue
+		}
+		pending = append(pending, pid)
+	}
+
+	if len(pending) > 0 {
+		_, err := RestoreAndUnlockProcessTree(ctx, pending, deviceMap, log)
+		timings.TotalDuration = time.Since(start)
+		return timings, err
+	}
+
+	timings.TotalDuration = time.Since(start)
+	return timings, nil
+}
+
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
 func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings

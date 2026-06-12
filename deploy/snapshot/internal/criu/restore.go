@@ -11,6 +11,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -21,6 +22,8 @@ const RestoreLogFilename = "restore.log"
 const (
 	netNsPath        = "/proc/1/ns/net"
 	placeholderFDDir = "/proc/1/fd"
+	cudaPluginLibDir = "/usr/local/lib/criu"
+	criuLibsDirEnv   = "CRIU_LIBS_DIR"
 )
 
 // ExecuteRestore opens the image/work directory FDs, configures inherited
@@ -29,6 +32,7 @@ func ExecuteRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	checkpointPath string,
+	cudaDeviceMap string,
 	log logr.Logger,
 ) (int32, error) {
 	settings := m.CRIUDump.CRIU
@@ -71,6 +75,12 @@ func ExecuteRestore(
 	defer closeFiles(inheritedFiles)
 
 	notify := &restoreNotify{log: log}
+	restoreEnvCleanup, err := configureCUDAPluginRestoreEnv(m, cudaDeviceMap, log)
+	if err != nil {
+		return 0, err
+	}
+	defer restoreEnvCleanup()
+
 	log.V(1).Info("Executing go-criu Restore call")
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
@@ -79,6 +89,60 @@ func ExecuteRestore(
 	}
 
 	return notify.restoredPID, nil
+}
+
+func configureCUDAPluginRestoreEnv(m *types.CheckpointManifest, deviceMap string, log logr.Logger) (func(), error) {
+	if m.CUDA.IsEmpty() {
+		return func() {}, nil
+	}
+
+	previousDeviceMap, hadDeviceMap := os.LookupEnv(cuda.CRIUCUDADeviceMapEnv)
+	previousForce, hadForce := os.LookupEnv(cuda.CRIUCUDAForceRestorePluginEnv)
+	previousLibsDir, hadLibsDir := os.LookupEnv(criuLibsDirEnv)
+
+	if deviceMap != "" {
+		if err := os.Setenv(cuda.CRIUCUDADeviceMapEnv, deviceMap); err != nil {
+			return nil, fmt.Errorf("set %s: %w", cuda.CRIUCUDADeviceMapEnv, err)
+		}
+	} else {
+		if err := os.Unsetenv(cuda.CRIUCUDADeviceMapEnv); err != nil {
+			return nil, fmt.Errorf("unset %s: %w", cuda.CRIUCUDADeviceMapEnv, err)
+		}
+	}
+	if err := os.Setenv(cuda.CRIUCUDAForceRestorePluginEnv, "1"); err != nil {
+		return nil, fmt.Errorf("set %s: %w", cuda.CRIUCUDAForceRestorePluginEnv, err)
+	}
+	pluginLibDir := strings.TrimSpace(m.CRIUDump.CRIU.LibDir)
+	if pluginLibDir == "" {
+		pluginLibDir = cudaPluginLibDir
+	}
+	if err := os.Setenv(criuLibsDirEnv, pluginLibDir); err != nil {
+		return nil, fmt.Errorf("set %s: %w", criuLibsDirEnv, err)
+	}
+
+	log.V(1).Info("Configured CRIU CUDA plugin restore environment",
+		"device_map_set", deviceMap != "",
+		"force_restore_plugin", true,
+		"criu_libs_dir", pluginLibDir,
+	)
+
+	return func() {
+		restoreEnv(cuda.CRIUCUDADeviceMapEnv, previousDeviceMap, hadDeviceMap, log)
+		restoreEnv(cuda.CRIUCUDAForceRestorePluginEnv, previousForce, hadForce, log)
+		restoreEnv(criuLibsDirEnv, previousLibsDir, hadLibsDir, log)
+	}, nil
+}
+
+func restoreEnv(key, value string, hadValue bool, log logr.Logger) {
+	var err error
+	if hadValue {
+		err = os.Setenv(key, value)
+	} else {
+		err = os.Unsetenv(key)
+	}
+	if err != nil {
+		log.Error(err, "Failed to restore environment variable", "key", key)
+	}
 }
 
 // BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.

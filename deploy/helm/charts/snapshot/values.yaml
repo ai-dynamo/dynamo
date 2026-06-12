@@ -229,6 +229,6 @@ config:
     lazyPages: false        # Lazy page migration (experimental)
 
     # Config file options (NOT available via RPC - written to criu.conf)
-    libDir: ""                     # Keep empty: external CUDA checkpoint/restore only (no CRIU CUDA plugin)
+    libDir: ""                     # Optional CRIU plugin dir; empty uses Dynamo's CUDA restore plugin default
     allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
     skipInFlight: true             # Skip in-flight TCP connections

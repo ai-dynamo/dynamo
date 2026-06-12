@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dynamo Snapshot <snapshot@dynamo.local>
+Date: Thu, 12 Jun 2026 00:00:00 +0000
+Subject: [PATCH] cuda_plugin: use Dynamo cuda-checkpoint-helper
+
+Dynamo helper-only images intentionally omit NVIDIA's cuda-checkpoint
+launcher on arm64. The CRIU CUDA plugin still needs to run in those images
+because its RESUME_DEVICES_LATE hook owns the ptrace choreography that wakes
+and re-interrupts the CUDA restore thread before restored tasks are detached.
+
+Invoke Dynamo's cuda-checkpoint-helper directly for the CUDA checkpoint API
+operations. The helper implements the subset used by the plugin. During
+restore, pass an optional device map from DYNAMO_CUDA_DEVICE_MAP so Dynamo can
+still support cross-GPU remapping when needed. DYNAMO_CUDA_FORCE_RESTORE_PLUGIN
+lets restore use this hook for checkpoints that were created before helper-only
+images loaded the CRIU CUDA plugin at dump time.
+---
+diff --git a/plugins/cuda/cuda_plugin.c b/plugins/cuda/cuda_plugin.c
+index 9ccb04224..f53514572 100644
+--- a/plugins/cuda/cuda_plugin.c
++++ b/plugins/cuda/cuda_plugin.c
+@@ -13,12 +13,15 @@
+ #include <ctype.h>
+ #include <fcntl.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <unistd.h>
+ #include <sys/ptrace.h>
+ #include <sys/wait.h>
+ 
+-/* cuda-checkpoint binary should live in your PATH */
+-#define CUDA_CHECKPOINT "cuda-checkpoint"
++/* Dynamo helper-only images do not ship NVIDIA's cuda-checkpoint launcher. */
++#define CUDA_CHECKPOINT_HELPER "/usr/local/bin/cuda-checkpoint-helper"
++#define CUDA_CHECKPOINT_DEVICE_MAP_ENV "DYNAMO_CUDA_DEVICE_MAP"
++#define CUDA_CHECKPOINT_FORCE_RESTORE_ENV "DYNAMO_CUDA_FORCE_RESTORE_PLUGIN"
+ 
+ /* cuda-checkpoint --action flags */
+ #define ACTION_LOCK	  "lock"
+@@ -196,7 +199,7 @@ err:
+ static int cuda_checkpoint_supports_flag(const char *flag)
+ {
+ 	char msg_buf[2048];
+-	const char *args[] = { CUDA_CHECKPOINT, "-h", NULL };
++	const char *args[] = { CUDA_CHECKPOINT_HELPER, "-h", NULL };
+ 
+ 	if (launch_cuda_checkpoint(args, msg_buf, sizeof(msg_buf)) != 0)
+ 		return -1;
+@@ -215,7 +218,7 @@ static int get_cuda_restore_tid(int root_pid)
+ 
+ 	snprintf(pid_buf, sizeof(pid_buf), "%d", root_pid);
+ 
+-	const char *args[] = { CUDA_CHECKPOINT, "--get-restore-tid", "--pid", pid_buf, NULL };
++	const char *args[] = { CUDA_CHECKPOINT_HELPER, "--get-restore-tid", "--pid", pid_buf, NULL };
+ 	int ret = launch_cuda_checkpoint(args, pid_out, sizeof(pid_out));
+ 	if (ret != 0) {
+ 		pr_err("Failed to launch cuda-checkpoint to retrieve restore tid: %s\n", pid_out);
+@@ -244,7 +247,7 @@ static cuda_task_state_t get_cuda_state(pid_t pid)
+ {
+ 	char pid_buf[16];
+ 	char state_str[CUDA_CKPT_BUF_SIZE];
+-	const char *args[] = { CUDA_CHECKPOINT, "--get-state", "--pid", pid_buf, NULL };
++	const char *args[] = { CUDA_CHECKPOINT_HELPER, "--get-state", "--pid", pid_buf, NULL };
+ 
+ 	snprintf(pid_buf, sizeof(pid_buf), "%d", pid);
+ 
+@@ -256,21 +259,31 @@ static cuda_task_state_t get_cuda_state(pid_t pid)
+ 	return get_task_state_enum(state_str);
+ }
+ 
+-static int cuda_process_checkpoint_action(int pid, const char *action, unsigned int timeout, char *msg_buf,
+-					  int buf_size)
++static int cuda_process_checkpoint_action(int pid, const char *action, unsigned int timeout, const char *device_map,
++					  char *msg_buf, int buf_size)
+ {
+ 	char pid_buf[16];
+ 	char timeout_buf[16];
++	const char *args[10];
++	int arg = 0;
+ 
+ 	snprintf(pid_buf, sizeof(pid_buf), "%d", pid);
+ 
+-	const char *args[] = { CUDA_CHECKPOINT, "--action", action, "--pid", pid_buf, NULL /* --timeout */,
+-			       NULL /* timeout_val */, NULL };
++	args[arg++] = CUDA_CHECKPOINT_HELPER;
++	args[arg++] = "--action";
++	args[arg++] = action;
++	args[arg++] = "--pid";
++	args[arg++] = pid_buf;
+ 	if (timeout > 0) {
+ 		snprintf(timeout_buf, sizeof(timeout_buf), "%d", timeout);
+-		args[5] = "--timeout";
+-		args[6] = timeout_buf;
++		args[arg++] = "--timeout";
++		args[arg++] = timeout_buf;
+ 	}
++	if (device_map != NULL && device_map[0] != '\0') {
++		args[arg++] = "--device-map";
++		args[arg++] = device_map;
++	}
++	args[arg] = NULL;
+ 
+ 	return launch_cuda_checkpoint(args, msg_buf, buf_size);
+ }
+@@ -392,7 +405,7 @@ int cuda_plugin_checkpoint_devices(int pid)
+ 	}
+ 
+ 	task_info->checkpointed = 1;
+-	status = cuda_process_checkpoint_action(pid, ACTION_CHECKPOINT, 0, msg_buf, sizeof(msg_buf));
++	status = cuda_process_checkpoint_action(pid, ACTION_CHECKPOINT, 0, NULL, msg_buf, sizeof(msg_buf));
+ 	if (status) {
+ 		pr_err("CHECKPOINT_DEVICES failed with %s\n", msg_buf);
+ 	}
+@@ -448,7 +461,7 @@ int cuda_plugin_pause_devices(int pid)
+ 	}
+ 
+ 	pr_info("pausing devices on pid %d\n", pid);
+-	int status = cuda_process_checkpoint_action(pid, ACTION_LOCK, opts.timeout * 1000, msg_buf, sizeof(msg_buf));
++	int status = cuda_process_checkpoint_action(pid, ACTION_LOCK, opts.timeout * 1000, NULL, msg_buf, sizeof(msg_buf));
+ 	if (status) {
+ 		pr_err("PAUSE_DEVICES failed with %s\n", msg_buf);
+ 		if (alarm_timeouted())
+@@ -463,7 +476,7 @@ int cuda_plugin_pause_devices(int pid)
+ 
+ 	return 0;
+ unlock:
+-	status = cuda_process_checkpoint_action(pid, ACTION_UNLOCK, 0, msg_buf, sizeof(msg_buf));
++	status = cuda_process_checkpoint_action(pid, ACTION_UNLOCK, 0, NULL, msg_buf, sizeof(msg_buf));
+ 	if (status) {
+ 		pr_err("Failed to unlock process status %s, pid %d may hang\n", msg_buf, pid);
+ 	}
+@@ -477,6 +490,7 @@ int resume_device(int pid, int checkpointed, cuda_task_state_t initial_task_stat
+ 	int status;
+ 	int ret = 0;
+ 	int int_ret;
++	const char *device_map;
+ 	k_rtsigset_t save_sigset;
+ 
+ 	if (initial_task_state == CUDA_TASK_UNKNOWN) {
+@@ -505,7 +519,8 @@ int resume_device(int pid, int checkpointed, cuda_task_state_t initial_task_stat
+ 
+ 	if (checkpointed && (initial_task_state == CUDA_TASK_RUNNING || initial_task_state == CUDA_TASK_LOCKED)) {
+ 		/* If the process was "locked" or "running" before checkpointing it, we need to restore it */
+-		status = cuda_process_checkpoint_action(pid, ACTION_RESTORE, 0, msg_buf, sizeof(msg_buf));
++		device_map = getenv(CUDA_CHECKPOINT_DEVICE_MAP_ENV);
++		status = cuda_process_checkpoint_action(pid, ACTION_RESTORE, 0, device_map, msg_buf, sizeof(msg_buf));
+ 		if (status) {
+ 			pr_err("RESUME_DEVICES RESTORE failed with %s\n", msg_buf);
+ 			ret = -1;
+@@ -515,7 +530,7 @@ int resume_device(int pid, int checkpointed, cuda_task_state_t initial_task_stat
+ 
+ 	if (initial_task_state == CUDA_TASK_RUNNING) {
+ 		/* If the process was "running" before we paused it, we need to unlock it */
+-		status = cuda_process_checkpoint_action(pid, ACTION_UNLOCK, 0, msg_buf, sizeof(msg_buf));
++		status = cuda_process_checkpoint_action(pid, ACTION_UNLOCK, 0, NULL, msg_buf, sizeof(msg_buf));
+ 		if (status) {
+ 			pr_err("RESUME_DEVICES UNLOCK failed with %s\n", msg_buf);
+ 			ret = -1;
+@@ -569,8 +584,12 @@ int cuda_plugin_init(int stage)
+ 
+ 	if (stage == CR_PLUGIN_STAGE__RESTORE) {
+ 		if (!check_and_remove_inventory_plugin(CR_PLUGIN_DESC.name, strlen(CR_PLUGIN_DESC.name))) {
+-			plugin_disabled = true;
+-			return 0;
++			if (getenv(CUDA_CHECKPOINT_FORCE_RESTORE_ENV) == NULL) {
++				plugin_disabled = true;
++				return 0;
++			}
++			pr_info("forcing CUDA restore plugin without inventory because %s is set\n",
++				CUDA_CHECKPOINT_FORCE_RESTORE_ENV);
+ 		}
+ 	}
+ 
+@@ -582,13 +601,13 @@ int cuda_plugin_init(int stage)
+ 
+ 	ret = cuda_checkpoint_supports_flag("--action");
+ 	if (ret == -1) {
+-		pr_warn("check that %s is present in $PATH\n", CUDA_CHECKPOINT);
++		pr_warn("check that %s is present\n", CUDA_CHECKPOINT_HELPER);
+ 		plugin_disabled = true;
+ 		return 0;
+ 	}
+ 
+ 	if (ret == 0) {
+-		pr_warn("cuda-checkpoint --action flag not supported, an r555 or higher version driver is required. Disabling CUDA plugin\n");
++		pr_warn("cuda-checkpoint-helper --action flag not supported, an r555 or higher version driver is required. Disabling CUDA plugin\n");
+ 		plugin_disabled = true;
+ 		return 0;
+ 	}
