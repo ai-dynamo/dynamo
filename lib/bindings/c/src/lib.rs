@@ -488,11 +488,13 @@ impl RouterHandles {
                 reason,
                 queued_isl_tokens,
                 max_queued_isl_tokens,
+                potential_cached_tokens,
             } => {
                 tracing::warn!(
                     reason = ?reason,
                     queued_isl_tokens,
                     max_queued_isl_tokens = ?max_queued_isl_tokens,
+                    potential_cached_tokens = ?potential_cached_tokens,
                     "Prefill query rejected due to router backpressure"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
@@ -572,11 +574,13 @@ impl RouterHandles {
                 reason,
                 queued_isl_tokens,
                 max_queued_isl_tokens,
+                potential_cached_tokens,
             } => {
                 tracing::warn!(
                     reason = ?reason,
                     queued_isl_tokens,
                     max_queued_isl_tokens = ?max_queued_isl_tokens,
+                    potential_cached_tokens = ?potential_cached_tokens,
                     "Decode query rejected due to router backpressure"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
