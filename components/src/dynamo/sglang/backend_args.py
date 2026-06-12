@@ -4,7 +4,7 @@
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
 import argparse
-from typing import Optional
+from typing import List, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -113,11 +113,14 @@ class DynamoSGLangArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--decode-migration-class",
-            env_var="DYN_SGL_DECODE_MIGRATION_CLASS",
-            default=None,
-            choices=["fast", "slow"],
-            help="Optional routing class published for decode migration.",
+            flag_name="--worker-taint",
+            env_var="DYN_SGL_WORKER_TAINTS",
+            default=[],
+            action="append",
+            help=(
+                "Repeatable worker taint published in the model runtime config. "
+                "Decode-migration source and destination policies match these taints."
+            ),
         )
 
         # Topology constraint: rejecting --frontend-decoding combined with the
@@ -151,7 +154,7 @@ class DynamoSGLangConfig(ConfigBase):
 
     video_generation_worker: bool
     enable_rl: bool
-    decode_migration_class: Optional[str] = None
+    worker_taint: Optional[List[str]] = None
     frontend_decoding: bool = False
     sglang_trace_level: int
 

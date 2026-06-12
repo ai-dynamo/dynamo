@@ -192,6 +192,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
         self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
         self._decode_migration_reservations: Dict[str, Dict[str, Any]] = {}
+        self._decode_migration_lock = asyncio.Lock()
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -343,7 +344,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
-        trace_id = request.get("_decode_migration_rid") or context.trace_id
+        migration_state = request.get("decode_migration_state") or {}
+        trace_id = (
+            migration_state.get("rid")
+            or request.get("_decode_migration_rid")
+            or context.trace_id
+        )
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
@@ -358,6 +364,53 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         lora_path = self._resolve_lora(request)
         if lora_path:
             logging.debug(f"Request {context.id()} will use LoRA adapter: {lora_path}")
+
+        # A prepared migration stream is already bootstrapped by migrate_prepare.
+        # Attach it before the serving-mode branch so any migration-capable worker can
+        # receive a request, including ordinary aggregated workers.
+        migration_id = migration_state.get("migration_id") or request.get(
+            "_decode_migration_id"
+        )
+        decode = None
+        if migration_id:
+            async with self._decode_migration_lock:
+                reservation = self._decode_migration_reservations.get(migration_id)
+                if reservation is not None:
+                    decode = reservation.pop("decode_stream", None)
+        if decode is not None:
+            logging.info(
+                "Attached generate stream to prepared decode migration "
+                "rid=%s migration_id=%s room=%s",
+                trace_id,
+                migration_id,
+                (request.get("bootstrap_info") or {}).get("bootstrap_room"),
+            )
+            try:
+                if not self.use_sglang_tokenizer:
+                    async for out in self._process_token_stream(
+                        decode,
+                        context,
+                        return_tokens_as_token_ids,
+                        user_stop_token_ids=user_stop_token_ids,
+                    ):
+                        yield out
+                else:
+                    async for out in self._process_text_stream(
+                        decode,
+                        context,
+                        request=request,
+                        user_stop_token_ids=user_stop_token_ids,
+                    ):
+                        yield out
+            finally:
+                async with self._decode_migration_lock:
+                    self._decode_migration_reservations.pop(migration_id, None)
+            return
+        if migration_state.get("is_destination"):
+            raise RuntimeError(
+                "Prepared decode migration stream is missing or was already consumed "
+                f"for migration_id={migration_id}"
+            )
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -381,65 +434,42 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
-            migration_id = request.get("_decode_migration_id")
-            reservation = (
-                self._decode_migration_reservations.get(migration_id)
-                if migration_id
-                else None
+            decode = await self.engine.async_generate(
+                **input_param,
+                sampling_params=sampling_params,
+                stream=True,
+                **self._routed_experts_kwargs,
+                bootstrap_host=bootstrap_info["bootstrap_host"],
+                bootstrap_port=bootstrap_info["bootstrap_port"],
+                bootstrap_room=bootstrap_info["bootstrap_room"],
+                disagg_prefill_dp_rank=migration_state.get("source_dp_rank")
+                if migration_state
+                else request.get("_decode_migration_source_dp_rank"),
+                external_trace_header=trace_header,
+                rid=trace_id,
+                data_parallel_rank=dp_rank,
+                **self._session_kwargs(request),
+                lora_path=lora_path,
+                **logprob_kwargs,
+                **self._priority_kwargs(priority),
             )
-            attached_migration_id = None
-            if reservation is not None and reservation.get("decode_stream") is not None:
-                decode = reservation.pop("decode_stream")
-                attached_migration_id = migration_id
-                logging.info(
-                    "Attached generate stream to prepared decode migration "
-                    "rid=%s migration_id=%s room=%s",
-                    trace_id,
-                    migration_id,
-                    bootstrap_info["bootstrap_room"],
-                )
+
+            if not self.use_sglang_tokenizer:
+                async for out in self._process_token_stream(
+                    decode,
+                    context,
+                    return_tokens_as_token_ids,
+                    user_stop_token_ids=user_stop_token_ids,
+                ):
+                    yield out
             else:
-                decode = await self.engine.async_generate(
-                    **input_param,
-                    sampling_params=sampling_params,
-                    stream=True,
-                    **self._routed_experts_kwargs,
-                    bootstrap_host=bootstrap_info["bootstrap_host"],
-                    bootstrap_port=bootstrap_info["bootstrap_port"],
-                    bootstrap_room=bootstrap_info["bootstrap_room"],
-                    disagg_prefill_dp_rank=request.get(
-                        "_decode_migration_source_dp_rank"
-                    ),
-                    external_trace_header=trace_header,
-                    rid=trace_id,
-                    data_parallel_rank=dp_rank,
-                    **self._session_kwargs(request),
-                    lora_path=lora_path,
-                    **logprob_kwargs,
-                    **self._priority_kwargs(priority),
-                )
-
-            try:
-                if not self.use_sglang_tokenizer:
-                    async for out in self._process_token_stream(
-                        decode,
-                        context,
-                        return_tokens_as_token_ids,
-                        user_stop_token_ids=user_stop_token_ids,
-                    ):
-                        yield out
-
-                else:
-                    async for out in self._process_text_stream(
-                        decode,
-                        context,
-                        request=request,
-                        user_stop_token_ids=user_stop_token_ids,
-                    ):
-                        yield out
-            finally:
-                if attached_migration_id is not None:
-                    self._decode_migration_reservations.pop(attached_migration_id, None)
+                async for out in self._process_text_stream(
+                    decode,
+                    context,
+                    request=request,
+                    user_stop_token_ids=user_stop_token_ids,
+                ):
+                    yield out
         else:
             # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
@@ -507,101 +537,147 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def prepare_decode_migration(self, request, context=None):
         """Reserve and arm this worker as a migration destination."""
-        migration_id = request["migration_id"]
-        existing = self._decode_migration_reservations.get(migration_id)
-        if existing is None:
-            room = secrets.randbits(63) or 1
-            existing = {
-                "migration_id": migration_id,
-                "rid": request["rid"],
-                "bootstrap_room": room,
-                "source": dict(request.get("source") or {}),
-                "reserve_tokens": int(request.get("reserve_tokens") or 0),
-                "status": "reserved",
-                "created_at": time.monotonic(),
-            }
-            self._decode_migration_reservations[migration_id] = existing
-            logging.info(
-                "Reserved decode migration destination rid=%s migration_id=%s "
-                "room=%s reserve_tokens=%s",
-                existing["rid"],
-                migration_id,
-                room,
-                existing["reserve_tokens"],
-            )
-        elif existing["rid"] != request["rid"]:
+        if not getattr(self.config.server_args, "enable_decode_migration", False):
             yield {
-                "migration_id": migration_id,
-                "rid": request["rid"],
+                "migration_id": request.get("migration_id"),
+                "rid": request.get("rid"),
                 "success": False,
-                "status": "conflict",
-                "error": "migration_id is already bound to another request",
+                "status": "error",
+                "error": "Decode migration requires --enable-decode-migration",
             }
             return
 
-        source_state = request.get("source_state")
-        if source_state is not None and existing["status"] not in ("ready", "active"):
-            destination_request = request.get("destination_request")
-            if not isinstance(destination_request, dict):
-                yield {
+        migration_id = request["migration_id"]
+        response = None
+        async with self._decode_migration_lock:
+            existing = self._decode_migration_reservations.get(migration_id)
+            if existing is None:
+                room = secrets.randbits(63) or 1
+                existing = {
+                    "migration_id": migration_id,
+                    "rid": request["rid"],
+                    "bootstrap_room": room,
+                    "source": dict(request.get("source") or {}),
+                    "reserve_tokens": int(request.get("reserve_tokens") or 0),
+                    "status": "reserved",
+                    "created_at": time.monotonic(),
+                }
+                self._decode_migration_reservations[migration_id] = existing
+                logging.info(
+                    "Reserved decode migration destination rid=%s migration_id=%s "
+                    "room=%s reserve_tokens=%s",
+                    existing["rid"],
+                    migration_id,
+                    room,
+                    existing["reserve_tokens"],
+                )
+            elif existing["rid"] != request["rid"]:
+                response = {
+                    "migration_id": migration_id,
+                    "rid": request["rid"],
+                    "success": False,
+                    "status": "conflict",
+                    "error": "migration_id is already bound to another request",
+                }
+
+            source_state = request.get("source_state")
+            if (
+                response is None
+                and source_state is not None
+                and existing["status"] not in ("ready", "active")
+            ):
+                destination_request = request.get("destination_request")
+                if not isinstance(destination_request, dict):
+                    response = {
+                        "migration_id": migration_id,
+                        "rid": existing["rid"],
+                        "success": False,
+                        "status": "error",
+                        "error": "destination_request is required when arming",
+                    }
+                else:
+                    bootstrap_info = destination_request["bootstrap_info"]
+                    sampling_params = self._build_sampling_params(destination_request)
+                    input_param = self._get_input_param(destination_request)
+                    priority = (destination_request.get("routing") or {}).get(
+                        "priority"
+                    )
+                    logprob_kwargs = self._build_logprob_kwargs(destination_request)
+                    lora_path = self._resolve_lora(destination_request)
+                    migration_state = (
+                        destination_request.get("decode_migration_state") or {}
+                    )
+                    existing["status"] = "arming"
+                    try:
+                        decode_stream = await self.engine.async_generate(
+                            **input_param,
+                            sampling_params=sampling_params,
+                            stream=True,
+                            **self._routed_experts_kwargs,
+                            bootstrap_host=bootstrap_info["bootstrap_host"],
+                            bootstrap_port=bootstrap_info["bootstrap_port"],
+                            bootstrap_room=bootstrap_info["bootstrap_room"],
+                            disagg_prefill_dp_rank=migration_state.get(
+                                "source_dp_rank"
+                            )
+                            if migration_state
+                            else destination_request.get(
+                                "_decode_migration_source_dp_rank"
+                            ),
+                            external_trace_header=None,
+                            rid=migration_state.get("rid")
+                            or destination_request["_decode_migration_rid"],
+                            data_parallel_rank=(
+                                destination_request.get("routing") or {}
+                            ).get("dp_rank"),
+                            **self._session_kwargs(destination_request),
+                            lora_path=lora_path,
+                            **logprob_kwargs,
+                            **self._priority_kwargs(priority),
+                        )
+                    except Exception as exc:
+                        existing["status"] = "reserved"
+                        logging.exception(
+                            "Failed to arm decode migration destination "
+                            "rid=%s migration_id=%s",
+                            existing["rid"],
+                            migration_id,
+                        )
+                        response = {
+                            "migration_id": migration_id,
+                            "rid": existing["rid"],
+                            "success": False,
+                            "status": "error",
+                            "error": f"Failed to arm destination: {exc}",
+                        }
+                    else:
+                        existing["decode_stream"] = decode_stream
+                        existing["source_state"] = dict(source_state)
+                        existing["status"] = "ready"
+                        logging.info(
+                            "Armed decode migration destination rid=%s "
+                            "migration_id=%s room=%s committed_len=%s",
+                            existing["rid"],
+                            migration_id,
+                            existing["bootstrap_room"],
+                            source_state.get("committed_len"),
+                        )
+
+            if response is None:
+                source = existing["source"]
+                response = {
                     "migration_id": migration_id,
                     "rid": existing["rid"],
-                    "success": False,
-                    "status": "error",
-                    "error": "destination_request is required when arming",
+                    "success": True,
+                    "status": existing["status"],
+                    "bootstrap_host": source.get("bootstrap_host"),
+                    "bootstrap_port": source.get("bootstrap_port"),
+                    "bootstrap_room": existing["bootstrap_room"],
+                    "destination_dp_rank": 0,
+                    "reserve_tokens": existing["reserve_tokens"],
                 }
-                return
 
-            bootstrap_info = destination_request["bootstrap_info"]
-            sampling_params = self._build_sampling_params(destination_request)
-            input_param = self._get_input_param(destination_request)
-            priority = (destination_request.get("routing") or {}).get("priority")
-            logprob_kwargs = self._build_logprob_kwargs(destination_request)
-            lora_path = self._resolve_lora(destination_request)
-            existing["decode_stream"] = await self.engine.async_generate(
-                **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-                **self._routed_experts_kwargs,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
-                disagg_prefill_dp_rank=destination_request.get(
-                    "_decode_migration_source_dp_rank"
-                ),
-                external_trace_header=None,
-                rid=destination_request["_decode_migration_rid"],
-                data_parallel_rank=(destination_request.get("routing") or {}).get(
-                    "dp_rank"
-                ),
-                **self._session_kwargs(destination_request),
-                lora_path=lora_path,
-                **logprob_kwargs,
-                **self._priority_kwargs(priority),
-            )
-            existing["source_state"] = dict(source_state)
-            existing["status"] = "ready"
-            logging.info(
-                "Armed decode migration destination rid=%s migration_id=%s "
-                "room=%s committed_len=%s",
-                existing["rid"],
-                migration_id,
-                existing["bootstrap_room"],
-                source_state.get("committed_len"),
-            )
-
-        source = existing["source"]
-        yield {
-            "migration_id": migration_id,
-            "rid": existing["rid"],
-            "success": True,
-            "status": existing["status"],
-            "bootstrap_host": source.get("bootstrap_host"),
-            "bootstrap_port": source.get("bootstrap_port"),
-            "bootstrap_room": existing["bootstrap_room"],
-            "destination_dp_rank": 0,
-            "reserve_tokens": existing["reserve_tokens"],
-        }
+        yield response
 
     async def sync_decode_migration(self, request, context=None):
         """Describe or quiesce this worker as the exact migration source."""
@@ -644,32 +720,40 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if request.get("side") == "destination":
             migration_id = request["migration_id"]
             action = request["action"]
-            record = self._decode_migration_reservations.get(migration_id)
-            if record is None:
-                yield {
-                    "migration_id": migration_id,
-                    "action": action,
-                    "success": action == "abort",
-                    "status": "unknown",
-                }
+            record = None
+            response = None
+            async with self._decode_migration_lock:
+                record = self._decode_migration_reservations.get(migration_id)
+                if record is None:
+                    response = {
+                        "migration_id": migration_id,
+                        "action": action,
+                        "success": action == "abort",
+                        "status": "unknown",
+                    }
+                elif action == "activate":
+                    record["status"] = "active"
+                elif action == "abort":
+                    record["status"] = "aborted"
+                    self._decode_migration_reservations.pop(migration_id, None)
+                else:
+                    response = {
+                        "migration_id": migration_id,
+                        "action": action,
+                        "success": False,
+                        "status": record["status"],
+                        "error": f"Unsupported destination action {action!r}",
+                    }
+
+            if response is not None:
+                yield response
                 return
-            if action == "activate":
-                record["status"] = "active"
-            elif action == "abort":
-                record["status"] = "aborted"
+            if action == "abort":
                 tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
                 if tokenizer_manager is not None:
-                    tokenizer_manager.abort_request(rid=record["rid"], abort_all=False)
-                self._decode_migration_reservations.pop(migration_id, None)
-            else:
-                yield {
-                    "migration_id": migration_id,
-                    "action": action,
-                    "success": False,
-                    "status": record["status"],
-                    "error": f"Unsupported destination action {action!r}",
-                }
-                return
+                    tokenizer_manager.abort_request(
+                        rid=record["rid"], abort_all=False
+                    )
             logging.info(
                 "Finalized decode migration destination rid=%s migration_id=%s "
                 "action=%s status=%s",

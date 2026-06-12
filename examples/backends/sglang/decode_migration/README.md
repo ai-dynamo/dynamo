@@ -1,125 +1,161 @@
 # SGLang Decode-to-Decode Migration Prototype
 
-This prototype migrates an actively decoding request from a fast SGLang worker
-to a slow SGLang decode worker through Dynamo. It uses SGLang's current NIXL
-prefill/decode transfer protocol, but treats the live decode worker as the KV
-sender.
+This prototype migrates an actively decoding request between ordinary SGLang
+workers behind the normal Dynamo frontend. There is no coordinator model and no
+alternate HTTP frontend.
 
-Every worker publishes its normal Dynamo model card, enables decode migration,
-and exposes the same generation and migration endpoints. The destination first
-reserves an opaque
-NIXL room, then arms an actual parked SGLang decode request and receiver with
-the source's exact KV frontier. The source rank is passed explicitly; it is not
-encoded in the room ID.
+## Architecture
 
-The source remains authoritative until the prepared destination returns its
-first output and the coordinator activates it. Only then is source state
-released. A destination failure resumes the untouched source request. Client
-cancellation aborts whichever side currently owns or retains state.
+Start Dynamo with `--router-mode kv --enable-decode-migration`. The Rust
+`DecodeMigration` operator runs after preprocessing and before `PrefillRouter`.
+It selects the source through the normal KV router, evaluates the request trigger
+while forwarding the source stream, and directly dispatches the continuation to
+the selected destination so the destination is not booked as a second unrelated
+KV-router request.
 
-## Migration trigger policy
+Every migration-enabled SGLang worker keeps its normal model card and exposes:
 
-The transfer protocol is independent of the policy that decides when to migrate.
-The prototype coordinator supports either a generated-token count or one or more
-semantic output token IDs. If `--migrate-on-token-id` is present, it takes
-precedence over `--migrate-after-tokens`.
+- `generate`
+- `migration_prepare`
+- `migration_sync`
+- `migration_finalize`
 
-For Qwen3 thinking requests, token ID `151668` is `</think>`. The coordinator
-forwards that boundary token from the fast worker, then reserves and arms the
-destination, snapshots the exact SGLang KV frontier, and performs the handoff. A
-request that finishes before the boundary never enters migration. The
-coordinator model card also carries `reasoning_parser=qwen3` and the configured
-stream interval so Dynamo preserves reasoning/content parsing across the single
-client stream.
+Workers publish generic taints such as `decode/fast` and `decode/slow`, plus
+migration compatibility metadata. Every worker can source and receive a
+migration. Aggregated workers initialize SGLang's existing decode-side NIXL
+receiver queues only for requests carrying migration bootstrap metadata; normal
+requests continue through the ordinary prefill path.
 
-## Run locally
+The transaction is:
 
-The launcher uses GPU 0 for the aggregated source and GPU 1 for the decode
-destination. It builds a small derived image with the SGLang kernel version
-required by the checked-out source tree.
+1. Select and pin a source worker.
+2. Forward source output until the single trigger fires.
+3. Ask the destination to reserve an opaque bootstrap room.
+4. Quiesce the source and obtain its exact committed KV frontier.
+5. Arm a parked destination request with the room, explicit source rank, and
+   continuation request.
+6. Transfer the committed KV range with NIXL.
+7. Activate the destination after its first valid output, then commit and release
+   the source.
+
+Before source commit, any failure aborts the destination and resumes the retained
+source. Client cancellation is propagated to whichever source and destination
+streams exist at that transaction stage.
+
+## Request Policy
+
+Migration is opt-in through `nvext.decode_migration`. The policy has independent
+source and destination routing constraints and exactly one tagged trigger.
+
+```json
+{
+  "nvext": {
+    "decode_migration": {
+      "source": {"required_taints": ["decode/fast"]},
+      "destination": {"required_taints": ["decode/slow"]},
+      "trigger": {"type": "sequence_length", "tokens": 256}
+    }
+  }
+}
+```
+
+A semantic boundary can use a token trigger instead:
+
+```json
+{"type": "token_id", "token_id": 151668}
+```
+
+For Qwen3, token ID `151668` is `</think>`. The trigger implementation scans all
+tokens in a coalesced stream chunk, so `--stream-interval > 1` does not skip the
+boundary.
+
+## Run Locally
+
+The default harness uses Qwen3-0.6B on two GPUs:
 
 ```bash
 ./examples/backends/sglang/decode_migration/run_container.sh
 STREAM_INTERVAL=4 ./examples/backends/sglang/decode_migration/run_container.sh
 ```
 
-Mixed-TP examples used for validation:
+Select different free GPUs when needed:
 
 ```bash
-# Qwen3-8B, GQA KV reshaping through the heterogeneous-TP staging path
+SOURCE_GPUS=2 DESTINATION_GPUS=3 \
+  ./examples/backends/sglang/decode_migration/run_container.sh
+```
+
+The black-box suite verifies:
+
+- a request finishing before the trigger never migrates;
+- migrated deterministic output matches a source-only baseline;
+- stream intervals 1 and 4 preserve token accounting;
+- a request finishing immediately after handoff completes correctly;
+- cancellation before destination prepare and after commit clean up correctly;
+- workers accept a new migrated request after cancellation;
+- two requests crossing the trigger concurrently both complete correctly.
+
+Logs are written under `RESULT_DIR/stream-N` (default:
+`/tmp/decode-migration-results/stream-N`).
+
+## Mixed TP
+
+The transport state is range-based and preserves the existing heterogeneous-TP
+NIXL staging path. A Qwen3-8B TP4 to TP1 run can use:
+
+```bash
 MODEL_ROOT=/root/models/qwen3-8b \
 MODEL_PATH_IN_CONTAINER=/models/qwen3-8b \
 SERVED_MODEL_NAME=Qwen/Qwen3-8B \
 SOURCE_TP=4 DESTINATION_TP=1 \
 SOURCE_GPUS=0,1,2,3 DESTINATION_GPUS=4 \
 SGLANG_DISAGG_STAGING_BUFFER=1 \
-./examples/backends/sglang/decode_migration/run_container.sh
-
-# DeepSeek-V2-Lite, replicated MLA KV through the direct NIXL path on B200
-MODEL_ROOT=/root/models/deepseek-v2-lite \
-MODEL_PATH_IN_CONTAINER=/models/deepseek-v2-lite \
-SERVED_MODEL_NAME=deepseek-ai/DeepSeek-V2-Lite \
-SOURCE_TP=4 DESTINATION_TP=1 \
-SOURCE_GPUS=0,1,2,3 DESTINATION_GPUS=4 \
-ATTENTION_BACKEND=triton ENABLE_DETERMINISTIC_INFERENCE=1 \
-./examples/backends/sglang/decode_migration/run_container.sh
+  ./examples/backends/sglang/decode_migration/run_container.sh
 ```
 
-A paired Qwen3-8B thinking/GSM8K check starts a TP4 source on GPUs 0-3,
-a TP1 destination on GPU 4, and source-only plus migration coordinator model
-aliases behind the same Dynamo frontend:
+## Qwen3 Thinking-Boundary Accuracy
+
+The paired GSM8K harness sends each prompt once to the fast worker only and once
+with migration triggered by Qwen3's `</think>` token. It requires an observed
+migration commit before scoring the migrated response. A completion that reaches
+`max_tokens` without `</think>` is skipped because no migration was attempted.
 
 ```bash
-NUM_EXAMPLES=20 MAX_TOKENS=4096 \
-./examples/backends/sglang/decode_migration/run_qwen3_gsm8k.sh
+mkdir -p /tmp/qwen3-migration-gsm8k
+cp /tmp/gsm8k-test.jsonl /tmp/qwen3-migration-gsm8k/gsm8k-test.jsonl
+
+MODEL_ROOT=/root/models/qwen3-8b \
+MODEL_PATH_IN_CONTAINER=/models/qwen3-8b \
+SERVED_MODEL_NAME=Qwen/Qwen3-8B \
+SOURCE_TP=4 DESTINATION_TP=1 \
+SOURCE_GPUS=0,1,2,3 DESTINATION_GPUS=4 \
+SGLANG_DISAGG_STAGING_BUFFER=1 \
+ENABLE_DETERMINISTIC_INFERENCE=1 \
+TEST_MODE=gsm8k \
+GSM8K_NUM_QUESTIONS=20 GSM8K_MAX_ATTEMPTS=60 \
+GSM8K_MAX_TOKENS=1536 \
+GSM8K_DATA_PATH=/results/gsm8k-test.jsonl \
+RESULT_DIR=/tmp/qwen3-migration-gsm8k \
+  ./examples/backends/sglang/decode_migration/run_container.sh
 ```
 
-The harness uses SGLang's GSM8K prompt and scorer, enables Qwen thinking,
-requires every migrated request to produce reasoning, and proves each handoff
-from boundary, reservation, receiver arm, NIXL completion, activation, and
-source commit log events. It writes paired JSON and HTML reports under
-`RESULT_DIR`.
+The result is written to
+`RESULT_DIR/stream-1/gsm8k_accuracy_results.json`. `questions` is the number of
+completed migrated pairs; `attempted_questions` also includes skipped
+completions without a thinking boundary.
 
-On June 12, 2026, the 20-example deterministic smoke run completed all 20
-handoffs at `</think>`. Baseline and migrated accuracy were both 95%; hidden
-reasoning matched exactly for 20/20 requests and extracted answers matched for
-20/20. Final visible text matched exactly for 15/20; the other five retained the
-same answer with small post-handoff wording differences from TP4 versus TP1
-numerics. This is a focused paired regression check, not a statistically
-authoritative full GSM8K result.
+## Prototype Constraints
 
-The threshold/lifecycle `run_container.sh` harness starts two model workers, one
-Dynamo frontend, and three lightweight coordinator components exposed as
-distinct model aliases:
+- Exact source quiescence currently requires `--disable-overlap-schedule`.
+- Source quiescence uses a scheduler-wide pause, so concurrent migrations may be
+  serialized or one may fall back to its retained source.
+- Transfer is currently one-shot. The prepare/sync/finalize lifecycle and
+  explicit `[start, end)` range state are intended to support incremental KV
+  synchronization without changing the frontend ownership protocol.
+- Source and destination must have compatible model, page size, PP layout, KV
+  dtype, and transfer backend. Heterogeneous TP requires a supported direct or
+  staging transfer layout.
+- Destination reservation is currently local worker state rather than a durable
+  router lease with TTL.
 
-- `decode-migration-baseline`: source-only deterministic reference
-- `Qwen/Qwen3-0.6B`: normal decode migration
-- `decode-migration-rollback`: injected destination-start failure and source resume
-
-Logs are written to `/tmp/decode-migration-results/stream-N` on the host. The
-test covers deterministic output equality, a request finishing before the
-threshold, a request finishing immediately after handoff, rollback, client
-disconnect, and a successful request after cancellation.
-
-The test image includes a Dynamo runtime binding built from this worktree. If
-the image does not exist, `build_image.sh` builds that wheel with `maturin` and
-uses a temporary Docker build context. The host therefore needs Rust, `maturin`,
-and `protoc` for a fresh image build.
-
-## Prototype constraints
-
-- Source overlap scheduling must be disabled.
-- The source uses a scheduler-wide pause, so only one migration can be active.
-- Source and destination must use compatible model, TP/PP layout, page size,
-  KV dtype, and transfer backend.
-- The destination is selected statically by the prototype coordinator.
-- The transfer is one-shot; incremental range synchronization is the next step.
-- Destination capacity accounting is represented by a session reservation; a
-  production router lease and per-request scheduler accounting remain follow-up
-  work.
-
-The current B200 image cannot use its bundled FlashInfer for DeepSeek MLA
-because it is one patch below SGLang's minimum version. FlashMLA dense decode is
-SM90a-only. The verified DeepSeek-V2-Lite run therefore uses Triton attention.
-
-See [ROADMAP.md](ROADMAP.md) for the state model and production path.
+See [ROADMAP.md](ROADMAP.md) for the state model and incremental-transfer path.

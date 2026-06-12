@@ -762,3 +762,24 @@ def test_admission_control_env_var(monkeypatch) -> None:
 
     assert config.admission_control == "token-capacity"
     assert config.active_decode_blocks_threshold == 1.0
+
+
+def test_decode_migration_requires_kv_router_mode() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    args = parser.parse_args(["--enable-decode-migration"])
+    config = FrontendConfig.from_cli_args(args)
+    with pytest.raises(ValueError, match="requires --router-mode=kv"):
+        config.validate()
+
+
+def test_decode_migration_accepts_normal_dynamo_frontend_with_kv_router() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    args = parser.parse_args(
+        ["--enable-decode-migration", "--router-mode", "kv"]
+    )
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+    assert config.enable_decode_migration is True
+    assert config.chat_processor == "dynamo"

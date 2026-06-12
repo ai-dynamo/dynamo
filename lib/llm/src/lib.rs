@@ -9,6 +9,7 @@
 pub mod agents;
 pub mod backend;
 pub mod common;
+pub mod decode_migration;
 pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;

@@ -971,6 +971,7 @@ impl ModelWatcher {
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
                         router_config.enforce_disagg,
+                        router_config.enable_decode_migration,
                     )
                     .await
                     .context("build_preprocessed_routing")?,

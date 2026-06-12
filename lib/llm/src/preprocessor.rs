@@ -818,6 +818,7 @@ impl OpenAIPreprocessor {
             let hints = nvext.agent_hints.as_ref();
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
             builder.agent_context(nvext.agent_context.clone());
+            builder.decode_migration(nvext.decode_migration.clone());
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,

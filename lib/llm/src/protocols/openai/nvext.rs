@@ -12,6 +12,7 @@ use validator::{Validate, ValidationError};
 pub use crate::agents::context::AgentContext;
 use crate::protocols::TokenIdType;
 pub use crate::protocols::common::llm_backend::PromptLogprobs;
+use crate::protocols::common::preprocessor::DecodeMigrationPolicy;
 pub use crate::protocols::common::timing::TimingInfo;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
@@ -511,6 +512,11 @@ pub struct NvExt {
     #[schema(value_type = RoutingConstraintsSchema)]
     pub routing_constraints: Option<RoutingConstraints>,
 
+    /// Optional policy for migrating an actively decoding request to another worker.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_migration: Option<DecodeMigrationPolicy>,
+
     /// Parameters forwarded to global router .
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -651,6 +657,7 @@ mod tests {
         assert_eq!(nv_ext.request_timestamp_ms, None);
         assert_eq!(nv_ext.session_control, None);
         assert_eq!(nv_ext.routing_constraints, None);
+        assert_eq!(nv_ext.decode_migration, None);
     }
 
     // Test valid builder configurations

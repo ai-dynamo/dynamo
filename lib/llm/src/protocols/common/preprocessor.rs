@@ -33,6 +33,60 @@ pub struct RouterParams {
     pub itl_target: Option<f64>,
 }
 
+/// Taint constraints used independently for decode-migration source and destination selection.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct DecodeMigrationConstraints {
+    /// Worker taints that must be present for the worker to be eligible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_taints: Vec<String>,
+
+    /// Soft preference weights keyed by worker taint.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub preferred_taints: std::collections::HashMap<String, f32>,
+}
+
+impl From<&DecodeMigrationConstraints> for RoutingConstraints {
+    fn from(value: &DecodeMigrationConstraints) -> Self {
+        Self {
+            required_taints: value.required_taints.iter().cloned().collect(),
+            preferred_taints: value.preferred_taints.clone(),
+        }
+    }
+}
+
+/// The single condition that causes a running request to migrate.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DecodeMigrationTrigger {
+    /// Migrate after this token ID has been emitted by the source.
+    TokenId { token_id: TokenIdType },
+    /// Migrate once prompt plus generated token count reaches this value.
+    SequenceLength { tokens: u32 },
+}
+
+/// Per-request decode-to-decode migration policy supplied through `nvext`.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DecodeMigrationPolicy {
+    /// Independent constraints for selecting the initial source worker.
+    #[serde(default)]
+    pub source: DecodeMigrationConstraints,
+    /// Independent constraints for selecting the destination worker.
+    #[serde(default)]
+    pub destination: DecodeMigrationConstraints,
+    /// Exactly one migration trigger.
+    pub trigger: DecodeMigrationTrigger,
+}
+
+/// Framework-owned state added to source and destination generate requests.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DecodeMigrationRequestState {
+    pub rid: String,
+    pub migration_id: String,
+    pub source_dp_rank: u32,
+    #[serde(default)]
+    pub is_destination: bool,
+}
+
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine
 /// which worker(s) should handle the request.
@@ -245,6 +299,16 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_info: Option<BootstrapInfo>,
+
+    /// Per-request policy consumed by Dynamo's decode-migration operator.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_migration: Option<DecodeMigrationPolicy>,
+
+    /// Framework-owned destination handoff state; never accepted from public API nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_migration_state: Option<DecodeMigrationRequestState>,
 
     /// Additional arguments for extensibility
     #[builder(default)]

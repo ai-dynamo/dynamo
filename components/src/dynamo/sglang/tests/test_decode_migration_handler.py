@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
@@ -15,8 +16,12 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
     def handler(self):
         handler = object.__new__(DecodeWorkerHandler)
         handler._decode_migration_reservations = {}
+        handler._decode_migration_lock = asyncio.Lock()
         handler.engine = SimpleNamespace(
             tokenizer_manager=SimpleNamespace(abort_request=Mock())
+        )
+        handler.config = SimpleNamespace(
+            server_args=SimpleNamespace(enable_decode_migration=True)
         )
         return handler
 
@@ -51,6 +56,132 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         self.assertEqual(responses[0]["status"], "ready")
         self.assertEqual(responses[0]["bootstrap_room"], 17)
         handler.engine.async_generate.assert_not_called()
+
+
+    async def test_source_generate_uses_framework_migration_rid(self):
+        handler = self.handler()
+        handler.use_sglang_tokenizer = False
+        handler.enable_trace = False
+        handler.serving_mode = "aggregated"
+        handler._routed_experts_kwargs = {}
+        handler._enable_frontend_decoding = False
+        handler._mm_hashes_supported = False
+        handler._build_sampling_params = lambda request: {}
+        handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+        handler._build_logprob_kwargs = lambda request: {}
+        handler._resolve_lora = lambda request: None
+
+        async def engine_stream():
+            yield {"token_ids": [9]}
+
+        handler.engine.async_generate = AsyncMock(return_value=engine_stream())
+
+        async def process_token_stream(stream, context, *args, **kwargs):
+            del context, args, kwargs
+            async for item in stream:
+                yield item
+
+        handler._process_token_stream = process_token_stream
+        context = SimpleNamespace(
+            id=lambda: "destination-transport-id",
+            trace_id="frontend-trace-id",
+        )
+
+        responses = await collect(
+            handler.generate(
+                {
+                    "model": "model",
+                    "token_ids": [1, 2, 3],
+                    "stop_conditions": {},
+                    "sampling_options": {},
+                    "output_options": {},
+                    "decode_migration_state": {
+                        "rid": "source-engine-rid",
+                        "migration_id": "migration",
+                        "source_dp_rank": 0,
+                    },
+                },
+                context,
+            )
+        )
+
+        self.assertEqual(responses, [{"token_ids": [9]}])
+        self.assertEqual(
+            handler.engine.async_generate.await_args.kwargs["rid"],
+            "source-engine-rid",
+        )
+
+    async def test_prepared_stream_attaches_in_aggregated_mode_with_nested_state(self):
+        handler = self.handler()
+        handler.use_sglang_tokenizer = False
+        handler.enable_trace = False
+        handler.serving_mode = "aggregated"
+        handler._routed_experts_kwargs = {}
+        handler._build_sampling_params = lambda request: {}
+        handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+        handler._build_logprob_kwargs = lambda request: {}
+        handler._resolve_lora = lambda request: None
+        handler.engine.async_generate = AsyncMock(
+            side_effect=AssertionError("prepared stream must be reused")
+        )
+
+        async def prepared_stream():
+            yield {"token_ids": [9]}
+
+        async def process_token_stream(stream, context, *args, **kwargs):
+            del context, args, kwargs
+            async for item in stream:
+                yield item
+
+        handler._process_token_stream = process_token_stream
+        handler._decode_migration_reservations["migration"] = {
+            "migration_id": "migration",
+            "rid": "request",
+            "status": "ready",
+            "decode_stream": prepared_stream(),
+        }
+        context = SimpleNamespace(
+            id=lambda: "frontend-request",
+            trace_id="frontend-trace",
+        )
+
+        responses = await collect(
+            handler.generate(
+                {
+                    "model": "model",
+                    "token_ids": [1, 2, 3],
+                    "stop_conditions": {},
+                    "sampling_options": {},
+                    "output_options": {},
+                    "decode_migration_state": {
+                        "rid": "request",
+                        "migration_id": "migration",
+                        "source_dp_rank": 0,
+                    },
+                    "bootstrap_info": {
+                        "bootstrap_host": "127.0.0.1",
+                        "bootstrap_port": 8998,
+                        "bootstrap_room": 17,
+                    },
+                },
+                context,
+            )
+        )
+
+        self.assertEqual(responses, [{"token_ids": [9]}])
+        self.assertNotIn("migration", handler._decode_migration_reservations)
+        handler.engine.async_generate.assert_not_called()
+
+    async def test_prepare_rejects_worker_without_migration_capability(self):
+        handler = self.handler()
+        handler.config.server_args.enable_decode_migration = False
+        responses = await collect(
+            handler.prepare_decode_migration(
+                {"migration_id": "migration", "rid": "request"}
+            )
+        )
+        self.assertFalse(responses[0]["success"])
+        self.assertIn("--enable-decode-migration", responses[0]["error"])
 
     async def test_destination_abort_releases_session_and_engine_request(self):
         handler = self.handler()
@@ -93,6 +224,147 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         self.assertTrue(responses[0]["success"])
         self.assertEqual(responses[0]["status"], "unknown")
         handler.engine.tokenizer_manager.abort_request.assert_not_called()
+
+
+    def configure_destination_handler(self, handler):
+        handler.use_sglang_tokenizer = False
+        handler.enable_trace = False
+        handler.serving_mode = "aggregated"
+        handler._routed_experts_kwargs = {}
+        handler._enable_frontend_decoding = False
+        handler._mm_hashes_supported = False
+        handler._build_sampling_params = lambda request: {}
+        handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+        handler._build_logprob_kwargs = lambda request: {}
+        handler._resolve_lora = lambda request: None
+        handler._session_kwargs = lambda request: {}
+        handler._priority_kwargs = lambda priority: {}
+
+    def arm_request(self):
+        return {
+            "migration_id": "migration",
+            "rid": "request",
+            "source_state": {"committed_len": 3},
+            "destination_request": {
+                "model": "model",
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {},
+                "sampling_options": {},
+                "output_options": {},
+                "routing": {"dp_rank": 0},
+                "decode_migration_state": {
+                    "rid": "request",
+                    "migration_id": "migration",
+                    "source_dp_rank": 0,
+                    "is_destination": True,
+                },
+                "bootstrap_info": {
+                    "bootstrap_host": "127.0.0.1",
+                    "bootstrap_port": 8998,
+                    "bootstrap_room": 17,
+                },
+            },
+        }
+
+    async def test_concurrent_arm_is_idempotent(self):
+        handler = self.handler()
+        self.configure_destination_handler(handler)
+
+        async def prepared_stream():
+            yield {"token_ids": [9]}
+
+        async def arm(**kwargs):
+            del kwargs
+            await asyncio.sleep(0)
+            return prepared_stream()
+
+        handler.engine.async_generate = AsyncMock(side_effect=arm)
+        handler._decode_migration_reservations["migration"] = {
+            "migration_id": "migration",
+            "rid": "request",
+            "bootstrap_room": 17,
+            "source": {"bootstrap_host": "127.0.0.1", "bootstrap_port": 8998},
+            "reserve_tokens": 128,
+            "status": "reserved",
+        }
+
+        first, second = await asyncio.gather(
+            collect(handler.prepare_decode_migration(self.arm_request())),
+            collect(handler.prepare_decode_migration(self.arm_request())),
+        )
+
+        self.assertEqual(first[0]["status"], "ready")
+        self.assertEqual(second[0]["status"], "ready")
+        handler.engine.async_generate.assert_awaited_once()
+
+    async def test_abort_waits_for_inflight_arm_then_cancels_engine_request(self):
+        handler = self.handler()
+        self.configure_destination_handler(handler)
+        arm_started = asyncio.Event()
+        allow_arm = asyncio.Event()
+
+        async def prepared_stream():
+            yield {"token_ids": [9]}
+
+        async def arm(**kwargs):
+            del kwargs
+            arm_started.set()
+            await allow_arm.wait()
+            return prepared_stream()
+
+        handler.engine.async_generate = AsyncMock(side_effect=arm)
+        handler._decode_migration_reservations["migration"] = {
+            "migration_id": "migration",
+            "rid": "request",
+            "bootstrap_room": 17,
+            "source": {"bootstrap_host": "127.0.0.1", "bootstrap_port": 8998},
+            "reserve_tokens": 128,
+            "status": "reserved",
+        }
+
+        arm_task = asyncio.create_task(
+            collect(handler.prepare_decode_migration(self.arm_request()))
+        )
+        await arm_started.wait()
+        abort_task = asyncio.create_task(
+            collect(
+                handler.finalize_decode_migration(
+                    {
+                        "side": "destination",
+                        "action": "abort",
+                        "migration_id": "migration",
+                    }
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(abort_task.done())
+
+        allow_arm.set()
+        arm_response, abort_response = await asyncio.gather(arm_task, abort_task)
+
+        self.assertEqual(arm_response[0]["status"], "ready")
+        self.assertEqual(abort_response[0]["status"], "aborted")
+        self.assertNotIn("migration", handler._decode_migration_reservations)
+        handler.engine.tokenizer_manager.abort_request.assert_called_once_with(
+            rid="request", abort_all=False
+        )
+
+    async def test_destination_generate_without_prepared_stream_fails_closed(self):
+        handler = self.handler()
+        self.configure_destination_handler(handler)
+        handler.engine.async_generate = AsyncMock(
+            side_effect=AssertionError("must not start a fresh destination request")
+        )
+        context = SimpleNamespace(
+            id=lambda: "destination-transport-id",
+            trace_id="frontend-trace-id",
+        )
+        request = self.arm_request()["destination_request"]
+
+        with self.assertRaisesRegex(RuntimeError, "Prepared decode migration stream"):
+            await collect(handler.generate(request, context))
+        handler.engine.async_generate.assert_not_called()
 
 
 if __name__ == "__main__":

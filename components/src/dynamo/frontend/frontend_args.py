@@ -64,6 +64,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
 
     migration_limit: int
     migration_max_seq_len: Optional[int]
+    enable_decode_migration: bool
     model_name: Optional[str]
     model_path: Optional[str]
     metrics_prefix: Optional[str] = None
@@ -96,6 +97,12 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
+            )
+        if self.enable_decode_migration and self.router_mode != "kv":
+            raise ValueError("--enable-decode-migration requires --router-mode=kv")
+        if self.enable_decode_migration and self.chat_processor != "dynamo":
+            raise ValueError(
+                "--enable-decode-migration currently requires --dyn-chat-processor=dynamo"
             )
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
@@ -254,6 +261,17 @@ class FrontendArgGroup(ArgGroup):
                 "Dynamo namespace prefix for model discovery scoping. Discovers models from "
                 "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
                 "'ns-def456'). Takes precedence over --namespace if both are specified."
+            ),
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-decode-migration",
+            env_var="DYN_ENABLE_DECODE_MIGRATION",
+            default=False,
+            help=(
+                "Enable request-driven decode-to-decode migration. Requires KV routing; "
+                "requests opt in with nvext.decode_migration."
             ),
         )
 

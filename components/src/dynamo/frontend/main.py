@@ -241,7 +241,10 @@ async def async_main():
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(
-        router_mode, kv_router_config, **config.router_kwargs()
+        router_mode,
+        kv_router_config,
+        enable_decode_migration=config.enable_decode_migration,
+        **config.router_kwargs(),
     )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,

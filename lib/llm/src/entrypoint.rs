@@ -48,6 +48,7 @@ pub struct RouterConfig {
     /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
     pub enforce_disagg: bool,
+    pub enable_decode_migration: bool,
 }
 
 impl RouterConfig {
@@ -57,6 +58,7 @@ impl RouterConfig {
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
+            enable_decode_migration: false,
         }
     }
 
@@ -67,6 +69,11 @@ impl RouterConfig {
 
     pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
         self.enforce_disagg = enforce_disagg;
+        self
+    }
+
+    pub fn with_decode_migration(mut self, enabled: bool) -> Self {
+        self.enable_decode_migration = enabled;
         self
     }
 }

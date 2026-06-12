@@ -8,6 +8,7 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::{Backend, ExecutionContext},
+    decode_migration::DecodeMigration,
     discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
@@ -49,6 +50,7 @@ pub struct PreprocessedRouting {
     backend_engine:
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     prefill_router: Arc<PrefillRouter>,
+    decode_migration: Arc<DecodeMigration>,
 }
 
 pub struct PreparedEngine {
@@ -145,6 +147,7 @@ pub async fn build_preprocessed_routing(
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    enable_decode_migration: bool,
 ) -> anyhow::Result<PreprocessedRouting> {
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
@@ -166,11 +169,14 @@ pub async fn build_preprocessed_routing(
     let prefill_router = prefill_chooser
         .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
 
-    let backend_engine = preprocessed_backend_engine(router, router_mode, chooser)?;
+    let backend_engine = preprocessed_backend_engine(router, router_mode, chooser.clone())?;
+    let decode_migration =
+        DecodeMigration::new(enable_decode_migration, client.clone(), chooser).await?;
 
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,
+        decode_migration,
     })
 }
 
@@ -346,6 +352,7 @@ impl PreprocessedRouting {
         let token_backend = Backend::from_tokenizer(tokenizer).into_operator();
         let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
             .into_operator_for::<BackendOutput>();
+        let decode_migration = self.decode_migration.into_operator();
         let prefill_op = self.prefill_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
@@ -353,9 +360,11 @@ impl PreprocessedRouting {
             .link(preprocessor_op.forward_edge())?
             .link(migration.forward_edge())?
             .link(token_backend.forward_edge())?
+            .link(decode_migration.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
+            .link(decode_migration.backward_edge())?
             .link(token_backend.backward_edge())?
             .link(migration.backward_edge())?
             .link(preprocessor_op.backward_edge())?
@@ -381,14 +390,17 @@ impl PreprocessedRouting {
         >::new();
         let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
             .into_operator_for::<LLMEngineOutput>();
+        let decode_migration = self.decode_migration.into_operator();
         let prefill_op = self.prefill_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
         let engine = frontend
             .link(migration.forward_edge())?
+            .link(decode_migration.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
+            .link(decode_migration.backward_edge())?
             .link(migration.backward_edge())?
             .link(frontend)?;
 
