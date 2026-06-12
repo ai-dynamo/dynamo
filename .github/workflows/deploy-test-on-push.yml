@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Runs an infra smoke test on push without requiring a PR. This validates that
-# the prod deploy-test runner can reach aws-dev-02 and create a GPU-requesting
-# Job in the static deploy-test namespace. It intentionally does not install the
-# Dynamo operator or create a DynamoGraphDeployment.
+# Runs infra smoke tests on push without requiring a PR. This validates that the
+# prod deploy-test runner can reach aws-dev-02, create a GPU-requesting Job in
+# the static deploy-test namespace, and create/connect to a short-lived vCluster.
+# It intentionally does not install the Dynamo operator or create a
+# DynamoGraphDeployment.
 
 name: Deploy Test on Push
 
@@ -58,6 +59,17 @@ jobs:
           kubectl get priorityclass ci-nightly-high-priority
           kubectl get clusterpolicies.kyverno.io deploy-test-pod-policy
           kubectl create namespace "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ResourceQuota
+          metadata:
+            name: deploy-test-gpu-quota
+            namespace: ${TEST_NAMESPACE}
+          spec:
+            hard:
+              requests.nvidia.com/gpu: "16"
+              limits.nvidia.com/gpu: "16"
+          EOF
 
           for _ in $(seq 1 120); do
             if kubectl get resourcequota deploy-test-gpu-quota -n "${TEST_NAMESPACE}" >/dev/null 2>&1; then
@@ -154,3 +166,91 @@ jobs:
           echo "- Namespace: \`${TEST_NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Job: \`${JOB_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Pod: \`${POD_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  vcluster-smoke:
+    name: vCluster Smoke Test
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 20
+    env:
+      KUBE_CONTEXT: ${{ inputs.kube_context || 'nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02' }}
+      VCLUSTER_NAME: vc-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAMESPACE: vc-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_K8S_VERSION: v1.32.13
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set kubectl context
+        shell: bash
+        run: |
+          cp /teleport/kubeconfig.yaml /tmp/kubeconfig.yaml
+          kubectl --kubeconfig=/tmp/kubeconfig.yaml config use-context "${KUBE_CONTEXT}"
+          echo "KUBECONFIG=/tmp/kubeconfig.yaml" >> $GITHUB_ENV
+
+      - name: Install vCluster CLI
+        uses: ./.github/actions/install-vcluster-cli
+
+      - name: Create and verify vCluster
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PF_PID=""
+
+          cleanup() {
+            echo "::group::Cleanup vCluster smoke"
+            if [ -n "${PF_PID}" ] && kill -0 "${PF_PID}" 2>/dev/null; then
+              kill "${PF_PID}" || true
+            fi
+            kubectl get pods -n "${VCLUSTER_NAMESPACE}" -o wide || true
+            vcluster delete "${VCLUSTER_NAME}" --namespace "${VCLUSTER_NAMESPACE}" 2>&1 || true
+            kubectl delete namespace "${VCLUSTER_NAMESPACE}" --ignore-not-found=true --timeout=120s || true
+            echo "::endgroup::"
+          }
+          trap cleanup EXIT
+
+          kubectl create namespace "${VCLUSTER_NAMESPACE}"
+
+          vcluster create "${VCLUSTER_NAME}" \
+            --namespace "${VCLUSTER_NAMESPACE}" \
+            --connect=false \
+            --upgrade \
+            --set controlPlane.distro.k8s.enabled=true \
+            --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}"
+
+          kubectl wait --for=condition=ready pod \
+            -l "app=vcluster,release=${VCLUSTER_NAME}" \
+            -n "${VCLUSTER_NAMESPACE}" \
+            --timeout=900s
+
+          kubectl get pods -n "${VCLUSTER_NAMESPACE}" -o wide
+
+          kubectl port-forward -n "${VCLUSTER_NAMESPACE}" "svc/${VCLUSTER_NAME}" 8444:443 &
+          PF_PID=$!
+
+          for attempt in $(seq 1 30); do
+            if ! kill -0 "${PF_PID}" 2>/dev/null; then
+              echo "::error::kubectl port-forward exited before the vCluster API was reachable"
+              exit 1
+            fi
+            if curl -sk --connect-timeout 1 --max-time 2 https://127.0.0.1:8444/healthz >/dev/null; then
+              echo "vCluster API reachable after ${attempt} attempt(s)"
+              break
+            fi
+            if [ "${attempt}" -eq 30 ]; then
+              echo "::error::vCluster API did not become reachable within 60s"
+              exit 1
+            fi
+            sleep 2
+          done
+
+          vcluster connect "${VCLUSTER_NAME}" \
+            --namespace "${VCLUSTER_NAMESPACE}" \
+            --server=https://127.0.0.1:8444 \
+            --print > "${RUNNER_TEMP}/kubeconfig-vcluster-smoke"
+
+          kubectl --kubeconfig="${RUNNER_TEMP}/kubeconfig-vcluster-smoke" \
+            --request-timeout=15s get ns
+
+          echo "### vCluster smoke PASSED" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "- Namespace: \`${VCLUSTER_NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- vCluster: \`${VCLUSTER_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
