@@ -200,7 +200,7 @@ RUN uv pip uninstall triton && \
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    uv pip install --system --no-deps \
+    uv pip install {{ pip_target }} --no-deps \
         "modelexpress==${MODELEXPRESS_VERSION}"
 {% endif %}
 
