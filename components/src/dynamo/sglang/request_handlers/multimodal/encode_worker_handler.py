@@ -137,7 +137,14 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
     ) -> None:
         if self._cache_publisher is None or (not added_keys and not removed_keys):
             return
-        self._cache_publisher.publish_delta(added_keys, removed_keys)
+        try:
+            self._cache_publisher.publish_delta(added_keys, removed_keys)
+        except Exception:
+            logger.warning(
+                "Failed to publish embedding cache delta; "
+                "routing cache state may be stale",
+                exc_info=True,
+            )
 
     def cleanup(self) -> None:
         pass
