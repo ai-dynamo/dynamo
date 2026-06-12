@@ -905,8 +905,7 @@ impl ModelWatcher {
             // monitor (1-to-1), scoped to this WorkerSet's Client/namespace. The monitor tracks
             // Prometheus metrics (active_decode_blocks, active_prefill_tokens, worker TTFT/ITL
             // cleanup); thresholds control overload detection. The monitor and prefill router are
-            // created together here, so the monitor is passed into the prefill router directly —
-            // avoiding a fragile namespace->monitor lookup at activation time (DYN-3212).
+            // created together here, so the monitor is passed into the prefill router directly.
             //
             // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
             // so that overload-state updates (via set_overloaded_instances) are visible to the
