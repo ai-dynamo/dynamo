@@ -801,6 +801,7 @@ def test_router_decisions(
         request_plane=request_plane,
         zmq_kv_events=zmq_kv_events,
         standalone_indexer=zmq_kv_events,
+        standalone_selector=zmq_kv_events,
         model_name=MODEL_NAME,
     ) as mockers:
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
@@ -829,6 +830,7 @@ def test_router_decisions(
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             standalone_indexer_url=mockers.standalone_indexer_url,
+            standalone_selector_url=mockers.standalone_selector_url,
             router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
 

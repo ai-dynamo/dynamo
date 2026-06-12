@@ -2723,6 +2723,7 @@ def _test_router_decisions(
     durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
+    standalone_selector_url: Optional[str] = None,
     router_aic_config: Optional[dict[str, Any]] = None,
     router_predicted_ttl_secs: Optional[float] = None,
     initial_wait: float = 0.25,
@@ -3045,6 +3046,49 @@ def _test_router_decisions(
                     )
 
         asyncio.run(_verify_scores())
+
+    # Verify standalone selection service scores via HTTP POST /overlap_scores.
+    if standalone_selector_url:
+        _dp_a = dp_rank_a if dp_rank_a is not None else 0
+        _dp_b = dp_rank_b if dp_rank_b is not None else 0
+
+        async def _verify_selection_service_scores():
+            # The sidecar readiness gate confirms registration; allow KV events to settle.
+            await asyncio.sleep(3)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{standalone_selector_url}/overlap_scores",
+                    json={"token_ids": req4_tokens, "model_name": model_name},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"POST /overlap_scores failed: {resp.status} {await resp.text()}"
+                    body = await resp.json()
+
+                    scores = {
+                        (worker["worker_id"], worker["dp_rank"]): worker
+                        for worker in body["workers"]
+                    }
+                    score_a = scores[(worker_a_id, _dp_a)]["device_blocks"]
+                    score_b = scores[(worker_b_id, _dp_b)]["device_blocks"]
+
+                    logger.info(
+                        "Standalone selection /overlap_scores: %s[%s]=%s, %s[%s]=%s",
+                        worker_a_id,
+                        _dp_a,
+                        score_a,
+                        worker_b_id,
+                        _dp_b,
+                        score_b,
+                    )
+                    assert score_a > score_b, (
+                        f"Expected selection service worker {worker_a_id} dp_rank {_dp_a} "
+                        f"score {score_a} > worker {worker_b_id} dp_rank {_dp_b} "
+                        f"score {score_b} for req4 tokens"
+                    )
+
+        asyncio.run(_verify_selection_service_scores())
 
 
 def _test_busy_threshold_endpoint(
