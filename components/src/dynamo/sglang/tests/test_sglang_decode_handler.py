@@ -268,13 +268,18 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
 class TestMultimodalGuard:
     """Tests for multimodal guard when frontend extraction is missing."""
 
-    IMAGE_MESSAGE = {
-        "role": "user",
-        "content": [
-            {"type": "image_url", "image_url": {"url": "https://example.com/a.jpg"}},
-            {"type": "text", "text": "describe image"},
-        ],
-    }
+    @staticmethod
+    def _image_message():
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/a.jpg"},
+                },
+                {"type": "text", "text": "describe image"},
+            ],
+        }
 
     @pytest.mark.parametrize(
         "request_factory",
@@ -286,7 +291,7 @@ class TestMultimodalGuard:
     )
     def test_raises_for_image_url(self, request_factory):
         with pytest.raises(RuntimeError, match="multi_modal_data"):
-            raise_if_unextracted_multimodal(request_factory(self.IMAGE_MESSAGE))
+            raise_if_unextracted_multimodal(request_factory(self._image_message()))
 
     def test_text_only_request_bypasses_guard(self):
         raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
