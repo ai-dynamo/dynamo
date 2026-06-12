@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-snapshot-tp8
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    experimental:
+      checkpoint:
+        enabled: true
+        startupPolicy: WaitForCheckpoint
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "8"
+          - --disable-custom-all-reduce
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-placeholder:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "8"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 20Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: worker
