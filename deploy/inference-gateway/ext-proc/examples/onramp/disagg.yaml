@@ -130,6 +130,9 @@ spec:
         dynamo-role: decode
     spec:
       containers:
+        # Decode vLLM listens on :8001 (in-pod only). The pd-router-sidecar
+        # below fronts the pool targetPort :8000 and drives the prefill->decode
+        # KV-transfer handshake before forwarding here.
         - name: vllm
           image: vllm/vllm-openai:latest
           args:
@@ -138,7 +141,7 @@ spec:
             - "--served-model-name"
             - "Qwen/Qwen3-0.6B"
             - "--port"
-            - "8000"
+            - "8001"
             - "--enable-prefix-caching"
             - "--block-size"
             - "16"
@@ -151,8 +154,8 @@ spec:
             - "--kv-events-config"
             - '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
           ports:
-            - name: http
-              containerPort: 8000
+            - name: vllm-local
+              containerPort: 8001
             - name: kv-events
               containerPort: 5557
           env:
@@ -176,14 +179,30 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
-        # --- OPTIONAL: decode-side P/D routing sidecar -------------------------
-        # Reads `x-prefiller-host-port` (set by the EPP) and runs vLLM's
-        # kv_transfer_params handshake against the selected prefill pod. Provide
-        # your own image here; the EPP only emits the header, it does not run
-        # the transfer. See issue #10426 (non-goals) for why this lives on the
-        # decode side rather than in the EPP.
-        # - name: pd-router-sidecar
-        #   image: <your-pd-routing-sidecar>
+        # Dynamo decode-side P/D routing sidecar: receives gateway traffic on
+        # :8000 (the InferencePool targetPort), reads x-prefiller-host-port set
+        # by the EPP, runs vLLM's NIXL kv_transfer_params handshake against the
+        # selected prefill pod, then forwards decode to the local vLLM (:8001).
+        - name: pd-router-sidecar
+          image: nvcr.io/nvidia/ai-dynamo/pd-sidecar:my-tag
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DYN_PD_LISTEN_ADDR
+              value: "0.0.0.0:8000"
+            - name: DYN_PD_DECODE_URL
+              value: "http://127.0.0.1:8001"
+            - name: RUST_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
       tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu

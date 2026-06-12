@@ -66,6 +66,10 @@ COPY --from=dynamo lib/ lib/
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 
+# The Cargo workspace also lists the pd-sidecar crate as a member; copy it so the
+# workspace loads (only dynamo-ext-proc is actually compiled by the -p flag below).
+COPY --from=dynamo deploy/inference-gateway/pd-sidecar/ deploy/inference-gateway/pd-sidecar/
+
 # Build the binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH} \
