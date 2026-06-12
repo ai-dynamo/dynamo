@@ -6,8 +6,9 @@ use std::collections::{HashMap, HashSet};
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{StorageTier, WorkerWithDpRank};
 use crate::scheduling::TierOverlapBlocks;
+use crate::scheduling::config::RouterConfigOverride;
 
-use super::types::{OverlapScoresResponse, WorkerOverlapScore};
+use super::types::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 
 #[derive(Default)]
 pub(super) struct OverlapInputs {
@@ -102,10 +103,13 @@ pub(super) fn tier_overlap_blocks_from_tiered_matches(
 
 pub(super) fn build_overlap_scores_response(
     config: &crate::config::KvRouterConfig,
+    config_override: Option<&RouterConfigOverride>,
     tiered: &TieredMatchDetails,
     block_size: u32,
+    schedulable_workers: impl IntoIterator<Item = WorkerWithDpRank>,
 ) -> OverlapScoresResponse {
     let mut all_workers = HashSet::new();
+    all_workers.extend(schedulable_workers);
     for worker in tiered.device.overlap_scores.scores.keys() {
         all_workers.insert(*worker);
     }
@@ -118,6 +122,9 @@ pub(super) fn build_overlap_scores_response(
     let host = tiered.lower_tier.get(&StorageTier::HostPinned);
     let disk = tiered.lower_tier.get(&StorageTier::Disk);
     let external = tiered.lower_tier.get(&StorageTier::External);
+    let overlap_score_credit = config_override
+        .and_then(|cfg| cfg.overlap_score_credit)
+        .unwrap_or(config.overlap_score_credit);
 
     let mut workers: Vec<_> = all_workers
         .into_iter()
@@ -141,7 +148,9 @@ pub(super) fn build_overlap_scores_response(
                     .and_then(|matches| matches.hits.get(&worker))
                     .copied()
                     .unwrap_or(0);
-            let router_credit_blocks = device_blocks as f64
+            let host_pinned_blocks = device_blocks + host_pinned_extension_blocks;
+            let disk_blocks = host_pinned_blocks + disk_extension_blocks;
+            let router_credit_blocks = overlap_score_credit * device_blocks as f64
                 + config.host_cache_hit_weight * host_pinned_extension_blocks as f64
                 + config.disk_cache_hit_weight * disk_extension_blocks as f64;
 
@@ -149,8 +158,11 @@ pub(super) fn build_overlap_scores_response(
                 worker_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
                 device_blocks,
+                host_pinned_blocks,
+                disk_blocks,
                 host_pinned_extension_blocks,
                 disk_extension_blocks,
+                shared_beyond_device_blocks: None,
                 router_credit_blocks,
             }
         })
@@ -161,5 +173,11 @@ pub(super) fn build_overlap_scores_response(
         block_size,
         num_blocks: tiered.device.overlap_scores.frequencies.len(),
         workers,
+        shared_cache: SharedCacheOverlapScore {
+            enabled: false,
+            total_hit_blocks: 0,
+            ranges: Vec::new(),
+            error: None,
+        },
     }
 }

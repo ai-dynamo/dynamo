@@ -73,6 +73,7 @@ pub struct SelectionWorkerConfig {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
+    pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
     #[serde(default)]
@@ -141,6 +142,7 @@ pub struct WorkerCatalogRecord {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
+    pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
     #[serde(default)]
@@ -169,6 +171,7 @@ impl WorkerCatalogRecord {
             max_num_batched_tokens: req.max_num_batched_tokens,
             total_kv_blocks: req.total_kv_blocks,
             stable_routing_id: req.stable_routing_id,
+            is_eagle: req.is_eagle,
             taints: req.taints,
             topology_domains: req.topology_domains,
             kv_transfer_domain: req.kv_transfer_domain,
@@ -204,6 +207,7 @@ impl WorkerCatalogRecord {
             max_num_batched_tokens: self.max_num_batched_tokens,
             total_kv_blocks: self.total_kv_blocks,
             stable_routing_id: self.stable_routing_id.clone(),
+            is_eagle: self.is_eagle,
             taints: self.taints.clone(),
             topology_domains: self.topology_domains.clone(),
             kv_transfer_domain: self.kv_transfer_domain.clone(),
@@ -287,6 +291,8 @@ pub struct WorkerRequest {
     #[serde(default)]
     pub stable_routing_id: Option<String>,
     #[serde(default)]
+    pub is_eagle: Option<bool>,
+    #[serde(default)]
     pub taints: HashSet<String>,
     #[serde(default)]
     pub topology_domains: HashMap<String, String>,
@@ -320,6 +326,8 @@ pub struct WorkerPatchRequest {
     pub total_kv_blocks: Option<u64>,
     #[serde(default)]
     pub stable_routing_id: Option<String>,
+    #[serde(default)]
+    pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: Option<HashSet<String>>,
     #[serde(default)]
@@ -363,6 +371,9 @@ impl WorkerCatalogRecord {
         }
         if patch.stable_routing_id.is_some() {
             self.stable_routing_id = patch.stable_routing_id;
+        }
+        if patch.is_eagle.is_some() {
+            self.is_eagle = patch.is_eagle;
         }
         if let Some(taints) = patch.taints {
             self.taints = taints;
@@ -451,6 +462,12 @@ pub struct ReservationRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct OutputBlockRequest {
+    #[serde(default)]
+    pub decay_fraction: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PotentialLoadsRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
@@ -470,6 +487,8 @@ pub struct OverlapScoresRequest {
     pub tenant_id: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
+    #[serde(default)]
+    pub router_config_override: Option<RouterConfigOverride>,
 }
 
 #[derive(Debug, Serialize)]
@@ -519,9 +538,20 @@ pub struct WorkerOverlapScore {
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub device_blocks: usize,
+    pub host_pinned_blocks: usize,
+    pub disk_blocks: usize,
     pub host_pinned_extension_blocks: usize,
     pub disk_extension_blocks: usize,
+    pub shared_beyond_device_blocks: Option<u32>,
     pub router_credit_blocks: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SharedCacheOverlapScore {
+    pub enabled: bool,
+    pub total_hit_blocks: u32,
+    pub ranges: Vec<(u32, u32)>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -529,4 +559,5 @@ pub struct OverlapScoresResponse {
     pub block_size: u32,
     pub num_blocks: usize,
     pub workers: Vec<WorkerOverlapScore>,
+    pub shared_cache: SharedCacheOverlapScore,
 }

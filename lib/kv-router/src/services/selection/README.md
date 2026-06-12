@@ -63,9 +63,13 @@ duplicate/conflict handling.
 ### Lifecycle
 
 - `POST /reservations/{reservation_id}/prefill_complete`
+- `POST /reservations/{reservation_id}/output_block`
 - `DELETE /reservations/{reservation_id}`
 
 Lifecycle endpoints operate on `reservation_id`.
+`/output_block` accepts an optional `decay_fraction` in `[0.0, 1.0]` and is
+intended for clients that want parity with push-router output-block load
+tracking while they own the response stream.
 
 ## Request Inputs
 
@@ -74,6 +78,13 @@ For `/select`, `/select_and_reserve`, `/potential_loads`, and `/overlap_scores`:
 - If `token_ids` is present, the service computes block hashes and sequence
   hashes internally and ignores supplied hashes. `isl_tokens` is derived from
   `token_ids.len()`.
+- If `mm_routing_info.routing_token_ids` is present and non-empty, those tokens
+  are used for routing hash computation instead of `token_ids`, with
+  `mm_routing_info.block_mm_infos` aligned to routing blocks. Top-level
+  `block_mm_infos` may be supplied with `token_ids` for direct block-level MM
+  hashing.
+- `is_eagle` may be supplied per request; otherwise the worker catalog's
+  model-level `is_eagle` value is used, defaulting to `false`.
 - Otherwise, callers must provide `block_hashes`, `sequence_hashes`, and
   `isl_tokens`.
 
@@ -84,6 +95,11 @@ For `POST /reservations`:
 
 Signed hash values are reinterpreted bit-for-bit as unsigned router hashes,
 matching the standalone indexer and slot-tracker APIs.
+
+`/overlap_scores` returns all currently schedulable worker ranks for the model
+and tenant, including zero-hit rows, using the same host/disk cumulative fields
+as the Python-bound KV router. Shared-cache fields are present but disabled in
+this runtime-free service unless a shared-cache integration is added later.
 
 ## Retry Semantics
 

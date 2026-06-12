@@ -18,8 +18,8 @@ use crate::protocols::WorkerId;
 
 use super::core::{SelectionCore, SelectionServiceConfig};
 use super::types::{
-    OverlapScoresRequest, PotentialLoadsRequest, REQUEST_BODY_LIMIT_BYTES, ReservationRequest,
-    SelectAndReserveRequest, SelectRequest, WorkerPatchRequest, WorkerRequest,
+    OutputBlockRequest, OverlapScoresRequest, PotentialLoadsRequest, REQUEST_BODY_LIMIT_BYTES,
+    ReservationRequest, SelectAndReserveRequest, SelectRequest, WorkerPatchRequest, WorkerRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +145,24 @@ async fn delete_reservation(
     }
 }
 
+async fn add_output_block(
+    State(state): State<Arc<AppState>>,
+    Path(reservation_id): Path<String>,
+    payload: Result<Json<OutputBlockRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match payload {
+        Ok(payload) => payload,
+        Err(error) => return json_rejection(error),
+    };
+    match state
+        .core
+        .add_output_block(&reservation_id, req.decay_fraction)
+    {
+        Ok(()) => json_ok(StatusCode::OK),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn health() -> Response {
     json_ok(StatusCode::OK)
 }
@@ -227,6 +245,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/reservations/{reservation_id}/prefill_complete",
             post(prefill_complete),
+        )
+        .route(
+            "/reservations/{reservation_id}/output_block",
+            post(add_output_block),
         )
         .route("/reservations/{reservation_id}", delete(delete_reservation))
         .route("/workers", post(create_worker).get(list_workers))

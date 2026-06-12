@@ -9,11 +9,5 @@ from dynamo.llm import run_select_service
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    try:
-        run_select_service(args)
-    except Exception as exc:
-        if "-h" in args or "--help" in args:
-            print(exc)
-            return 0
-        raise
+    run_select_service(args)
     return 0

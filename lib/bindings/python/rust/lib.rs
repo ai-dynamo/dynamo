@@ -252,7 +252,11 @@ where
 }
 
 fn standalone_to_pyerr(err: anyhow::Error) -> PyErr {
-    #[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
+    #[cfg(any(
+        feature = "kv-indexer",
+        feature = "slot-tracker",
+        feature = "select-service"
+    ))]
     if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
         let _ = clap_error.print();
         return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());

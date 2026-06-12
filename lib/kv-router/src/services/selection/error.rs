@@ -49,9 +49,6 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         | KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
-        KvSchedulerError::BookingFailed(message) if message.contains("already exists") => {
-            StatusCode::CONFLICT
-        }
         KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
     }
 }

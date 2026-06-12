@@ -5,15 +5,29 @@ use dynamo_tokens::SequenceHash;
 use serde::Deserialize;
 
 use crate::protocols::{
-    BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    BlockExtraInfo, BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
 };
 
 use super::error::SelectionError;
+
+type RoutingTokensAndMmInfos<'a> = (&'a [u32], Option<&'a [Option<BlockExtraInfo>]>);
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MmRoutingInfoRequest {
+    pub routing_token_ids: Vec<u32>,
+    #[serde(default)]
+    pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PromptRequest {
     #[serde(default)]
     pub token_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    pub mm_routing_info: Option<MmRoutingInfoRequest>,
+    #[serde(default)]
+    pub block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     #[serde(default)]
     pub block_hashes: Option<Vec<i64>>,
     #[serde(default)]
@@ -22,18 +36,23 @@ pub struct PromptRequest {
     pub isl_tokens: Option<usize>,
     #[serde(default)]
     pub lora_name: Option<String>,
+    #[serde(default)]
+    pub is_eagle: Option<bool>,
 }
 
 impl PromptRequest {
     pub(super) fn normalize_for_selection(
         &self,
         block_size: u32,
+        default_is_eagle: bool,
     ) -> Result<NormalizedPrompt, SelectionError> {
-        if let Some(token_ids) = &self.token_ids {
+        if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
             return Ok(normalize_tokens(
                 token_ids,
                 block_size,
                 self.lora_name.as_deref(),
+                block_mm_infos,
+                self.is_eagle.unwrap_or(default_is_eagle),
             ));
         }
 
@@ -52,9 +71,16 @@ impl PromptRequest {
     pub(super) fn normalize_for_reservation(
         &self,
         block_size: u32,
+        default_is_eagle: bool,
     ) -> Result<NormalizedReservation, SelectionError> {
-        if let Some(token_ids) = &self.token_ids {
-            let normalized = normalize_tokens(token_ids, block_size, self.lora_name.as_deref());
+        if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
+            let normalized = normalize_tokens(
+                token_ids,
+                block_size,
+                self.lora_name.as_deref(),
+                block_mm_infos,
+                self.is_eagle.unwrap_or(default_is_eagle),
+            );
             return Ok(NormalizedReservation {
                 sequence_hashes: normalized.sequence_hashes,
             });
@@ -72,19 +98,37 @@ impl PromptRequest {
             sequence_hashes: signed_sequence_hashes(sequence_hashes),
         })
     }
+
+    fn routing_tokens_and_mm_infos(&self) -> Option<RoutingTokensAndMmInfos<'_>> {
+        if let Some(mm_routing_info) = &self.mm_routing_info
+            && !mm_routing_info.routing_token_ids.is_empty()
+        {
+            return Some((
+                &mm_routing_info.routing_token_ids,
+                Some(mm_routing_info.block_mm_infos.as_slice()),
+            ));
+        }
+
+        self.token_ids
+            .as_deref()
+            .map(|token_ids| (token_ids, self.block_mm_infos.as_deref()))
+    }
 }
 
 fn normalize_tokens(
     token_ids: &[u32],
     block_size: u32,
     lora_name: Option<&str>,
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+    is_eagle: bool,
 ) -> NormalizedPrompt {
     let block_hashes = compute_block_hash_for_seq(
         token_ids,
         block_size,
         BlockHashOptions {
+            block_mm_infos,
             lora_name,
-            ..Default::default()
+            is_eagle: Some(is_eagle),
         },
     );
     let sequence_hashes = compute_seq_hash_for_block(&block_hashes);

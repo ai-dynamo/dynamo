@@ -9,13 +9,23 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
+use crate::protocols::{
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier,
+    WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
+use crate::scheduling::config::RouterConfigOverride;
+
+use super::input::{MmRoutingInfoRequest, PromptRequest};
+use super::scoring::build_overlap_scores_response;
 use super::*;
 
 fn test_config() -> crate::config::KvRouterConfig {
-    let mut config = crate::config::KvRouterConfig::default();
-    config.use_kv_events = false;
-    config.router_queue_threshold = None;
-    config
+    crate::config::KvRouterConfig {
+        use_kv_events: false,
+        router_queue_threshold: None,
+        ..Default::default()
+    }
 }
 
 fn app() -> Router {
@@ -62,6 +72,95 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
         body["max_num_batched_tokens"] = serde_json::json!(max_tokens);
     }
     post(app, "/workers", &body.to_string()).await
+}
+
+#[test]
+fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
+    let mm_infos = vec![Some(BlockExtraInfo {
+        mm_objects: vec![BlockMmObjectInfo {
+            mm_hash: 42,
+            offsets: vec![(0, 2)],
+        }],
+    })];
+    let request = PromptRequest {
+        token_ids: Some(vec![1, 2, 3, 4]),
+        mm_routing_info: Some(MmRoutingInfoRequest {
+            routing_token_ids: vec![10, 11, 12, 13, 14, 15, 16, 17],
+            block_mm_infos: mm_infos.clone(),
+        }),
+        block_mm_infos: None,
+        block_hashes: None,
+        sequence_hashes: None,
+        isl_tokens: None,
+        lora_name: Some("adapter".to_string()),
+        is_eagle: Some(true),
+    };
+
+    let normalized = request
+        .normalize_for_selection(4, false)
+        .expect("normalize prompt");
+    let expected_block_hashes = compute_block_hash_for_seq(
+        &[10, 11, 12, 13, 14, 15, 16, 17],
+        4,
+        BlockHashOptions {
+            block_mm_infos: Some(&mm_infos),
+            lora_name: Some("adapter"),
+            is_eagle: Some(true),
+        },
+    );
+    assert_eq!(normalized.block_hashes, expected_block_hashes);
+    assert_eq!(
+        normalized.sequence_hashes,
+        compute_seq_hash_for_block(&expected_block_hashes)
+    );
+    assert_eq!(normalized.isl_tokens, 8);
+}
+
+#[test]
+fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
+    let worker = WorkerWithDpRank::new(1, 0);
+    let idle_worker = WorkerWithDpRank::new(2, 0);
+    let mut device_scores = OverlapScores::new();
+    device_scores.scores.insert(worker, 2);
+    device_scores.frequencies = vec![1, 1];
+    let mut host = LowerTierMatchDetails::default();
+    host.hits.insert(worker, 1);
+    let mut tiered = TieredMatchDetails {
+        device: MatchDetails {
+            overlap_scores: device_scores,
+            last_matched_hashes: Default::default(),
+        },
+        lower_tier: Default::default(),
+    };
+    tiered.lower_tier.insert(StorageTier::HostPinned, host);
+
+    let mut config = test_config();
+    config.host_cache_hit_weight = 0.75;
+    let override_config = RouterConfigOverride {
+        overlap_score_credit: Some(0.5),
+        ..Default::default()
+    };
+    let response = build_overlap_scores_response(
+        &config,
+        Some(&override_config),
+        &tiered,
+        4,
+        [worker, idle_worker],
+    );
+
+    assert_eq!(response.workers.len(), 2);
+    let selected = response
+        .workers
+        .iter()
+        .find(|row| row.worker_id == 1)
+        .expect("worker row");
+    assert_eq!(selected.device_blocks, 2);
+    assert_eq!(selected.host_pinned_blocks, 3);
+    assert_eq!(selected.disk_blocks, 3);
+    assert_eq!(selected.host_pinned_extension_blocks, 1);
+    assert_eq!(selected.shared_beyond_device_blocks, None);
+    assert_eq!(selected.router_credit_blocks, 1.75);
+    assert!(!response.shared_cache.enabled);
 }
 
 #[tokio::test]
@@ -154,6 +253,52 @@ async fn select_echoes_selection_id_and_does_not_book_load() {
 }
 
 #[tokio::test]
+async fn overlap_scores_returns_all_schedulable_worker_ranks() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let response = post(
+        app.clone(),
+        "/workers",
+        r#"{
+            "worker_id": 2,
+            "model_name": "model",
+            "endpoint": "http://worker-2:8000",
+            "block_size": 4,
+            "data_parallel_start_rank": 2,
+            "data_parallel_size": 2
+        }"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = post(
+        app,
+        "/overlap_scores",
+        r#"{"model_name":"model","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let workers = body["workers"].as_array().expect("workers array");
+    let ids: Vec<_> = workers
+        .iter()
+        .map(|row| {
+            (
+                row["worker_id"].as_u64().unwrap(),
+                row["dp_rank"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(ids, vec![(1, 0), (2, 2), (2, 3)]);
+    assert_eq!(workers[0]["host_pinned_blocks"], 0);
+    assert_eq!(workers[0]["disk_blocks"], 0);
+    assert_eq!(body["shared_cache"]["enabled"], false);
+}
+
+#[tokio::test]
 async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let app = app();
     assert_eq!(
@@ -190,6 +335,69 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
         .await
         .unwrap();
     assert_eq!(free.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn output_block_endpoint_updates_reserved_load() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let response = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-output"}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let loads_before = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let before = response_json(loads_before).await;
+    let before_blocks = before[0]["loads"][0]["potential_decode_blocks"]
+        .as_u64()
+        .unwrap();
+
+    let response = post(
+        app.clone(),
+        "/reservations/res-output/output_block",
+        r#"{}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let invalid = post(
+        app.clone(),
+        "/reservations/res-output/output_block",
+        r#"{"decay_fraction":1.5}"#,
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let loads_after = app
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after = response_json(loads_after).await;
+    let after_blocks = after[0]["loads"][0]["potential_decode_blocks"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(after_blocks, before_blocks + 1);
 }
 
 #[tokio::test]

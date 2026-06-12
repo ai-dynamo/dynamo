@@ -20,8 +20,8 @@ mod tests;
 pub use core::{SelectionCore, SelectionServiceConfig};
 pub use server::{AppState, create_router, run_server};
 pub use types::{
-    ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
-    ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
-    SelectResponse, SelectionKey, SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle,
-    WorkerOverlapScore, WorkerPatchRequest, WorkerRequest,
+    ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse,
+    PotentialLoadsRequest, ReadyResponse, ReservationRequest, ReservationResponse,
+    SelectAndReserveRequest, SelectRequest, SelectResponse, SelectionKey, SelectionWorkerConfig,
+    WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore, WorkerPatchRequest, WorkerRequest,
 };
