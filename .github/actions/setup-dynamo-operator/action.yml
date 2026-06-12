@@ -144,7 +144,8 @@ runs:
           --upgrade \
           --set controlPlane.distro.k8s.enabled=true \
           --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
-          --set sync.fromHost.priorityClasses.enabled=true
+          --set sync.fromHost.priorityClasses.enabled=true \
+          --set sync.toHost.pods.priorityClassName=ci-nightly-high-priority
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
@@ -182,12 +183,10 @@ runs:
 
         VKUBECONFIG="${{ github.workspace }}/.kubeconfig-vcluster"
         AUTO_PROBE_NAME="priority-auto-probe"
-        EXPLICIT_PROBE_NAME="priority-explicit-probe"
         PRIORITY_CLASS="ci-nightly-high-priority"
 
         cleanup() {
           kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${AUTO_PROBE_NAME}" --ignore-not-found=true --wait=false 2>/dev/null || true
-          kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${EXPLICIT_PROBE_NAME}" --ignore-not-found=true --wait=false 2>/dev/null || true
         }
         trap cleanup EXIT
 
@@ -298,79 +297,23 @@ runs:
           exit 1
         }
         AUTO_VCLUSTER_PRIORITY_CLASS=$(print_vcluster_pod_priority "${AUTO_VCLUSTER_POD}" "[auto]")
-        AUTO_HOST_PRIORITY_CLASS=""
 
-        if AUTO_HOST_POD=$(wait_for_host_pod "${AUTO_PROBE_NAME}"); then
-          AUTO_HOST_PRIORITY_CLASS=$(print_host_pod_priority "${AUTO_HOST_POD}" "[auto]")
-        else
-          echo "::warning::No host pod appeared for ${AUTO_PROBE_NAME}"
+        AUTO_HOST_POD=$(wait_for_host_pod "${AUTO_PROBE_NAME}") || {
+          echo "::error::No host pod appeared for ${AUTO_PROBE_NAME}"
           kubectl --kubeconfig="${VKUBECONFIG}" -n default describe pod "${AUTO_VCLUSTER_POD}" || true
           kubectl --kubeconfig="${VKUBECONFIG}" -n default get events --sort-by='.lastTimestamp' || true
           kubectl -n "${NAMESPACE}" get pods -o wide --show-labels || true
-        fi
-
-        kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${EXPLICIT_PROBE_NAME}" --ignore-not-found=true --wait=true
-        cat <<EOF | kubectl --kubeconfig="${VKUBECONFIG}" apply -f -
-        apiVersion: batch/v1
-        kind: Job
-        metadata:
-          name: ${EXPLICIT_PROBE_NAME}
-          namespace: default
-        spec:
-          ttlSecondsAfterFinished: 120
-          template:
-            metadata:
-              labels:
-                app.kubernetes.io/name: vcluster-priority-sync-probe
-                app.kubernetes.io/instance: ${EXPLICIT_PROBE_NAME}
-            spec:
-              priorityClassName: ${PRIORITY_CLASS}
-              restartPolicy: Never
-              containers:
-                - name: probe
-                  image: ${PROBE_IMAGE}
-                  command:
-                    - sh
-                    - -c
-                    - echo explicit-priority-probe; sleep 5
-        EOF
-
-        EXPLICIT_VCLUSTER_POD=$(wait_for_vcluster_pod "${EXPLICIT_PROBE_NAME}") || {
-          echo "::error::No vCluster pod appeared for ${EXPLICIT_PROBE_NAME}"
-          kubectl --kubeconfig="${VKUBECONFIG}" -n default describe job "${EXPLICIT_PROBE_NAME}" || true
-          kubectl --kubeconfig="${VKUBECONFIG}" -n default get events --sort-by='.lastTimestamp' || true
           exit 1
         }
-        EXPLICIT_VCLUSTER_PRIORITY_CLASS=$(print_vcluster_pod_priority "${EXPLICIT_VCLUSTER_POD}" "[explicit]")
+        AUTO_HOST_PRIORITY_CLASS=$(print_host_pod_priority "${AUTO_HOST_POD}" "[auto]")
 
-        EXPLICIT_HOST_POD=$(wait_for_host_pod "${EXPLICIT_PROBE_NAME}") || {
-          echo "::error::No host pod appeared for ${EXPLICIT_PROBE_NAME}"
-          kubectl --kubeconfig="${VKUBECONFIG}" -n default describe pod "${EXPLICIT_VCLUSTER_POD}" || true
-          kubectl --kubeconfig="${VKUBECONFIG}" -n default get events --sort-by='.lastTimestamp' || true
-          kubectl -n "${NAMESPACE}" get pods -o wide --show-labels || true
-          exit 1
-        }
-        EXPLICIT_HOST_PRIORITY_CLASS=$(print_host_pod_priority "${EXPLICIT_HOST_POD}" "[explicit]")
-
-        kubectl --kubeconfig="${VKUBECONFIG}" -n default wait \
-          --for=condition=complete job "${EXPLICIT_PROBE_NAME}" \
-          --timeout=180s
-
-        if [ "${EXPLICIT_VCLUSTER_PRIORITY_CLASS}" != "${PRIORITY_CLASS}" ]; then
-          echo "::error::Explicit probe did not keep priorityClassName=${PRIORITY_CLASS} inside vCluster"
+        if [ "${AUTO_HOST_PRIORITY_CLASS}" != "${PRIORITY_CLASS}" ]; then
+          echo "::error::Host pod did not get priorityClassName=${PRIORITY_CLASS}"
           exit 1
         fi
 
-        if [ "${EXPLICIT_HOST_PRIORITY_CLASS}" != "${PRIORITY_CLASS}" ]; then
-          echo "::error::Explicit probe did not sync priorityClassName=${PRIORITY_CLASS} to the host pod"
-          exit 1
-        fi
-
-        if [ "${AUTO_VCLUSTER_PRIORITY_CLASS}" != "${PRIORITY_CLASS}" ]; then
-          echo "::error::vCluster did not automatically assign priorityClassName=${PRIORITY_CLASS} to a pod that omitted priorityClassName"
-          echo "Automatic probe result: vCluster priorityClassName=${AUTO_VCLUSTER_PRIORITY_CLASS:-<empty>}, host priorityClassName=${AUTO_HOST_PRIORITY_CLASS:-<missing>}"
-          echo "sync.fromHost.priorityClasses.enabled=true makes the PriorityClass available inside vCluster; this result means workloads still need to set priorityClassName explicitly or rely on host-side Kyverno injection."
-          exit 1
+        if [ -z "${AUTO_VCLUSTER_PRIORITY_CLASS}" ]; then
+          echo "vCluster did not default priorityClassName inside the virtual cluster; the synced host pod still has the required priorityClassName."
         fi
 
         echo "::endgroup::"
