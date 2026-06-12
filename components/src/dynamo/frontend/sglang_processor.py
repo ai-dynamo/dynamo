@@ -386,6 +386,8 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
             )
+        except PreprocessError as exc:
+            raise InvalidArgument(str(exc)) from exc
         except InvalidArgument:
             raise
         except Exception as exc:

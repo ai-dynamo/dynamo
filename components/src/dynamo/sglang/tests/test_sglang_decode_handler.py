@@ -203,6 +203,28 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert "seed" not in sampling_params
 
 
+def test_build_sampling_params_maps_guided_decoding_to_json_schema():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {
+                    "json": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }
+                }
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["json_schema"] == (
+        '{"type": "object", "properties": {"city": {"type": "string"}}}'
+    )
+
+
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 

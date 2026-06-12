@@ -29,6 +29,7 @@ from dynamo.frontend.sglang_prepost import (
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _parse_json_array_buffer,
+    build_response_format_guided_decoding,
     build_tool_call_guided_decoding,
     convert_tools,
     create_parsers,
@@ -536,6 +537,90 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         )
         assert tcp is not None
         assert rp is not None
+
+
+class TestBuildResponseFormatGuidedDecoding:
+    def test_json_schema_builds_guided_decoding(self):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "city_result",
+                "schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+
+        guided = build_response_format_guided_decoding(
+            {"model": "test", "response_format": response_format}
+        )
+
+        assert guided == {
+            "json": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            }
+        }
+
+    def test_top_level_schema_builds_guided_decoding(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "strict": {"type": "boolean", "default": True},
+            },
+            "required": ["city"],
+        }
+
+        guided = build_response_format_guided_decoding(
+            {
+                "model": "test",
+                "response_format": {"type": "json_schema", "schema": schema},
+            }
+        )
+
+        assert guided == {
+            "json": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            }
+        }
+        assert "strict" in schema["properties"]
+
+    def test_json_schema_requires_schema(self):
+        with pytest.raises(
+            PreprocessError,
+            match="schema_ is required for json_schema response format request",
+        ):
+            build_response_format_guided_decoding(
+                {"model": "test", "response_format": {"type": "json_schema"}}
+            )
+
+    def test_json_object_builds_guided_decoding(self):
+        assert build_response_format_guided_decoding(
+            {"model": "test", "response_format": {"type": "json_object"}}
+        ) == {"json": {"type": "object"}}
+
+    def test_structural_tag_builds_guided_decoding(self):
+        response_format = {
+            "type": "structural_tag",
+            "structures": [
+                {
+                    "begin": "<json>",
+                    "schema": {"type": "object"},
+                    "end": "</json>",
+                }
+            ],
+            "triggers": ["<json>"],
+        }
+
+        assert build_response_format_guided_decoding(
+            {"model": "test", "response_format": response_format}
+        ) == {"structural_tag": response_format}
 
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
@@ -1097,6 +1182,39 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
+
+    def test_response_format_takes_precedence_over_tool_guidance(
+        self, tokenizer, caplog
+    ):
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": {"type": "json_object"},
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert (
+            "Tool-call guided decoding will be ignored because of response_format already exists."
+            in caplog.text
+        )
 
     def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
         """Multi-turn with prior assistant tool_calls renders without raising.
