@@ -523,7 +523,9 @@ jobs:
     - name: Install cargo-llvm-cov
       run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
     - name: Install cargo-nextest
-      run: curl -LsSf https://get.nexte.st/0.9.137/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+      # Install from crates.io (same channel as the repo's other cargo tools) to avoid
+      # an extra download host.
+      run: cargo nextest --version 2>/dev/null || cargo install cargo-nextest@0.9.137 --locked
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}

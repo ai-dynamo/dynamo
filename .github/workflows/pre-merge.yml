@@ -166,8 +166,9 @@ jobs:
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt
     - name: Install cargo-nextest
-      # Prebuilt binary (fast); nextest emits JUnit natively (see .config/nextest.toml).
-      run: curl -LsSf https://get.nexte.st/0.9.137/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+      # Install from crates.io (same channel as the repo's other cargo tools) to avoid
+      # an extra download host; nextest emits JUnit natively (see .config/nextest.toml).
+      run: cargo nextest --version 2>/dev/null || cargo install cargo-nextest@0.9.137 --locked
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
