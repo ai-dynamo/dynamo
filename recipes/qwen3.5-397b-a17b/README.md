@@ -164,7 +164,7 @@ needed.
 
 ## Files
 
-```
+```text
 qwen3.5-397b-a17b/
 ├── README.md
 ├── hw/

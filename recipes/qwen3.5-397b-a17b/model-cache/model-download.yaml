@@ -27,6 +27,11 @@ spec:
         app.kubernetes.io/component: model-download
     spec:
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: model-download
           image: python:3.10-slim
@@ -55,6 +60,8 @@ spec:
           args:
             - |
               set -eux
+              python -m venv /tmp/venv
+              . /tmp/venv/bin/activate
               pip install --no-cache-dir huggingface_hub==1.11.0
               hf download "$MODEL_NAME" --revision "$MODEL_REVISION"
           resources:

@@ -43,7 +43,7 @@ spec:
           ulimit -n 1048576 || true
           ulimit -u 65536 || true
 
-          apt update && apt install -y --no-install-recommends curl jq git
+          apt update && apt install -y --no-install-recommends curl jq
 
           # Latest released aiperf from PyPI. This is a plain text synthetic
           # run (no custom dataset / session_id / images), so the synthetic
