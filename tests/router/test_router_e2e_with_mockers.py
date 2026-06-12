@@ -108,6 +108,12 @@ ROUTER_OVERLOAD_503_CASES = (
         id="prefill-tokens",
     ),
 )
+# Speed isolation: only the *gated* stage is slow (speedup_ratio 0.01); the
+# non-gated stage is orders of magnitude faster (100.0) so its latency never
+# determines probe cleanup and each case exercises only the intended overload
+# signal.
+_SLOW_SPEEDUP = 0.01
+_FAST_SPEEDUP = 100.0
 ROUTER_DISAGG_OVERLOAD_503_CASES = (
     pytest.param(
         {
@@ -118,8 +124,10 @@ ROUTER_DISAGG_OVERLOAD_503_CASES = (
             "num_prefill": 1,
             "num_decode": 1,
             "max_tokens": 1,
-            # Gate the PREFILL pool only (this was a silent no-op in disagg
-            # before the fix). Decode/queue thresholds disabled.
+            # Gate the PREFILL pool only: slow prefill (accumulates tokens), fast
+            # decode. Decode/queue thresholds disabled.
+            "prefill_speedup": _SLOW_SPEEDUP,
+            "decode_speedup": _FAST_SPEEDUP,
             "thresholds": {
                 "blocks_threshold": "None",
                 "tokens_threshold": 1,
@@ -134,7 +142,10 @@ ROUTER_DISAGG_OVERLOAD_503_CASES = (
             "num_prefill": 1,
             "num_decode": 1,
             "max_tokens": 50,
-            # Gate the DECODE pool only; prefill threshold disabled.
+            # Gate the DECODE pool only: fast prefill, slow decode (fills its
+            # limited blocks). Prefill threshold disabled.
+            "prefill_speedup": _FAST_SPEEDUP,
+            "decode_speedup": _SLOW_SPEEDUP,
             "thresholds": {
                 "blocks_threshold": 0.2,
                 "tokens_threshold": "None",
@@ -1002,20 +1013,22 @@ def test_mocker_disagg_router_overload_503(
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
 
-    # Limited, slow workers so the gated pool saturates quickly.
-    mocker_args = {
-        "speedup_ratio": 0.01,
-        "block_size": 4,
-        "num_gpu_blocks": 64,
-        "durable_kv_events": durable_kv_events,
-    }
+    # Per-stage args: limited blocks, with only the gated stage slow (speed
+    # isolation — see _SLOW_SPEEDUP/_FAST_SPEEDUP).
+    def _stage_args(speedup: float) -> Dict[str, Any]:
+        return {
+            "speedup_ratio": speedup,
+            "block_size": 4,
+            "num_gpu_blocks": 64,
+            "durable_kv_events": durable_kv_events,
+        }
 
     with _launch_disagg_workers(
         request,
         shared_namespace,
         registration_order="prefill_first",
-        prefill_mocker_args=mocker_args,
-        decode_mocker_args=mocker_args,
+        prefill_mocker_args=_stage_args(overload_case["prefill_speedup"]),
+        decode_mocker_args=_stage_args(overload_case["decode_speedup"]),
         num_prefill_mockers=overload_case["num_prefill"],
         num_decode_mockers=overload_case["num_decode"],
         enable_disagg_bootstrap=False,

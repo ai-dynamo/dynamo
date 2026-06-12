@@ -173,7 +173,28 @@ impl
 
                 // Pass the phase barrier to the spawned task. It is released after routing
                 // completes so worker recording finishes before phase changes to Decode.
-                self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
+                let admission_rx = self.spawn_prefill_task(
+                    prefill_context,
+                    Some(worker_id),
+                    prefill_phase_barrier,
+                );
+
+                // Await the prefill dispatch (admission) result before starting
+                // decode. If the prefill was rejected (e.g. all eligible / the
+                // pinned prefill worker overloaded -> ResourceExhausted), surface
+                // the typed error now (503) instead of detaching and letting decode
+                // proceed against a prefill that never ran. Signalled at dispatch
+                // acceptance, so this does not gate on prefill output (which would
+                // deadlock the bootstrap KV-transfer rendezvous).
+                match admission_rx.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => {
+                        return Err(anyhow::anyhow!(
+                            "prefill task ended before signaling admission"
+                        ));
+                    }
+                }
 
                 (
                     Ok(PrefillOutcome::Bootstrap {
@@ -237,6 +258,7 @@ impl
                     prefill_context,
                     Some(resolved_wid),
                     None,
+                    None, // synchronous path: caller awaits the full completion
                 )
                 .await?;
                 (
@@ -280,6 +302,7 @@ impl
                     prefill_context,
                     preselected_worker,
                     None,
+                    None, // synchronous path: caller awaits the full completion
                 )
                 .await?;
                 let prefill_worker_id = completion

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use futures::StreamExt;
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
@@ -52,11 +52,6 @@ impl PrefillRouter {
         } else {
             None
         };
-
-        // A pinned selection (caller pin or sticky affinity) bypasses the
-        // overload-aware scheduler query below, so its overload state must be
-        // checked explicitly after selection.
-        let used_pin = sticky_worker.is_some() || preselected_worker.is_some();
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(worker) = sticky_worker {
@@ -123,18 +118,6 @@ impl PrefillRouter {
                 Err(e) => return classify_prefill_query_error(e),
             }
         };
-
-        // Pinned/sticky workers skipped the overload-aware query above, so an
-        // already-overloaded pin would otherwise only fail later inside the
-        // detached prefill task (after decode has already proceeded). Reject it
-        // here, through the same typed ResourceExhausted path the query uses.
-        if let Some(rejected) = reject_if_pinned_worker_overloaded(
-            used_pin,
-            worker_id,
-            self.prefill_overloaded_ids().as_ref(),
-        ) {
-            return rejected;
-        }
 
         // Get bootstrap info from ModelManager (works for ANY mode)
         let Some(endpoint) = self
@@ -219,11 +202,20 @@ impl PrefillRouter {
     /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
     /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
     /// the prefill route must finish worker recording before the phase can change to Decode.
+    ///
+    /// When `admission_tx` is provided, the dispatch outcome is signalled on it: `Ok(())` once
+    /// `generate_to_worker` accepts the request (the worker was admitted — not overloaded / the
+    /// queue not saturated), or `Err(_)` with the typed dispatch error otherwise. The bootstrap
+    /// caller awaits this before starting decode, so a rejected prefill (e.g. `ResourceExhausted`)
+    /// surfaces as a 503 instead of being swallowed in this detached task. The signal is sent at
+    /// dispatch acceptance — NOT at first output — so it cannot deadlock the bootstrap rendezvous
+    /// (prefill's first token waits for the decode we are gating on this signal).
     pub(super) async fn execute_prefill(
         router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
+        mut admission_tx: Option<oneshot::Sender<Result<(), anyhow::Error>>>,
     ) -> Result<PrefillCompletion, PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         // Clone tracker before request is consumed by generate_to_worker.
@@ -235,15 +227,32 @@ impl PrefillRouter {
             InnerPrefillRouter::SimpleRouter(_) => target_worker.map(|worker_id| (worker_id, None)),
             InnerPrefillRouter::KvRouter(_) => None,
         };
-        let mut prefill_response = router
-            .generate_to_worker(request, target_worker)
-            .await
-            .map_err(|e| {
-                PrefillError::PrefillError(
+        let mut prefill_response = match router.generate_to_worker(request, target_worker).await {
+            Ok(stream) => {
+                // Dispatch accepted — signal admission so the bootstrap caller can
+                // start decode. Stream consumption below stays detached.
+                if let Some(tx) = admission_tx.take() {
+                    let _ = tx.send(Ok(()));
+                }
+                stream
+            }
+            Err(e) => {
+                // Dispatch rejected (e.g. ResourceExhausted: all eligible / the
+                // pinned prefill worker overloaded). Hand the typed error to the
+                // awaiting caller so it surfaces before decode.
+                if let Some(tx) = admission_tx.take() {
+                    let _ = tx.send(Err(e));
+                    return Err(PrefillError::PrefillError(
+                        "prefill admission failed".to_string(),
+                        None,
+                    ));
+                }
+                return Err(PrefillError::PrefillError(
                     "failed to route to prefill worker".to_string(),
                     Some(e.into()),
-                )
-            })?;
+                ));
+            }
+        };
 
         // Release the phase barrier now that routing completed and worker recording already ran.
         // Decode may proceed without waiting for prefill output streaming to finish.
@@ -321,15 +330,20 @@ impl PrefillRouter {
     ///
     /// The `phase_transition_permit` is passed to the spawned task and released after routing
     /// completes, allowing the main task's `set_phase(Decode)` to proceed.
+    ///
+    /// Returns a receiver that resolves with the prefill dispatch (admission) result: `Ok(())`
+    /// once the request is accepted, or `Err(_)` with the typed dispatch error. The caller awaits
+    /// this before starting decode; stream consumption continues detached in the spawned task.
     pub(super) fn spawn_prefill_task(
         &self,
         prefill_request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: OwnedSemaphorePermit,
-    ) {
+    ) -> oneshot::Receiver<Result<(), anyhow::Error>> {
         let router = self.prefill_router.get().cloned();
         // Capture current span to propagate trace context to the spawned task
         let span = tracing::Span::current();
+        let (admission_tx, admission_rx) = oneshot::channel();
 
         tokio::spawn(
             async move {
@@ -338,6 +352,7 @@ impl PrefillRouter {
                     prefill_request,
                     target_worker,
                     Some(phase_transition_permit),
+                    Some(admission_tx),
                 )
                 .await
                 {
@@ -351,6 +366,8 @@ impl PrefillRouter {
             }
             .instrument(span),
         );
+
+        admission_rx
     }
 
     /// Query the best prefill worker without executing a request.
@@ -444,37 +461,6 @@ impl PrefillRouter {
     pub fn enforce_disagg(&self) -> bool {
         self.enforce_disagg
     }
-
-    /// Current overloaded worker-id snapshot from the prefill router's `Client`,
-    /// or `None` if the router has not activated yet. Used to reject pinned
-    /// workers that bypass the overload-aware scheduler query.
-    fn prefill_overloaded_ids(&self) -> Option<HashSet<WorkerId>> {
-        match self.prefill_router.get()? {
-            InnerPrefillRouter::KvRouter(r) => r.chooser.client().overloaded_instance_ids(),
-            InnerPrefillRouter::SimpleRouter(r) => r.client.overloaded_instance_ids(),
-        }
-    }
-}
-
-/// Reject a pinned (preselected/sticky) prefill worker that is currently overloaded,
-/// mapped through the same typed `ResourceExhausted` path the scheduler query uses.
-/// Returns `None` for unpinned selections (the query path already excludes overloaded
-/// workers) or when the pinned worker is not in the overloaded set.
-fn reject_if_pinned_worker_overloaded(
-    used_pin: bool,
-    worker_id: WorkerId,
-    overloaded: Option<&HashSet<WorkerId>>,
-) -> Option<PrefillResolveDecision> {
-    if used_pin && overloaded.is_some_and(|ids| ids.contains(&worker_id)) {
-        return Some(PrefillResolveDecision::Rejected(
-            dynamo_runtime::error::DynamoError::builder()
-                .error_type(dynamo_runtime::error::ErrorType::ResourceExhausted)
-                .message(format!("pinned prefill worker {worker_id} is overloaded"))
-                .build()
-                .into(),
-        ));
-    }
-    None
 }
 
 /// Classify a worker-selection error from `query_prefill_worker`.
@@ -775,28 +761,88 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn reject_if_pinned_worker_overloaded_rejects_only_overloaded_pins() {
-        let overloaded = HashSet::from([7u64]);
+    /// Focused pre-dispatch rejection guard for the admission handshake: when the
+    /// router rejects at dispatch (here: the only prefill worker is overloaded, so
+    /// `generate_to_worker` returns `ResourceExhausted`), `execute_prefill` must
+    /// signal that typed error on the admission oneshot — so the bootstrap caller
+    /// surfaces a 503 before starting decode instead of swallowing it in the
+    /// detached task. Admission must NOT be reported as success.
+    #[tokio::test]
+    async fn execute_prefill_signals_admission_rejection_before_decode() {
+        use crate::protocols::common::llm_backend::LLMEngineOutput;
+        use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode};
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::sync::Arc;
 
-        // Pinned + overloaded -> typed ResourceExhausted rejection.
-        match reject_if_pinned_worker_overloaded(true, 7, Some(&overloaded)) {
-            Some(PrefillResolveDecision::Rejected(e)) => {
-                assert!(dynamo_runtime::error::match_error_chain(
-                    e.as_ref(),
-                    &[dynamo_runtime::error::ErrorType::ResourceExhausted],
-                    &[],
-                ));
-            }
-            _ => panic!("expected Rejected for an overloaded pinned worker"),
-        }
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_admission_reject".to_string())
+            .unwrap()
+            .component("prefill".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
 
-        // Pinned but not overloaded -> no rejection.
-        assert!(reject_if_pinned_worker_overloaded(true, 9, Some(&overloaded)).is_none());
-        // Unpinned: the scheduler query already excludes overloaded workers.
-        assert!(reject_if_pinned_worker_overloaded(false, 7, Some(&overloaded)).is_none());
-        // No overload snapshot available -> no rejection.
-        assert!(reject_if_pinned_worker_overloaded(true, 7, None).is_none());
+        // Register one discovered worker, then mark it overloaded so the router's
+        // free pool is empty while a routable worker exists -> dispatch rejects
+        // with ResourceExhausted (rather than a generic "no instances" error).
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+        client.set_overloaded_instances(&[worker_id]);
+
+        let push_router =
+            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                client,
+                RouterMode::RoundRobin,
+            )
+            .await
+            .unwrap();
+        let inner = InnerPrefillRouter::SimpleRouter(Arc::new(push_router));
+
+        let request = Context::new(
+            PreprocessedRequest::builder()
+                .model("test".to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .unwrap(),
+        );
+
+        let (admission_tx, admission_rx) = oneshot::channel();
+        // target_worker = None -> SimpleRouter::generate() -> round-robin over the
+        // (empty) free pool -> ResourceExhausted at dispatch.
+        let result =
+            PrefillRouter::execute_prefill(Some(inner), request, None, None, Some(admission_tx))
+                .await;
+
+        let admission = admission_rx
+            .await
+            .expect("admission result must be signalled before decode");
+        assert!(
+            admission.is_err(),
+            "overloaded dispatch must signal admission rejection, not success"
+        );
+        assert!(
+            dynamo_runtime::error::match_error_chain(
+                admission.unwrap_err().as_ref(),
+                &[dynamo_runtime::error::ErrorType::ResourceExhausted],
+                &[],
+            ),
+            "admission rejection must be ResourceExhausted (surfaces as 503)"
+        );
+        assert!(
+            result.is_err(),
+            "execute_prefill must fail when dispatch is rejected"
+        );
+
+        rt.shutdown();
     }
 }
 
