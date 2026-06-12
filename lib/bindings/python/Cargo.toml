@@ -40,6 +40,7 @@ nvtx = ["dynamo-runtime/nvtx"]
 mm-routing = ["dynamo-llm/mm-routing"]
 key-value-store-redis = ["dynamo-llm/key-value-store-redis"]
 key-value-store-postgres = ["dynamo-llm/key-value-store-postgres"]
+key-value-store-tikv = ["dynamo-llm/key-value-store-tikv"]
 
 [dependencies]
 # AIC perf model: pure-Rust hot-path latency engine. Pinned to aiconfigurator

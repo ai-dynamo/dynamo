@@ -45,14 +45,17 @@ Store URL schemes:
 | `memory` | None | Development or a single frontend process. State is lost on restart and is not shared across replicas. |
 | `redis://user:password@host:6379/0` | `key-value-store-redis` feature | Shared Redis or Valkey deployment. Use `rediss://` for TLS. Redis performs expiration natively. |
 | `postgresql://user:password@host/database` | `key-value-store-postgres` feature | Shared PostgreSQL or PostgreSQL-compatible CockroachDB deployment. URL parameters configure TLS. |
+| `tikv://pd1:2379,pd2:2379/prefix` | `key-value-store-tikv` feature | Shared TiKV deployment. The optional URL prefix overrides `DYN_STATEFUL_RESPONSES_STORE_NAMESPACE`. |
 
 For high availability, every frontend replica must use the same shared store and namespace. The memory store cannot preserve `previous_response_id` continuity when requests move between replicas.
 
-TTL values are relative durations. Redis applies them natively, while PostgreSQL computes expiry from the database clock, so frontend clock skew does not change retention. Each replica may run cleanup for stores without native TTL; cleanup starts after the configured interval and PostgreSQL deletes at most 1000 expired rows per pass.
+TTL values are relative durations. Redis and TiKV apply them natively, while PostgreSQL computes expiry from the database clock, so frontend clock skew does not change retention. Each replica may run cleanup for stores without native TTL; cleanup starts after the configured interval and PostgreSQL deletes at most 1000 expired rows per pass.
 
 Redis URLs are passed directly to the Redis client, including ACL username, password, database, and the `rediss://` TLS scheme. TLS uses the host's native certificate roots.
 
 PostgreSQL URLs are passed directly to SQLx. Use `sslmode`, `sslrootcert`, `sslcert`, and `sslkey` URL parameters when TLS or mutual TLS is required. The frontend creates the `dynamo_key_value_store` table and expiry index when the table does not exist. The runtime role needs `CREATE` permission for first-time initialization; a preprovisioned table lets a read/write/delete-only runtime role skip DDL.
+
+The current TiKV URL accepts PD endpoints and an optional key prefix. It does not expose TiKV TLS or authentication settings, so use it only on a trusted network until secure client configuration is added. `DELETE` is intended for immutable response IDs; its returned existence flag is advisory if callers concurrently reuse the same key.
 
 Redis example:
 

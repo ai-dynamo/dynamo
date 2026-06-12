@@ -82,6 +82,19 @@ pub struct StoredResponseContext {
     pub input_items: Vec<Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredResponseValue {
+    Current(StoredResponseContext),
+    Legacy { context: StoredResponseContext },
+}
+
+fn decode_stored_context(bytes: &[u8]) -> Result<StoredResponseContext, serde_json::Error> {
+    Ok(match serde_json::from_slice(bytes)? {
+        StoredResponseValue::Current(context) | StoredResponseValue::Legacy { context } => context,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct ResponseContextStoreConfig {
     pub store_config: KeyValueStoreConfig,
@@ -194,7 +207,7 @@ impl ResponseContextStoreManager {
         let previous_context = match request.inner.previous_response_id.as_deref() {
             Some(previous_response_id) => {
                 let store = self.store().await?;
-                Some(serde_json::from_slice::<StoredResponseContext>(
+                Some(decode_stored_context(
                     &store.get(previous_response_id).await?.ok_or_else(|| {
                         PreviousResponseNotFound(previous_response_id.to_string())
                     })?,
@@ -386,6 +399,22 @@ mod tests {
             &vec!["worker_id".to_string()]
         );
         assert!(manager.store.get().is_none());
+    }
+
+    #[test]
+    fn decodes_current_and_legacy_stored_contexts() {
+        let current = context_bytes(vec![json!({"type": "message"})]);
+        let legacy = serde_json::to_vec(&json!({
+            "context": context(vec![json!({"type": "message"})]),
+            "expires_at": 123,
+        }))
+        .unwrap();
+
+        assert_eq!(
+            decode_stored_context(&current).unwrap().input_items.len(),
+            1
+        );
+        assert_eq!(decode_stored_context(&legacy).unwrap().input_items.len(), 1);
     }
 
     #[test]
