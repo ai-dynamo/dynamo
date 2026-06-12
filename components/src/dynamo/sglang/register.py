@@ -323,6 +323,30 @@ async def _get_runtime_config(
                 e,
             )
 
+    decode_migration_class = getattr(dynamo_args, "decode_migration_class", None)
+    if decode_migration_class is not None:
+        migration_metadata = {
+            "protocol_version": 1,
+            "decode_class": decode_migration_class,
+            "transport": server_args.disaggregation_transfer_backend,
+            "tp_size": server_args.tp_size,
+            "pp_size": server_args.pp_size,
+            "supports_heterogeneous_tp": True,
+            "compatibility_id": ":".join(
+                str(value)
+                for value in (
+                    server_args.model_path,
+                    server_args.page_size,
+                    server_args.pp_size,
+                    server_args.disaggregation_transfer_backend,
+                )
+            ),
+        }
+        runtime_config.set_engine_specific(
+            "decode_migration", json.dumps(migration_metadata)
+        )
+        logging.info("Published decode migration metadata: %s", migration_metadata)
+
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 

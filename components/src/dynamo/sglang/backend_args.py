@@ -111,6 +111,14 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
         )
+        add_argument(
+            g,
+            flag_name="--decode-migration-class",
+            env_var="DYN_SGL_DECODE_MIGRATION_CLASS",
+            default=None,
+            choices=["fast", "slow"],
+            help="Optional routing class published for decode migration.",
+        )
 
         # Topology constraint: rejecting --frontend-decoding combined with the
         # EPD multimodal flags happens in DynamoSGLangConfig.validate() below.
@@ -143,6 +151,7 @@ class DynamoSGLangConfig(ConfigBase):
 
     video_generation_worker: bool
     enable_rl: bool
+    decode_migration_class: Optional[str] = None
     frontend_decoding: bool = False
     sglang_trace_level: int
 

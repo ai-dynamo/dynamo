@@ -87,8 +87,22 @@ async def init_decode(
     list_loras_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.list_loras"
     )
+    migration_prepare_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.migration_prepare"
+    )
+    migration_sync_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.migration_sync"
+    )
+    migration_finalize_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.migration_finalize"
+    )
 
-    shutdown_endpoints[:] = [generate_endpoint]
+    shutdown_endpoints[:] = [
+        generate_endpoint,
+        migration_prepare_endpoint,
+        migration_sync_endpoint,
+        migration_finalize_endpoint,
+    ]
 
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
@@ -167,6 +181,20 @@ async def init_decode(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
+            migration_prepare_endpoint.serve_endpoint(
+                handler.prepare_decode_migration,
+                metrics_labels=metrics_labels,
+            ),
+            migration_sync_endpoint.serve_endpoint(
+                handler.sync_decode_migration,
+                metrics_labels=metrics_labels,
+            ),
+            migration_finalize_endpoint.serve_endpoint(
+                handler.finalize_decode_migration,
+                metrics_labels=metrics_labels,
+            ),
+        ]
+        gather_tasks.append(
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -176,8 +204,8 @@ async def init_decode(
                 readiness_gate=ready_event,
                 worker_type=decode_worker_type,
                 needs=decode_needs,
-            ),
-        ]
+            )
+        )
         if getattr(server_args, "enable_streaming_session", False):
             gather_tasks.append(
                 session_control_endpoint.serve_endpoint(handler.session_control)
