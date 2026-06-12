@@ -109,6 +109,19 @@ daemonset:
   # SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=false.
   nodeArch: amd64
 
+  # RuntimeClass used for the privileged snapshot-agent pod. Set to "" on
+  # clusters that expose host NVIDIA devices and driver libraries without an
+  # nvidia RuntimeClass.
+  runtimeClassName: nvidia
+
+  # Optional host NVIDIA driver library directory mounted into the agent pod.
+  # This is useful with runtimeClassName="" helper-only deployments where the
+  # NVIDIA container runtime does not inject libcuda.so.1.
+  hostDriverLibs:
+    enabled: false
+    hostPath: /home/kubernetes/bin/nvidia/lib64
+    mountPath: /usr/local/nvidia/lib64
+
   # Tolerations for GPU nodes
   tolerations:
     - key: nvidia.com/gpu

@@ -110,6 +110,10 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `daemonset.image.repository` | Snapshot-agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
 | `daemonset.image.tag` | Snapshot-agent image tag | `1.0.0` |
 | `daemonset.nodeArch` | Required node architecture for the agent. Keep `amd64` when the image includes the cuda-checkpoint launcher; set `arm64` for helper-only images | `amd64` |
+| `daemonset.runtimeClassName` | RuntimeClass for the agent pod. Set to `""` on clusters where the NVIDIA RuntimeClass is unavailable and host GPU devices are already visible | `nvidia` |
+| `daemonset.hostDriverLibs.enabled` | Mount host NVIDIA driver libraries into the agent and prepend them to `LD_LIBRARY_PATH` | `false` |
+| `daemonset.hostDriverLibs.hostPath` | Host path for NVIDIA driver libraries when `hostDriverLibs.enabled=true` | `/home/kubernetes/bin/nvidia/lib64` |
+| `daemonset.hostDriverLibs.mountPath` | Container mount path for host driver libraries | `/usr/local/nvidia/lib64` |
 | `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
@@ -148,6 +152,24 @@ restores, multi-node simultaneous access, or backends that cannot reattach an
 RWO volume to the node selected for restore.
 
 See [values.yaml](./values.yaml) for the full configuration surface.
+
+### Clusters without an NVIDIA RuntimeClass
+
+Some environments expose GPU device nodes to privileged pods but do not provide
+or allow `runtimeClassName: nvidia` for the snapshot-agent DaemonSet. In that
+mode the NVIDIA container runtime also does not inject `libcuda.so.1`, so mount
+the host driver libraries explicitly:
+
+```bash
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace ${NAMESPACE} \
+  --set daemonset.runtimeClassName="" \
+  --set daemonset.hostDriverLibs.enabled=true \
+  --set daemonset.hostDriverLibs.hostPath=/home/kubernetes/bin/nvidia/lib64
+```
+
+Adjust `daemonset.hostDriverLibs.hostPath` if your node image stores driver
+libraries elsewhere.
 
 ## Next steps
 

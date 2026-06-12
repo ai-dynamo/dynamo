@@ -121,6 +121,18 @@ If you are reusing an existing checkpoint PVC, do not set `storage.pvc.create=tr
 
 CRI-O or OpenShift: append for example `--set runtime.type=crio` and, on OpenShift, `--set openshift.enabled=true` (see `deploy/helm/charts/snapshot/README.md`).
 
+If your cluster does not provide an NVIDIA RuntimeClass for privileged
+DaemonSets, set `daemonset.runtimeClassName=""` and enable the host driver
+library mount so the helper can load the host `libcuda.so.1`:
+
+```bash
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace ${NAMESPACE} \
+  --set daemonset.runtimeClassName="" \
+  --set daemonset.hostDriverLibs.enabled=true \
+  --set daemonset.hostDriverLibs.hostPath=/home/kubernetes/bin/nvidia/lib64
+```
+
 For clusters that prefer one privileged snapshot agent instead of one DaemonSet
 per workload namespace, install the chart once in an infrastructure namespace.
 In this mode the chart does not create workload PVCs; the Dynamo operator either

@@ -72,8 +72,10 @@ spec:
         {{- with .Values.daemonset.affinity }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      # CUDA checkpoint/restore requires the nvidia container runtime
-      runtimeClassName: nvidia
+      {{- if .Values.daemonset.runtimeClassName }}
+      # CUDA checkpoint/restore usually relies on the nvidia container runtime.
+      runtimeClassName: {{ .Values.daemonset.runtimeClassName | quote }}
+      {{- end }}
       {{- if .Values.seccomp.deploy }}
       initContainers:
         # Deploy seccomp profile to host before starting the agent
@@ -113,6 +115,10 @@ spec:
                   fieldPath: spec.nodeName
             - name: SNAPSHOT_LOG_LEVEL
               value: {{ .Values.daemonset.snapshotLogLevel | quote }}
+            {{- if .Values.daemonset.hostDriverLibs.enabled }}
+            - name: LD_LIBRARY_PATH
+              value: {{ printf "%s:$(LD_LIBRARY_PATH)" .Values.daemonset.hostDriverLibs.mountPath | quote }}
+            {{- end }}
             {{- if .Values.rbac.namespaceRestricted }}
             # Restrict pod watching to this namespace (namespace-scoped RBAC)
             - name: RESTRICTED_NAMESPACE
@@ -153,6 +159,11 @@ spec:
             - name: kubelet-pod-resources
               mountPath: /var/lib/kubelet/pod-resources
               readOnly: true
+            {{- if .Values.daemonset.hostDriverLibs.enabled }}
+            - name: host-driver-libs
+              mountPath: {{ .Values.daemonset.hostDriverLibs.mountPath | quote }}
+              readOnly: true
+            {{- end }}
             {{- if and (eq .Values.storage.type "oci") .Values.storage.oci.credentialsSecretRef }}
             # Mount docker config for OCI registry auth
             - name: docker-config
@@ -219,6 +230,13 @@ spec:
           hostPath:
             path: /var/lib/kubelet/pod-resources
             type: Directory
+        {{- if .Values.daemonset.hostDriverLibs.enabled }}
+        # Host NVIDIA driver libraries for clusters without nvidia RuntimeClass injection.
+        - name: host-driver-libs
+          hostPath:
+            path: {{ .Values.daemonset.hostDriverLibs.hostPath | quote }}
+            type: Directory
+        {{- end }}
         {{- if and (eq .Values.storage.type "oci") .Values.storage.oci.credentialsSecretRef }}
         - name: docker-config
           secret:

@@ -77,6 +77,7 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 			"innermost_pid", details.InnermostPID,
 			"cmdline", details.Cmdline,
 			"action", action,
+			"device_map", deviceMap,
 			"duration", duration,
 			"output", out,
 		)
@@ -88,6 +89,7 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 		"innermost_pid", details.InnermostPID,
 		"cmdline", details.Cmdline,
 		"action", action,
+		"device_map", deviceMap,
 		"duration", duration,
 		"output", out,
 	)

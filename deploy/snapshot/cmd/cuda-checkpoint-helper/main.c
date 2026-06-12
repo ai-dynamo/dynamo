@@ -1,9 +1,15 @@
+#define _GNU_SOURCE
 #include <ctype.h>
 #include <cuda.h>
+#include <dirent.h>
+#include <dlfcn.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static int
 print_usage(FILE* stream)
@@ -20,7 +26,7 @@ print_usage(FILE* stream)
 }
 
 static void
-print_cuda_error(CUresult status)
+get_cuda_error(CUresult status, const char** name_out, const char** msg_out)
 {
   const char* name = NULL;
   const char* msg = NULL;
@@ -35,7 +41,18 @@ print_cuda_error(CUresult status)
     msg = "unknown CUDA error";
   }
 
-  fprintf(stderr, "%s: %s\n", name, msg);
+  *name_out = name;
+  *msg_out = msg;
+}
+
+static void
+print_cuda_error(const char* api_name, CUresult status)
+{
+  const char* name = NULL;
+  const char* msg = NULL;
+
+  get_cuda_error(status, &name, &msg);
+  fprintf(stderr, "%s failed: %s: %s\n", api_name, name, msg);
 }
 
 static int
@@ -204,6 +221,296 @@ process_state_string(CUprocessState state)
   }
 }
 
+static void
+print_env_value(const char* name)
+{
+  const char* value = getenv(name);
+
+  fprintf(stderr, "env.%s=%s\n", name, value != NULL ? value : "<unset>");
+}
+
+static void
+print_cuda_versions(void)
+{
+  int driver_version = 0;
+  CUresult status;
+
+  fprintf(stderr, "cuda_header_version=%d\n", CUDA_VERSION);
+  status = cuDriverGetVersion(&driver_version);
+  if (status == CUDA_SUCCESS) {
+    fprintf(stderr, "cuda_driver_version=%d\n", driver_version);
+  } else {
+    print_cuda_error("cuDriverGetVersion", status);
+  }
+}
+
+static void
+print_libcuda_path(void)
+{
+  Dl_info info;
+
+  if (dladdr((void*)cuInit, &info) != 0 && info.dli_fname != NULL) {
+    fprintf(stderr, "libcuda_path=%s\n", info.dli_fname);
+    return;
+  }
+  fprintf(stderr, "libcuda_path=<unknown>\n");
+}
+
+static void
+print_symbol_status(const char* symbol)
+{
+  dlerror();
+  fprintf(stderr, "symbol.%s=%s\n", symbol, dlsym(RTLD_DEFAULT, symbol) != NULL ? "present" : "missing");
+}
+
+static void
+print_cuda_symbol_status(void)
+{
+  print_symbol_status("cuInit");
+  print_symbol_status("cuDriverGetVersion");
+  print_symbol_status("cuCheckpointProcessLock");
+  print_symbol_status("cuCheckpointProcessCheckpoint");
+  print_symbol_status("cuCheckpointProcessRestore");
+  print_symbol_status("cuCheckpointProcessUnlock");
+  print_symbol_status("cuCheckpointProcessGetState");
+  print_symbol_status("cuCheckpointProcessGetRestoreThreadId");
+}
+
+static void
+print_file_excerpt(const char* path)
+{
+  FILE* file = fopen(path, "r");
+  char buffer[4096];
+  size_t n;
+
+  if (file == NULL) {
+    fprintf(stderr, "%s=<unreadable: %s>\n", path, strerror(errno));
+    return;
+  }
+
+  n = fread(buffer, 1, sizeof(buffer) - 1, file);
+  buffer[n] = '\0';
+  fclose(file);
+  fprintf(stderr, "%s=%s%s\n", path, buffer, n == sizeof(buffer) - 1 ? "<truncated>" : "");
+}
+
+static void
+print_proc_status(int pid)
+{
+  char path[64];
+  FILE* file;
+  char line[512];
+  static const char* const prefixes[] = {
+    "Name:", "State:", "Tgid:", "Pid:", "PPid:", "TracerPid:", "NSpid:", "Threads:", NULL,
+  };
+
+  snprintf(path, sizeof(path), "/proc/%d/status", pid);
+  file = fopen(path, "r");
+  if (file == NULL) {
+    fprintf(stderr, "%s=<unreadable: %s>\n", path, strerror(errno));
+    return;
+  }
+
+  while (fgets(line, sizeof(line), file) != NULL) {
+    int i;
+
+    for (i = 0; prefixes[i] != NULL; ++i) {
+      if (strncmp(line, prefixes[i], strlen(prefixes[i])) == 0) {
+        line[strcspn(line, "\n")] = '\0';
+        fprintf(stderr, "target.%s\n", line);
+        break;
+      }
+    }
+  }
+  fclose(file);
+}
+
+static void
+print_proc_cmdline(int pid)
+{
+  char path[64];
+  FILE* file;
+  char buffer[1024];
+  size_t n;
+  size_t i;
+
+  snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+  file = fopen(path, "r");
+  if (file == NULL) {
+    fprintf(stderr, "%s=<unreadable: %s>\n", path, strerror(errno));
+    return;
+  }
+
+  n = fread(buffer, 1, sizeof(buffer) - 1, file);
+  fclose(file);
+  buffer[n] = '\0';
+  for (i = 0; i < n; ++i) {
+    if (buffer[i] == '\0') {
+      buffer[i] = ' ';
+    }
+  }
+  fprintf(stderr, "target.cmdline=%s%s\n", n > 0 ? buffer : "<empty>", n == sizeof(buffer) - 1 ? "<truncated>" : "");
+}
+
+static void
+print_proc_namespace(int pid, const char* namespace_name)
+{
+  char path[64];
+  char target[256];
+  ssize_t n;
+
+  snprintf(path, sizeof(path), "/proc/%d/ns/%s", pid, namespace_name);
+  n = readlink(path, target, sizeof(target) - 1);
+  if (n < 0) {
+    fprintf(stderr, "%s=<unreadable: %s>\n", path, strerror(errno));
+    return;
+  }
+  target[n] = '\0';
+  fprintf(stderr, "target.ns.%s=%s\n", namespace_name, target);
+}
+
+static const char*
+file_type_string(mode_t mode)
+{
+  if (S_ISCHR(mode)) {
+    return "char";
+  }
+  if (S_ISDIR(mode)) {
+    return "dir";
+  }
+  if (S_ISREG(mode)) {
+    return "regular";
+  }
+  if (S_ISLNK(mode)) {
+    return "symlink";
+  }
+  return "other";
+}
+
+static void
+print_path_status(const char* path)
+{
+  struct stat st;
+
+  if (stat(path, &st) != 0) {
+    fprintf(stderr, "path.%s=missing:%s\n", path, strerror(errno));
+    return;
+  }
+  fprintf(stderr, "path.%s=present,type=%s,mode=%o\n", path, file_type_string(st.st_mode), st.st_mode & 07777);
+}
+
+static void
+print_directory_sample(const char* path)
+{
+  DIR* dir = opendir(path);
+  struct dirent* entry;
+  int printed = 0;
+
+  if (dir == NULL) {
+    fprintf(stderr, "dir.%s=<unreadable: %s>\n", path, strerror(errno));
+    return;
+  }
+  fprintf(stderr, "dir.%s=", path);
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    if (printed >= 32) {
+      fprintf(stderr, "<truncated>");
+      break;
+    }
+    fprintf(stderr, "%s%s", printed > 0 ? " " : "", entry->d_name);
+    ++printed;
+  }
+  if (printed == 0) {
+    fprintf(stderr, "<empty>");
+  }
+  fprintf(stderr, "\n");
+  closedir(dir);
+}
+
+static void
+print_device_visibility(void)
+{
+  static const char* const paths[] = {
+    "/dev/nvidiactl",
+    "/dev/nvidia0",
+    "/dev/nvidia-uvm",
+    "/dev/nvidia-uvm-tools",
+    "/dev/nvidia-caps",
+    "/dev/nvidia-caps-imex-channels",
+    "/dev/nvidia-nvswitchctl",
+    "/dev/nvidia-nvswitch0",
+    "/dev/nvidia-nvlink",
+    "/dev/nvidia-fs",
+    NULL,
+  };
+  int i;
+
+  for (i = 0; paths[i] != NULL; ++i) {
+    print_path_status(paths[i]);
+  }
+  print_directory_sample("/dev/nvidia-caps");
+  print_directory_sample("/dev/nvidia-caps-imex-channels");
+}
+
+static void
+print_checkpoint_state(int pid, const char* failed_api_name)
+{
+  CUprocessState state;
+  CUresult status;
+  int tid = 0;
+
+  if (strcmp(failed_api_name, "cuCheckpointProcessGetState") != 0) {
+    status = cuCheckpointProcessGetState(pid, &state);
+    if (status == CUDA_SUCCESS) {
+      fprintf(stderr, "target.cuda_state=%s\n", process_state_string(state));
+    } else {
+      print_cuda_error("cuCheckpointProcessGetState", status);
+    }
+  }
+
+  if (strcmp(failed_api_name, "cuCheckpointProcessGetRestoreThreadId") != 0) {
+    status = cuCheckpointProcessGetRestoreThreadId(pid, &tid);
+    if (status == CUDA_SUCCESS) {
+      fprintf(stderr, "target.cuda_restore_tid=%d\n", tid);
+    } else {
+      print_cuda_error("cuCheckpointProcessGetRestoreThreadId", status);
+    }
+  }
+}
+
+static void
+print_failure_diagnostics(const char* api_name, CUresult status, int pid, const char* action, const char* device_map)
+{
+  const char* name = NULL;
+  const char* msg = NULL;
+
+  get_cuda_error(status, &name, &msg);
+  fprintf(stderr, "%s failed: %s: %s\n", api_name, name, msg);
+  fprintf(stderr, "cuda-checkpoint-helper diagnostics begin\n");
+  fprintf(stderr, "helper.action=%s\n", action != NULL ? action : "<none>");
+  fprintf(stderr, "helper.pid=%d\n", pid);
+  fprintf(stderr, "helper.device_map=%s\n", device_map != NULL && device_map[0] != '\0' ? device_map : "<empty>");
+  print_cuda_versions();
+  print_libcuda_path();
+  print_cuda_symbol_status();
+  print_env_value("LD_LIBRARY_PATH");
+  print_env_value("CUDA_VISIBLE_DEVICES");
+  print_env_value("NVIDIA_VISIBLE_DEVICES");
+  print_env_value("NVIDIA_DRIVER_CAPABILITIES");
+  print_file_excerpt("/proc/driver/nvidia/version");
+  print_proc_status(pid);
+  print_proc_cmdline(pid);
+  print_proc_namespace(pid, "pid");
+  print_proc_namespace(pid, "mnt");
+  print_proc_namespace(pid, "ipc");
+  print_proc_namespace(pid, "net");
+  print_checkpoint_state(pid, api_name);
+  print_device_visibility();
+  fprintf(stderr, "cuda-checkpoint-helper diagnostics end\n");
+}
+
 static CUresult
 do_lock(int pid, unsigned int timeout_ms)
 {
@@ -268,6 +575,7 @@ int
 main(int argc, char** argv)
 {
   const char* action = NULL;
+  const char* api_name = NULL;
   const char* device_map = "";
   int pid = 0;
   int have_pid = 0;
@@ -336,9 +644,10 @@ main(int argc, char** argv)
     if (timeout_ms != 0 || device_map[0] != '\0') {
       return print_usage(stderr);
     }
+    api_name = "cuCheckpointProcessGetState";
     status = do_get_state(pid, &state);
     if (status != CUDA_SUCCESS) {
-      print_cuda_error(status);
+      print_cuda_error(api_name, status);
       return 1;
     }
     return fprintf(stdout, "%s\n", process_state_string(state)) < 0 ? 1 : 0;
@@ -350,37 +659,47 @@ main(int argc, char** argv)
     if (timeout_ms != 0 || device_map[0] != '\0') {
       return print_usage(stderr);
     }
+    api_name = "cuCheckpointProcessGetRestoreThreadId";
     status = do_get_restore_tid(pid, &tid);
     if (status != CUDA_SUCCESS) {
-      print_cuda_error(status);
+      print_cuda_error(api_name, status);
       return 1;
     }
     return fprintf(stdout, "%d\n", tid) < 0 ? 1 : 0;
   }
 
   if (strcmp(action, "lock") == 0) {
+    api_name = "cuCheckpointProcessLock";
     status = do_lock(pid, timeout_ms);
   } else if (strcmp(action, "checkpoint") == 0) {
     if (timeout_ms != 0 || device_map[0] != '\0') {
       return print_usage(stderr);
     }
+    api_name = "cuCheckpointProcessCheckpoint";
     status = do_checkpoint(pid);
   } else if (strcmp(action, "restore") == 0) {
     if (timeout_ms != 0) {
       return print_usage(stderr);
     }
-    status = do_restore(pid, device_map);
+    /* cuCheckpointProcessRestore requires persistence mode or prior cuInit. */
+    api_name = "cuInit";
+    status = cuInit(0);
+    if (status == CUDA_SUCCESS) {
+      api_name = "cuCheckpointProcessRestore";
+      status = do_restore(pid, device_map);
+    }
   } else if (strcmp(action, "unlock") == 0) {
     if (timeout_ms != 0 || device_map[0] != '\0') {
       return print_usage(stderr);
     }
+    api_name = "cuCheckpointProcessUnlock";
     status = do_unlock(pid);
   } else {
     return print_usage(stderr);
   }
 
   if (status != CUDA_SUCCESS) {
-    print_cuda_error(status);
+    print_failure_diagnostics(api_name, status, pid, action, device_map);
     return 1;
   }
   return 0;

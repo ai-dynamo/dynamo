@@ -98,7 +98,8 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64/stubs \
-    -lcuda
+    -lcuda \
+    -ldl
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
