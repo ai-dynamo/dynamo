@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Runs deploy tests on push without requiring a PR. Uses pre-built images from
-# ACR (main-operator, main-vllm-runtime, etc.) so no build step is needed.
-# Also triggerable manually via workflow_dispatch to test any image tag.
+# Runs deploy tests on push without requiring a PR. Uses release images from
+# NVCR (kubernetes-operator, vllm-runtime) so no build step is needed.
+# Also triggerable manually via workflow_dispatch.
 
 name: Deploy Test on Push
 
@@ -42,8 +42,6 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ inputs.operator_tag || 'main-operator' }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}

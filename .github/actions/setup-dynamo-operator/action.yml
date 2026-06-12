@@ -15,8 +15,9 @@ inputs:
     required: false
     default: ''
   registry:
-    description: 'Container registry hostname (e.g. myregistry.azurecr.io)'
-    required: true
+    description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
+    required: false
+    default: ''
   operator_tag:
     description: 'Operator image tag (default: main-operator)'
     required: false
@@ -163,17 +164,22 @@ runs:
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
         set -x
-        OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
-        echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
-
         helm repo add bitnami https://charts.bitnami.com/bitnami
         cd deploy/helm/charts/platform/
         helm dep build .
 
+        IMAGE_ARGS=""
+        if [ -n "${REGISTRY}" ]; then
+          OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+          echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
+          IMAGE_ARGS="--set dynamo-operator.controllerManager.manager.image.repository=${OPERATOR_REPO} --set dynamo-operator.controllerManager.manager.image.tag=${OPERATOR_TAG}"
+        else
+          echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
+        fi
+
         KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
         helm upgrade --install dynamo-platform . --namespace default \
-          --set dynamo-operator.controllerManager.manager.image.repository=${OPERATOR_REPO} \
-          --set dynamo-operator.controllerManager.manager.image.tag=${OPERATOR_TAG} \
+          ${IMAGE_ARGS} \
           --set dynamo-operator.gpuDiscovery.enabled=false \
           --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
