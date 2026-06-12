@@ -28,7 +28,6 @@ import os
 import pytest
 
 from tests.deploy.test_deploy import (
-    DEFAULT_MAX_TOKENS,
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_TEMPERATURE,
     MIN_RESPONSE_CONTENT_LENGTH,
@@ -47,6 +46,12 @@ logger = logging.getLogger(__name__)
 EFA_MODEL_NAME = "Qwen/Qwen3-0.6B"
 PREFILL_SERVICE = "VllmPrefillWorker"
 DECODE_SERVICE = "VllmDecodeWorker"
+
+# Generate enough tokens to clear MIN_RESPONSE_CONTENT_LENGTH with margin.
+# The shared DEFAULT_MAX_TOKENS=30 leaves a thin cushion above the 100-char
+# minimum (a short, deterministic Qwen3-0.6B reply can land near the floor),
+# so request a larger budget here to keep this single-completion test robust.
+EFA_MAX_TOKENS = 64
 
 # Substrings that prove NIXL registered memory regions with the EFA libfabric
 # provider (i.e. the KV-cache transfer actually used LIBFABRIC -> EFA). These
@@ -202,7 +207,7 @@ async def test_efa_deployment(
         payload = {
             "model": EFA_MODEL_NAME,
             "messages": [{"role": "user", "content": TEST_PROMPT}],
-            "max_tokens": DEFAULT_MAX_TOKENS,
+            "max_tokens": EFA_MAX_TOKENS,
             "temperature": DEFAULT_TEMPERATURE,
             "stream": False,
         }
