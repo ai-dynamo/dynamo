@@ -136,3 +136,25 @@ cases:
       sglang:
         reasoning_text: 'preamble'
         normal_text: 'body</think>answer'
+  REASONING.stream.3.d:
+    description: Primed reasoning, DSML tool-call begin marker split across chunks
+    ref: dynamo
+    spec_ref: tests/parity/README.md; lib/parsers/REASONING_CASES.md
+    in_reasoning: true
+    chunks:
+    - 'Let me read it.<｜DS'
+    - 'ML｜tool_calls>'
+    - "\n<｜DSML｜invoke name=\"read\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+    expected:
+      dynamo:
+        reasoning_text: Let me read it.
+        normal_text: |-
+          <｜DSML｜tool_calls>
+          <｜DSML｜invoke name="read">
+          </｜DSML｜invoke>
+          </｜DSML｜tool_calls>
+        reason: 'Streaming counterpart of REASONING.batch.3.b with the tool-call-begin marker split across chunk boundaries (mid full-width codepoint). Partial-prefix buffering reassembles the marker and force-exits reasoning so the DSML block routes to normal_text.'
+      vllm:
+        unavailable: vLLM's reasoning parser takes no in_reasoning priming flag and has no DeepSeek DSML tool-call boundary, so the primed-handoff scenario has no apples-to-apples peer.
+      sglang:
+        unavailable: SGLang's reasoning detector takes no in_reasoning priming flag and has no DeepSeek DSML tool-call boundary, so the primed-handoff scenario has no apples-to-apples peer.

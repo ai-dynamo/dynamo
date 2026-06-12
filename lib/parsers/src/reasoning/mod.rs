@@ -21,6 +21,14 @@ pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
 /// `KimiK2ParserConfig::default().section_start` in `crate::tool_calling::config`.
 pub(crate) const KIMI_K2_TOOL_SECTION_BEGIN: &str = "<|tool_calls_section_begin|>";
 
+/// DeepSeek-V4 DSML tool-call block opener. When the model is primed into reasoning
+/// (`set_in_reasoning(true)`) it may emit this block directly without first closing
+/// `</think>`; treating it as a reasoning-exit marker keeps the tool call out of
+/// `reasoning_content` so the tool-call parser can see it. Mirrors
+/// `ToolCallConfig::deepseek_v4`'s `block_start` (`block_name = "tool_calls"`) in
+/// `crate::tool_calling::config`.
+pub(crate) const DEEPSEEK_V4_TOOL_CALLS_BEGIN: &str = "<｜DSML｜tool_calls>";
+
 static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>> = OnceLock::new();
 
 /// Initialize the global reasoning parser map
@@ -219,11 +227,24 @@ impl ReasoningParserType {
             ReasoningParserType::Qwen => ReasoningParserWrapper {
                 parser: Box::new(basic_parser),
             },
-            // Same `<think>` / `</think>` config as Qwen today; kept as a
-            // distinct variant so V4-specific divergence has somewhere to land.
+            // Same `<think>` / `</think>` config as Qwen, plus a tool-start
+            // force-exit. When primed into reasoning (`set_in_reasoning(true)`) the
+            // model can emit a `<｜DSML｜tool_calls>` block with no preceding
+            // `</think>`; without the marker the reasoning parser swallows the whole
+            // block into `reasoning_content` and the tool-call parser is starved
+            // (the tool call is silently dropped). Mirrors `KimiK25`.
+            //
+            // Force-exit consumes from the marker to the end, so a hypothetical
+            // interleaved `</think>...tool_calls...<think>B` would route B to
+            // normal_text in batch (streaming re-enters on the next `<think>`).
+            // That is safe in practice: a primed DSv4 tool-use turn ends after the
+            // tool block (finish_reason=tool_calls), so no post-tool reasoning.
             // See `ReasoningParserType::DeepSeekV4` docstring for rationale.
             ReasoningParserType::DeepSeekV4 => ReasoningParserWrapper {
-                parser: Box::new(basic_parser),
+                parser: Box::new(
+                    BasicReasoningParser::new("<think>".into(), "</think>".into(), false, true)
+                        .with_tool_start_token(DEEPSEEK_V4_TOOL_CALLS_BEGIN),
+                ),
             },
             ReasoningParserType::NemotronDeci => ReasoningParserWrapper {
                 parser: Box::new(basic_parser),
@@ -683,5 +704,99 @@ mod tests {
         }
         assert_eq!(all_reasoning, "Weighing options.");
         assert_eq!(all_content, "Beijing is sunny.");
+    }
+
+    // Primed into reasoning (prompt ended in <think>), the model emits a bare
+    // <｜DSML｜tool_calls> block with NO preceding </think>. The tool-start marker
+    // must force-exit reasoning so the DSML block lands in normal_text (handed to
+    // the tool-call parser). Before the fix the whole block was swallowed into
+    // reasoning_text and the tool call was silently dropped.
+    // Parity coverage: reasoning/fixtures/deepseek_v4/REASONING.{batch,stream}.yaml.
+    #[test]
+    fn test_deepseek_v4_primed_bare_tool_call_routes_to_normal() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+        parser.set_in_reasoning(true);
+
+        let input = "\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"read\">\n\
+                     <｜DSML｜parameter name=\"filePath\" string=\"true\">/a/b.ts</｜DSML｜parameter>\n\
+                     </｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+        let result = parser.detect_and_parse_reasoning(input, &[]);
+
+        // Batch trims reasoning (trim_start on force-exit), so the whitespace-only
+        // prefix collapses to empty; the whole DSML block lands in normal_text.
+        assert_eq!(result.reasoning_text, "");
+        assert!(
+            result.normal_text.starts_with("<｜DSML｜tool_calls>"),
+            "normal_text should hold the DSML block, got: {:?}",
+            result.normal_text
+        );
+        assert!(result.normal_text.contains("invoke name=\"read\""));
+    }
+
+    // Same bug under streaming, with the tool-start marker SPLIT across chunk
+    // boundaries (and mid-codepoint of the full-width `｜`). Partial-prefix
+    // buffering must reassemble the marker and force-exit reasoning.
+    #[test]
+    fn test_deepseek_v4_primed_bare_tool_call_streaming() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+        parser.set_in_reasoning(true);
+
+        // "<｜DSML｜tool_calls>" deliberately split across the chunk boundary.
+        let tokens = &[
+            "\n\n<｜DS",
+            "ML｜tool_calls>\n<｜DSML｜invoke name=\"read\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+        ];
+        let mut reasoning = String::new();
+        let mut normal = String::new();
+        for t in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(t, &[]);
+            reasoning.push_str(&r.reasoning_text);
+            normal.push_str(&r.normal_text);
+        }
+
+        assert_eq!(reasoning, "\n\n");
+        assert!(
+            normal.starts_with("<｜DSML｜tool_calls>"),
+            "normal should hold the DSML block, got: {normal:?}"
+        );
+        assert!(!reasoning.contains("DSML"));
+    }
+
+    // Regression guard for the common (clean) path: when the model DOES emit a
+    // closing </think> before the tool call, reasoning is captured normally and
+    // the DSML block still routes to normal_text.
+    #[test]
+    fn test_deepseek_v4_primed_reasoning_then_tool_call() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+        parser.set_in_reasoning(true);
+
+        let input = "Let me read it.</think>\n\n<｜DSML｜tool_calls>\n\
+                     <｜DSML｜invoke name=\"read\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+        let result = parser.detect_and_parse_reasoning(input, &[]);
+
+        assert_eq!(result.reasoning_text, "Let me read it.");
+        // normal_text is trimmed in batch mode, so the inter-tag whitespace is gone.
+        assert!(
+            result.normal_text.starts_with("<｜DSML｜tool_calls>"),
+            "normal_text should hold the DSML block, got: {:?}",
+            result.normal_text
+        );
+    }
+
+    // Drift guard: the reasoning force-exit marker must stay byte-identical to the
+    // tool-call parser's DSML block opener. The two live in separate modules and
+    // are independent string sources; if `deepseek_v4`'s block name ever changes,
+    // fail loudly here instead of silently resurrecting the swallow bug.
+    #[test]
+    fn test_deepseek_v4_tool_marker_matches_tool_call_config() {
+        use crate::tool_calling::config::{ParserConfig, ToolCallConfig};
+        let cfg = ToolCallConfig::deepseek_v4();
+        match cfg.parser_config {
+            ParserConfig::Dsml(dsml) => assert_eq!(
+                DEEPSEEK_V4_TOOL_CALLS_BEGIN, dsml.block_start,
+                "reasoning force-exit marker drifted from ToolCallConfig::deepseek_v4 block_start"
+            ),
+            _ => panic!("expected a DSML parser config for deepseek_v4"),
+        }
     }
 }
