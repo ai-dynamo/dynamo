@@ -81,7 +81,7 @@ Each `unified_main.py` calls `run(MyLLMEngine)` from the common
 Subclass `LLMEngine` and implement the required methods:
 
 ```python
-from dynamo.common.backend import LLMEngine, EngineConfig, WorkerConfig
+from dynamo.common.backend import LLMEngine, EngineConfig, LlmRegistration, WorkerConfig
 
 class MyEngine(LLMEngine):
     @classmethod
@@ -99,10 +99,10 @@ class MyEngine(LLMEngine):
         # `worker_id` is an opaque per-worker key; most engines ignore it.
         return EngineConfig(
             model="my-model",
-            context_length=4096,
-            kv_cache_block_size=16,
-            # Populate `bootstrap_host` / `bootstrap_port` here on prefill
-            # workers that advertise a Dynamo-level handshake address.
+            # Token-pipeline metadata goes in the `llm` sub-record. Populate
+            # `bootstrap_host` / `bootstrap_port` here on prefill workers that
+            # advertise a Dynamo-level handshake address.
+            llm=LlmRegistration(context_length=4096, kv_cache_block_size=16),
         )
 
     async def generate(self, request, context):
@@ -231,10 +231,10 @@ from dynamo.llm.exceptions import (
 The unified path supports the canonical PD-disagg roles via a single
 `--disaggregation-mode` flag. The mode flows from CLI → `WorkerConfig` →
 the Rust `Worker`, which uses it to decide model registration
-(`ModelType::Prefill` for prefill workers, the parsed `endpoint_types`
-for everyone else) and to disable the local KV indexer on decode
-workers. Engines read the same field on their runtime config to switch
-per-mode behavior in `generate()`.
+(`ModelType::empty()` + `WorkerType::Prefill` for prefill workers, the
+parsed `endpoint_types` for everyone else) and to disable the local KV
+indexer on decode workers. Engines read the same field on their runtime
+config to switch per-mode behavior in `generate()`.
 
 ```text
 +-----------+   --disaggregation-mode prefill    +------------------+
@@ -242,7 +242,7 @@ per-mode behavior in `generate()`.
 +-----------+                                    +------------------+
                                                           |
                                                           v
-                                          ModelType::Prefill registration
+                                          WorkerType::Prefill registration
                                           (Rust Worker)
 
                                                           |

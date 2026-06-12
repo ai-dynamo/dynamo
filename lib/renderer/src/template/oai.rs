@@ -18,6 +18,20 @@ pub fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
     if let Some(arr) = tools.as_array() {
         for tool in arr {
             let mut tool = tool.clone();
+            if let Some(function) = tool.get_mut("function") {
+                // Backfill a missing/null `description`. It's optional in the
+                // OpenAI tool schema, but some chat templates (e.g. gpt-oss
+                // harmony) concatenate it unconditionally and fail on an
+                // `undefined`/null value.
+                if let Some(obj) = function.as_object_mut()
+                    && !matches!(obj.get("description"), Some(serde_json::Value::String(_)))
+                {
+                    obj.insert(
+                        "description".to_string(),
+                        serde_json::Value::String(String::new()),
+                    );
+                }
+            }
             if let Some(function) = tool.get_mut("function")
                 && let Some(parameters) = function.get_mut("parameters")
             {
@@ -167,6 +181,11 @@ fn may_be_fix_msg_content(
                             // Mixed text+image array for a string-content
                             // template — flatten with model-family image
                             // placeholders inlined where the image parts were.
+                            // An empty `placeholder_tpl` ("") drops the image
+                            // parts entirely while keeping the text — used by
+                            // pure pass-through / encoder-decoder templates
+                            // (Nemotron-Parse) whose vision encoder consumes the
+                            // image out-of-band, so no text token represents it.
                             // The `is_empty` guard preserves a literal `[]`
                             // content (matches pre-PR behavior); flattening
                             // an empty array to `""` would silently change
@@ -202,7 +221,10 @@ fn may_be_fix_msg_content(
 ///
 /// Used in `may_be_fix_msg_content` when `preserve_arrays=false` and the
 /// template knows a placeholder convention — currently Phi-3-vision
-/// (`<|image_{n}|>`) and LLaVA-1.5 (`<image>`).
+/// (`<|image_{n}|>`), LLaVA-1.5 (`<image>`), and pure pass-through /
+/// encoder-decoder templates (`""`, image emits nothing — Nemotron-Parse).
+/// With an empty `placeholder_tpl` the non-text parts contribute no characters,
+/// so the result is the concatenated text parts only.
 ///
 /// **Caveat — non-text index slot:** `img_idx` increments for every non-text
 /// part, not just images. The current supported families (Phi-3, LLaVA-1.5)
@@ -522,6 +544,112 @@ mod tests {
     use dynamo_protocols::types::CreateChatCompletionRequest as NvCreateChatCompletionRequest;
     use minijinja::{Environment, context};
 
+    /// Dev utility (ignored by default): dump the prompt Dynamo's renderer
+    /// produces for a tool-calling chat request, so it can be diffed against
+    /// vLLM's `openai_harmony` rendering — to see whether the gpt-oss Jinja
+    /// `chat_template` actually emits the harmony "tool calls go to the
+    /// commentary channel" guidance + `functions` namespace.
+    ///
+    /// Point GPTOSS_CHAT_TEMPLATE at the model's tokenizer_config.json (its
+    /// `chat_template` field is extracted) OR a raw chat_template.jinja file:
+    ///   GPTOSS_CHAT_TEMPLATE=/path/openai-gpt-oss-120b/tokenizer_config.json \
+    ///     cargo test -p dynamo-renderer dump_gptoss_tool_prompt -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_gptoss_tool_prompt() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
+
+        let path = std::env::var("GPTOSS_CHAT_TEMPLATE").expect(
+            "set GPTOSS_CHAT_TEMPLATE to the tokenizer_config.json, chat_template.jinja, or model dir path",
+        );
+        let input_path = std::path::Path::new(&path);
+        let file_path = if input_path.is_dir() {
+            // Prefer tokenizer_config.json from model dir if provided
+            input_path.join("tokenizer_config.json")
+        } else {
+            input_path.to_path_buf()
+        };
+        let raw = std::fs::read_to_string(&file_path).expect("read chat template file");
+        // Resolve the actual Jinja template. gpt-oss ships its chat template in a
+        // separate `chat_template.jinja` file, NOT inside tokenizer_config.json,
+        // so:
+        //   * if the file is JSON with a `chat_template` field, use it;
+        //   * otherwise, if a sibling `chat_template.jinja` exists, read that;
+        //   * otherwise treat the file itself as the template.
+        let template_string: String = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) if v.get("chat_template").is_some() => v["chat_template"]
+                .as_str()
+                .expect("chat_template field must be a string")
+                .to_string(),
+            _ => {
+                let sibling = std::path::Path::new(&path)
+                    .parent()
+                    .map(|d| d.join("chat_template.jinja"));
+                match sibling {
+                    Some(p) if p.exists() => {
+                        eprintln!(
+                            "[info] {path} had no chat_template field; using {}",
+                            p.display()
+                        );
+                        std::fs::read_to_string(&p).expect("read sibling chat_template.jinja")
+                    }
+                    _ => raw,
+                }
+            }
+        };
+
+        // Guard against silently echoing a non-template (e.g. a tokenizer_config.json
+        // with no chat_template and no sibling .jinja).
+        assert!(
+            template_string.contains("{%") || template_string.contains("{{"),
+            "resolved template has no Jinja tags — GPTOSS_CHAT_TEMPLATE ({path}) is probably \
+             tokenizer_config.json with no chat_template field and no sibling chat_template.jinja. \
+             Point it at the chat_template.jinja file."
+        );
+
+        let chat_template: ChatTemplate =
+            serde_json::from_value(serde_json::json!({ "chat_template": template_string }))
+                .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        // Declare tools — the tool-channel guidance only renders when tools are present.
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
+              "model": "openai/gpt-oss-120b",
+              "messages": [{"role":"user","content":"Search the repo for the string \"countHook\"."}],
+              "tools": [
+                {"type":"function","function":{"name":"grep","description":"search files","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}}},
+                {"type":"function","function":{"name":"read","description":"read a file","parameters":{"type":"object","properties":{"filePath":{"type":"string"}},"required":["filePath"]}}}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+        eprintln!("================ RENDERED gpt-oss PROMPT (tools declared) ================");
+        eprintln!("{rendered}");
+        eprintln!("================ END RENDERED PROMPT ================");
+        eprintln!("[diagnostics] does the rendered prompt contain…");
+        for needle in [
+            "commentary",
+            "Calls to these tools",
+            "functions",
+            "# Tools",
+            "<|channel|>",
+            "constrain",
+            "analysis",
+        ] {
+            eprintln!(
+                "  {:>22}: {}",
+                format!("{needle:?}"),
+                rendered.contains(needle)
+            );
+        }
+    }
+
     /// Tests that media URL content parts are converted to empty placeholders.
     #[test]
     fn test_convert_media_url_to_placeholder_single_type() {
@@ -772,6 +900,96 @@ mod tests {
             serde_json::Value::Object(Default::default())
         );
         assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_missing_description() {
+        // `description` is optional in the OpenAI tool schema, but some chat
+        // templates (e.g. gpt-oss harmony) concatenate it unconditionally and
+        // fail on an `undefined`/null value. It must be backfilled to "".
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "parameters": {
+                            "type": "object",
+                            "properties": { "x": { "type": "string" } },
+                            "required": ["x"],
+                            "additionalProperties": false
+                        },
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            serde_json::Value::String(String::new())
+        );
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_null_description() {
+        // An explicit null `description` must also be normalized to "".
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "description": null,
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            serde_json::Value::String(String::new())
+        );
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_preserves_description() {
+        // A present `description` must be left untouched.
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get the current weather in a given location",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            "Get the current weather in a given location"
+        );
     }
 
     /// Tests that content arrays (containing only text parts) are correctly concatenated.
@@ -1056,6 +1274,81 @@ mod tests {
         assert_eq!(content, "Describe: <image>");
     }
 
+    /// Nemotron-Parse pass-through path: a mixed text+image array with an
+    /// empty placeholder (`""`) flattens to the text parts only — the image
+    /// contributes nothing because the vision encoder consumes it out-of-band.
+    /// Without this, `{{ message.content }}` would JSON-serialize the array
+    /// into the prompt (the gibberish failure mode).
+    #[test]
+    fn test_may_be_fix_msg_content_flattens_empty_placeholder() {
+        let json_str = r#"{
+            "model": "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                    ]
+                }
+            ]
+        }"#;
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages_raw = serde_json::to_value(request.messages()).unwrap();
+
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, Some(""))).unwrap();
+
+        let content = messages[0]["content"].as_str().expect("content flattened");
+        assert_eq!(
+            content,
+            "</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>"
+        );
+    }
+
+    /// End-to-end render through the Nemotron-Parse pass-through chat template:
+    /// a text+image chat request must produce exactly the control-token prompt,
+    /// with the image dropped from the rendered text. The renderer is agnostic
+    /// to the control tokens themselves (they are just the text part, passed
+    /// through verbatim), so both `predict_no_text_in_pic` and
+    /// `predict_text_in_pic` prompts round-trip identically.
+    #[test]
+    fn test_render_nemotron_parse_passthrough() {
+        use super::super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+        }))
+        .unwrap();
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        for prompt in [
+            "</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>",
+            "</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>",
+        ] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                        ]
+                    }]
+                }))
+                .unwrap();
+
+            let rendered = formatter.render(&request).unwrap();
+            assert_eq!(
+                rendered, prompt,
+                "rendered prompt must be the control tokens only, with no JSON-serialized image array"
+            );
+        }
+    }
+
     /// Tests that content arrays containing only non-text types remain as arrays,
     /// and image_url types are converted to image placeholders.
     #[test]
@@ -1240,10 +1533,11 @@ NORMAL MODE
             .render(context! { messages => messages.as_array().unwrap() })
             .unwrap();
 
-        // Should produce clean JSON without double-encoding
+        // Should produce clean JSON without double-encoding, with Python
+        // json.dumps separators (what transformers' tojson emits).
         assert_eq!(
             out,
-            r#"{"format":"celsius","location":"San Francisco, CA"}"#
+            r#"{"format": "celsius", "location": "San Francisco, CA"}"#
         );
     }
 

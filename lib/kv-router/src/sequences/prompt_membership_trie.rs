@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
+use crate::lookup_update::update_arc_lookup_for_keys;
 use crate::protocols::WorkerWithDpRank;
 
 type SharedNode = Arc<RwLock<PromptTrieNode>>;
@@ -256,9 +257,15 @@ impl PromptMembershipTrie {
             let guard = resolved.read();
             guard.lookup_hashes_for_worker_repair(worker, hash, direction)
         };
-        for repair_hash in repair_hashes {
-            worker_lookup.insert(repair_hash, resolved.clone());
-        }
+        Self::update_lookup_for_hashes(worker_lookup, &repair_hashes, resolved);
+    }
+
+    fn update_lookup_for_hashes(
+        worker_lookup: &mut WorkerLookup,
+        hashes: &[SequenceHash],
+        node: &SharedNode,
+    ) {
+        update_arc_lookup_for_keys(worker_lookup, hashes.iter().copied(), node);
     }
 
     fn repair_stale_lookup_from_node(
@@ -457,9 +464,7 @@ impl PromptMembershipTrie {
                         parent_guard.children.insert(first_hash, new_node.clone());
                         drop(parent_guard);
 
-                        for &hash in remaining {
-                            worker_lookup.insert(hash, new_node.clone());
-                        }
+                        Self::update_lookup_for_hashes(worker_lookup, remaining, &new_node);
                         return;
                     }
                 }
@@ -502,17 +507,19 @@ impl PromptMembershipTrie {
                             .insert(tail_first_hash, new_node.clone());
                         drop(child_guard);
 
-                        for &hash in &remaining[..match_len] {
-                            worker_lookup.insert(hash, child.clone());
-                        }
-                        for &hash in tail {
-                            worker_lookup.insert(hash, new_node.clone());
-                        }
+                        Self::update_lookup_for_hashes(
+                            worker_lookup,
+                            &remaining[..match_len],
+                            &child,
+                        );
+                        Self::update_lookup_for_hashes(worker_lookup, tail, &new_node);
                     } else {
                         drop(child_guard);
-                        for &hash in &remaining[..match_len] {
-                            worker_lookup.insert(hash, child.clone());
-                        }
+                        Self::update_lookup_for_hashes(
+                            worker_lookup,
+                            &remaining[..match_len],
+                            &child,
+                        );
                     }
                     return;
                 }
@@ -520,9 +527,7 @@ impl PromptMembershipTrie {
                 child_guard.promote_to_full(worker);
                 drop(child_guard);
 
-                for &hash in &remaining[..edge_len] {
-                    worker_lookup.insert(hash, child.clone());
-                }
+                Self::update_lookup_for_hashes(worker_lookup, &remaining[..edge_len], &child);
 
                 last_hash = Some(remaining[edge_len - 1]);
                 remaining = &remaining[edge_len..];

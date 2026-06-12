@@ -132,15 +132,36 @@ cases:
     - <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant
     - <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
     expected:
-      dynamo: &id003
+      dynamo:
         reasoning_text: ''
-        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
+        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
         reason: Unlike vLLM streaming reasoning, Dynamo parses reasoning before tool calling. For GPT-OSS/Harmony, directed commentary is tool-call text, so Dynamo passes it in normal_text for the Harmony tool parser to emit structured tool_calls and remove the markup from final content.
       vllm:
         reasoning_text: ''
         normal_text: ''
         reason: vLLM streaming reasoning suppresses directed Harmony commentary at the reasoning layer; Dynamo keeps it because normal_text is the handoff to the Harmony tool parser.
-      sglang: *id003
+      sglang:
+        reasoning_text: ''
+        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{"tz":"PST"}<|call|>
+  REASONING.stream.4.d:
+    description: Directed Harmony analysis tool recipient split across chunks
+    ref: *upstream_ref
+    chunks:
+    - <|channel|>analysis to=functions.grep code<|message|>
+    - '{"pattern":"foo"}<|call|>'
+    expected:
+      dynamo:
+        reasoning_text: ''
+        normal_text: '<|channel|>analysis to=functions.grep code<|message|>{"pattern":"foo"}<|call|>'
+        reason: A directed analysis-channel call (to=functions.*) is a tool call regardless of channel label. Dynamo hands the complete envelope to the Harmony tool parser via normal_text, even when header and <|call|> arrive in separate chunks, by persisting the channel/recipient across the chunk boundary and reconstructing from the cumulative token buffer on the <|call|> chunk.
+      vllm:
+        reasoning_text: '{"pattern":"foo"}'
+        normal_text: ''
+        reason: vLLM streaming reasoning suppresses directed Harmony analysis at the reasoning layer; Dynamo keeps it because normal_text is the handoff to the Harmony tool parser.
+      sglang:
+        reasoning_text: ''
+        normal_text: '<|channel|>analysis to=functions.grep code<|message|>{"pattern":"foo"}<|call|>'
+        reason: SGLang classifies a directed Harmony analysis channel ending in <|call|> as a tool_call handoff, matching Dynamo's behavior.
   REASONING.stream.1.b:
     description: Plain text without Harmony channel markers
     ref: *upstream_ref

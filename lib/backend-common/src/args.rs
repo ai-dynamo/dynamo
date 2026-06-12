@@ -68,8 +68,9 @@ pub struct CommonArgs {
     pub exclude_tools_when_tool_choice_none: bool,
 
     /// Disaggregation role: `agg` (default), `prefill`, or `decode`.
-    /// Prefill workers register as `ModelType::Prefill` regardless of
-    /// `endpoint_types`; decode workers do not advertise a local KV indexer.
+    /// Prefill workers register with `ModelType::empty()` and
+    /// `WorkerType::Prefill` regardless of `endpoint_types`; decode workers
+    /// do not advertise a local KV indexer.
     #[arg(
         long,
         value_enum,

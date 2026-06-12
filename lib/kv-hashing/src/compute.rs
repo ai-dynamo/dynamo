@@ -35,6 +35,18 @@ impl Request {
         Ok(seq.blocks().iter().map(UniversalBlock::from).collect())
     }
 
+    fn into_blocks_consuming(self, block_size: u32) -> Result<Vec<UniversalBlock>, KvHashingError> {
+        let salt_hash = compute_salt_hash(self.salt(), self.lora_name())?;
+        let token_mm = self.mm_info.into_iter().map(Into::into).collect::<Vec<_>>();
+        let seq = TokenBlockSequence::new_with_mm(
+            Tokens::from(self.tokens),
+            &token_mm,
+            block_size,
+            Some(salt_hash),
+        )?;
+        Ok(seq.blocks().iter().map(UniversalBlock::from).collect())
+    }
+
     /// Projection: per-block [`BlockHash`].
     pub fn block_hashes(&self, block_size: u32) -> Result<Vec<BlockHash>, KvHashingError> {
         Ok(self
@@ -48,6 +60,22 @@ impl Request {
     pub fn sequence_hashes(&self, block_size: u32) -> Result<Vec<SequenceHash>, KvHashingError> {
         Ok(self
             .into_blocks(block_size)?
+            .into_iter()
+            .map(|b| b.sequence_hash())
+            .collect())
+    }
+
+    /// Consuming projection: per-block [`SequenceHash`].
+    ///
+    /// This preserves the borrowed [`Self::sequence_hashes`] API for callers that need to
+    /// keep the request, while allowing one-shot producers to move the token vector into
+    /// block construction and avoid an extra full-prompt clone.
+    pub fn into_sequence_hashes(
+        self,
+        block_size: u32,
+    ) -> Result<Vec<SequenceHash>, KvHashingError> {
+        Ok(self
+            .into_blocks_consuming(block_size)?
             .into_iter()
             .map(|b| b.sequence_hash())
             .collect())

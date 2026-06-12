@@ -143,12 +143,17 @@ class ChainAugmentOutcome:
       these messages via ``PipelineOutcome.audit_events`` so operators
       can audit them; a Prometheus counter for this signal is deferred
       to a follow-up observability PR.
+    - ``reasons``: non-empty ``PredictStageResponse.reason`` strings
+      observed while running the chain. Used by the adapter to preserve
+      legacy diagnostics such as ``predict_failed`` when no prediction
+      payload was produced.
     """
 
     prediction: Optional[PredictionData]
     final_from: str = ""
     degraded: list[str] = field(default_factory=list)
     chain_break_warnings: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------------

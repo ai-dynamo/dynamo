@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use clap::Parser;
 use dynamo_backend_common::{
     AsyncEngineContext, CommonArgs, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
-    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx, ModelInput,
-    PreprocessedRequest, SnapshotPublisher, WorkerConfig, usage,
+    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, MetricsBindings, MetricsCtx,
+    ModelInput, PreprocessedRequest, SnapshotPublisher, WorkerConfig, usage,
 };
 use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::RwLock;
@@ -281,17 +281,19 @@ impl LLMEngine for VllmBackend {
                     .clone()
                     .unwrap_or_else(|| self.model.clone()),
             ),
-            context_length: Some(context_length),
-            kv_cache_block_size: self.extra.block_size,
-            total_kv_blocks,
-            max_num_seqs: self.extra.max_num_seqs,
-            max_num_batched_tokens: self.extra.max_num_batched_tokens,
-            data_parallel_size: Some(data_parallel_size),
-            // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
-            data_parallel_start_rank: Some(0),
-            bootstrap_host: None,
-            bootstrap_port: None,
             runtime_data: Default::default(),
+            llm: Some(LlmRegistration {
+                context_length: Some(context_length),
+                kv_cache_block_size: self.extra.block_size,
+                total_kv_blocks,
+                max_num_seqs: self.extra.max_num_seqs,
+                max_num_batched_tokens: self.extra.max_num_batched_tokens,
+                data_parallel_size: Some(data_parallel_size),
+                // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
+                data_parallel_start_rank: Some(0),
+                bootstrap_host: None,
+                bootstrap_port: None,
+            }),
         })
     }
 
