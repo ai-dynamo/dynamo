@@ -5,7 +5,7 @@
 #
 # Topology: 2 prefill (CTX) workers, each on 1 GB200 node, DEP4 (TP=4 EP=4 ADP).
 #           1 decode  (GEN) worker on 8 GB200 nodes, DEP32 (TP=32 EP=32 ADP).
-# GEN MoE: CUTEDSL with EPLB. CTX MoE: default backend.
+# GEN MoE: TRTLLM with EPLB. CTX MoE: default backend.
 # KV cache: FP8. Speculative decoding: MTP with 1 next-N predict layer.
 #
 # Instructions:
@@ -74,7 +74,7 @@ data:
       free_gpu_memory_fraction: 0.6
       dtype: fp8
     moe_config:
-      backend: CUTEDSL
+      backend: TRTLLM
       load_balancer:
         num_slots: 288
         layer_updates_per_iter: 1
