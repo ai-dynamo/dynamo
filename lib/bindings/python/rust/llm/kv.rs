@@ -18,6 +18,8 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
