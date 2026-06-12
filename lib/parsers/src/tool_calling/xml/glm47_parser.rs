@@ -5,6 +5,7 @@
 // Format: <tool_call>function_name<arg_key>param1</arg_key><arg_value>value1</arg_value></tool_call>
 // Reference: https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
 
+use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -586,8 +587,10 @@ fn parse_tool_call_block(
         anyhow::bail!("Empty function name in tool call");
     }
 
-    // Parse key-value pairs
-    let mut arguments = HashMap::new();
+    // Parse key-value pairs. IndexMap (not HashMap): serialized `arguments`
+    // must keep the model-emitted key order (echoed back as history; KV-cache
+    // prefix matching).
+    let mut arguments: IndexMap<String, ParsedValue> = IndexMap::new();
     let args_section = &content[function_name.len()..];
 
     // Build regex patterns
@@ -1172,5 +1175,18 @@ mod tests {
             serde_json::from_str(&calls[1].function.arguments).unwrap();
         assert_eq!(args0.get("location").unwrap().as_str().unwrap(), "NYC");
         assert_eq!(args1.get("location").unwrap().as_str().unwrap(), "LA");
+    }
+
+    #[test] // helper — serialized arguments must keep the model-emitted arg order
+    fn test_arguments_preserve_model_emitted_arg_order() {
+        let config = get_test_config();
+        // to, date, from is deliberately NOT alphabetical.
+        let message = "<tool_call>book_flight<arg_key>to</arg_key><arg_value>LAX</arg_value><arg_key>date</arg_key><arg_value>2026-03-15</arg_value><arg_key>from</arg_key><arg_value>NYC</arg_value></tool_call>";
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].function.arguments, r#"{"to":"LAX","date":"2026-03-15","from":"NYC"}"#,
+            "arguments must serialize in model-emitted order"
+        );
     }
 }

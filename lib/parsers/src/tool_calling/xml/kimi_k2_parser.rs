@@ -1139,4 +1139,17 @@ mod tests {
         assert_eq!(args0["location"], "NYC");
         assert_eq!(args1["location"], "LA");
     }
+
+    #[test] // helper — the JSON round-trip must not reorder argument keys
+    fn test_arguments_preserve_model_emitted_key_order() {
+        let config = default_config();
+        // path, old_str, command is deliberately NOT alphabetical.
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.editor:0<|tool_call_argument_begin|>{"path":"/a","old_str":"x","command":"replace"}<|tool_call_end|><|tool_calls_section_end|>"#;
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].function.arguments, r#"{"path":"/a","old_str":"x","command":"replace"}"#,
+            "Value round-trip must preserve model-emitted key order (needs serde_json preserve_order)"
+        );
+    }
 }

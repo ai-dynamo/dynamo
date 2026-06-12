@@ -1361,4 +1361,17 @@ mod tests {
         assert_eq!(args0["city"], "NYC");
         assert_eq!(args1["city"], "LA");
     }
+
+    #[test] // helper — serialized arguments must keep the model-emitted parameter order
+    fn test_arguments_preserve_model_emitted_param_order() {
+        let config = get_test_config();
+        // path, old_str, command is deliberately NOT alphabetical.
+        let input = "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"file_editor\">\n<｜DSML｜parameter name=\"path\" string=\"true\">/a</｜DSML｜parameter>\n<｜DSML｜parameter name=\"old_str\" string=\"true\">x</｜DSML｜parameter>\n<｜DSML｜parameter name=\"command\" string=\"true\">replace</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>";
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].function.arguments, r#"{"path":"/a","old_str":"x","command":"replace"}"#,
+            "serde_json::Map must preserve insertion order (needs preserve_order)"
+        );
+    }
 }

@@ -26,8 +26,15 @@ keywords.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
-serde_json = { workspace = true, features = ["raw_value"] }
+# preserve_order: tool-call `arguments` must serialize in the model-emitted key
+# order in EVERY build (standalone and dynamo-workspace). Without it, key order
+# rides on feature unification from other crates, and `serde_json::Map` /
+# `Value` round-trips alphabetize — clients echo the reordered arguments back
+# as conversation history, drifting the few-shot prompt away from what the
+# model emitted and breaking append-only KV-cache prefix matching.
+serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

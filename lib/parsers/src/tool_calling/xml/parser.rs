@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use num_traits::ToPrimitive;
 use regex::Regex;
 use serde_json::Value;
@@ -366,8 +367,12 @@ fn parse_tool_call_block(
         // Get parameter config for this function
         let param_config = get_arguments_config(function_name, tools);
 
-        // Parse parameters from the function body.
-        let mut parameters: HashMap<String, ParsedValue> = HashMap::new();
+        // Parse parameters from the function body. IndexMap (not HashMap): the
+        // serialized `arguments` must keep the model-emitted parameter order —
+        // clients echo it back as conversation history, so a reordered map
+        // drifts the few-shot prompt away from what the model emitted and
+        // breaks append-only KV-cache prefix matching.
+        let mut parameters: IndexMap<String, ParsedValue> = IndexMap::new();
 
         for param_cap in parameter_regex.captures_iter(function_body) {
             let param_name_raw = param_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
@@ -1623,5 +1628,19 @@ LA
         let args1: serde_json::Value = serde_json::from_str(&calls[1].function.arguments).unwrap();
         assert_eq!(args0["city"], "NYC");
         assert_eq!(args1["city"], "LA");
+    }
+
+    #[test] // helper — serialized arguments must keep the model-emitted parameter order
+    fn test_arguments_preserve_model_emitted_param_order() {
+        // path, old_str, new_str, command is deliberately NOT alphabetical:
+        // a HashMap (random) or BTreeMap (alphabetical) map both fail this.
+        let input = "<tool_call>\n<function=file_editor>\n<parameter=path>\n/app/x.go\n</parameter>\n<parameter=old_str>\nfoo\n</parameter>\n<parameter=new_str>\nbar\n</parameter>\n<parameter=command>\nstr_replace\n</parameter>\n</function>\n</tool_call>";
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].function.arguments,
+            r#"{"path":"/app/x.go","old_str":"foo","new_str":"bar","command":"str_replace"}"#,
+            "arguments must serialize in model-emitted order (clients echo them back as history; KV-cache prefix matching)"
+        );
     }
 }

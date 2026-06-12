@@ -1095,4 +1095,13 @@ mod detect_parser_tests {
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(normal, Some("Checked.".to_string()));
     }
+
+    #[test] // helper — the JSON round-trip must not reorder argument keys
+    fn test_serialize_harmony_arguments_preserves_key_order() {
+        assert_eq!(
+            serialize_harmony_arguments(r#"{"path":"/a","old_str":"x","command":"replace"}"#),
+            r#"{"path":"/a","old_str":"x","command":"replace"}"#,
+            "Value round-trip must preserve model-emitted key order (needs serde_json preserve_order)"
+        );
+    }
 }
