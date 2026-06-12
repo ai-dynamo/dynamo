@@ -369,6 +369,8 @@ class TestVllmKvEventsApi:
             assert decoded["type"] == "BlockRemoved"
             assert decoded["block_hashes"] == [123, 456]
             assert decoded["medium"] == "GPU"
+            if _has_group_idx(BlockRemoved):
+                assert decoded.get("group_idx", 0) == 0
             if _has_kv_cache_spec_kind(BlockRemoved):
                 assert decoded["kv_cache_spec_kind"] == "full_attention"
             if _has_kv_cache_spec_sliding_window(BlockRemoved):
