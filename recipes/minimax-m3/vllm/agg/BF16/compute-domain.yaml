@@ -1,0 +1,11 @@
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: m3-vllm-bf16-tp8-d0cf-compute-domain
+  namespace: ibhosale-dynamo
+spec:
+  numNodes: 2
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: m3-vllm-bf16-tp8-d0cf-channel

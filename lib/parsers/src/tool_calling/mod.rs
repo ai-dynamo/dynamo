@@ -36,7 +36,8 @@ pub enum ToolChoice {
 
 // Re-export main types and functions for convenience
 pub use config::{
-    JsonParserConfig, KimiK2ParserConfig, ParserConfig, ToolCallConfig, XmlParserConfig,
+    JsonParserConfig, KimiK2ParserConfig, MiniMaxM3ParserConfig, ParserConfig, ToolCallConfig,
+    XmlParserConfig,
 };
 pub use dsml::try_tool_call_parse_dsml;
 pub use gemma4::try_tool_call_parse_gemma4;

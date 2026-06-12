@@ -1,0 +1,263 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: m3-vllm-bf16-tp8-d0cf
+  namespace: ibhosale-dynamo
+  labels:
+    app: m3-vllm-bf16-tp8-d0cf
+    app.kubernetes.io/part-of: m3-vllm-bf16-tp8-d0cf
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: shared-model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      sharedMemory:
+        size: 40Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /model-cache
+      extraPodMetadata:
+        labels:
+          app.kubernetes.io/part-of: m3-vllm-bf16-tp8-d0cf
+          dynamo.nvidia.com/component: frontend
+          dynamo.nvidia.com/framework: vllm
+          dynamo.nvidia.com/model: minimax-m3-dynamo-vllm-bf16
+      extraPodSpec:
+        imagePullSecrets:
+          - name: acr-token-secret
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+          - operator: Exists
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-minimax-m3-dev.1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              exec python3 -m dynamo.frontend \
+                --http-port 8000 \
+                --dyn-chat-processor dynamo \
+                --router-mode round-robin
+          env:
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_HUB_CACHE
+              value: /model-cache/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: "[]"
+            - name: DYN_SYSTEM_STARTING_HEALTH_STATUS
+              value: ready
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel
+      sharedMemory:
+        size: 200Gi
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /model-cache
+      extraPodMetadata:
+        labels:
+          app.kubernetes.io/part-of: m3-vllm-bf16-tp8-d0cf
+          dynamo.nvidia.com/component: decode
+          dynamo.nvidia.com/framework: vllm
+          dynamo.nvidia.com/model: minimax-m3-dynamo-vllm-bf16
+      extraPodSpec:
+        imagePullSecrets:
+          - name: acr-token-secret
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: kubernetes.io/arch
+                      operator: In
+                      values:
+                        - arm64
+                    - key: nvidia.com/gpu.product
+                      operator: In
+                      values:
+                        - NVIDIA-GB200
+                    - key: cloud.google.com/gke-nodepool
+                      operator: In
+                      values:
+                        - customer-gpu-o7v
+                        - customer-gpu-w0e
+        tolerations:
+          - operator: Exists
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: m3-vllm-bf16-tp8-d0cf-channel
+        volumes:
+          - name: vllm-cache
+            emptyDir: {}
+          - name: flashinfer-package-cubins
+            emptyDir: {}
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-minimax-m3-dev.1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited || true
+              ulimit -n 1048576 || true
+              echo "===== MiniMax M3 Dynamo vLLM BF16 TP=8 two-node Day0 CF launch: no EP, no symm mem, cutlass 4.5.2, no source hotpatch ====="
+              date -u +%Y-%m-%dT%H:%M:%SZ
+              echo "MODEL_PATH=${MODEL_PATH}"
+              echo "SERVED_MODEL_NAME=${SERVED_MODEL_NAME}"
+              echo "TP_SIZE=8"
+              readlink -f "${MODEL_PATH}" || true
+              find -L "${MODEL_PATH}" -maxdepth 1 -type f -name '*.safetensors' | wc -l || true
+              du -shL "${MODEL_PATH}" || true
+              nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader || true
+              pip install --force-reinstall --no-deps nvidia-cutlass-dsl-libs-cu13==4.5.2
+
+              exec python3 -m dynamo.vllm \
+                --model "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --trust-remote-code \
+                --enable-multimodal \
+                --tensor-parallel-size 8 \
+                --pipeline-parallel-size 1 \
+                --block-size 128 \
+                --mm-encoder-attn-backend FLASHINFER \
+                --mm-processor-cache-type lru \
+                --max-model-len 131072 \
+                --gpu-memory-utilization 0.90 \
+                --dyn-reasoning-parser minimax_m3 \
+                --dyn-tool-call-parser minimax_m3 \
+                --moe-backend triton \
+                --compilation-config '{"mode":0,"cudagraph_mode":"NONE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":false}}' \
+                --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}' \
+                --no-enable-flashinfer-autotune \
+                --no-enable-log-requests
+          env:
+            - name: SERVED_MODEL_NAME
+              value: minimax-m3-dynamo-vllm-bf16
+            - name: MODEL_PATH
+              value: /model-cache/ibhosale-minimax-m3-bf16/payload
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_HUB_CACHE
+              value: /model-cache/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: VLLM_CACHE_ROOT
+              value: /vllm-cache
+            - name: FLASHINFER_CACHE_DIR
+              value: /vllm-cache/flashinfer
+            - name: FLASHINFER_CUBIN_DIR
+              value: /vllm-cache/flashinfer-cubins
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "7200"
+            - name: TILELANG_CLEANUP_TEMP_FILES
+              value: "1"
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
+            - name: VLLM_USE_NCCL_SYMM_MEM
+              value: "0"
+            - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+              value: "0"
+            - name: VLLM_USE_BREAKABLE_CUDAGRAPH
+              value: "0"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_MNNVL_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NCCL_P2P_LEVEL
+              value: NVL
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: UCX_MEMTYPE_CACHE
+              value: "n"
+            - name: UCX_TLS
+              value: cuda_copy,cuda_ipc,tcp
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "y"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              cpu: "32"
+              memory: 256Gi
+            limits:
+              cpu: "64"
+              memory: 512Gi
+          startupProbe:
+            failureThreshold: 720
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+          readinessProbe:
+            failureThreshold: 120
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 30
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 20
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: vllm-cache
+              mountPath: /vllm-cache
+            - name: flashinfer-package-cubins
+              mountPath: /usr/local/lib/python3.12/dist-packages/flashinfer_cubin/cubins

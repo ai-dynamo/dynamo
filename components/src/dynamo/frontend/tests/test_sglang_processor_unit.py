@@ -9,12 +9,20 @@ incremental detokenization, error handling, and deprecation warnings.
 Parallels test_vllm_unit.py for the vLLM backend.
 """
 
+# ruff: noqa: E402
+
 import asyncio
 import json
 import sys
 import types
 
 import pytest
+
+pytest.importorskip(
+    "sglang.srt.parser.jinja_template_utils",
+    reason="sglang frontend parser modules are not installed in this environment",
+)
+
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
@@ -28,11 +36,14 @@ from dynamo.frontend.sglang_prepost import (
     _flatten_message_content,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
+    _normalize_sglang_parser_name,
     _parse_json_array_buffer,
+    build_response_format_guided_decoding,
     build_tool_call_guided_decoding,
     convert_tools,
     create_parsers,
     preprocess_chat_request,
+    resolve_request_force_reasoning,
 )
 from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
@@ -537,6 +548,59 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is not None
         assert rp is not None
 
+    def test_minimax_m3_dynamo_aliases_are_normalized_for_sglang(self, monkeypatch):
+        """Dynamo parser aliases should not leak into SGLang parser lookup."""
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                self.tools = tools
+                self.tool_call_parser = tool_call_parser
+
+        class FakeReasoningParser:
+            def __init__(self, *, model_type, stream_reasoning, force_reasoning):
+                self.model_type = model_type
+                self.stream_reasoning = stream_reasoning
+                self.force_reasoning = force_reasoning
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "ReasoningParser",
+            FakeReasoningParser,
+        )
+
+        tcp, rp = create_parsers(
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+            },
+            tool_call_parser_name="minimax-m3-nom",
+            reasoning_parser_name="minimax_m3",
+        )
+
+        assert tcp.tool_call_parser == "minimax-m3"
+        assert rp.model_type == "minimax-m3"
+
+
+def test_normalize_sglang_parser_name_accepts_minimax_m3_aliases():
+    assert _normalize_sglang_parser_name("minimax-m3") == "minimax-m3"
+    assert _normalize_sglang_parser_name("minimax_m3") == "minimax-m3"
+    assert _normalize_sglang_parser_name("minimax_m3_nom") == "minimax-m3"
+    assert _normalize_sglang_parser_name("minimax-m3-nom") == "minimax-m3"
+    assert _normalize_sglang_parser_name("kimi_k2") == "kimi_k2"
+
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
     def test_none_when_no_tools(self):
@@ -569,6 +633,43 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             )
             is None
         )
+
+    def test_auto_tool_guidance_normalizes_minimax_m3_alias(self, monkeypatch):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        )
+        seen = {}
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                seen["tool_call_parser"] = tool_call_parser
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                assert tool_choice == "auto"
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto"},
+            tool_call_parser_name="minimax_m3_nom",
+            sglang_tools=tools,
+        )
+
+        assert seen["tool_call_parser"] == "minimax-m3"
+        assert guided == {"structural_tag": {"type": "object"}}
 
     def test_required_tool_choice_builds_json_schema_guidance(self):
         tools = convert_tools(
@@ -701,6 +802,101 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
 
         assert isinstance(guided, dict)
         assert "structural_tag" in guided
+
+
+class TestBuildResponseFormatGuidedDecoding:
+    def test_json_object_builds_object_schema(self):
+        guided = build_response_format_guided_decoding(
+            {"response_format": {"type": "json_object"}}
+        )
+
+        assert guided == {"json": {"type": "object"}}
+
+    def test_json_schema_builds_schema_guidance(self):
+        schema = {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        }
+        guided = build_response_format_guided_decoding(
+            {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "Capital", "schema": schema},
+                }
+            }
+        )
+
+        assert guided == {"json": schema}
+
+    def test_json_schema_requires_schema(self):
+        with pytest.raises(ValueError, match="response_format.json_schema.schema"):
+            build_response_format_guided_decoding(
+                {"response_format": {"type": "json_schema", "json_schema": {}}}
+            )
+
+    def test_auto_tool_guidance_defers_to_response_format(self, tokenizer):
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Return JSON"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "strict": True,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+                "response_format": {"type": "json_object"},
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    def test_forced_tool_choice_takes_precedence_over_response_format(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+        )
+
+        tool_guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required", "response_format": {"type": "json_object"}},
+            tool_call_parser_name="hermes",
+            sglang_tools=tools,
+        )
+
+        assert isinstance(tool_guided, dict)
+        assert tool_guided != {"json": {"type": "object"}}
+
+    def test_response_format_skips_reasoning_parser(self):
+        tcp, rp = create_parsers(
+            {"response_format": {"type": "json_object"}},
+            tool_call_parser_name="minimax-m3-nom",
+            reasoning_parser_name="minimax-m3",
+        )
+
+        assert tcp is None
+        assert rp is None
 
     def test_tool_parser_requires_tools(self):
         """Tool parser is not created if no tools in request."""
@@ -1701,6 +1897,44 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
 
+    def test_minimax_m3_defaults_to_thinking_mode(self):
+        assert (
+            resolve_request_force_reasoning(
+                {"chat_template_kwargs": {}},
+                "minimax-m3",
+                template_default=False,
+            )
+            is True
+        )
+        assert (
+            resolve_request_force_reasoning(
+                {"chat_template_kwargs": {}},
+                "minimax_m3",
+                template_default=False,
+            )
+            is True
+        )
+
+    def test_minimax_m3_disabled_thinking_mode(self):
+        assert (
+            resolve_request_force_reasoning(
+                {"chat_template_kwargs": {"thinking_mode": "disabled"}},
+                "minimax-m3",
+                template_default=True,
+            )
+            is False
+        )
+
+    def test_minimax_m3_enabled_thinking_mode(self):
+        assert (
+            resolve_request_force_reasoning(
+                {"chat_template_kwargs": {"thinking_mode": "enabled"}},
+                "minimax-m3",
+                template_default=False,
+            )
+            is True
+        )
+
 
 # ---------------------------------------------------------------------------
 # SglangStreamingPostProcessor: incremental detokenization
@@ -1878,6 +2112,34 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             post.process_output({"token_ids": [1], "finish_reason": None})
         # Should be trimmed, not 200 tokens
         assert len(post._all_token_ids) < 200
+
+    def test_trailing_eos_is_stripped_when_tool_parser_preserves_specials(
+        self, tokenizer
+    ):
+        class FakeToolParser:
+            def parse_stream_chunk(self, text):
+                return text, []
+
+            def has_tool_call(self, text):
+                return False
+
+        eos_token_id = tokenizer.eos_token_id
+        assert eos_token_id is not None
+        eos_text = tokenizer.decode([eos_token_id], skip_special_tokens=False)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=FakeToolParser(),
+            reasoning_parser=None,
+            eos_token_ids=[eos_token_id],
+        )
+        token_ids = tokenizer.encode("The capital of France is Paris.") + [eos_token_id]
+
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
+
+        assert choice is not None
+        content = choice["delta"]["content"]
+        assert "Paris." in content
+        assert eos_text not in content
 
 
 # ---------------------------------------------------------------------------

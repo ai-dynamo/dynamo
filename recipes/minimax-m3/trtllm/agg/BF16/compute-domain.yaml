@@ -1,0 +1,11 @@
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: minimax-m3-trtllm-tp8-compute-domain
+  namespace: ibhosale-dynamo
+spec:
+  numNodes: 2
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: minimax-m3-trtllm-tp8-channel

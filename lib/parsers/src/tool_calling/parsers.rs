@@ -22,9 +22,11 @@ use super::pythonic::{
 };
 use super::response::ToolCallResponse;
 use super::xml::{
-    detect_tool_call_start_glm47, detect_tool_call_start_kimi_k2, detect_tool_call_start_xml,
+    detect_tool_call_start_glm47, detect_tool_call_start_kimi_k2,
+    detect_tool_call_start_minimax_m3, detect_tool_call_start_xml,
     find_tool_call_end_position_glm47, find_tool_call_end_position_kimi_k2,
-    find_tool_call_end_position_xml, try_tool_call_parse_glm47, try_tool_call_parse_kimi_k2,
+    find_tool_call_end_position_minimax_m3, find_tool_call_end_position_xml,
+    try_tool_call_parse_glm47, try_tool_call_parse_kimi_k2, try_tool_call_parse_minimax_m3,
     try_tool_call_parse_xml,
 };
 use std::collections::HashMap;
@@ -52,6 +54,10 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
+        map.insert("minimax_m3", ToolCallConfig::minimax_m3());
+        map.insert("minimax-m3", ToolCallConfig::minimax_m3());
+        map.insert("minimax_m3_nom", ToolCallConfig::minimax_m3());
+        map.insert("minimax-m3-nom", ToolCallConfig::minimax_m3());
         map.insert("glm47", ToolCallConfig::glm47());
         map.insert("kimi_k2", ToolCallConfig::kimi_k2());
         map.insert("gemma4", ToolCallConfig::gemma4());
@@ -106,6 +112,11 @@ pub async fn try_tool_call_parse(
         ParserConfig::KimiK2(kimi_config) => {
             let (results, normal_content) =
                 try_tool_call_parse_kimi_k2(message, kimi_config, tools)?;
+            Ok((results, normal_content))
+        }
+        ParserConfig::MiniMaxM3(minimax_config) => {
+            let (results, normal_content) =
+                try_tool_call_parse_minimax_m3(message, minimax_config, tools)?;
             Ok((results, normal_content))
         }
         ParserConfig::Gemma4 => {
@@ -163,6 +174,11 @@ pub async fn detect_and_parse_tool_call_with_recovery(
             let mut c = c.clone();
             c.allow_eof_recovery = true;
             ParserConfig::Dsml(c)
+        }
+        ParserConfig::MiniMaxM3(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::MiniMaxM3(c)
         }
         // GLM-4.7 intentionally omitted: match upstream vLLM/SGLang behavior
         // (drop the call when </tool_call> is missing).
@@ -256,6 +272,9 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
             }
             ParserConfig::KimiK2(kimi_config) => {
                 Ok(detect_tool_call_start_kimi_k2(chunk, kimi_config))
+            }
+            ParserConfig::MiniMaxM3(minimax_config) => {
+                Ok(detect_tool_call_start_minimax_m3(chunk, minimax_config))
             }
             ParserConfig::Gemma4 => Ok(detect_tool_call_start_gemma4(chunk)),
         },
@@ -368,6 +387,9 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
             ParserConfig::KimiK2(kimi_config) => {
                 find_tool_call_end_position_kimi_k2(chunk, kimi_config)
             }
+            ParserConfig::MiniMaxM3(minimax_config) => Some(
+                find_tool_call_end_position_minimax_m3(chunk, minimax_config),
+            ),
             ParserConfig::Gemma4 => find_tool_call_end_position_gemma4(chunk),
         },
         None => Some(chunk.len()),
@@ -409,6 +431,10 @@ mod tests {
             "jamba",
             "nemotron_nano",
             "minimax_m2",
+            "minimax_m3",
+            "minimax-m3",
+            "minimax_m3_nom",
+            "minimax-m3-nom",
             "glm47",
             "kimi_k2",
             "gemma4",
@@ -3592,5 +3618,601 @@ weather forecasting
         assert_eq!(name, "batch_process");
         assert!(args["items"].is_array());
         assert_eq!(args["items"], serde_json::json!([1, 2, 3, 4, 5]));
+    }
+
+    const MINIMAX_M3_NS: &str = "]<]minimax[>[";
+
+    fn minimax_m3_element(name: &str, body: &str) -> String {
+        format!("{MINIMAX_M3_NS}<{name}>{body}{MINIMAX_M3_NS}</{name}>")
+    }
+
+    fn minimax_m3_invoke(function_name: &str, body: &str) -> String {
+        format!("{MINIMAX_M3_NS}<invoke name=\"{function_name}\">{body}{MINIMAX_M3_NS}</invoke>")
+    }
+
+    fn minimax_m3_tool_block(invokes: &[String]) -> String {
+        format!(
+            "{MINIMAX_M3_NS}<tool_call>\n{}\n{MINIMAX_M3_NS}</tool_call>",
+            invokes.join("\n")
+        )
+    }
+
+    fn minimax_m3_tool(name: &str, parameters: serde_json::Value) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            parameters: Some(parameters),
+            strict: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_simple_tool_call() {
+        let input = r#"I'll check. ]<]minimax[>[<tool_call>
+]<]minimax[>[<invoke name="get_weather">]<]minimax[>[<location>San Francisco]<]minimax[>[</location>]<]minimax[>[<unit>celsius]<]minimax[>[</unit>]<]minimax[>[</invoke>
+]<]minimax[>[</tool_call> trailing text"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("minimax_m3"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("I'll check. ".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco");
+        assert_eq!(args["unit"], "celsius");
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_sglang_alias_and_nested_parameters() {
+        let input = r#"]<]minimax[>[<tool_call>
+]<]minimax[>[<invoke name="search_web">]<]minimax[>[<query>MiniMax M3]<]minimax[>[</query>]<]minimax[>[<filters>]<]minimax[>[<item>]<]minimax[>[<key>source]<]minimax[>[</key>]<]minimax[>[<value>docs]<]minimax[>[</value>]<]minimax[>[</item>]<]minimax[>[<item>]<]minimax[>[<key>year]<]minimax[>[</key>]<]minimax[>[<value>2026]<]minimax[>[</value>]<]minimax[>[</item>]<]minimax[>[</filters>]<]minimax[>[<limit>2]<]minimax[>[</limit>]<]minimax[>[</invoke>
+]<]minimax[>[</tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "search_web".to_string(),
+            parameters: Some(serde_json::json!({
+                "properties": {
+                    "query": {"type": "string"},
+                    "filters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "value": {"type": "string"}
+                            }
+                        }
+                    },
+                    "limit": {"type": "integer"}
+                }
+            })),
+            strict: None,
+        }];
+        let (result, content) =
+            detect_and_parse_tool_call(input, Some("minimax-m3-nom"), Some(&tools))
+                .await
+                .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "search_web");
+        assert_eq!(args["query"], "MiniMax M3");
+        assert_eq!(
+            args["filters"],
+            serde_json::json!([
+                {"key": "source", "value": "docs"},
+                {"key": "year", "value": "2026"}
+            ])
+        );
+        assert_eq!(args["limit"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_multiple_invokes() {
+        let input = r#"]<]minimax[>[<tool_call>
+]<]minimax[>[<invoke name="first">]<]minimax[>[<x>1]<]minimax[>[</x>]<]minimax[>[</invoke>
+]<]minimax[>[<invoke name="second">]<]minimax[>[<y>two]<]minimax[>[</y>]<]minimax[>[</invoke>
+]<]minimax[>[</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m3_nom"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        let (name1, args1) = extract_name_and_args(result[0].clone());
+        let (name2, args2) = extract_name_and_args(result[1].clone());
+        assert_eq!(name1, "first");
+        assert_eq!(args1["x"], "1");
+        assert_eq!(name2, "second");
+        assert_eq!(args2["y"], "two");
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_accepts_vllm_invoke_attribute_variants() {
+        let cases = [
+            (
+                r#"]<]minimax[>[<invoke name='single_quote'>]<]minimax[>[<x>1]<]minimax[>[</x>]<]minimax[>[</invoke>"#,
+                "single_quote",
+            ),
+            (
+                r#"]<]minimax[>[<invoke name=unquoted>]<]minimax[>[<x>1]<]minimax[>[</x>]<]minimax[>[</invoke>"#,
+                "unquoted",
+            ),
+            (
+                r#"]<]minimax[>[<invoke
+    name = "spaced">]<]minimax[>[<x>1]<]minimax[>[</x>]<]minimax[>[</invoke>"#,
+                "spaced",
+            ),
+        ];
+
+        for (invoke, expected_name) in cases {
+            let input = format!("]<]minimax[>[<tool_call>{invoke}]<]minimax[>[</tool_call>");
+            let (result, _) = detect_and_parse_tool_call(&input, Some("minimax_m3"), None)
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 1);
+            let (name, args) = extract_name_and_args(result[0].clone());
+            assert_eq!(name, expected_name);
+            assert_eq!(args["x"], "1");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_incomplete_outer_tool_block_is_not_emitted_without_recovery() {
+        let input = format!(
+            "prefix {}<tool_call>\n{}",
+            MINIMAX_M3_NS,
+            minimax_m3_invoke("get_weather", &minimax_m3_element("city", "Seattle"))
+        );
+
+        let (result, content) = detect_and_parse_tool_call(&input, Some("minimax_m3"), None)
+            .await
+            .unwrap();
+
+        assert!(result.is_empty());
+        assert_eq!(content, Some("prefix ".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_stream_finalize_recovers_complete_invoke_without_outer_close() {
+        let input = format!(
+            "prefix {}<tool_call>\n{}",
+            MINIMAX_M3_NS,
+            minimax_m3_invoke("get_weather", &minimax_m3_element("city", "Seattle"))
+        );
+
+        let (result, content) = detect_and_parse_tool_call_with_stream_finalize_recovery(
+            &input,
+            Some("minimax_m3"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(content, Some("prefix ".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["city"], "Seattle");
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_incomplete_invoke_is_not_emitted_even_with_recovery() {
+        let input = format!(
+            "{}<tool_call>\n{}<invoke name=\"get_weather\">{}",
+            MINIMAX_M3_NS,
+            MINIMAX_M3_NS,
+            minimax_m3_element("city", "Seattle")
+        );
+
+        let (result, content) = detect_and_parse_tool_call_with_stream_finalize_recovery(
+            &input,
+            Some("minimax_m3"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_empty());
+        assert_eq!(content, Some("".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_malformed_tool_call_is_not_emitted() {
+        let input = format!(
+            "{}<tool_call>\n{}<bad>{}</bad>\n{}</tool_call>",
+            MINIMAX_M3_NS, MINIMAX_M3_NS, MINIMAX_M3_NS, MINIMAX_M3_NS
+        );
+
+        let (result, content) =
+            detect_and_parse_tool_call(input.as_str(), Some("minimax_m3"), None)
+                .await
+                .unwrap();
+
+        assert!(result.is_empty());
+        assert_eq!(content, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_minimax_m3_detects_split_streaming_marker_prefixes() {
+        let marker = format!("{MINIMAX_M3_NS}<tool_call>");
+
+        assert!(!detect_tool_call_start("ordinary text", Some("minimax_m3")).unwrap());
+        assert!(detect_tool_call_start(&marker, Some("minimax_m3")).unwrap());
+
+        for split in 1..marker.len() {
+            let prefix = &marker[..split];
+            assert!(
+                detect_tool_call_start(prefix, Some("minimax_m3")).unwrap(),
+                "failed to detect split marker prefix: {prefix:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_split_streaming_markers_reassemble_to_tool_call() {
+        let input = minimax_m3_tool_block(&[minimax_m3_invoke(
+            "get_weather",
+            &minimax_m3_element("city", "Seattle"),
+        )]);
+        let chunks: Vec<&str> = input
+            .as_bytes()
+            .chunks(3)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap())
+            .collect();
+        let mut accumulated = String::new();
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            accumulated.push_str(chunk);
+            let (result, _) = detect_and_parse_tool_call(&accumulated, Some("minimax_m3"), None)
+                .await
+                .unwrap();
+
+            if index + 1 == chunks.len() {
+                assert_eq!(result.len(), 1);
+                let (name, args) = extract_name_and_args(result[0].clone());
+                assert_eq!(name, "get_weather");
+                assert_eq!(args["city"], "Seattle");
+            } else {
+                assert!(result.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_multiline_and_html_unescaped_arguments() {
+        let note = "\nline one &amp; two\nline &lt;three&gt;\n";
+        let input = minimax_m3_tool_block(&[minimax_m3_invoke(
+            "create_note",
+            &format!(
+                "{}{}",
+                minimax_m3_element("title", "Daily"),
+                minimax_m3_element("note", note)
+            ),
+        )]);
+        let tools = vec![minimax_m3_tool(
+            "create_note",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "note": {"type": "string"}
+                }
+            }),
+        )];
+
+        let (result, _) = detect_and_parse_tool_call(&input, Some("minimax_m3"), Some(&tools))
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(args["title"], "Daily");
+        assert_eq!(args["note"], "\nline one & two\nline <three>\n");
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_duplicate_and_mixed_fields_are_preserved() {
+        let payload = minimax_m3_element(
+            "payload",
+            &format!(
+                "text before {} text after",
+                minimax_m3_element("child", "value")
+            ),
+        );
+        let duplicate_demo = minimax_m3_element(
+            "duplicate_demo",
+            &format!(
+                "{}{}",
+                minimax_m3_element("tag", "a"),
+                minimax_m3_element("tag", "b")
+            ),
+        );
+        let input = minimax_m3_tool_block(&[minimax_m3_invoke(
+            "convert",
+            &format!("{payload}{duplicate_demo}"),
+        )]);
+        let tools = vec![minimax_m3_tool(
+            "convert",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "type": "object",
+                        "properties": {
+                            "child": {"type": "string"}
+                        }
+                    },
+                    "duplicate_demo": {
+                        "type": "object",
+                        "properties": {
+                            "tag": {"type": "string"}
+                        }
+                    }
+                }
+            }),
+        )];
+
+        let (result, _) = detect_and_parse_tool_call(&input, Some("minimax_m3"), Some(&tools))
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(
+            args["payload"],
+            serde_json::json!({
+                "child": "value",
+                "$text": "text before  text after"
+            })
+        );
+        assert_eq!(
+            args["duplicate_demo"],
+            serde_json::json!({
+                "tag": ["a", "b"]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_mixed_text_field_avoids_child_name_collision() {
+        let payload = minimax_m3_element(
+            "payload",
+            &format!(
+                "text{}{}",
+                minimax_m3_element("$text", "child text"),
+                minimax_m3_element("child", "value")
+            ),
+        );
+        let input = minimax_m3_tool_block(&[minimax_m3_invoke("convert", &payload)]);
+
+        let (result, _) = detect_and_parse_tool_call(&input, Some("minimax_m3"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(
+            args["payload"],
+            serde_json::json!({
+                "$text": "child text",
+                "$$text": "text",
+                "child": "value"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_schema_conversion_edge_cases() {
+        let input = minimax_m3_tool_block(&[minimax_m3_invoke(
+            "convert",
+            &[
+                minimax_m3_element("whole", "5.0"),
+                minimax_m3_element("count", "42"),
+                minimax_m3_element("flag", "1"),
+                minimax_m3_element("payload", r#"{"nested":true}"#),
+                minimax_m3_element("items", "[1,2]"),
+                minimax_m3_element("empty_object", ""),
+                minimax_m3_element("empty_array", ""),
+                minimax_m3_element("unknown", "42"),
+            ]
+            .join(""),
+        )]);
+        let tools = vec![minimax_m3_tool(
+            "convert",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "whole": {"type": "number"},
+                    "count": {"type": "integer"},
+                    "flag": {"type": "boolean"},
+                    "payload": {"type": "object"},
+                    "items": {"type": "array"},
+                    "empty_object": {"type": "object"},
+                    "empty_array": {"type": "array"}
+                }
+            }),
+        )];
+
+        let (result, _) = detect_and_parse_tool_call(&input, Some("minimax_m3"), Some(&tools))
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(
+            args,
+            serde_json::json!({
+                "whole": 5.0,
+                "count": 42,
+                "flag": true,
+                "payload": {"nested": true},
+                "items": [1, 2],
+                "empty_object": {},
+                "empty_array": [],
+                "unknown": "42"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_nested_schema_conversion_edge_cases() {
+        let shipping = minimax_m3_element(
+            "shipping",
+            &format!(
+                "{}{}",
+                minimax_m3_element("city", "Singapore"),
+                minimax_m3_element("zip", "018956")
+            ),
+        );
+        let first_item = minimax_m3_element(
+            "item",
+            &format!(
+                "{}{}",
+                minimax_m3_element("sku", "book-001"),
+                minimax_m3_element("qty", "2")
+            ),
+        );
+        let second_item = minimax_m3_element(
+            "item",
+            &format!(
+                "{}{}",
+                minimax_m3_element("sku", "pen-007"),
+                minimax_m3_element("qty", "5")
+            ),
+        );
+        let items = minimax_m3_element("items", &format!("{first_item}{second_item}"));
+        let metadata = minimax_m3_element(
+            "metadata",
+            &format!(
+                "{}{}",
+                minimax_m3_element("score", "42"),
+                minimax_m3_element("rank", "7")
+            ),
+        );
+        let duplicate_demo = minimax_m3_element(
+            "duplicate_demo",
+            &format!(
+                "{}{}",
+                minimax_m3_element("tag", "a"),
+                minimax_m3_element("tag", "b")
+            ),
+        );
+        let schema_mismatch_array = minimax_m3_element(
+            "schema_mismatch_array",
+            &format!(
+                "{}{}",
+                minimax_m3_element("x", "1"),
+                minimax_m3_element("x", "2")
+            ),
+        );
+        let unknown_struct = minimax_m3_element(
+            "unknown_struct",
+            &format!(
+                "{}{}{}",
+                minimax_m3_element("a", "1"),
+                minimax_m3_element("a", "2"),
+                minimax_m3_element("nil", "null")
+            ),
+        );
+        let input = minimax_m3_tool_block(&[minimax_m3_invoke(
+            "create_order",
+            &[
+                minimax_m3_element("user_id", "42"),
+                minimax_m3_element("urgent", "true"),
+                minimax_m3_element("note", "Please leave at front desk."),
+                minimax_m3_element("nil", "NULL"),
+                shipping,
+                items,
+                metadata,
+                duplicate_demo,
+                schema_mismatch_array,
+                unknown_struct,
+            ]
+            .join(""),
+        )]);
+        let tools = vec![minimax_m3_tool(
+            "create_order",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "integer"},
+                    "urgent": {"type": "boolean"},
+                    "note": {"type": "string"},
+                    "nil": {"type": "string"},
+                    "shipping": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "zip": {"type": "integer"}
+                        }
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "sku": {"type": "string"},
+                                "qty": {"type": "integer"}
+                            }
+                        }
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "additionalProperties": {"type": "integer"}
+                    },
+                    "duplicate_demo": {
+                        "type": "object",
+                        "properties": {
+                            "tag": {"type": "string"}
+                        }
+                    },
+                    "schema_mismatch_array": {
+                        "type": "array",
+                        "items": {"type": "integer"}
+                    }
+                }
+            }),
+        )];
+
+        let (result, _) = detect_and_parse_tool_call(&input, Some("minimax_m3"), Some(&tools))
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let (_, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(
+            args,
+            serde_json::json!({
+                "user_id": 42,
+                "urgent": true,
+                "note": "Please leave at front desk.",
+                "nil": null,
+                "shipping": {
+                    "city": "Singapore",
+                    "zip": 18956
+                },
+                "items": [
+                    {
+                        "sku": "book-001",
+                        "qty": 2
+                    },
+                    {
+                        "sku": "pen-007",
+                        "qty": 5
+                    }
+                ],
+                "metadata": {
+                    "score": 42,
+                    "rank": 7
+                },
+                "duplicate_demo": {
+                    "tag": ["a", "b"]
+                },
+                "schema_mismatch_array": {
+                    "x": ["1", "2"]
+                },
+                "unknown_struct": {
+                    "a": ["1", "2"],
+                    "nil": null
+                }
+            })
+        );
     }
 }

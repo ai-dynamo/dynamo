@@ -1438,9 +1438,27 @@ impl ModelDeploymentCard {
     ) -> anyhow::Result<Self> {
         let local_path = local_path.as_ref();
 
-        // This is usually the right choice
+        // Prefer the model config's architectural context length. Some
+        // multimodal HF configs, including MiniMax-M3-VL, store the language
+        // model config under `text_config`; tokenizer `model_max_length` can
+        // be a much larger sentinel/default and must be a last resort.
         let architectural_max_context_length =
             crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
+                .or_else(|_| {
+                    let text_config: serde_json::Value =
+                        crate::file_json_field(&local_path.join("config.json"), "text_config")?;
+                    serde_json::from_value(
+                        text_config
+                            .get("max_position_embeddings")
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Field 'text_config.max_position_embeddings' not found"
+                                )
+                            })?,
+                    )
+                    .context("Failed to deserialize text_config.max_position_embeddings")
+                })
                 // But sometimes this is
                 .or_else(|_| {
                     crate::file_json_field(
@@ -1588,6 +1606,9 @@ struct HFConfig {
     text_config: Option<HFTextConfig>,
 
     // Sometimes it's inside HFTextConfig, sometimes it's here
+    bos_token_id: Option<TokenIdType>,
+
+    // Sometimes it's inside HFTextConfig, sometimes it's here
     eos_token_id: Option<serde_json::Value>,
 }
 
@@ -1637,79 +1658,45 @@ impl HFConfig {
             );
         };
 
-        let gencfg_path = file_path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join("generation_config.json");
+        let model_dir = file_path.parent().unwrap_or_else(|| Path::new(""));
+        let gencfg_path = model_dir.join("generation_config.json");
 
-        // bos_token_id is optional - not all models have it
-        // Try to load from generation_config.json if not in config.json
         if text_config.bos_token_id.is_none() {
             text_config.bos_token_id =
-                crate::file_json_field::<TokenIdType>(&gencfg_path, "bos_token_id").ok();
+                crate::file_json_field::<TokenIdType>(&gencfg_path, "bos_token_id")
+                    .ok()
+                    .or(config.bos_token_id)
+                    .or_else(|| resolve_token_id_from_tokenizer_files(model_dir, "bos_token").ok());
         }
 
         // TODO: refactor this when we switch to per-architecture tokenization
-        // eos_token_id can appear in multiple places, and as suggested by HuggingFace
-        // community that the priority should be:
+        // eos_token_id can appear in multiple places, and the lookup order should
+        // match the HuggingFace ecosystem:
         // 1. generation_config.json;
-        // 2. config.json, or text_config field in config.json.
+        // 2. config.json, or text_config field in config.json;
+        // 3. tokenizer_config.json;
+        // 4. special_tokens_map.json, resolved through tokenizer files.
         // https://github.com/huggingface/transformers/issues/25395#issuecomment-1671863257
-        let mut final_eos_token_ids: Vec<TokenIdType> = {
-                // Firstly check the generation_config.json
-                crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
-                .inspect_err(
-                    |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
-                )
-                .ok().and_then(|v| {
-                    if v.is_number() {
-                        v.as_number()
-                            .and_then(|n| n.as_u64())
-                            .map(|n| vec![n as TokenIdType])
-                    } else if v.is_array() {
-                        let arr = v.as_array().unwrap();
-                        Some(
-                            arr.iter()
-                                .filter_map(|inner_v| {
-                                    inner_v
-                                        .as_number()
-                                        .and_then(|n| n.as_u64())
-                                        .map(|n| n as TokenIdType)
-                                })
-                                .collect(),
-                        )
-                    } else {
-                        None
-                    }
-                })
-            }.or_else(|| {
+        let mut final_eos_token_ids: Vec<TokenIdType> =
+            // Firstly check the generation_config.json
+            crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
+            .inspect_err(
+                |err| tracing::debug!(%err, "Missing eos_token_id in generation_config.json"),
+            )
+            .ok()
+            .and_then(|v| token_ids_from_json_value(&v, file_path, "eos_token_id"))
+            .or_else(|| {
                 // Check config.json and text_config
                 config
                 .eos_token_id
                 .as_ref()
                 .or(text_config.eos_token_id.as_ref())
-                .and_then(|v| {
-                    if v.is_number() {
-                        v.as_number()
-                            .and_then(|n| n.as_u64())
-                            .map(|n| vec![n as TokenIdType])
-                    } else {
-                        serde_json::from_value(v.clone())
-                            .map(Some)
-                            .unwrap_or_else(|err| {
-                                tracing::error!(
-                                    ?v,
-                                    path = %file_path.display(),
-                                    "eos_token_id is not a number or an array, cannot deserialize: {err}",
-                                );
-                                None
-                            })
-                    }
-                })
+                .and_then(|v| token_ids_from_json_value(v, file_path, "eos_token_id"))
             })
+            .or_else(|| resolve_token_id_from_tokenizer_files(model_dir, "eos_token").ok().map(|id| vec![id]))
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "missing eos_token_id in config.json and generation_config.json, cannot load"
+                    "missing eos_token_id in generation_config.json, config.json, tokenizer_config.json, and special_tokens_map.json, cannot load"
                 )
             })?;
         // Also check tokenizer_config.json for the tokenizer's eos_token.
@@ -1717,12 +1704,7 @@ impl HFConfig {
         // but the tokenizer's eos_token is <|im_end|> — the token the model actually
         // emits to end generation. Merge the tokenizer's EOS into the set so both
         // are recognized as stop tokens.
-        let tokenizer_cfg_path = file_path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join("tokenizer_config.json");
-        if let Ok(tokenizer_eos_id) =
-            resolve_eos_token_id_from_tokenizer_config(&tokenizer_cfg_path)
+        if let Ok(tokenizer_eos_id) = resolve_token_id_from_tokenizer_files(model_dir, "eos_token")
             && !final_eos_token_ids.contains(&tokenizer_eos_id)
         {
             final_eos_token_ids.push(tokenizer_eos_id);
@@ -1734,29 +1716,107 @@ impl HFConfig {
     }
 }
 
-/// Resolve the tokenizer's `eos_token` to a token ID by reading `tokenizer_config.json`.
+fn token_ids_from_json_value(
+    value: &serde_json::Value,
+    file_path: &Path,
+    field_name: &str,
+) -> Option<Vec<TokenIdType>> {
+    if value.is_number() {
+        value
+            .as_number()
+            .and_then(|n| n.as_u64())
+            .map(|n| vec![n as TokenIdType])
+    } else if value.is_array() {
+        Some(
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|inner_v| {
+                    inner_v
+                        .as_number()
+                        .and_then(|n| n.as_u64())
+                        .map(|n| n as TokenIdType)
+                })
+                .collect(),
+        )
+    } else {
+        serde_json::from_value(value.clone())
+            .map(Some)
+            .unwrap_or_else(|err| {
+                tracing::error!(
+                    ?value,
+                    path = %file_path.display(),
+                    "{field_name} is not a number or an array, cannot deserialize: {err}",
+                );
+                None
+            })
+    }
+}
+
+fn resolve_token_id_from_tokenizer_files(
+    directory: &Path,
+    key: &str,
+) -> anyhow::Result<TokenIdType> {
+    resolve_token_id_from_tokenizer_config(&directory.join("tokenizer_config.json"), key)
+        .or_else(|_| resolve_token_id_from_special_tokens_map(directory, key))
+}
+
+/// Resolve a tokenizer special token to a token ID by reading `tokenizer_config.json`.
 ///
-/// Reads the `eos_token` field (string) and looks it up in `added_tokens_decoder`
-/// to find the corresponding token ID. This handles models where the tokenizer's
-/// EOS token differs from `config.json`'s `eos_token_id`.
-fn resolve_eos_token_id_from_tokenizer_config(path: &Path) -> anyhow::Result<TokenIdType> {
+/// Reads fields such as `eos_token` or `bos_token` and looks the token string up
+/// in `added_tokens_decoder`. This handles models where tokenizer special-token
+/// IDs are not duplicated into `config.json` or `generation_config.json`.
+fn resolve_token_id_from_tokenizer_config(path: &Path, key: &str) -> anyhow::Result<TokenIdType> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read tokenizer_config.json: {:?}", path))?;
     let config: serde_json::Value = serde_json::from_str(&contents)
         .with_context(|| format!("Failed to parse tokenizer_config.json: {:?}", path))?;
 
-    // Get eos_token — can be a plain string or a dict with a "content" field (older HF format)
-    let eos_token_str = match config.get("eos_token") {
-        Some(serde_json::Value::String(s)) => s.clone(),
+    let token_str = token_string_from_value(config.get(key))
+        .with_context(|| format!("{key} not found or invalid in tokenizer_config.json"))?;
+    resolve_token_string_from_tokenizer_config(&config, &token_str)
+}
+
+fn resolve_token_id_from_special_tokens_map(
+    directory: &Path,
+    key: &str,
+) -> anyhow::Result<TokenIdType> {
+    let path = directory.join("special_tokens_map.json");
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read special_tokens_map.json: {:?}", path))?;
+    let special_tokens_map: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse special_tokens_map.json: {:?}", path))?;
+    let token_str = token_string_from_value(special_tokens_map.get(key))
+        .with_context(|| format!("{key} not found or invalid in special_tokens_map.json"))?;
+
+    std::fs::read_to_string(directory.join("tokenizer_config.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .and_then(|config| resolve_token_string_from_tokenizer_config(&config, &token_str).ok())
+        .or_else(|| {
+            resolve_token_string_from_tokenizer_json(&directory.join("tokenizer.json"), &token_str)
+                .ok()
+        })
+        .ok_or_else(|| anyhow::anyhow!("token '{token_str}' not found in tokenizer files"))
+}
+
+fn token_string_from_value(value: Option<&serde_json::Value>) -> anyhow::Result<String> {
+    match value {
+        Some(serde_json::Value::String(s)) => Ok(s.clone()),
         Some(serde_json::Value::Object(obj)) => obj
             .get("content")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("eos_token is an object without 'content' field"))?,
-        _ => anyhow::bail!("eos_token not found or not a string in tokenizer_config.json"),
-    };
+            .ok_or_else(|| anyhow::anyhow!("token object missing content field")),
+        _ => anyhow::bail!("token value is not a string"),
+    }
+}
 
-    // Look up the token string in added_tokens_decoder to get its ID
+fn resolve_token_string_from_tokenizer_config(
+    config: &serde_json::Value,
+    token_str: &str,
+) -> anyhow::Result<TokenIdType> {
     let added_tokens = config
         .get("added_tokens_decoder")
         .and_then(|v| v.as_object())
@@ -1769,7 +1829,7 @@ fn resolve_eos_token_id_from_tokenizer_config(path: &Path) -> anyhow::Result<Tok
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if content == eos_token_str {
+        if content == token_str {
             let token_id: TokenIdType = id_str.parse().with_context(|| {
                 format!(
                     "Failed to parse token ID '{}' from added_tokens_decoder",
@@ -1780,10 +1840,37 @@ fn resolve_eos_token_id_from_tokenizer_config(path: &Path) -> anyhow::Result<Tok
         }
     }
 
-    anyhow::bail!(
-        "eos_token '{}' not found in added_tokens_decoder",
-        eos_token_str
-    )
+    anyhow::bail!("token '{}' not found in added_tokens_decoder", token_str)
+}
+
+fn resolve_token_string_from_tokenizer_json(
+    path: &Path,
+    token_str: &str,
+) -> anyhow::Result<TokenIdType> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read tokenizer.json: {:?}", path))?;
+    let tokenizer: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse tokenizer.json: {:?}", path))?;
+    let added_tokens = tokenizer
+        .get("added_tokens")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("added_tokens not found in tokenizer.json"))?;
+
+    for token_info in added_tokens {
+        let content = token_info
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if content == token_str {
+            let token_id = token_info
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("token id missing for '{token_str}'"))?;
+            return Ok(token_id as TokenIdType);
+        }
+    }
+
+    anyhow::bail!("token '{}' not found in tokenizer.json", token_str)
 }
 
 impl ModelInfo for HFConfig {
@@ -2018,6 +2105,54 @@ mod tests {
             eos_token_id_set.contains(&248046),
             "Should contain tokenizer eos_token (248046 <|im_end|>)"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_json_eos_bos_from_tokenizer_config_only() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-tokenizer-config-only/config.json");
+        let config = HFConfig::from_json_file(&config_file)?;
+
+        assert_eq!(config.bos_token_id(), Some(200019));
+        assert_eq!(config.eos_token_ids(), vec![200020]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_json_eos_bos_from_special_tokens_map() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-special-tokens-map-only/config.json");
+        let config = HFConfig::from_json_file(&config_file)?;
+
+        assert_eq!(config.bos_token_id(), Some(200019));
+        assert_eq!(config.eos_token_ids(), vec![200020]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_json_missing_eos_everywhere_lists_all_sources() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let config_file = dir.path().join("config.json");
+        std::fs::write(
+            &config_file,
+            r#"{
+                "architectures": ["MockForCausalLM"],
+                "model_type": "mock",
+                "max_position_embeddings": 1024,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 1,
+                "vocab_size": 200100
+            }"#,
+        )?;
+
+        let result = HFConfig::from_json_file(&config_file);
+        assert!(result.is_err(), "expected missing EOS error");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("generation_config.json"), "{msg}");
+        assert!(msg.contains("config.json"), "{msg}");
+        assert!(msg.contains("tokenizer_config.json"), "{msg}");
+        assert!(msg.contains("special_tokens_map.json"), "{msg}");
         Ok(())
     }
 

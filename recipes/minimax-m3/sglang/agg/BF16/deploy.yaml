@@ -1,0 +1,312 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: m3-sglang-bf16-tp8-d0cf
+  namespace: ibhosale-dynamo
+  labels:
+    app: m3-sglang-bf16-tp8-d0cf
+    app.kubernetes.io/part-of: m3-sglang-bf16-tp8-d0cf
+spec:
+  backendFramework: sglang
+  envs:
+    - name: HF_HOME
+      value: /model-cache
+    - name: HF_HUB_CACHE
+      value: /model-cache/hub
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: TRANSFORMERS_OFFLINE
+      value: "1"
+    - name: FLASHINFER_DISABLE_VERSION_CHECK
+      value: "1"
+    - name: FLASHINFER_WORKSPACE_BASE
+      value: /model-cache
+    - name: SGLANG_ENABLE_JIT_DEEPGEMM
+      value: "1"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: NCCL_MNNVL_ENABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "1"
+    - name: NCCL_P2P_LEVEL
+      value: NVL
+    - name: NCCL_SOCKET_IFNAME
+      value: eth0
+    - name: NCCL_STORE_TIMEOUT
+      value: "7200"
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: UCX_CUDA_IPC_ENABLE_MNNVL
+      value: "y"
+    - name: UCX_MEMTYPE_CACHE
+      value: "n"
+    - name: UCX_TLS
+      value: cuda_copy,cuda_ipc,tcp
+    - name: NVIDIA_GDRCOPY
+      value: "1"
+    - name: TORCHINDUCTOR_CACHE_DIR
+      value: /scratch/torchinductor-cache
+    - name: TRITON_CACHE_DIR
+      value: /scratch/triton-cache
+    - name: PYTHONUNBUFFERED
+      value: "1"
+  pvcs:
+    - name: shared-model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      sharedMemory:
+        size: 40Gi
+      extraPodMetadata:
+        labels:
+          app.kubernetes.io/part-of: m3-sglang-bf16-tp8-d0cf
+          dynamo.nvidia.com/component: frontend
+          dynamo.nvidia.com/framework: sglang
+          dynamo.nvidia.com/model: minimax-m3-dynamo-sglang-bf16
+      extraPodSpec:
+        imagePullSecrets:
+          - name: acr-token-secret
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+          - operator: Exists
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-minimax-m3-dev.1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --http-port
+            - "8000"
+            - --model-name
+            - minimax-m3-dynamo-sglang-bf16
+            - --model-path
+            - /model-cache/ibhosale-minimax-m3-bf16/payload
+            - --dyn-chat-processor
+            - sglang
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_HUB_CACHE
+              value: /model-cache/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: "[]"
+            - name: DYN_SYSTEM_STARTING_HEALTH_STATUS
+              value: ready
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          securityContext:
+            runAsUser: 0
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          volumeMounts:
+            - mountPath: /model-cache
+              name: shared-model-cache
+            - mountPath: /scratch
+              name: scratch
+        volumes:
+          - name: shared-model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+          - name: scratch
+            emptyDir: {}
+
+    decode:
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      envFromSecret: hf-token-secret
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+          custom:
+            ephemeral-storage: 800Gi
+        claims:
+          - name: compute-domain-channel
+      sharedMemory:
+        size: 200Gi
+      extraPodMetadata:
+        labels:
+          app.kubernetes.io/part-of: m3-sglang-bf16-tp8-d0cf
+          dynamo.nvidia.com/component: decode
+          dynamo.nvidia.com/framework: sglang
+          dynamo.nvidia.com/model: minimax-m3-dynamo-sglang-bf16
+      extraPodSpec:
+        imagePullSecrets:
+          - name: acr-token-secret
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: kubernetes.io/arch
+                      operator: In
+                      values:
+                        - arm64
+                    - key: nvidia.com/gpu.product
+                      operator: In
+                      values:
+                        - NVIDIA-GB200
+                    - key: cloud.google.com/gke-nodepool
+                      operator: In
+                      values:
+                        - customer-gpu-o7v
+                        - customer-gpu-w0e
+                    # This node repeatedly timed out in NodePrepareResources for
+                    # the compute-domain channel during BF16 TP=8 bringup.
+                    - key: kubernetes.io/hostname
+                      operator: NotIn
+                      values:
+                        - gke-brugdizq-dgxc-k8-customer-gpu-o7v-f4dfae7a-hrk5
+        tolerations:
+          - operator: Exists
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: m3-sglang-bf16-tp8-d0cf-channel
+        volumes:
+          - name: shared-model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+          - name: scratch
+            emptyDir: {}
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-minimax-m3-dev.1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited || true
+              ulimit -n 1048576 || true
+              echo "===== MiniMax M3 Dynamo SGLang BF16 TP=8 two-node Day0 CF launch ====="
+              date -u +%Y-%m-%dT%H:%M:%SZ
+              echo "MODEL_PATH=${MODEL_PATH}"
+              echo "SERVED_MODEL_NAME=${SERVED_MODEL_NAME}"
+              echo "TP_SIZE=8"
+              readlink -f "${MODEL_PATH}" || true
+              find -L "${MODEL_PATH}" -maxdepth 1 -type f -name '*.safetensors' | wc -l || true
+              du -shL "${MODEL_PATH}" || true
+              nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader || true
+
+              exec python3 -m dynamo.sglang \
+                --model-path "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --page-size 16 \
+                --tp 8 \
+                --trust-remote-code \
+                --enable-metrics \
+                --mem-fraction-static 0.80 \
+                --attention-backend flashinfer \
+                --mm-attention-backend flashinfer_cudnn \
+                --moe-runner-backend triton \
+                --dtype bfloat16 \
+                --disable-decode-cuda-graph \
+                --chunked-prefill-size 8192 \
+                --dyn-reasoning-parser minimax-m3 \
+                --dyn-tool-call-parser minimax-m3-nom \
+                --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}' \
+                --watchdog-timeout 3600 \
+                --host 0.0.0.0 \
+                --port 30000
+          env:
+            - name: SERVED_MODEL_NAME
+              value: minimax-m3-dynamo-sglang-bf16
+            - name: MODEL_PATH
+              value: /model-cache/ibhosale-minimax-m3-bf16/payload
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_HUB_CACHE
+              value: /model-cache/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_MNNVL_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NCCL_P2P_LEVEL
+              value: NVL
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "y"
+            - name: UCX_MEMTYPE_CACHE
+              value: "n"
+            - name: UCX_TLS
+              value: cuda_copy,cuda_ipc,tcp
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /scratch/torchinductor-cache
+            - name: TRITON_CACHE_DIR
+              value: /scratch/triton-cache
+          resources:
+            requests:
+              cpu: "16"
+              memory: 256Gi
+            limits:
+              cpu: "32"
+              memory: 512Gi
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+            runAsUser: 0
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            failureThreshold: 720
+            periodSeconds: 10
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            failureThreshold: 120
+            periodSeconds: 10
+            timeoutSeconds: 10
+          volumeMounts:
+            - mountPath: /model-cache
+              name: shared-model-cache
+            - mountPath: /scratch
+              name: scratch

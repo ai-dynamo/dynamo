@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# MiniMax-M3-Preview SGLang DynamoGraphDeployment — GB200 (arm64), 1P+1D DISAGG.
+# Validated 2026-06-11 on GCP dynamo-gcp-dev-02 with image
+#   ...:ibhosale-minimax-m3-sglang-runtime-cu130-day0cf-frontendfix-dyn6d5eebe-sgla206b25-20260611-arm64
+#
+# Topology: frontend (Rust pre-processor) + 1 prefill TP4 + 1 decode TP4 (8 GPUs).
+# Key flags:
+#   frontend: --dyn-chat-processor dynamo  (Rust pre-processor; NOT sglang)
+#             --router-mode kv
+#   workers : --skip-tokenizer-init  (frontend tokenizes)
+#             --disaggregation-mode {prefill,decode} --disaggregation-transfer-backend nixl
+#             --tp 4 --quantization mxfp8 --moe-runner-backend deep_gemm
+#             --attention-backend flashinfer --mm-attention-backend flashinfer_cudnn
+#             --dtype bfloat16 --page-size 16 --chunked-prefill-size 8192
+#             --mem-fraction-static 0.70   (0.70 needed at ISL>=8000 to avoid deep_gemm OOM)
+#             --dyn-reasoning-parser minimax-m3 --dyn-tool-call-parser minimax-m3-nom
+#
+# Scheduling: Grove forbids nodeName; pin via nodeAffinity on kubernetes.io/hostname.
+# Each TP4 worker takes all 4 GPUs of a node -> one worker per node.
+# Replace the hostnames below with two free same-NVL-clique GB200x4 nodes.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: kp-m3-1p1d
+  namespace: kprashanth
+spec:
+  backendFramework: sglang
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        imagePullSecrets:
+        - name: nvcrimagepullsecret
+        - name: acr-token-secret
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - operator: Exists
+        containers:
+        - name: main
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:minimax-m3-sglang-runtime-cu130-day0cf-frontendfix-sgla206b25-20260611-arm64
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --http-port
+          - '8000'
+          - --model-name
+          - minimax-m3-preview
+          - --model-path
+          - /model-cache/ibhosale-custom-model/payload
+          - --dyn-chat-processor
+          - dynamo
+          - --router-mode
+          - kv
+          securityContext:
+            runAsUser: 0
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'false'
+          - name: PYTHONUNBUFFERED
+            value: '1'
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          volumeMounts:
+          - mountPath: /model-cache
+            name: shared-model-cache
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+  - name: prefill
+    type: prefill
+    replicas: 1
+    podTemplate:
+      spec:
+        imagePullSecrets:
+        - name: nvcrimagepullsecret
+        - name: acr-token-secret
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values: &id001
+                  - gke-brugdizq-dgxc-k8-customer-gpu-w0e-32ae6790-46k1
+                  - gke-brugdizq-dgxc-k8-customer-gpu-w0e-32ae6790-5rzq
+        tolerations:
+        - operator: Exists
+        containers:
+        - name: main
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:minimax-m3-sglang-runtime-cu130-day0cf-frontendfix-sgla206b25-20260611-arm64
+          imagePullPolicy: IfNotPresent
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - 'ulimit -l unlimited || true; ulimit -n 1048576 || true
+
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+
+            /sbin/ldconfig
+
+            nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+
+
+            exec python3 -m dynamo.sglang --model-path /model-cache/ibhosale-custom-model/payload --served-model-name minimax-m3-preview --page-size 16 --tp 4 --trust-remote-code --skip-tokenizer-init --mem-fraction-static 0.70 --quantization mxfp8 --attention-backend flashinfer --mm-attention-backend flashinfer_cudnn --moe-runner-backend deep_gemm --dtype bfloat16 --chunked-prefill-size 8192 --dyn-reasoning-parser minimax-m3 --dyn-tool-call-parser minimax-m3-nom --disaggregation-mode prefill --disaggregation-transfer-backend nixl --disaggregation-bootstrap-port 30001 --model-loader-extra-config ''{"enable_multithread_load": true, "num_threads": 32}'' --watchdog-timeout 3600 --host 0.0.0.0 --port 30000'
+          workingDir: /workspace/examples/backends/sglang
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: '16'
+              memory: 256Gi
+              ephemeral-storage: 2000Gi
+            limits:
+              cpu: '64'
+              memory: 512Gi
+              nvidia.com/gpu: '4'
+          volumeMounts:
+          - mountPath: /model-cache
+            name: shared-model-cache
+          - mountPath: /scratch
+            name: scratch
+          - mountPath: /dev/shm
+            name: dshm
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: scratch
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+  - name: decode
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
+        imagePullSecrets:
+        - name: nvcrimagepullsecret
+        - name: acr-token-secret
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values: *id001
+        tolerations:
+        - operator: Exists
+        containers:
+        - name: main
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:minimax-m3-sglang-runtime-cu130-day0cf-frontendfix-sgla206b25-20260611-arm64
+          imagePullPolicy: IfNotPresent
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - 'ulimit -l unlimited || true; ulimit -n 1048576 || true
+
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+
+            /sbin/ldconfig
+
+            nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+
+
+            exec python3 -m dynamo.sglang --model-path /model-cache/ibhosale-custom-model/payload --served-model-name minimax-m3-preview --page-size 16 --tp 4 --trust-remote-code --skip-tokenizer-init --mem-fraction-static 0.70 --quantization mxfp8 --attention-backend flashinfer --mm-attention-backend flashinfer_cudnn --moe-runner-backend deep_gemm --dtype bfloat16 --chunked-prefill-size 8192 --dyn-reasoning-parser minimax-m3 --dyn-tool-call-parser minimax-m3-nom --disaggregation-mode decode --disaggregation-transfer-backend nixl --disaggregation-bootstrap-port 30001 --model-loader-extra-config ''{"enable_multithread_load": true, "num_threads": 32}'' --watchdog-timeout 3600 --host 0.0.0.0 --port 30000'
+          workingDir: /workspace/examples/backends/sglang
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: '16'
+              memory: 256Gi
+              ephemeral-storage: 2000Gi
+            limits:
+              cpu: '64'
+              memory: 512Gi
+              nvidia.com/gpu: '4'
+          volumeMounts:
+          - mountPath: /model-cache
+            name: shared-model-cache
+          - mountPath: /scratch
+            name: scratch
+          - mountPath: /dev/shm
+            name: dshm
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: scratch
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi

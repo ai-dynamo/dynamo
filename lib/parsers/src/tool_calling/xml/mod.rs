@@ -3,6 +3,7 @@
 
 mod glm47_parser;
 mod kimi_k2_parser;
+mod minimax_m3_parser;
 mod parsed_value;
 mod parser;
 
@@ -13,6 +14,10 @@ pub use glm47_parser::{
 pub use kimi_k2_parser::{
     detect_tool_call_start_kimi_k2, find_tool_call_end_position_kimi_k2,
     try_tool_call_parse_kimi_k2,
+};
+pub use minimax_m3_parser::{
+    detect_tool_call_start_minimax_m3, find_tool_call_end_position_minimax_m3,
+    try_tool_call_parse_minimax_m3,
 };
 pub use parser::{
     detect_tool_call_start_xml, find_tool_call_end_position_xml, try_tool_call_parse_xml,

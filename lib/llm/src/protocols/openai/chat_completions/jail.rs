@@ -28,6 +28,13 @@ fn is_harmony_parser(parser: Option<&str>) -> bool {
     parser == Some("harmony")
 }
 
+fn drops_trailing_after_tool_call(parser: Option<&str>) -> bool {
+    matches!(
+        parser,
+        Some("minimax_m3" | "minimax-m3" | "minimax_m3_nom" | "minimax-m3-nom")
+    )
+}
+
 fn contains_harmony_protocol(text: &str) -> bool {
     text.contains("<|channel|>")
 }
@@ -212,6 +219,10 @@ impl ChoiceJailState {
         jail_stream: &JailedStream,
         emissions: &mut Vec<ChoiceEmission>,
     ) {
+        if drops_trailing_after_tool_call(jail_stream.tool_call_parser.as_deref()) {
+            return;
+        }
+
         if content.is_empty() {
             return;
         }
@@ -2026,6 +2037,36 @@ mod tests {
         assert!(
             all_text.contains("Done!"),
             "Trailing text 'Done!' should appear in output. Got text: {:?}",
+            all_text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_streaming_drops_trailing_text_after_tool_block() {
+        let jail = JailedStream::builder()
+            .tool_call_parser("minimax_m3")
+            .build();
+
+        let chunks = vec![text_chunk(
+            r#"Let me check. ]<]minimax[>[<tool_call>
+]<]minimax[>[<invoke name="get_weather">]<]minimax[>[<location>SF]<]minimax[>[</location>]<]minimax[>[</invoke>
+]<]minimax[>[</tool_call> trailing text"#,
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].0, "get_weather");
+
+        let all_text = collect_text_content(&responses);
+        assert_eq!(all_text, "Let me check. ");
+        assert!(
+            !all_text.contains("trailing text"),
+            "MiniMax M3 should ignore text after the tool block. Got text: {:?}",
             all_text
         );
     }

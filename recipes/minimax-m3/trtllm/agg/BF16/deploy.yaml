@@ -1,0 +1,289 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: minimax-m3-trtllm-tp8
+  namespace: ibhosale-dynamo
+  labels:
+    app: minimax-m3-trtllm-tp8
+    app.kubernetes.io/part-of: minimax-m3-trtllm-tp8
+spec:
+  backendFramework: trtllm
+  labels:
+    app: minimax-m3-trtllm-tp8
+    app.kubernetes.io/part-of: minimax-m3-trtllm-tp8
+  pvcs:
+    - name: shared-model-cache
+      create: false
+  envs:
+    - name: NCCL_MNNVL_ENABLE
+      value: "1"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "1"
+    - name: TLLM_LOG_LEVEL
+      value: info
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      sharedMemory:
+        size: 40Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /model-cache
+      extraPodMetadata:
+        labels:
+          app.kubernetes.io/part-of: minimax-m3-trtllm-tp8
+          dynamo.nvidia.com/component: frontend
+          dynamo.nvidia.com/framework: trtllm
+          dynamo.nvidia.com/mode: agg-multi-node
+          dynamo.nvidia.com/model: minimax-m3-preview
+      extraPodSpec:
+        imagePullSecrets:
+          - name: acr-token-secret
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: kubernetes.io/arch
+                      operator: In
+                      values:
+                        - arm64
+                    - key: cloud.google.com/gke-nodepool
+                      operator: In
+                      values:
+                        - customer-gpu-o7v
+                        - customer-gpu-w0e
+        tolerations:
+          - operator: Exists
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-minimax-m3-dev.1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              exec /opt/dynamo/venv/bin/python -m dynamo.frontend \
+                --http-port 8000 \
+                --router-mode round-robin \
+                --request-plane nats
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+
+    agg:
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel
+      sharedMemory:
+        size: 200Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /model-cache
+      extraPodMetadata:
+        labels:
+          app.kubernetes.io/part-of: minimax-m3-trtllm-tp8
+          dynamo.nvidia.com/component: agg
+          dynamo.nvidia.com/framework: trtllm
+          dynamo.nvidia.com/mode: agg-multi-node
+          dynamo.nvidia.com/model: minimax-m3-preview
+      extraPodSpec:
+        imagePullSecrets:
+          - name: acr-token-secret
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: kubernetes.io/arch
+                      operator: In
+                      values:
+                        - arm64
+                    - key: nvidia.com/gpu.product
+                      operator: In
+                      values:
+                        - NVIDIA-GB200
+                    - key: cloud.google.com/gke-nodepool
+                      operator: In
+                      values:
+                        - customer-gpu-o7v
+                        - customer-gpu-w0e
+        tolerations:
+          - operator: Exists
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: minimax-m3-trtllm-tp8-channel
+        volumes:
+          - name: trtllm-config
+            configMap:
+              name: minimax-m3-trtllm-tp8-config
+          - name: sshd-run
+            emptyDir: {}
+        initContainers:
+          - name: sshd-run-perms
+            image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-minimax-m3-dev.1
+            imagePullPolicy: Always
+            command:
+              - /bin/bash
+              - -lc
+            args:
+              - |
+                set -euo pipefail
+                chown root:root /run/sshd
+                chmod 0755 /run/sshd
+            securityContext:
+              runAsUser: 0
+              runAsGroup: 0
+            volumeMounts:
+              - mountPath: /run/sshd
+                name: sshd-run
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-minimax-m3-dev.1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          command:
+            - /opt/dynamo/venv/bin/python
+            - -m
+            - dynamo.trtllm
+          args:
+            - --model-path
+            - /model-cache/ibhosale-minimax-m3-bf16/payload
+            - --served-model-name
+            - minimax-m3-preview
+            - --extra-engine-args
+            - /config/agg.yaml
+            - --request-plane
+            - nats
+            - --kv-block-size
+            - "32"
+            - --modality
+            - multimodal
+            - --max-file-size-mb
+            - "100"
+            - --dyn-reasoning-parser
+            - minimax-m3
+            - --dyn-tool-call-parser
+            - minimax-m3-nom
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_HUB_CACHE
+              value: /model-cache/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: TRITON_CACHE_DIR
+              value: /tmp/triton-cache
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /tmp/torchinductor-cache
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_MNNVL_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NCCL_P2P_LEVEL
+              value: NVL
+            - name: NCCL_GRAPH_MIXING_SUPPORT
+              value: "0"
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "y"
+            - name: UCX_MEMTYPE_CACHE
+              value: "n"
+            - name: UCX_TLS
+              value: cuda_copy,cuda_ipc,tcp
+            - name: DYN_LOG
+              value: info,dynamo_trtllm=debug
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "true"
+            - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+              value: "300"
+            - name: DYN_CANARY_WAIT_TIME
+              value: "60"
+          resources:
+            requests:
+              cpu: "32"
+              memory: 700Gi
+              ephemeral-storage: 800Gi
+            limits:
+              cpu: "64"
+              memory: 800Gi
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+          startupProbe:
+            failureThreshold: 540
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+          volumeMounts:
+            - mountPath: /config
+              name: trtllm-config
+              readOnly: true
+            - mountPath: /run/sshd
+              name: sshd-run
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minimax-m3-trtllm-tp8-config
+  namespace: ibhosale-dynamo
+data:
+  agg.yaml: |
+    backend: pytorch
+    allreduce_strategy: MNNVL
+    trust_remote_code: true
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 1
+    moe_expert_parallel_size: 8
+    gpus_per_node: 4
+    attn_backend: TRTLLM
+    dtype: bfloat16
+    max_seq_len: 53248
+    max_num_tokens: 74752
+    max_batch_size: 2
+    enable_chunked_prefill: true
+    enable_attention_dp: false
+    num_postprocess_workers: 8
+    kv_cache_config:
+      enable_block_reuse: false
+      event_buffer_max_size: 0
+      free_gpu_memory_fraction: 0.30
+      tokens_per_block: 32
+    sparse_attention_config:
+      algorithm: minimax_m3
+    cuda_graph_config:
+      max_batch_size: 1

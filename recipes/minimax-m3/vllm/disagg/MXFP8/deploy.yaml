@@ -1,0 +1,212 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-m3-1p1d
+  namespace: kprashanth
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        imagePullSecrets:
+        - name: nvcrimagepullsecret
+        - name: acr-token-secret
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - operator: Exists
+        containers:
+        - name: main
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:ibhosale-minimax-m3-vllm-runtime-cu130-day0cf-frontendfix-dyn6d5eebe-ame454b47d-20260611-arm64
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --http-port
+          - '8000'
+          - --model-name
+          - minimax-m3-preview
+          - --model-path
+          - /model-cache/ibhosale-custom-model/payload
+          - --dyn-chat-processor
+          - dynamo
+          - --router-mode
+          - kv
+          securityContext:
+            runAsUser: 0
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'false'
+          - name: PYTHONUNBUFFERED
+            value: '1'
+          - name: DYN_MM_ALLOW_INTERNAL
+            value: '1'
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          volumeMounts:
+          - mountPath: /model-cache
+            name: shared-model-cache
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+  - name: prefill
+    type: prefill
+    replicas: 1
+    podTemplate:
+      spec:
+        imagePullSecrets:
+        - name: nvcrimagepullsecret
+        - name: acr-token-secret
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values: &nodes
+                  - gke-brugdizq-dgxc-k8-customer-gpu-w0e-32ae6790-d686
+                  - gke-brugdizq-dgxc-k8-customer-gpu-w0e-32ae6790-mb4d
+        tolerations:
+        - operator: Exists
+        containers:
+        - name: main
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:ibhosale-minimax-m3-vllm-runtime-cu130-day0cf-frontendfix-dyn6d5eebe-ame454b47d-20260611-arm64
+          imagePullPolicy: IfNotPresent
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - 'ulimit -l unlimited || true; ulimit -n 1048576 || true
+
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+
+            export PYTHONUNBUFFERED=1
+
+            export DYN_MM_ALLOW_INTERNAL=1
+
+            /sbin/ldconfig
+
+            nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+
+            ln -sfn /usr/local/lib/python3.12/dist-packages/nixl_cu13 /usr/local/lib/python3.12/dist-packages/nixl
+
+            pip install --no-cache-dir --force-reinstall ''nvidia-cutlass-dsl[cu13]==4.5.1'' 2>&1 | tail -1
+
+            python3 -c "import nixl; from nixl._api import nixl_agent; print(''nixl OK'')" || echo "WARN nixl shim failed"
+
+            exec python3 -m dynamo.vllm --model /model-cache/ibhosale-custom-model/payload --served-model-name minimax-m3-preview --trust-remote-code --tensor-parallel-size 4 --max-model-len 40000 --block-size 128 --attention-backend FLASH_ATTN --enable-multimodal --enable-prefix-caching --gpu-memory-utilization 0.85 --dyn-reasoning-parser minimax_m3 --dyn-tool-call-parser minimax_m3 --disaggregation-mode prefill --kv-transfer-config ''{"kv_connector":"NixlConnector","kv_role":"kv_both"}'' --kv-events-config ''{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'''
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: ["IPC_LOCK", "SYS_PTRACE"]
+          resources:
+            requests:
+              cpu: '16'
+              memory: 256Gi
+              ephemeral-storage: 2000Gi
+            limits:
+              cpu: '64'
+              memory: 512Gi
+              nvidia.com/gpu: '4'
+          volumeMounts:
+          - mountPath: /model-cache
+            name: shared-model-cache
+          - mountPath: /dev/shm
+            name: dshm
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 200Gi
+  - name: decode
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
+        imagePullSecrets:
+        - name: nvcrimagepullsecret
+        - name: acr-token-secret
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values: *nodes
+        tolerations:
+        - operator: Exists
+        containers:
+        - name: main
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:ibhosale-minimax-m3-vllm-runtime-cu130-day0cf-frontendfix-dyn6d5eebe-ame454b47d-20260611-arm64
+          imagePullPolicy: IfNotPresent
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - 'ulimit -l unlimited || true; ulimit -n 1048576 || true
+
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+
+            export PYTHONUNBUFFERED=1
+
+            export DYN_MM_ALLOW_INTERNAL=1
+
+            /sbin/ldconfig
+
+            nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+
+            ln -sfn /usr/local/lib/python3.12/dist-packages/nixl_cu13 /usr/local/lib/python3.12/dist-packages/nixl
+
+            pip install --no-cache-dir --force-reinstall ''nvidia-cutlass-dsl[cu13]==4.5.1'' 2>&1 | tail -1
+
+            python3 -c "import nixl; from nixl._api import nixl_agent; print(''nixl OK'')" || echo "WARN nixl shim failed"
+
+            exec python3 -m dynamo.vllm --model /model-cache/ibhosale-custom-model/payload --served-model-name minimax-m3-preview --trust-remote-code --tensor-parallel-size 4 --max-model-len 40000 --block-size 128 --attention-backend FLASH_ATTN --enable-multimodal --enable-prefix-caching --gpu-memory-utilization 0.85 --dyn-reasoning-parser minimax_m3 --dyn-tool-call-parser minimax_m3 --disaggregation-mode decode --kv-transfer-config ''{"kv_connector":"NixlConnector","kv_role":"kv_both"}'' --kv-events-config ''{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'''
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: ["IPC_LOCK", "SYS_PTRACE"]
+          resources:
+            requests:
+              cpu: '16'
+              memory: 256Gi
+              ephemeral-storage: 2000Gi
+            limits:
+              cpu: '64'
+              memory: 512Gi
+              nvidia.com/gpu: '4'
+          volumeMounts:
+          - mountPath: /model-cache
+            name: shared-model-cache
+          - mountPath: /dev/shm
+            name: dshm
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 200Gi

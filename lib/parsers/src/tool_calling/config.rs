@@ -287,6 +287,37 @@ impl Default for KimiK2ParserConfig {
     }
 }
 
+/// Configuration for MiniMax M3 namespace-token XML tool calls.
+///
+/// Format:
+/// ```text
+/// ]<]minimax[>[<tool_call>
+/// ]<]minimax[>[<invoke name="function_name">]<]minimax[>[<param>value]<]minimax[>[</param>]<]minimax[>[</invoke>
+/// ]<]minimax[>[</tool_call>
+/// ```
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MiniMaxM3ParserConfig {
+    /// Namespace token emitted before each XML-ish tag.
+    pub namespace_token: String,
+    /// Tool-call block tag name.
+    pub tool_call_tag: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
+}
+
+impl Default for MiniMaxM3ParserConfig {
+    fn default() -> Self {
+        Self {
+            namespace_token: "]<]minimax[>[".to_string(),
+            tool_call_tag: "tool_call".to_string(),
+            allow_eof_recovery: false,
+        }
+    }
+}
+
 /// Parser-specific configuration
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -299,6 +330,7 @@ pub enum ParserConfig {
     Dsml(DsmlParserConfig),
     KimiK2(KimiK2ParserConfig),
     Glm47(Glm47ParserConfig),
+    MiniMaxM3(MiniMaxM3ParserConfig),
     /// Gemma 4 uses a custom non-JSON grammar with bare keys, `<|"|>` string
     /// delimiters, and fixed `<|tool_call>...<tool_call|>` markers. No
     /// configuration is required at runtime — markers are not user-tunable.
@@ -333,6 +365,12 @@ impl ParserConfig {
                 tokens.push(config.call_start.clone());
                 tokens
             }
+            ParserConfig::MiniMaxM3(config) => {
+                vec![format!(
+                    "{}<{}>",
+                    config.namespace_token, config.tool_call_tag
+                )]
+            }
             ParserConfig::Gemma4 => {
                 vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()]
             }
@@ -351,6 +389,12 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_end.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
             ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
+            ParserConfig::MiniMaxM3(config) => {
+                vec![format!(
+                    "{}</{}>",
+                    config.namespace_token, config.tool_call_tag
+                )]
+            }
             ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_END.to_string()],
         }
     }
@@ -633,6 +677,19 @@ impl ToolCallConfig {
                 passthrough_when_no_function: false,
                 backoff_when_no_wrapper: true,
             }),
+            structural_tag_builder: None,
+        }
+    }
+
+    pub fn minimax_m3() -> Self {
+        // MiniMax-M3 format:
+        // ]<]minimax[>[<tool_call>
+        // ]<]minimax[>[<invoke name="function_name">]<]minimax[>[<param>value]<]minimax[>[</param>]<]minimax[>[</invoke>
+        // ]<]minimax[>[</tool_call>
+        // This differs from MiniMax-M2: parameter names are tag names, and the
+        // MiniMax namespace token is emitted before every tag.
+        Self {
+            parser_config: ParserConfig::MiniMaxM3(MiniMaxM3ParserConfig::default()),
             structural_tag_builder: None,
         }
     }
