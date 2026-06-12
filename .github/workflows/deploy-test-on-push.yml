@@ -176,6 +176,7 @@ jobs:
       VCLUSTER_NAME: vc-smoke-${{ github.run_id }}-${{ github.run_attempt }}
       VCLUSTER_NAMESPACE: dynamo-deploy-test
       VCLUSTER_K8S_VERSION: v1.32.13
+      VCLUSTER_PROBE_IMAGE: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dockerhub/busybox:1.37
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -215,7 +216,8 @@ jobs:
             --connect=false \
             --upgrade \
             --set controlPlane.distro.k8s.enabled=true \
-            --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}"
+            --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}" \
+            --set sync.fromHost.priorityClasses.enabled=true
 
           kubectl wait --for=condition=ready pod \
             -l "app=vcluster,release=${VCLUSTER_NAME}" \
@@ -250,6 +252,163 @@ jobs:
 
           kubectl --kubeconfig="${RUNNER_TEMP}/kubeconfig-vcluster-smoke" \
             --request-timeout=15s get ns
+
+          echo "::group::Verify vCluster PriorityClass behavior"
+          VKUBECONFIG="${RUNNER_TEMP}/kubeconfig-vcluster-smoke"
+          PRIORITY_CLASS="ci-nightly-high-priority"
+          AUTO_PROBE_NAME="priority-auto-probe"
+          EXPLICIT_PROBE_NAME="priority-explicit-probe"
+
+          wait_for_vcluster_pod() {
+            local probe_name="$1"
+            local pod_name=""
+            for _ in $(seq 1 60); do
+              pod_name=$(kubectl --kubeconfig="${VKUBECONFIG}" -n default get pod \
+                -l "app.kubernetes.io/instance=${probe_name}" \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+              if [ -n "${pod_name}" ]; then
+                echo "${pod_name}"
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          wait_for_host_pod() {
+            local probe_name="$1"
+            local pod_name=""
+            for _ in $(seq 1 60); do
+              pod_name=$(kubectl -n "${VCLUSTER_NAMESPACE}" get pod \
+                -l "app.kubernetes.io/instance=${probe_name}" \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+              if [ -n "${pod_name}" ]; then
+                echo "${pod_name}"
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          get_vcluster_priority_class() {
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default get pod "$1" \
+              -o jsonpath='{.spec.priorityClassName}' 2>/dev/null || true
+          }
+
+          get_host_priority_class() {
+            kubectl -n "${VCLUSTER_NAMESPACE}" get pod "$1" \
+              -o jsonpath='{.spec.priorityClassName}' 2>/dev/null || true
+          }
+
+          for _ in $(seq 1 60); do
+            if kubectl --kubeconfig="${VKUBECONFIG}" get priorityclass "${PRIORITY_CLASS}" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl --kubeconfig="${VKUBECONFIG}" get priorityclass "${PRIORITY_CLASS}"
+
+          kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${AUTO_PROBE_NAME}" --ignore-not-found=true --wait=true
+          cat <<EOF | kubectl --kubeconfig="${VKUBECONFIG}" apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${AUTO_PROBE_NAME}
+            namespace: default
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 120
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: vcluster-priority-sync-probe
+                  app.kubernetes.io/instance: ${AUTO_PROBE_NAME}
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: probe
+                    image: ${VCLUSTER_PROBE_IMAGE}
+                    command:
+                      - sh
+                      - -c
+                      - echo automatic-priority-probe; sleep 5
+          EOF
+
+          AUTO_VCLUSTER_POD=$(wait_for_vcluster_pod "${AUTO_PROBE_NAME}") || {
+            echo "::error::No vCluster pod appeared for ${AUTO_PROBE_NAME}"
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default describe job "${AUTO_PROBE_NAME}" || true
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default get events --sort-by='.lastTimestamp' || true
+            exit 1
+          }
+          AUTO_HOST_POD=$(wait_for_host_pod "${AUTO_PROBE_NAME}") || {
+            echo "::error::No host pod appeared for ${AUTO_PROBE_NAME}"
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default describe pod "${AUTO_VCLUSTER_POD}" || true
+            kubectl -n "${VCLUSTER_NAMESPACE}" get pods -o wide --show-labels || true
+            exit 1
+          }
+
+          AUTO_VCLUSTER_PRIORITY_CLASS=$(get_vcluster_priority_class "${AUTO_VCLUSTER_POD}")
+          AUTO_HOST_PRIORITY_CLASS=$(get_host_priority_class "${AUTO_HOST_POD}")
+          echo "[auto] vCluster pod=${AUTO_VCLUSTER_POD} priorityClassName=${AUTO_VCLUSTER_PRIORITY_CLASS:-<empty>}"
+          echo "[auto] host pod=${AUTO_HOST_POD} priorityClassName=${AUTO_HOST_PRIORITY_CLASS:-<empty>}"
+
+          kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${EXPLICIT_PROBE_NAME}" --ignore-not-found=true --wait=true
+          cat <<EOF | kubectl --kubeconfig="${VKUBECONFIG}" apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${EXPLICIT_PROBE_NAME}
+            namespace: default
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 120
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: vcluster-priority-sync-probe
+                  app.kubernetes.io/instance: ${EXPLICIT_PROBE_NAME}
+              spec:
+                priorityClassName: ${PRIORITY_CLASS}
+                restartPolicy: Never
+                containers:
+                  - name: probe
+                    image: ${VCLUSTER_PROBE_IMAGE}
+                    command:
+                      - sh
+                      - -c
+                      - echo explicit-priority-probe; sleep 5
+          EOF
+
+          EXPLICIT_VCLUSTER_POD=$(wait_for_vcluster_pod "${EXPLICIT_PROBE_NAME}") || {
+            echo "::error::No vCluster pod appeared for ${EXPLICIT_PROBE_NAME}"
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default describe job "${EXPLICIT_PROBE_NAME}" || true
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default get events --sort-by='.lastTimestamp' || true
+            exit 1
+          }
+          EXPLICIT_HOST_POD=$(wait_for_host_pod "${EXPLICIT_PROBE_NAME}") || {
+            echo "::error::No host pod appeared for ${EXPLICIT_PROBE_NAME}"
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default describe pod "${EXPLICIT_VCLUSTER_POD}" || true
+            kubectl -n "${VCLUSTER_NAMESPACE}" get pods -o wide --show-labels || true
+            exit 1
+          }
+
+          EXPLICIT_VCLUSTER_PRIORITY_CLASS=$(get_vcluster_priority_class "${EXPLICIT_VCLUSTER_POD}")
+          EXPLICIT_HOST_PRIORITY_CLASS=$(get_host_priority_class "${EXPLICIT_HOST_POD}")
+          echo "[explicit] vCluster pod=${EXPLICIT_VCLUSTER_POD} priorityClassName=${EXPLICIT_VCLUSTER_PRIORITY_CLASS:-<empty>}"
+          echo "[explicit] host pod=${EXPLICIT_HOST_POD} priorityClassName=${EXPLICIT_HOST_PRIORITY_CLASS:-<empty>}"
+          echo "::endgroup::"
+
+          if [ "${EXPLICIT_VCLUSTER_PRIORITY_CLASS}" != "${PRIORITY_CLASS}" ] || [ "${EXPLICIT_HOST_PRIORITY_CLASS}" != "${PRIORITY_CLASS}" ]; then
+            echo "::error::Explicit vCluster priorityClassName did not survive sync to the host pod"
+            exit 1
+          fi
+
+          if [ "${AUTO_VCLUSTER_PRIORITY_CLASS}" != "${PRIORITY_CLASS}" ]; then
+            echo "::error::vCluster did not automatically assign priorityClassName=${PRIORITY_CLASS} to a pod that omitted priorityClassName"
+            echo "Automatic probe result: vCluster priorityClassName=${AUTO_VCLUSTER_PRIORITY_CLASS:-<empty>}, host priorityClassName=${AUTO_HOST_PRIORITY_CLASS:-<empty>}"
+            exit 1
+          fi
 
           echo "### vCluster smoke PASSED" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "- Namespace: \`${VCLUSTER_NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
