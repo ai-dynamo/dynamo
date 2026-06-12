@@ -9,12 +9,7 @@ This document describes the architecture, workflows, and maintenance procedures 
 NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com).
 
 <Note>
-The documentation website is hosted entirely on
-[Fern](https://buildwithfern.com). CI publishes to
-`dynamo.docs.buildwithfern.com`; the production domain
-`docs.dynamo.nvidia.com` is a custom domain alias that points to the
-Fern-hosted site. There is no separate server — Fern handles hosting,
-CDN, and versioned URL routing.
+The documentation website is published at [https://docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo). CI handles publishing, including hosting, CDN, and versioned URL routing.
 </Note>
 
 <Error>
