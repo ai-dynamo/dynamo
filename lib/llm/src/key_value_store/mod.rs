@@ -8,6 +8,8 @@ mod memory;
 mod postgres;
 #[cfg(feature = "key-value-store-redis")]
 mod redis;
+#[cfg(feature = "key-value-store-tikv")]
+mod tikv;
 use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
@@ -17,12 +19,15 @@ pub use memory::MemoryKeyValueStore;
 pub use postgres::PostgresKeyValueStore;
 #[cfg(feature = "key-value-store-redis")]
 pub use redis::RedisKeyValueStore;
+#[cfg(feature = "key-value-store-tikv")]
+pub use tikv::TikvKeyValueStore;
 
 /// A namespaced byte store with optional expiration.
 ///
 /// Implementations must not return expired values. `put` atomically replaces
-/// the value and TTL for a key. A concurrent write can make `delete`'s return
-/// value stale immediately after the operation completes.
+/// the value and TTL for a key. The `delete` result is advisory and must not be
+/// used for synchronization; callers must not concurrently reuse a key being
+/// deleted.
 #[async_trait]
 pub trait KeyValueStore: Send + Sync + 'static {
     async fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>>;
@@ -43,6 +48,11 @@ pub enum KeyValueStoreConfig {
     Redis(String),
     #[cfg(feature = "key-value-store-postgres")]
     Postgres(String),
+    #[cfg(feature = "key-value-store-tikv")]
+    Tikv {
+        endpoints: Vec<String>,
+        prefix: Option<String>,
+    },
 }
 
 impl fmt::Debug for KeyValueStoreConfig {
@@ -53,6 +63,12 @@ impl fmt::Debug for KeyValueStoreConfig {
             Self::Redis(_) => f.write_str("Redis(\"<redacted>\")"),
             #[cfg(feature = "key-value-store-postgres")]
             Self::Postgres(_) => f.write_str("Postgres(\"<redacted>\")"),
+            #[cfg(feature = "key-value-store-tikv")]
+            Self::Tikv { endpoints, prefix } => f
+                .debug_struct("Tikv")
+                .field("endpoints", endpoints)
+                .field("prefix", prefix)
+                .finish(),
         }
     }
 }
@@ -71,6 +87,13 @@ impl KeyValueStoreConfig {
         if raw.starts_with("postgres://") || raw.starts_with("postgresql://") {
             return Ok(Self::Postgres(raw.to_string()));
         }
+        #[cfg(feature = "key-value-store-tikv")]
+        if let Some(config) = raw
+            .strip_prefix("tikv://")
+            .or_else(|| raw.strip_prefix("tikv:"))
+        {
+            return parse_tikv_config(config);
+        }
         anyhow::bail!(
             "unsupported key-value store URL; enabled stores: {}",
             enabled_store_url_schemes()
@@ -87,6 +110,14 @@ impl KeyValueStoreConfig {
             Self::Postgres(url) => Ok(Arc::new(
                 PostgresKeyValueStore::connect(url, namespace).await?,
             )),
+            #[cfg(feature = "key-value-store-tikv")]
+            Self::Tikv { endpoints, prefix } => Ok(Arc::new(
+                TikvKeyValueStore::connect(
+                    endpoints.clone(),
+                    prefix.as_deref().unwrap_or(namespace),
+                )
+                .await?,
+            )),
         }
     }
 }
@@ -98,8 +129,31 @@ pub fn enabled_store_url_schemes() -> String {
         "redis:// or rediss://",
         #[cfg(feature = "key-value-store-postgres")]
         "postgres:// or postgresql://",
+        #[cfg(feature = "key-value-store-tikv")]
+        "tikv://pd1:2379,pd2:2379/prefix",
     ];
     schemes.join(", ")
+}
+
+#[cfg(feature = "key-value-store-tikv")]
+fn parse_tikv_config(config: &str) -> anyhow::Result<KeyValueStoreConfig> {
+    let (endpoints, prefix) =
+        config
+            .split_once('/')
+            .map_or((config, None), |(endpoints, prefix)| {
+                let prefix = prefix.trim_matches('/');
+                (endpoints, (!prefix.is_empty()).then(|| prefix.to_string()))
+            });
+    let endpoints = endpoints
+        .split(',')
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if endpoints.is_empty() {
+        anyhow::bail!("TiKV store URL must include at least one PD endpoint");
+    }
+    Ok(KeyValueStoreConfig::Tikv { endpoints, prefix })
 }
 
 #[cfg(test)]
@@ -134,7 +188,8 @@ pub(crate) async fn test_store_contract(store: &dyn KeyValueStore) {
     test,
     any(
         feature = "key-value-store-redis",
-        feature = "key-value-store-postgres"
+        feature = "key-value-store-postgres",
+        feature = "key-value-store-tikv"
     )
 ))]
 pub(crate) async fn test_namespace_isolation(
@@ -193,5 +248,18 @@ mod tests {
         let config = KeyValueStoreConfig::parse(url).unwrap();
         assert_eq!(config, KeyValueStoreConfig::Postgres(url.to_string()));
         assert!(!format!("{config:?}").contains("password"));
+    }
+
+    #[cfg(feature = "key-value-store-tikv")]
+    #[test]
+    fn parses_tikv_endpoints_and_optional_prefix() {
+        assert_eq!(
+            KeyValueStoreConfig::parse("tikv://127.0.0.1:2379,127.0.0.2:2379/prod/responses")
+                .unwrap(),
+            KeyValueStoreConfig::Tikv {
+                endpoints: vec!["127.0.0.1:2379".to_string(), "127.0.0.2:2379".to_string()],
+                prefix: Some("prod/responses".to_string()),
+            }
+        );
     }
 }
