@@ -545,16 +545,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--num-decode-workers", type=int, default=1)
     parser.add_argument("--replay-concurrency", type=int)
     parser.add_argument(
-        "--replay-mode",
-        choices=("offline", "online"),
-        default="offline",
+        "--replay-concurrency-ramp-duration-seconds",
+        type=float,
+        default=None,
+        help=(
+            "ramp concurrency to `--replay-concurrency` over this many seconds; "
+            "caps max simultaneous requests for that duration"
+        ),
     )
-    parser.add_argument(
-        "--router-mode",
-        choices=("round_robin", "kv_router"),
-        default="round_robin",
-    )
-    parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     parser.add_argument(
         "--trace-format",
         choices=(
@@ -647,6 +645,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
+    if (
+        args.replay_concurrency_ramp_duration_seconds is not None
+        and args.replay_concurrency_ramp_duration_seconds < 0.0
+    ):
+        parser.error("--replay-concurrency-ramp-duration-seconds must be non-negative")
+    if (
+        args.replay_concurrency_ramp_duration_seconds is not None
+        and args.replay_concurrency_ramp_duration_seconds > 0.0
+        and args.replay_concurrency is None
+    ):
+        parser.error(
+            "--replay-concurrency-ramp-duration-seconds requires --replay-concurrency"
+        )
+    if (
+        args.replay_concurrency_ramp_duration_seconds is not None
+        and args.replay_concurrency_ramp_duration_seconds > 0.0
+        and args.replay_mode != "offline"
+    ):
+        parser.error(
+            "--replay-concurrency-ramp-duration-seconds only supports --replay-mode=offline"
+        )
+    if (
+        args.replay_concurrency_ramp_duration_seconds is not None
+        and args.replay_concurrency_ramp_duration_seconds > 0.0
+        and args.planner_config is not None
+    ):
+        parser.error(
+            "--replay-concurrency-ramp-duration-seconds is not supported with --planner-config"
+        )
 
     if args.report_jsonl is not None:
         if args.replay_mode != "offline":
@@ -723,6 +750,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if using_trace_file:
+        replay_concurrency_ramp_duration_ms = (
+            args.replay_concurrency_ramp_duration_seconds * 1_000.0
+            if args.replay_concurrency_ramp_duration_seconds is not None
+            else None
+        )
         max_sim_time_ms = (
             args.max_sim_time_seconds * 1_000.0
             if args.max_sim_time_seconds is not None
@@ -739,6 +771,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_prefill_workers=args.num_prefill_workers,
             num_decode_workers=args.num_decode_workers,
             replay_concurrency=args.replay_concurrency,
+            replay_concurrency_ramp_duration_ms=replay_concurrency_ramp_duration_ms,
             replay_mode=args.replay_mode,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
@@ -750,6 +783,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_sim_time_ms=max_sim_time_ms,
         )
     else:
+        replay_concurrency_ramp_duration_ms = (
+            args.replay_concurrency_ramp_duration_seconds * 1_000.0
+            if args.replay_concurrency_ramp_duration_seconds is not None
+            else None
+        )
         report = run_synthetic_trace_replay(
             args.input_tokens,
             args.output_tokens,
@@ -763,6 +801,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_prefill_workers=args.num_prefill_workers,
             num_decode_workers=args.num_decode_workers,
             replay_concurrency=args.replay_concurrency,
+            replay_concurrency_ramp_duration_ms=replay_concurrency_ramp_duration_ms,
             replay_mode=args.replay_mode,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,

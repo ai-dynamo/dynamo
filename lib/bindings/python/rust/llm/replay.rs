@@ -734,7 +734,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_concurrency_ramp_duration_ms=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -748,6 +748,7 @@ pub fn run_mocker_trace_replay(
     num_prefill_workers: usize,
     num_decode_workers: usize,
     replay_concurrency: Option<isize>,
+    replay_concurrency_ramp_duration_ms: Option<f64>,
     replay_mode: &str,
     router_mode: &str,
     arrival_speedup_ratio: f64,
@@ -797,7 +798,11 @@ pub fn run_mocker_trace_replay(
         }
     }
     let report = py.allow_threads(move || {
-        let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        let replay_concurrency = parse_replay_concurrency_config(
+            replay_concurrency,
+            replay_concurrency_ramp_duration_ms,
+            &replay_mode,
+        )?;
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
             && replay_concurrency.is_none()
         {
@@ -809,20 +814,21 @@ pub fn run_mocker_trace_replay(
         match args_selection {
             ReplayArgsSelection::Aggregated(args) => {
                 match (replay_mode.as_str(), replay_concurrency) {
-                    ("offline", Some(max_in_flight)) => {
+                    ("offline", Some(concurrency_config)) => {
                         dynamo_mocker::replay::simulate_concurrency_file_with_router_mode_and_format(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             &trace_file,
                             trace_block_size,
-                            max_in_flight,
+                            concurrency_config,
                             num_workers,
                             router_mode,
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
-                            record_per_request, max_sim_time_ms,
+                            record_per_request,
+                            max_sim_time_ms,
                         )
                     }
                     ("offline", None) => {
@@ -841,14 +847,14 @@ pub fn run_mocker_trace_replay(
                             record_per_request, max_sim_time_ms,
                         )
                     }
-                    ("online", Some(max_in_flight)) => {
+                    ("online", Some(concurrency_config)) => {
                         dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode_and_format(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             &trace_file,
                             trace_block_size,
-                            max_in_flight,
+                            concurrency_config.max_in_flight,
                             num_workers,
                             router_mode,
                             trace_format,
@@ -879,19 +885,20 @@ pub fn run_mocker_trace_replay(
             }
             ReplayArgsSelection::Disagg(config) => match (replay_mode.as_str(), replay_concurrency)
             {
-                ("offline", Some(max_in_flight)) => {
+                ("offline", Some(concurrency_config)) => {
                     dynamo_mocker::replay::simulate_concurrency_file_disagg_with_router_mode_and_format(
                         *config,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
                         &trace_file,
                         trace_block_size,
-                        max_in_flight,
+                        concurrency_config,
                         router_mode,
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
-                        record_per_request, max_sim_time_ms,
+                        record_per_request,
+                        max_sim_time_ms,
                     )
                 }
                 ("offline", None) => {
@@ -956,7 +963,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_concurrency_ramp_duration_ms=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -972,6 +979,7 @@ pub fn run_mocker_synthetic_trace_replay(
     num_prefill_workers: usize,
     num_decode_workers: usize,
     replay_concurrency: Option<isize>,
+    replay_concurrency_ramp_duration_ms: Option<f64>,
     replay_mode: &str,
     router_mode: &str,
     arrival_speedup_ratio: f64,
@@ -1004,7 +1012,11 @@ pub fn run_mocker_synthetic_trace_replay(
         ReplayArgsSelection::Disagg(config) => config.prefill_args.block_size.max(1),
     };
     let report = py.allow_threads(move || {
-        let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        let replay_concurrency = parse_replay_concurrency_config(
+            replay_concurrency,
+            replay_concurrency_ramp_duration_ms,
+            &replay_mode,
+        )?;
         let use_workload = turns_per_session > 1
             || shared_prefix_ratio > 0.0
             || num_prefix_groups > 0
@@ -1029,13 +1041,13 @@ pub fn run_mocker_synthetic_trace_replay(
             return match args_selection {
                 ReplayArgsSelection::Aggregated(args) => match (replay_mode.as_str(), replay_concurrency)
                 {
-                    ("offline", Some(max_in_flight)) => {
+                    ("offline", Some(concurrency_config)) => {
                         dynamo_mocker::replay::simulate_concurrency_workload_with_router_mode(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
-                            max_in_flight,
+                            concurrency_config,
                             num_workers,
                             router_mode,
                         )
@@ -1050,13 +1062,13 @@ pub fn run_mocker_synthetic_trace_replay(
                             router_mode,
                         )
                     }
-                    ("online", Some(max_in_flight)) => {
+                    ("online", Some(concurrency_config)) => {
                         dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
-                            max_in_flight,
+                            concurrency_config.max_in_flight,
                             num_workers,
                             router_mode,
                         )
@@ -1078,12 +1090,12 @@ pub fn run_mocker_synthetic_trace_replay(
                 },
                 ReplayArgsSelection::Disagg(config) => {
                     match (replay_mode.as_str(), replay_concurrency) {
-                        ("offline", Some(max_in_flight)) => dynamo_mocker::replay::simulate_concurrency_workload_disagg_with_router_mode(
+                        ("offline", Some(concurrency_config)) => dynamo_mocker::replay::simulate_concurrency_workload_disagg_with_router_mode(
                             *config,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
-                            max_in_flight,
+                            concurrency_config,
                             router_mode,
                         ),
                         ("offline", None) => dynamo_mocker::replay::simulate_trace_workload_disagg_with_router_mode(
@@ -1105,6 +1117,13 @@ pub fn run_mocker_synthetic_trace_replay(
             };
         }
 
+        if matches!(replay_concurrency, Some(concurrency_config) if concurrency_config.ramp_duration_ms.is_some())
+        {
+            anyhow::bail!(
+                "replay_concurrency_ramp_duration_ms only supports workload/session replay"
+            );
+        }
+
         let requests = build_synthetic_requests(
             input_tokens,
             output_tokens,
@@ -1116,13 +1135,13 @@ pub fn run_mocker_synthetic_trace_replay(
         match args_selection {
             ReplayArgsSelection::Aggregated(args) => match (replay_mode.as_str(), replay_concurrency)
             {
-                ("offline", Some(max_in_flight)) => {
+                ("offline", Some(concurrency_config)) => {
                     dynamo_mocker::replay::simulate_concurrency_requests_with_router_mode(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
                         requests,
-                        max_in_flight,
+                        concurrency_config.max_in_flight,
                         num_workers,
                         router_mode,
                     )
@@ -1136,13 +1155,13 @@ pub fn run_mocker_synthetic_trace_replay(
                     arrival_speedup_ratio,
                     router_mode,
                 ),
-                ("online", Some(max_in_flight)) => {
+                ("online", Some(concurrency_config)) => {
                     dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
                         requests,
-                        max_in_flight,
+                        concurrency_config.max_in_flight,
                         num_workers,
                         router_mode,
                     )
@@ -1165,13 +1184,13 @@ pub fn run_mocker_synthetic_trace_replay(
             },
             ReplayArgsSelection::Disagg(config) => match (replay_mode.as_str(), replay_concurrency)
             {
-                ("offline", Some(max_in_flight)) => {
+                ("offline", Some(concurrency_config)) => {
                     dynamo_mocker::replay::simulate_concurrency_requests_disagg_with_router_mode(
                         *config,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
                         requests,
-                        max_in_flight,
+                        concurrency_config.max_in_flight,
                         router_mode,
                     )
                 }
@@ -1462,6 +1481,46 @@ fn parse_replay_concurrency(replay_concurrency: Option<isize>) -> anyhow::Result
         Some(value) => Ok(Some(value as usize)),
         None => Ok(None),
     }
+}
+
+fn parse_replay_concurrency_config(
+    replay_concurrency: Option<isize>,
+    ramp_duration_ms: Option<f64>,
+    replay_mode: &str,
+) -> anyhow::Result<Option<dynamo_mocker::replay::ReplayConcurrencyConfig>> {
+    let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+    let ramp_duration_ms = parse_replay_concurrency_ramp_duration_ms(
+        ramp_duration_ms,
+        replay_concurrency,
+        replay_mode,
+    )?;
+    Ok(replay_concurrency.map(
+        |max_in_flight| dynamo_mocker::replay::ReplayConcurrencyConfig {
+            max_in_flight,
+            ramp_duration_ms,
+        },
+    ))
+}
+
+fn parse_replay_concurrency_ramp_duration_ms(
+    value: Option<f64>,
+    replay_concurrency: Option<usize>,
+    replay_mode: &str,
+) -> anyhow::Result<Option<f64>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value < 0.0 {
+        anyhow::bail!("replay_concurrency_ramp_duration_ms must be a finite, non-negative value");
+    }
+    let value = (value > 0.0).then_some(value);
+    if value.is_some() && replay_concurrency.is_none() {
+        anyhow::bail!("replay_concurrency_ramp_duration_ms requires replay_concurrency");
+    }
+    if value.is_some() && replay_mode != "offline" {
+        anyhow::bail!("replay_concurrency_ramp_duration_ms only supports replay_mode='offline'");
+    }
+    Ok(value)
 }
 
 #[allow(clippy::too_many_arguments)]

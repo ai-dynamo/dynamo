@@ -14,6 +14,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
+pub use crate::loadgen::ReplayConcurrencyConfig;
 use dynamo_kv_router::PrefillLoadEstimator;
 
 pub use artifacts::{
