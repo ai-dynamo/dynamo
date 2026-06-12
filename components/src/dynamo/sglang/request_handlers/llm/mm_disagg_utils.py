@@ -43,6 +43,14 @@ def extract_media_urls(
     items are also accepted for forward/backward compatibility. Returns ``None``
     when the modality is absent so callers can pass it straight through to
     ``async_generate`` (which treats ``None`` as "no media").
+
+    Malformed or unsupported payloads raise ``ValueError`` rather than silently
+    degrading to text. In disaggregated serving both workers depend on this
+    helper, so a dropped item would not just be a local parse bug — it would
+    desync the prefill/decode token layout and corrupt the answer. This mirrors
+    the explicit wire-variant validation in ``MultimodalEncodeWorkerHandler``;
+    in particular, frontend-decoded (``Decoded``) media is rejected because the
+    disaggregated path is URL-passthrough only.
     """
     if not mm_data:
         return None
@@ -50,6 +58,10 @@ def extract_media_urls(
     items = mm_data.get(media_key)
     if not items:
         return None
+    if not isinstance(items, list):
+        raise ValueError(
+            f"{media_key} must be a list of URL items, got {type(items).__name__}"
+        )
 
     urls: list[str] = []
     for item in items:
@@ -60,6 +72,13 @@ def extract_media_urls(
             url = item.get("Url")
             if isinstance(url, str):
                 urls.append(url)
+                continue
+            if "Decoded" in item:
+                raise ValueError(
+                    f"Frontend-decoded media is not supported for disaggregated "
+                    f"{media_key}; use URL-based inputs."
+                )
+        raise ValueError(f"Unsupported {media_key} item: {item!r}")
 
     return urls or None
 

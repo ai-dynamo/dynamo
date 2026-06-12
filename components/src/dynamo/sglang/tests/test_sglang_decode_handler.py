@@ -41,7 +41,6 @@ def test_extract_media_urls_supports_string_and_wire_items():
         "video_url": [
             "file:///tmp/test.mp4",
             {"Url": "https://example.com/test.mp4"},
-            {"ignored": "value"},
         ]
     }
 
@@ -51,12 +50,24 @@ def test_extract_media_urls_supports_string_and_wire_items():
     ]
 
 
-def test_extract_media_urls_returns_none_for_missing_or_invalid_items():
+def test_extract_media_urls_returns_none_for_missing_modality():
     assert extract_media_urls({}, "image_url") is None
     assert extract_media_urls(None, "image_url") is None
-    assert (
-        extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url") is None
-    )
+    assert extract_media_urls({"image_url": []}, "image_url") is None
+
+
+def test_extract_media_urls_rejects_malformed_payloads():
+    # A bare string (not a list) would otherwise split into per-character items.
+    with pytest.raises(ValueError, match="must be a list"):
+        extract_media_urls({"image_url": "https://example.com/a.png"}, "image_url")
+
+    # Frontend-decoded media is URL-passthrough only in the disaggregated path.
+    with pytest.raises(ValueError, match="Frontend-decoded"):
+        extract_media_urls({"image_url": [{"Decoded": "..."}]}, "image_url")
+
+    # Unsupported dict variant fails clearly instead of degrading to text.
+    with pytest.raises(ValueError, match="Unsupported"):
+        extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url")
 
 
 @pytest.mark.parametrize(

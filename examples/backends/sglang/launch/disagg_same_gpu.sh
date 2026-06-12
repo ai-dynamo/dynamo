@@ -29,6 +29,11 @@ MODEL="Qwen/Qwen3-0.6B"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                echo "Missing value for --model"
+                echo "Use --help for usage information"
+                exit 1
+            fi
             MODEL="$2"
             shift 2
             ;;
