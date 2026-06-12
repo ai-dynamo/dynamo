@@ -77,6 +77,8 @@ jobs:
     - uses: actions/setup-node@v4
       with:
         node-version: '22'
+    - name: Validate kubectl-doc Fern component contract
+      run: node --test fern/components/kubectl-doc/KubeSchemaDoc.contract.test.mjs
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Validate Fern configuration

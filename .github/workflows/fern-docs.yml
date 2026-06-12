@@ -153,6 +153,21 @@ jobs:
             cp -r source-checkout/fern/components docs-checkout/fern/components
           fi
 
+          # Point generated kubectl-doc schema fetches at the exact GitHub ref being built.
+          # The large JSON payloads stay in the source repo and are not uploaded through Fern.
+          if [ -f docs-checkout/fern/components/kubectl-doc/schemaSources.generated.ts ]; then
+            RAW_SCHEMA_BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/fern/kubectl-doc-schemas"
+            sed -i "s|^export const schemaBaseURL = .*|export const schemaBaseURL = \"${RAW_SCHEMA_BASE_URL}\";|" \
+              docs-checkout/fern/components/kubectl-doc/schemaSources.generated.ts
+          fi
+
+          # Sync static assets used directly by documentation pages.
+          if [ -d source-checkout/docs/assets ]; then
+            echo "Syncing assets/ to docs-website branch..."
+            rm -rf docs-checkout/fern/assets
+            cp -r source-checkout/docs/assets docs-checkout/fern/assets
+          fi
+
           # Sync digest/ directory
           if [ -d source-checkout/docs/digest ]; then
             echo "Syncing digest/ to docs-website branch..."
