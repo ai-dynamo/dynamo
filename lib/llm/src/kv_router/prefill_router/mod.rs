@@ -49,10 +49,15 @@ pub struct PrefillRouter {
     router_mode: RouterMode,
     enforce_disagg: bool,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    /// Model name used to look up the worker monitor for prefill client registration
+    /// Model name (used for logging / lifecycle messages).
     model_name: String,
-    /// Namespace used to look up the correct WorkerSet's worker monitor
+    /// Namespace (used for logging / lifecycle messages).
     namespace: String,
+    /// Worker monitor for this WorkerSet, handed in at construction (the monitor and
+    /// prefill router are created together in `watcher.rs`). On activation the prefill
+    /// `Client` is attached to it so the monitor publishes the overloaded set to the
+    /// prefill pool. `None` for a disabled router.
+    worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
     is_eagle: bool,
     /// Set to true when all prefill workers die. Checked in generate() to prevent
     /// routing to dead workers. Cleared on reactivation when workers rejoin.

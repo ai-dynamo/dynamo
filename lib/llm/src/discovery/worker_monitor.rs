@@ -380,8 +380,9 @@ impl WorkerLoadState {
 /// which should be registered with the HTTP service's Prometheus registry using
 /// [`register_worker_load_metrics`](crate::kv_router::metrics::register_worker_load_metrics).
 ///
-/// In disaggregated mode, use `set_prefill_client` to register the prefill endpoint for
-/// proper TTFT metric cleanup when prefill workers are removed.
+/// In disaggregated mode, use `attach_prefill_client` to attach the prefill endpoint so the
+/// monitor publishes the overloaded set to the prefill pool and cleans up TTFT metrics when
+/// prefill workers are removed.
 #[derive(Clone)]
 pub struct KvWorkerMonitor {
     /// Decode endpoint client (used for ITL cleanup and overload detection)
@@ -411,8 +412,9 @@ impl KvWorkerMonitor {
     /// using [`register_worker_load_metrics`](crate::kv_router::metrics::register_worker_load_metrics)
     /// during HTTP service setup.
     ///
-    /// For disaggregated mode, call `set_prefill_client` after creation to enable
-    /// proper TTFT metric cleanup when prefill workers are removed.
+    /// For disaggregated mode, call `attach_prefill_client` after creation to enable
+    /// prefill-pool overload publishing and TTFT metric cleanup when prefill workers
+    /// are removed.
     pub fn new(client: Client, config: LoadThresholdConfig) -> Self {
         Self {
             client,
@@ -433,19 +435,20 @@ impl KvWorkerMonitor {
         self.thresholds.read().unwrap().is_configured()
     }
 
-    /// Set the prefill client for disaggregated mode.
+    /// Attach the prefill router's `Client` for disaggregated mode.
     ///
-    /// This enables monitoring of prefill endpoint instances for TTFT metric cleanup.
-    /// In disaggregated mode, TTFT metrics are attributed to prefill workers, so we need
-    /// to watch the prefill endpoint to clean up TTFT gauges when prefill workers disappear.
+    /// This is what wires prefill backpressure end-to-end: once attached, the monitor
+    /// publishes the overloaded set to the prefill `Client` (so the PrefillRouter excludes
+    /// overloaded workers / sheds when all are over — DYN-3212) and watches the prefill
+    /// endpoint to clean up TTFT gauges when prefill workers disappear.
     ///
     /// This method can be called after `start_monitoring` - the monitoring loop will
     /// be immediately notified and start watching the prefill endpoint.
-    pub fn set_prefill_client(&self, prefill_client: Client) {
+    pub fn attach_prefill_client(&self, prefill_client: Client) {
         let mut guard = self.prefill_client.write().unwrap();
         *guard = Some(prefill_client);
         self.prefill_client_notify.notify_one();
-        tracing::debug!("KvWorkerMonitor: prefill client registered for TTFT cleanup");
+        tracing::debug!("KvWorkerMonitor: prefill client attached (overload publish + TTFT cleanup)");
     }
 
     /// Get the current active decode blocks threshold, if configured.
@@ -1229,7 +1232,7 @@ mod tests {
         );
         assert_eq!(prefill_client.overloaded_instance_ids(), None);
 
-        // Once registered (as happens via set_prefill_client on prefill router
+        // Once registered (as happens via attach_prefill_client on prefill router
         // activation), the prefill client must receive the same set.
         *holder.write().unwrap() = Some(prefill_client.clone());
         publish_overloaded_instances(&decode_client, &holder, &[1, 2]);

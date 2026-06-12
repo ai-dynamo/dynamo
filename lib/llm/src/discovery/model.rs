@@ -13,7 +13,7 @@ use rand::Rng;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
-use super::{KvWorkerMonitor, ModelManagerError};
+use super::ModelManagerError;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -435,53 +435,6 @@ impl Model {
             }
         }
         result
-    }
-
-    /// Get the worker monitor for a namespace's WorkerSet.
-    ///
-    /// `worker_sets` is keyed by the composite WorkerSet key
-    /// `{namespace}:{model_type}:{worker_type}` (see `worker_set_key`), not by a
-    /// bare namespace. The only caller (the prefill router, on activation) passes
-    /// a plain namespace, and the monitor it needs lives on the decode/aggregated
-    /// WorkerSet for that namespace — prefill WorkerSets carry no monitor. A bare
-    /// `.get(namespace)` therefore never matched, so the prefill client was never
-    /// registered and prefill-token overload was a silent no-op (DYN-3212).
-    ///
-    /// Resolve it by finding the WorkerSet in this namespace that actually owns a
-    /// monitor. Try an exact key match first (in case a full key is passed), then
-    /// fall back to a `{namespace}:`-prefixed search.
-    ///
-    /// Mixed-version (rolling-upgrade) deployments can briefly have more than one
-    /// monitor-bearing WorkerSet in a namespace: a legacy decode worker with no
-    /// declared `worker_type` buckets as `{ns}:...:aggregated` (compat shim) while
-    /// a new decode worker buckets as `{ns}:...:decode`. Prefer the decode set
-    /// (the pool the prefill router hands off to) so the resolution is
-    /// deterministic; fall back to any monitor-bearing set so a fully-legacy
-    /// (aggregated) deployment still resolves.
-    pub fn get_worker_monitor_for_namespace(&self, namespace: &str) -> Option<KvWorkerMonitor> {
-        if let Some(monitor) = self
-            .worker_sets
-            .get(namespace)
-            .and_then(|entry| entry.value().worker_monitor.clone())
-        {
-            return Some(monitor);
-        }
-
-        let prefix = format!("{namespace}:");
-        let decode_suffix = format!(":{}", crate::worker_type::WorkerType::Decode.as_str());
-        let mut fallback: Option<KvWorkerMonitor> = None;
-        for entry in self.worker_sets.iter() {
-            if !entry.key().starts_with(&prefix) || entry.value().worker_monitor.is_none() {
-                continue;
-            }
-            if entry.key().ends_with(&decode_suffix) {
-                return entry.value().worker_monitor.clone();
-            }
-            if fallback.is_none() {
-                fallback = entry.value().worker_monitor.clone();
-            }
-        }
-        fallback
     }
 
     /// Total worker count across all WorkerSets.
@@ -942,150 +895,6 @@ mod tests {
             model.is_displayable(),
             "model must remain visible when prefill died but enforce_disagg=false (fallback)"
         );
-    }
-
-    /// Regression for DYN-3212: `worker_sets` is keyed by the composite
-    /// `{namespace}:{model_type}:{worker_type}` key, but the prefill router looks
-    /// the monitor up by plain namespace. The lookup must resolve the monitor on
-    /// the decode WorkerSet from the bare namespace (an exact `.get(namespace)`
-    /// used to return None, so the prefill client was never registered).
-    #[tokio::test]
-    async fn get_worker_monitor_for_namespace_resolves_composite_key() {
-        use crate::model_card::ModelDeploymentCard;
-        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
-
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let component = drt
-            .namespace("ns1".to_string())
-            .unwrap()
-            .component("backend".to_string())
-            .unwrap();
-        let client = component
-            .endpoint("generate".to_string())
-            .client()
-            .await
-            .unwrap();
-        let monitor = KvWorkerMonitor::new(client, LoadThresholdConfig::default());
-
-        let model = Model::new("llama".to_string());
-        // Decode WorkerSet stored under its composite ws_key, carrying the monitor.
-        let mut ws = WorkerSet::new(
-            "ns1".to_string(),
-            "abc".to_string(),
-            ModelDeploymentCard::default(),
-        );
-        ws.worker_monitor = Some(monitor);
-        model.add_worker_set("ns1:chat|completions:decode".to_string(), Arc::new(ws));
-
-        // Lookup by the PLAIN namespace must find the monitor.
-        assert!(
-            model.get_worker_monitor_for_namespace("ns1").is_some(),
-            "monitor must resolve from the bare namespace"
-        );
-        // A namespace that only shares a prefix ('ns' vs 'ns1') must NOT match.
-        assert!(
-            model.get_worker_monitor_for_namespace("ns").is_none(),
-            "prefix-only namespace must not match a different namespace"
-        );
-
-        rt.shutdown();
-    }
-
-    /// Backward-compat (rolling upgrade): a legacy decode worker with no declared
-    /// worker_type buckets as `{ns}:...:aggregated` while a new decode worker
-    /// buckets as `{ns}:...:decode`, so both monitor-bearing sets coexist in the
-    /// namespace. Resolution must be deterministic and prefer the decode set; a
-    /// fully-legacy (aggregated-only) namespace must still resolve.
-    #[tokio::test]
-    async fn get_worker_monitor_for_namespace_prefers_decode_in_mixed_version() {
-        use crate::model_card::ModelDeploymentCard;
-        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
-
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let ns = drt.namespace("ns1".to_string()).unwrap();
-
-        async fn monitor_with(
-            ns: &dynamo_runtime::component::Namespace,
-            component: &str,
-            cfg: LoadThresholdConfig,
-        ) -> KvWorkerMonitor {
-            let client = ns
-                .component(component.to_string())
-                .unwrap()
-                .endpoint("generate".to_string())
-                .client()
-                .await
-                .unwrap();
-            KvWorkerMonitor::new(client, cfg)
-        }
-
-        // Distinguish the two monitors by their threshold config (a public field).
-        let decode_cfg = LoadThresholdConfig {
-            active_decode_blocks_threshold: Some(0.5),
-            ..Default::default()
-        };
-        let agg_cfg = LoadThresholdConfig {
-            active_prefill_tokens_threshold: Some(999),
-            ..Default::default()
-        };
-        let decode_monitor = monitor_with(&ns, "backend", decode_cfg.clone()).await;
-        let agg_monitor = monitor_with(&ns, "legacy", agg_cfg).await;
-
-        let make_ws = |monitor: KvWorkerMonitor| {
-            let mut ws = WorkerSet::new(
-                "ns1".to_string(),
-                "abc".to_string(),
-                ModelDeploymentCard::default(),
-            );
-            ws.worker_monitor = Some(monitor);
-            Arc::new(ws)
-        };
-
-        let model = Model::new("llama".to_string());
-        model.add_worker_set(
-            "ns1:chat|completions:aggregated".to_string(),
-            make_ws(agg_monitor),
-        );
-        model.add_worker_set(
-            "ns1:chat|completions:decode".to_string(),
-            make_ws(decode_monitor),
-        );
-
-        // Must deterministically return the DECODE set's monitor.
-        let resolved = model
-            .get_worker_monitor_for_namespace("ns1")
-            .expect("monitor must resolve");
-        assert_eq!(
-            resolved.load_threshold_config(),
-            decode_cfg,
-            "must prefer the decode WorkerSet's monitor in a mixed-version namespace"
-        );
-
-        // Fully-legacy (aggregated-only) namespace still resolves via the fallback.
-        let legacy_only = Model::new("llama".to_string());
-        let agg_only_cfg = LoadThresholdConfig {
-            active_prefill_tokens_threshold: Some(7),
-            ..Default::default()
-        };
-        legacy_only.add_worker_set(
-            "ns1:chat|completions:aggregated".to_string(),
-            make_ws(monitor_with(&ns, "legacy2", agg_only_cfg.clone()).await),
-        );
-        assert_eq!(
-            legacy_only
-                .get_worker_monitor_for_namespace("ns1")
-                .expect("aggregated-only namespace must resolve")
-                .load_threshold_config(),
-            agg_only_cfg,
-        );
-
-        rt.shutdown();
     }
 
     /// A single WorkerSet with a deactivated prefill router (enforce_disagg=true) must be

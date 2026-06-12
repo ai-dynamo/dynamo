@@ -15,7 +15,7 @@ use dynamo_kv_router::{
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
-use super::{KvWorkerMonitor, Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
+use super::{Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
 
 use dynamo_runtime::{
     component::{Endpoint, build_transport_type},
@@ -1038,16 +1038,6 @@ impl ModelManager {
     ) -> Option<LoadThresholdConfig> {
         let model_entry = self.models.get(model)?;
         model_entry.load_threshold_config(config)
-    }
-
-    /// Gets an existing worker monitor for a specific namespace of a model.
-    pub fn get_worker_monitor_for_namespace(
-        &self,
-        model: &str,
-        namespace: &str,
-    ) -> Option<KvWorkerMonitor> {
-        let model_entry = self.models.get(model)?;
-        model_entry.get_worker_monitor_for_namespace(namespace)
     }
 
     /// Lists all models with worker monitors configured.

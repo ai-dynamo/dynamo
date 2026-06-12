@@ -41,6 +41,7 @@ impl PrefillRouter {
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
+            worker_monitor: None,      // Disabled router never attaches a client
             is_eagle: false,
             deactivated: std::sync::atomic::AtomicBool::new(false),
             activated: std::sync::atomic::AtomicBool::new(false),
@@ -59,6 +60,7 @@ impl PrefillRouter {
         model_name: String,
         namespace: String,
         is_eagle: bool,
+        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -73,6 +75,7 @@ impl PrefillRouter {
             prefill_load_estimator,
             model_name,
             namespace,
+            worker_monitor,
             is_eagle,
             deactivated: std::sync::atomic::AtomicBool::new(false),
             activated: std::sync::atomic::AtomicBool::new(false),
@@ -146,7 +149,7 @@ impl PrefillRouter {
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
-            self.register_prefill_client(model_manager.as_ref(), &client);
+            self.attach_prefill_client(&client);
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -161,7 +164,7 @@ impl PrefillRouter {
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
-            self.register_prefill_client(model_manager.as_ref(), &client);
+            self.attach_prefill_client(&client);
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -188,11 +191,12 @@ impl PrefillRouter {
         Ok(())
     }
 
-    fn register_prefill_client(&self, model_manager: &ModelManager, client: &Client) {
-        if let Some(monitor) =
-            model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
-        {
-            monitor.set_prefill_client(client.clone());
+    /// Attach the freshly-created prefill `Client` to this WorkerSet's monitor (handed in
+    /// at construction). The monitor then publishes the overloaded set to the prefill pool
+    /// and watches the prefill endpoint for metric cleanup. No-op for a disabled router.
+    fn attach_prefill_client(&self, client: &Client) {
+        if let Some(monitor) = self.worker_monitor.as_ref() {
+            monitor.attach_prefill_client(client.clone());
         }
     }
 
