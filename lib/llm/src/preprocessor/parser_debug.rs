@@ -1,39 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parser debug mode (opt-in via `DYN_PARSER_DEBUG`).
+//! Parser anomaly detection (always on).
 //!
-//! When enabled, the chat postprocessor emits one structured `tracing` event per
-//! choice at stream end, pairing the RAW model completion text (pre-parse, captured
+//! The chat postprocessor pairs the RAW model completion text (pre-parse, captured
 //! at stream entry) with the parsed result (`reasoning_content` / `content` /
-//! `tool_calls` / `finish_reason`). This lets intermittent parse failures be
-//! diagnosed from logs — e.g. a completion whose raw text contains `<function=...`
-//! markup the parser failed to extract shows up as `raw` with the markup and
-//! `tool_call_count = 0` — instead of requiring hand-instrumented gateway captures.
+//! `tool_calls` / `finish_reason`) per choice, and at stream end emits one
+//! structured `warn` event for any choice whose pairing indicates a parse defect —
+//! e.g. raw text containing the tool parser's start marker while zero tool calls
+//! were extracted (a silently dropped call), or tool-call markup surviving into
+//! `content` (a leak) or `reasoning_content` (an absorb). Healthy requests emit
+//! nothing, so this stays quiet in production and fires exactly on the
+//! small-percentage failures that are otherwise unreproducible from logs.
 //!
 //! The reasoning parser rewrites `choice.delta.content` in place per delta, so the
 //! raw text only exists at stream entry while the parsed result is only complete
 //! after the tool-call jail. Two taps therefore share a per-choice accumulator: an
 //! entry tap captures raw text before any parsing, and an exit tap captures the
-//! parsed deltas and emits at stream end.
-//!
-//! WARNING: raw completions carry user data; this mode is opt-in only.
+//! parsed deltas and evaluates the anomaly predicates at stream end.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 
 use dynamo_protocols::types::ChatCompletionMessageContent;
-use dynamo_runtime::config::env_is_truthy;
-use dynamo_runtime::config::environment_names::llm::DYN_PARSER_DEBUG;
 use dynamo_runtime::protocols::annotated::Annotated;
 
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-
-/// Whether parser debug mode is enabled. Read once from `DYN_PARSER_DEBUG`.
-pub static PARSER_DEBUG_ENABLED: LazyLock<bool> = LazyLock::new(|| env_is_truthy(DYN_PARSER_DEBUG));
 
 /// Shared per-choice accumulator for the RAW (pre-parse) completion text, keyed by
 /// choice index. Populated by the entry tap, read by the exit tap at stream end.
@@ -134,13 +129,64 @@ fn build_records(
         .collect()
 }
 
-/// Emit one structured tracing event per record. Each field is a separate `tracing`
-/// field (not a formatted string) so the event is queryable in `DYN_LOGGING_JSONL`
-/// deployments.
-fn emit(records: &[ParserDebugRecord]) {
+impl ParserDebugRecord {
+    /// Anomaly predicates over the raw-vs-parsed pairing. Returns the names of
+    /// every predicate that fired (empty = healthy). `tool_start_tokens` are the
+    /// configured tool parser's start markers (e.g. `<tool_call>`); marker-based
+    /// predicates are skipped when no tool parser is configured.
+    ///
+    /// The three marker predicates map 1:1 to the production failure shapes from
+    /// the Nemotron tool-call-leak incident: a start marker in `raw` with zero
+    /// extracted calls is a silently dropped call (the model emitted a block the
+    /// parser could not extract — e.g. a missing `<function=NAME>` line); a marker
+    /// in `content` is a leak (parser-owned markup reached the client); a marker in
+    /// `reasoning_content` is an absorb (the block was swallowed into reasoning).
+    /// `all_output_lost` is marker-independent and catches total-loss shapes even
+    /// for parsers whose markers are unknown here.
+    pub fn anomalies(&self, tool_start_tokens: &[String]) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        let contains_marker = |text: &str| {
+            tool_start_tokens
+                .iter()
+                .any(|t| !t.is_empty() && text.contains(t.as_str()))
+        };
+
+        if !tool_start_tokens.is_empty() {
+            if self.tool_call_count == 0 && contains_marker(&self.raw) {
+                found.push("tool_call_dropped");
+            }
+            if contains_marker(&self.content) {
+                found.push("tool_markup_in_content");
+            }
+            if contains_marker(&self.reasoning_content) {
+                found.push("tool_markup_in_reasoning");
+            }
+        }
+
+        if !self.raw.trim().is_empty()
+            && self.content.trim().is_empty()
+            && self.reasoning_content.trim().is_empty()
+            && self.tool_call_count == 0
+        {
+            found.push("all_output_lost");
+        }
+
+        found
+    }
+}
+
+/// Emit one structured `warn` event per ANOMALOUS record (healthy records emit
+/// nothing). Each field is a separate `tracing` field (not a formatted string) so
+/// the event is queryable in `DYN_LOGGING_JSONL` deployments.
+fn emit_anomalous(records: &[ParserDebugRecord], tool_start_tokens: &[String]) {
     for r in records {
-        tracing::info!(
+        let anomalies = r.anomalies(tool_start_tokens);
+        if anomalies.is_empty() {
+            continue;
+        }
+        tracing::warn!(
             target: "parser_debug",
+            anomalies = ?anomalies,
             stream_id = %r.stream_id,
             choice_index = r.choice_index,
             reasoning_parser = %r.reasoning_parser,
@@ -152,7 +198,7 @@ fn emit(records: &[ParserDebugRecord]) {
             tool_call_count = r.tool_call_count,
             tool_call_names = ?r.tool_call_names,
             finish_reason = %r.finish_reason,
-            "parser debug: raw completion vs parsed output"
+            "parser anomaly: raw completion vs parsed output disagree"
         );
     }
 }
@@ -180,23 +226,26 @@ where
         }
         Some((response, (stream, acc)))
     })
+    .fuse()
 }
 
 /// Exit tap: accumulate the PARSED outputs per choice as they flow, yield each
-/// response unchanged, and emit one debug record per choice (via `emit`) when the
-/// stream ends. Production entry point — see [`tap_parsed_collecting`] for the
-/// callback-generic core that tests drive with a capturing sink.
+/// response unchanged, and at stream end emit a `warn` event for every choice whose
+/// raw-vs-parsed pairing is anomalous (healthy choices emit nothing). Production
+/// entry point — see [`tap_parsed_collecting`] for the callback-generic core that
+/// tests drive with a capturing sink.
 pub fn tap_parsed_and_emit<S>(
     stream: S,
     raw: RawAccumulator,
     reasoning_parser: Option<String>,
     tool_parser: Option<String>,
+    tool_start_tokens: Vec<String>,
 ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
-    tap_parsed_collecting(stream, raw, reasoning_parser, tool_parser, |records| {
-        emit(&records)
+    tap_parsed_collecting(stream, raw, reasoning_parser, tool_parser, move |records| {
+        emit_anomalous(&records, &tool_start_tokens)
     })
 }
 
@@ -284,6 +333,7 @@ where
             }
         }
     })
+    .fuse()
 }
 
 #[cfg(test)]
@@ -339,6 +389,81 @@ mod tests {
     fn empty_state_yields_no_records() {
         let records = build_records("id", "-", "-", &HashMap::new(), &HashMap::new());
         assert!(records.is_empty());
+    }
+
+    fn record(
+        raw: &str,
+        reasoning: &str,
+        content: &str,
+        tool_call_count: usize,
+    ) -> ParserDebugRecord {
+        ParserDebugRecord {
+            stream_id: "sid".to_string(),
+            choice_index: 0,
+            reasoning_parser: "nemotron3".to_string(),
+            tool_parser: "qwen3_coder".to_string(),
+            raw: raw.to_string(),
+            raw_chunks: vec![raw.to_string()],
+            reasoning_content: reasoning.to_string(),
+            content: content.to_string(),
+            tool_call_count,
+            tool_call_names: Vec::new(),
+            finish_reason: "Stop".to_string(),
+        }
+    }
+
+    fn markers() -> Vec<String> {
+        vec!["<tool_call>".to_string()]
+    }
+
+    #[test]
+    fn anomaly_dropped_call() {
+        // The Nemotron empty-stop shape: raw has a tool block (sans <function=NAME>),
+        // jail strips it, nothing extracted — content is just the stripped newlines.
+        let r = record(
+            "prose</think>\n<tool_call>\n<parameter=command>\nls\n</parameter>\n</tool_call>\n",
+            "prose",
+            "\n\n",
+            0,
+        );
+        assert_eq!(r.anomalies(&markers()), vec!["tool_call_dropped"]);
+    }
+
+    #[test]
+    fn anomaly_leak_into_content() {
+        let r = record("raw", "", "before <tool_call>x</tool_call> after", 0);
+        assert!(r.anomalies(&markers()).contains(&"tool_markup_in_content"));
+    }
+
+    #[test]
+    fn anomaly_absorb_into_reasoning() {
+        // The chunk-split absorb shape: whole tool block swallowed into reasoning.
+        let r = record("raw", "plan <tool_call>x</tool_call>", "", 0);
+        assert!(
+            r.anomalies(&markers())
+                .contains(&"tool_markup_in_reasoning")
+        );
+    }
+
+    #[test]
+    fn anomaly_all_output_lost_without_markers() {
+        // Marker-independent: everything vanished even though raw had text.
+        let r = record("some raw text", "", "  \n", 0);
+        assert_eq!(r.anomalies(&[]), vec!["all_output_lost"]);
+    }
+
+    #[test]
+    fn healthy_tool_call_is_not_anomalous() {
+        // Marker in raw is fine when a call WAS extracted and markup stayed out of
+        // content/reasoning.
+        let r = record("<tool_call>...</tool_call>", "plan", "done", 1);
+        assert!(r.anomalies(&markers()).is_empty());
+    }
+
+    #[test]
+    fn healthy_plain_text_is_not_anomalous() {
+        let r = record("hello world", "", "hello world", 0);
+        assert!(r.anomalies(&markers()).is_empty());
     }
 
     #[test]

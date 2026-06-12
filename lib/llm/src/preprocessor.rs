@@ -1907,13 +1907,14 @@ impl OpenAIPreprocessor {
             has_tools,
         )?;
 
-        // Parser debug mode (opt-in via DYN_PARSER_DEBUG): capture the RAW pre-parse
-        // text at stream entry, before the reasoning parser rewrites delta content.
-        // The matching exit tap below emits one record per choice at stream end.
+        // Parser anomaly detection (always on): capture the RAW pre-parse text at
+        // stream entry, before the reasoning parser rewrites delta content. The
+        // matching exit tap below evaluates anomaly predicates at stream end and
+        // warns only when the raw-vs-parsed pairing indicates a parse defect.
         // Only active when a parser stage runs (otherwise raw == content).
-        let parser_debug_acc = (*parser_debug::PARSER_DEBUG_ENABLED
-            && (should_parse_reasoning || should_strip_disabled_reasoning_start || should_jail))
-            .then(parser_debug::RawAccumulator::new);
+        let parser_debug_acc =
+            (should_parse_reasoning || should_strip_disabled_reasoning_start || should_jail)
+                .then(parser_debug::RawAccumulator::new);
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = match parser_debug_acc.clone() {
             Some(acc) => Box::pin(parser_debug::tap_raw(stream, acc)),
             None => Box::pin(stream),
@@ -1968,13 +1969,24 @@ impl OpenAIPreprocessor {
 
         // Parser debug exit tap: accumulate parsed outputs per choice and emit one
         // record (raw vs parsed) at stream end. Shares the entry tap's accumulator.
+        // The tool parser's start markers drive the dropped/leak/absorb predicates;
+        // only anomalous choices are logged (at warn), healthy streams emit nothing.
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = match parser_debug_acc {
-            Some(acc) => Box::pin(parser_debug::tap_parsed_and_emit(
-                transformed_stream,
-                acc,
-                self.runtime_config.reasoning_parser.clone(),
-                self.tool_call_parser.clone(),
-            )),
+            Some(acc) => {
+                let tool_start_tokens = self
+                    .tool_call_parser
+                    .as_deref()
+                    .and_then(|p| get_tool_parser_map().get(p))
+                    .map(|c| c.parser_config.tool_call_start_tokens())
+                    .unwrap_or_default();
+                Box::pin(parser_debug::tap_parsed_and_emit(
+                    transformed_stream,
+                    acc,
+                    self.runtime_config.reasoning_parser.clone(),
+                    self.tool_call_parser.clone(),
+                    tool_start_tokens,
+                ))
+            }
             None => transformed_stream,
         };
 

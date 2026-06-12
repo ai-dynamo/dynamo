@@ -1853,15 +1853,14 @@ async fn parser_debug_reasoning_raw_retained() {
 }
 
 #[tokio::test]
-async fn parser_debug_split_marker_destruction_preserves_raw() {
-    // Destroyed-evidence repro: nemotron force-reasoning + qwen3_coder jail.
-    // A chunk boundary splits `</think>` at the lone `<`; the reasoning parser
-    // fails to reassemble it and swallows the ENTIRE tool call into
-    // reasoning_content — tool_calls empty, content empty, finish=Stop. The
-    // evidence (and the chunking needed to reproduce) exists only in the
-    // parser-debug record: raw shows `<function=terminal>` intact, raw_chunks
-    // shows the exact split. The same bytes unsplit parse fine (control below),
-    // so the boundaries are the repro-critical information.
+async fn parser_debug_split_marker_call_survives_and_raw_preserved() {
+    // Chunk boundaries split `</think>` and `<tool_call>` at the lone `<`.
+    // On this branch the reasoning parser reassembles a marker split at the
+    // lone `<` (the chunk-split fix), so this chunking parses CLEAN: the call
+    // is extracted and nothing is absorbed into reasoning_content. The debug
+    // record still preserves the exact delta boundaries (raw_chunks) so any
+    // future regression of this shape is reproducible from one log line, and
+    // a healthy parse like this one must trip NO anomaly predicates.
     let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("qwen3_coder"));
     let request = request_with_terminal_tool();
 
@@ -1896,19 +1895,26 @@ async fn parser_debug_split_marker_destruction_preserves_raw() {
     let records = sink.lock().unwrap().clone();
     assert_eq!(records.len(), 1);
     let r = &records[0];
-    // The destruction: no tool call extracted, nothing in content.
-    assert_eq!(r.tool_call_count, 0, "split marker destroys the tool call");
-    assert_eq!(r.content, "");
-    // The evidence: raw retains the full markup the parsers destroyed...
+    // The fix: the split markers reassemble, so the call is extracted.
+    assert_eq!(
+        r.tool_call_count, 1,
+        "split markers must reassemble into a parsed call"
+    );
+    assert_eq!(r.tool_call_names, vec!["terminal"]);
+    assert_eq!(r.reasoning_content, "pick a command");
+    // The record still preserves the raw markup and the exact chunking.
     assert!(
         r.raw.contains("<function=terminal>"),
-        "raw must prove the model emitted the function tag; got {:?}",
+        "raw must keep the model-emitted function tag; got {:?}",
         r.raw
     );
-    // ...and raw_chunks retains the exact chunking needed to REPRODUCE the bug
-    // (the same bytes in one chunk parse fine — see the control test).
     assert_eq!(r.raw_chunks.len(), 3);
     assert!(r.raw_chunks[0].ends_with('<') && r.raw_chunks[1].ends_with('<'));
+    // A healthy parse trips no anomaly predicates.
+    assert!(
+        r.anomalies(&["<tool_call>".to_string()]).is_empty(),
+        "clean split-marker parse must not be flagged anomalous"
+    );
 }
 
 #[tokio::test]
