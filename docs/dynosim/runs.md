@@ -39,7 +39,7 @@ flowchart LR
     H --> TC[Trace Collector]
 ```
 
-The load driver is either a Mooncake-style JSONL trace (timestamps, ISL/OSL, `hash_ids`) or a synthetic generator parameterized by `isl`/`osl`/`concurrency`. Single-engine simulation (`SES`) is the fast path for `num_workers == 1` with the vLLM engine; multi-engine simulation (`MES`) covers aggregated multi-worker runs, disaggregated prefill/decode runs, and KV-router runs. The trace collector produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed by downstream analysis.
+The load driver is either a Mooncake-style JSONL trace (timestamps, ISL/OSL, `hash_ids`) or a synthetic generator parameterized by `isl`/`osl`/`concurrency`. Single-engine simulation (`SES`) is the fast path for `num_workers == 1` with vLLM, SGLang, or TRT-LLM; multi-engine simulation (`MES`) covers aggregated multi-worker runs, disaggregated prefill/decode runs, and KV-router runs. The trace collector produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed by downstream analysis.
 
 Each simulation composes a different set of components. SES drives the engine core directly (scheduler + forward-pass modeling). MES composes multiple engine cores with KV transfer/offloading, KV routing, and planner simulation layered on top:
 
@@ -506,7 +506,7 @@ If `--report-json` is not provided, `python -m dynamo.replay` writes a timestamp
 
 Shared constraints:
 
-- `extra_engine_args.engine_type` must be `vllm` or `sglang`
+- `extra_engine_args.engine_type` must be `vllm`, `sglang`, or `trtllm`
 - aggregated simulation requires the existing aggregated args path
 - disaggregated simulation requires both `prefill_engine_args` and `decode_engine_args`
 - disaggregated simulation requires `router_mode=kv_router`
@@ -516,9 +516,8 @@ Shared constraints:
 Additional offline constraints:
 
 - offline `kv_router` requires `num_workers > 1`
-- single-worker offline mode is still a dedicated fast path for `vllm`, but it now supports both
-  flat request runs and workload-driven multi-turn runs
-- `sglang` still goes through the shared multi-worker runtime even when `num_workers=1`
+- single-worker offline mode is a dedicated fast path for `vllm`, `sglang`, and `trtllm`;
+  it supports flat request runs and workload-driven multi-turn runs
 - offline disaggregated simulation is a separate two-stage runtime with prefill and decode worker pools
 
 Additional online constraints:
