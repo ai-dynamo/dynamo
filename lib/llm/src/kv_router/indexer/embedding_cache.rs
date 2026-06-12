@@ -4,8 +4,8 @@
 use std::{
     collections::HashSet,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
 };
 
@@ -17,8 +17,8 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
     publisher::{MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCacheUpdate},
+    MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
 };
 
 #[derive(Clone, Default)]
@@ -89,10 +89,6 @@ impl EmbeddingCacheIndexer {
 
     pub fn apply_event(&self, event: &MultimodalEmbeddingCacheEvent) {
         match &event.update {
-            MultimodalEmbeddingCacheUpdate::Snapshot { cache_keys } => {
-                let new_keys = cache_keys.iter().cloned().collect::<HashSet<_>>();
-                self.apply_snapshot(event.worker_id, new_keys);
-            }
             MultimodalEmbeddingCacheUpdate::Delta {
                 added_keys,
                 removed_keys,
@@ -170,36 +166,6 @@ impl EmbeddingCacheIndexer {
         Ok(())
     }
 
-    fn apply_snapshot(&self, worker_id: WorkerId, new_keys: HashSet<String>) {
-        let existing_keys = self
-            .worker_cache_keys
-            .get(&worker_id)
-            .map(|keys| keys.clone())
-            .unwrap_or_default();
-
-        let removed_keys = existing_keys
-            .difference(&new_keys)
-            .cloned()
-            .collect::<Vec<_>>();
-        let added_keys = new_keys
-            .difference(&existing_keys)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for key in removed_keys {
-            self.remove_worker_from_key(&key, worker_id);
-        }
-        for key in &added_keys {
-            self.add_worker_to_key(key.clone(), worker_id);
-        }
-
-        if new_keys.is_empty() {
-            self.worker_cache_keys.remove(&worker_id);
-        } else {
-            self.worker_cache_keys.insert(worker_id, new_keys);
-        }
-    }
-
     fn apply_delta(
         &self,
         worker_id: WorkerId,
@@ -262,19 +228,21 @@ mod tests {
     };
 
     #[test]
-    fn embedding_cache_state_replaces_worker_snapshot() {
+    fn delta_removes_stale_worker_keys() {
         let indexer = EmbeddingCacheIndexer::new();
 
         indexer.apply_event(&MultimodalEmbeddingCacheEvent {
             worker_id: 7,
-            update: MultimodalEmbeddingCacheUpdate::Snapshot {
-                cache_keys: vec!["b".to_string(), "a".to_string()],
+            update: MultimodalEmbeddingCacheUpdate::Delta {
+                added_keys: vec!["b".to_string(), "a".to_string()],
+                removed_keys: vec![],
             },
         });
         indexer.apply_event(&MultimodalEmbeddingCacheEvent {
             worker_id: 7,
-            update: MultimodalEmbeddingCacheUpdate::Snapshot {
-                cache_keys: vec!["c".to_string()],
+            update: MultimodalEmbeddingCacheUpdate::Delta {
+                added_keys: vec!["c".to_string()],
+                removed_keys: vec!["a".to_string(), "b".to_string()],
             },
         });
 
@@ -287,14 +255,16 @@ mod tests {
 
         indexer.apply_event(&MultimodalEmbeddingCacheEvent {
             worker_id: 1,
-            update: MultimodalEmbeddingCacheUpdate::Snapshot {
-                cache_keys: vec!["a".to_string(), "b".to_string()],
+            update: MultimodalEmbeddingCacheUpdate::Delta {
+                added_keys: vec!["a".to_string(), "b".to_string()],
+                removed_keys: vec![],
             },
         });
         indexer.apply_event(&MultimodalEmbeddingCacheEvent {
             worker_id: 2,
-            update: MultimodalEmbeddingCacheUpdate::Snapshot {
-                cache_keys: vec!["a".to_string()],
+            update: MultimodalEmbeddingCacheUpdate::Delta {
+                added_keys: vec!["a".to_string()],
+                removed_keys: vec![],
             },
         });
 

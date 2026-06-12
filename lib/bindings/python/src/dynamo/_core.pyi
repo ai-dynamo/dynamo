@@ -706,15 +706,6 @@ class MultimodalEmbeddingCachePublisher:
             endpoint: The endpoint to extract component information from.
         """
 
-    def publish_snapshot(self, cache_keys: list[str]) -> None:
-        """
-        Publish a full snapshot of cache keys currently held by the worker.
-
-        Args:
-            cache_keys: Full list of worker-local cache keys.
-        """
-        ...
-
     def publish_delta(self, added_keys: list[str], removed_keys: list[str]) -> None:
         """
         Publish an incremental cache mutation for this worker.

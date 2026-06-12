@@ -4,7 +4,6 @@
 import asyncio
 import json
 import logging
-from contextlib import suppress
 from typing import Any, AsyncIterator, Dict, Optional
 
 import torch
@@ -133,18 +132,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             self._embedding_cache = MultimodalEmbeddingCacheManager(capacity_bytes)
             logger.info("Multimodal embedding cache enabled: %.2f GB", capacity_gb)
 
-        self._cache_snapshot_interval_secs = 30.0
-        self._cache_snapshot_task: asyncio.Task | None = None
-        if self._embedding_cache is not None and self._cache_publisher is not None:
-            self._cache_snapshot_task = asyncio.create_task(
-                self._run_cache_snapshot_publisher()
-            )
-
-    def _publish_cache_snapshot(self) -> None:
-        if self._embedding_cache is None or self._cache_publisher is None:
-            return
-        self._cache_publisher.publish_snapshot(self._embedding_cache.keys())
-
     def _publish_cache_delta(
         self, added_keys: list[str], removed_keys: list[str]
     ) -> None:
@@ -152,23 +139,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             return
         self._cache_publisher.publish_delta(added_keys, removed_keys)
 
-    async def _run_cache_snapshot_publisher(self) -> None:
-        while True:
-            try:
-                await asyncio.sleep(self._cache_snapshot_interval_secs)
-                self._publish_cache_snapshot()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Failed to publish embedding cache snapshot")
-
     def cleanup(self) -> None:
-        if self._cache_snapshot_task is not None:
-            self._cache_snapshot_task.cancel()
-            self._cache_snapshot_task = None
-        if self._cache_publisher is not None:
-            with suppress(Exception):
-                self._cache_publisher.publish_snapshot([])
+        pass
 
     @staticmethod
     def _url_hash(url: str) -> str:

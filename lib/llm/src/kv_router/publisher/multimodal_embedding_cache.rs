@@ -14,9 +14,6 @@ use crate::kv_router::MULTIMODAL_EMBEDDING_CACHE_SUBJECT;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MultimodalEmbeddingCacheUpdate {
-    Snapshot {
-        cache_keys: Vec<String>,
-    },
     Delta {
         added_keys: Vec<String>,
         removed_keys: Vec<String>,
@@ -42,12 +39,6 @@ impl MultimodalEmbeddingCachePublisher {
             publisher: OnceLock::new(),
             runtime_handle: OnceLock::new(),
         })
-    }
-
-    pub fn publish_snapshot(&self, mut cache_keys: Vec<String>) -> Result<()> {
-        cache_keys.sort();
-        cache_keys.dedup();
-        self.publish_update(MultimodalEmbeddingCacheUpdate::Snapshot { cache_keys })
     }
 
     pub fn publish_delta(
