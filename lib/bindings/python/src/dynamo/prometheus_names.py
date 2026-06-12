@@ -167,6 +167,8 @@ class kv_publisher:
 
     # Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     ENGINES_DROPPED_EVENTS_TOTAL = "kv_publisher_engines_dropped_events_total"
+    # Total number of KV events seen by publisher source, relay stage, and event type
+    EVENTS_TOTAL = "kv_publisher_events_total"
     # Total number of ZMQ KV events seen by the relay, labeled by stage and event type
     ZMQ_EVENTS_TOTAL = "kv_publisher_zmq_events_total"
     # Total number of ZMQ KV events filtered before conversion, labeled by event type and reason

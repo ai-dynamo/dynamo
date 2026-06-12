@@ -21,8 +21,11 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
-    metrics::KvPublisherMetrics,
+    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
+    indexer::start_worker_kv_query_endpoint,
+    metrics::{
+        KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE, KV_PUBLISHER_EVENT_SOURCE_ZMQ, KvPublisherMetrics,
+    },
 };
 
 mod batching;
@@ -40,7 +43,11 @@ use batching::BatchingState;
 use dedup::EventDedupFilter;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
-use event_processor::{start_event_processor, start_event_processor_jetstream};
+#[cfg(test)]
+use event_processor::start_event_processor;
+use event_processor::{
+    start_event_processor_jetstream_with_metric_source, start_event_processor_with_metric_source,
+};
 use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
@@ -125,6 +132,18 @@ impl KvEventSource {
                 zmq_handle.abort();
             }
         }
+    }
+}
+
+/// The `source` label applied to the generic `kv_publisher_events_total` metric,
+/// derived from the configured event source. The match is intentionally
+/// exhaustive (no wildcard): adding a new [`KvEventSourceConfig`] variant will
+/// fail to compile until it is given an explicit source label, so a new source
+/// can never silently land without metric attribution.
+fn metric_source_for(source_config: &Option<KvEventSourceConfig>) -> &'static str {
+    match source_config {
+        Some(KvEventSourceConfig::Zmq { .. }) => KV_PUBLISHER_EVENT_SOURCE_ZMQ,
+        None => KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
     }
 }
 
@@ -222,6 +241,7 @@ impl KvEventPublisher {
         let next_event_id = Arc::new(AtomicU64::new(0));
 
         let mut source = None;
+        let metric_source = metric_source_for(&source_config);
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
                 component.clone(),
@@ -283,13 +303,14 @@ impl KvEventPublisher {
                         }
                     };
 
-                start_event_processor(
+                start_event_processor_with_metric_source(
                     EventPlanePublisher(event_publisher),
                     worker_id,
                     cancellation_token_clone,
                     rx,
                     local_indexer_clone,
                     batching_timeout_ms,
+                    metric_source,
                 )
                 .await
             });
@@ -308,13 +329,14 @@ impl KvEventPublisher {
                     tracing::error!("Failed to connect NatsQueue: {e}");
                     return;
                 }
-                start_event_processor_jetstream(
+                start_event_processor_jetstream_with_metric_source(
                     nats_queue,
                     worker_id,
                     cancellation_token_clone,
                     rx,
                     local_indexer_clone,
                     batching_timeout_ms,
+                    metric_source,
                 )
                 .await
             });
@@ -375,5 +397,25 @@ impl KvEventPublisher {
 impl Drop for KvEventPublisher {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod metric_source_tests {
+    use super::*;
+
+    #[test]
+    fn metric_source_matches_event_source_kind() {
+        assert_eq!(
+            metric_source_for(&Some(KvEventSourceConfig::Zmq {
+                endpoint: "tcp://127.0.0.1:0".to_string(),
+                topic: String::new(),
+            })),
+            KV_PUBLISHER_EVENT_SOURCE_ZMQ
+        );
+        assert_eq!(
+            metric_source_for(&None),
+            KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE
+        );
     }
 }
