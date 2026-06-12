@@ -19,6 +19,7 @@ dependencies = [
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
     "msgspec>=0.19.0",
+    "zstandard>=0.23.0,<1.0",
     "pyzmq>=26.0.0",
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
     # so back-port Self via typing_extensions in dynamo.common.configuration.
@@ -380,6 +381,7 @@ ignore_missing_imports = true
 # "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # Third-party libs without type stubs or optional internal deps
@@ -388,6 +390,8 @@ module = [
     "nvtx",
     "fsspec",
     "fsspec.*",
+    "zstandard",
+    "zstandard.*",
     "kubernetes",
     "kubernetes.*",
     "scipy",

@@ -7,8 +7,10 @@ cases:
   TOOLCALLING.batch.7.a:
     description: Standard scalar types
     ref: dynamo
-    model_text: '<tool_call>{"name": "book_flight", "arguments": {"destination": "Paris", "passengers": 2, "first_class":
-      true}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "book_flight", "arguments": {"destination": "Paris", "passengers": 2, "first_class": true}}
+      </tool_call>
     tools:
     - name: book_flight
       parameters:
@@ -21,7 +23,7 @@ cases:
           first_class:
             type: boolean
     expected:
-      dynamo:
+      dynamo: &id001
         calls:
         - name: book_flight
           arguments:
@@ -31,14 +33,14 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "book_flight", "arguments": {"destination": "Paris", "passengers": 2, "first_class":
-          true}}</tool_call>'
+      sglang: *id001
   TOOLCALLING.batch.7.b:
     description: Unicode + escaped chars
     ref: dynamo
-    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "Tōkyō \"central\""}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "get_weather", "arguments": {"location": "Tōkyō \"central\""}}
+      </tool_call>
     tools:
     - name: get_weather
       parameters:
@@ -47,7 +49,7 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
+      dynamo: &id002
         calls:
         - name: get_weather
           arguments:
@@ -55,13 +57,14 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "Tōkyō \"central\""}}</tool_call>'
+      sglang: *id002
   TOOLCALLING.batch.7.c:
-    description: Schema mismatch — string value where schema declares integer
+    description: Schema mismatch - string value where schema declares integer
     ref: dynamo
-    model_text: '<tool_call>{"name": "set_temperature", "arguments": {"celsius": "20"}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "set_temperature", "arguments": {"celsius": "20"}}
+      </tool_call>
     tools:
     - name: set_temperature
       parameters:
@@ -70,7 +73,7 @@ cases:
           celsius:
             type: integer
     expected:
-      dynamo:
+      dynamo: &id003
         calls:
         - name: set_temperature
           arguments:
@@ -78,13 +81,14 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "set_temperature", "arguments": {"celsius": "20"}}</tool_call>'
+      sglang: *id003
   TOOLCALLING.batch.7.d:
     description: Nested object + array
     ref: dynamo
-    model_text: '<tool_call>{"name": "process_data", "arguments": {"items": [1,2,3], "config": {"nested": true}}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "process_data", "arguments": {"items": [1,2,3], "config": {"nested": true}}}
+      </tool_call>
     tools:
     - name: process_data
       parameters:
@@ -95,7 +99,7 @@ cases:
           config:
             type: object
     expected:
-      dynamo:
+      dynamo: &id004
         calls:
         - name: process_data
           arguments:
@@ -108,14 +112,14 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "process_data", "arguments": {"items": [1,2,3], "config": {"nested": true}}}</tool_call>'
+      sglang: *id004
   TOOLCALLING.batch.7.e:
     description: Large / deep JSON-edge argument payload
     ref: dynamo
-    model_text: '<tool_call>{"name": "process_data", "arguments": {"payload": {"regions": [{"name": "west", "scores": [1, 2,
-      3]}, {"name": "east", "scores": [4, 5, 6]}], "flags": {"enabled": true, "retry": null}, "empty": {}}}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "process_data", "arguments": {"payload": {"regions": [{"name": "west", "scores": [1, 2, 3]}, {"name": "east", "scores": [4, 5, 6]}], "flags": {"enabled": true, "retry": null}, "empty": {}}}}
+      </tool_call>
     tools:
     - name: process_data
       parameters:
@@ -124,7 +128,7 @@ cases:
           payload:
             type: object
     expected:
-      dynamo:
+      dynamo: &id005
         calls:
         - name: process_data
           arguments:
@@ -147,14 +151,14 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "process_data", "arguments": {"payload": {"regions": [{"name": "west", "scores": [1,
-          2, 3]}, {"name": "east", "scores": [4, 5, 6]}], "flags": {"enabled": true, "retry": null}, "empty": {}}}}</tool_call>'
+      sglang: *id005
   TOOLCALLING.batch.7.f:
     description: Numeric precision edge preserves integer-like number literal
     ref: https://qwen.readthedocs.io/en/v2.5/framework/function_call.html
-    model_text: '<tool_call>{"name": "set_limit", "arguments": {"count": 9007199254740993}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "set_limit", "arguments": {"count": 9007199254740993}}
+      </tool_call>
     tools:
     - name: set_limit
       parameters:
@@ -163,7 +167,7 @@ cases:
           count:
             type: number
     expected:
-      dynamo:
+      dynamo: &id006
         calls:
         - name: set_limit
           arguments:
@@ -171,7 +175,4 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        reason: SGLang's Qwen2.5 detector requires newline-delimited '<tool_call>\n...\n</tool_call>' blocks; this fixture uses Dynamo's compact inline '<tool_call>{...}</tool_call>' form, so SGLang treats it as normal text.
-        calls: []
-        normal_text: '<tool_call>{"name": "set_limit", "arguments": {"count": 9007199254740993}}</tool_call>'
+      sglang: *id006

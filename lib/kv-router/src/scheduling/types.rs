@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
+pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    DpRank, RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
+    WorkerWithDpRank,
 };
 use crate::sequences::WorkerLoadProjection;
 
@@ -27,16 +28,6 @@ pub struct TierOverlapBlocks {
     pub host_pinned: FxHashMap<WorkerWithDpRank, usize>,
     #[serde(default)]
     pub disk: FxHashMap<WorkerWithDpRank, usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PotentialLoad {
-    pub worker_id: WorkerId,
-    pub dp_rank: DpRank,
-    pub potential_prefill_tokens: usize,
-    pub potential_decode_blocks: usize,
-    #[serde(default)]
-    pub active_requests: usize,
 }
 
 #[derive(Debug, thiserror::Error)]

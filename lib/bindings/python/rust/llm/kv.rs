@@ -12,13 +12,21 @@ use tokio_stream::StreamExt;
 use super::local_model::RoutingConstraints;
 use super::*;
 use crate::Endpoint;
-#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
+#[cfg(any(
+    feature = "kv-indexer",
+    feature = "slot-tracker",
+    feature = "select-service"
+))]
 use clap::Parser;
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::services::selection::{self, SelectionServiceConfig};
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
@@ -191,7 +199,58 @@ where
     }
 }
 
-#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
+#[cfg(feature = "select-service")]
+#[derive(Parser)]
+#[command(
+    name = "python -m dynamo.select_service",
+    about = "Runtime-free Dynamo worker selection service"
+)]
+struct SelectServiceCli {
+    /// HTTP server port
+    #[arg(long, default_value_t = 8092)]
+    port: u16,
+
+    /// Number of KV indexer worker threads
+    #[arg(long, default_value_t = 4)]
+    threads: usize,
+}
+
+pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    #[cfg(feature = "select-service")]
+    {
+        let cli = SelectServiceCli::try_parse_from(
+            std::iter::once(OsString::from("python -m dynamo.select_service"))
+                .chain(args.into_iter().map(Into::into)),
+        )?;
+
+        init_standalone_logging();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(selection::run_server(SelectionServiceConfig {
+            port: cli.port,
+            threads: cli.threads,
+            kv_router_config: kv_router_config_from_dynamo_env(),
+        }))
+    }
+
+    #[cfg(not(feature = "select-service"))]
+    {
+        let _ = args;
+        anyhow::bail!(
+            "dynamo.select_service is not available in this build; reinstall with --features select-service"
+        )
+    }
+}
+
+#[cfg(any(
+    feature = "kv-indexer",
+    feature = "slot-tracker",
+    feature = "select-service"
+))]
 fn init_standalone_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
