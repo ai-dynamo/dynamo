@@ -457,6 +457,56 @@ Supported values for `DYN_KVBM_DISK_ALLOCATOR_TYPE`:
 export DYN_KVBM_DISK_DISABLE_O_DIRECT=true
 ```
 
+### Disk to Device Onboarding Hangs with cuFile/GDS Errors
+
+**Symptom:** KV cache onboarding from disk to device hangs indefinitely and requests become blocked. KVBM logs show errors similar to:
+
+```text
+GDS_MT: failed to create file handle: GDS_MT: file register error
+```
+
+And `cufile.log` contains errors like:
+
+```text
+cufio:340 cuFileHandleRegister error: internal error
+```
+
+**Cause:** NVIDIA GPUDirect Storage (GDS) fails to register the disk-cache file handle and falls back to its POSIX-compatible mode, but the fallback also fails. This typically happens in containerized environments (including Kubernetes) when cuFile cannot resolve the backing block device for the disk-cache path.
+
+See [ai-dynamo/dynamo#6032](https://github.com/ai-dynamo/dynamo/issues/6032) for the original report and discussion.
+
+**Solution:** Point the disk cache at a path backed by a real block device and, in Kubernetes, expose `/run/udev` so cuFile can query volume attributes.
+
+For a Kubernetes pod spec (e.g., on the prefill worker where `DYN_KVBM_DISK_CACHE_GB > 0`):
+
+```yaml
+extraPodSpec:
+  mainContainer:
+    env:
+      - name: DYN_KVBM_DISK_CACHE_DIR
+        value: "/cache/kvbm"
+    volumeMounts:
+      - name: kvbm-cache
+        mountPath: /cache/kvbm
+      - name: run-udev
+        mountPath: /run/udev
+        readOnly: true
+  volumes:
+    - name: kvbm-cache
+      emptyDir:
+        sizeLimit: <N>Gi
+    - name: run-udev
+      hostPath:
+        path: /run/udev
+```
+
+Key points:
+
+- `/run/udev` must be mounted as a `hostPath` volume. Without it, cuFile cannot read volume attributes and file registration fails.
+- `DYN_KVBM_DISK_CACHE_DIR` must point to a volume backed by a real block device (e.g., an `emptyDir` volume, a `hostPath` mount to a block-backed directory, or any other GDS-supported filesystem). The default `/tmp` is usually overlayfs inside a container, which cuFile cannot handle.
+
+After applying these changes, cuFile should log that it is running in compatible mode and disk-to-device onboarding should proceed.
+
 ## Developing Locally
 
 Inside the Dynamo container, after changing KVBM-related code (Rust and/or Python):
