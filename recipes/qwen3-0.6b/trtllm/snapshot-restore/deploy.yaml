@@ -127,6 +127,10 @@ spec:
                   value: "false"
                 - name: TLLM_WORKER_USE_SINGLE_PROCESS
                   value: "1"
+                # Snapshot restore needs a stable process/network shape. Keep
+                # TRT-LLM/OpenMPI in single-process, loopback/local transport
+                # mode so CRIU does not capture a listening socket bound to the
+                # checkpoint pod IP, which changes after restore.
                 - name: UCX_TLS
                   value: tcp,self
                 - name: OMPI_MCA_oob_tcp_if_include
@@ -143,9 +147,13 @@ spec:
                   value: lo
               resources:
                 requests:
+                  cpu: "4"
+                  memory: 16Gi
                   nvidia.com/gpu: "1"
                   ephemeral-storage: 10Gi
                 limits:
+                  cpu: "8"
+                  memory: 32Gi
                   nvidia.com/gpu: "1"
               volumeMounts:
                 - name: hf-cache

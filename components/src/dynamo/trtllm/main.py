@@ -5,7 +5,8 @@ import asyncio
 import gc
 import logging
 import os
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 import uvloop
 
@@ -74,6 +75,12 @@ class _SnapshotRuntimeProxy:
             checkpoint_config=self._checkpoint_config,
         )
 
+        # This is the checkpoint/restore synchronization point. It writes the
+        # "ready-for-checkpoint" sentinel after the TRT-LLM engine is resident,
+        # waits for the external snapshot agent to either capture or restore the
+        # process, and returns True only in the restored process. The real
+        # DistributedRuntime must not exist before this await, otherwise NATS,
+        # etcd, and endpoint sockets would be captured with the engine state.
         restored = await snapshot_controller.wait_for_restore()
         if not restored:
             logging.info(
@@ -103,17 +110,19 @@ class _SnapshotRuntimeProxy:
             )
         return self._runtime
 
-    def endpoint(self, *args: Any, **kwargs: Any) -> Any:
-        return self._require_runtime().endpoint(*args, **kwargs)
-
-    def register_engine_route(self, *args: Any, **kwargs: Any) -> Any:
-        return self._require_runtime().register_engine_route(*args, **kwargs)
-
     def shutdown(self) -> None:
         if self._runtime is not None:
             self._runtime.shutdown()
 
     def __getattr__(self, name: str) -> Any:
+        if name == "snapshot_before_endpoint":
+            raise AttributeError(name)
+
+        # Future DistributedRuntime methods should fail fast before restore
+        # instead of accidentally creating runtime-owned network state in the
+        # snapshot. Once snapshot_before_endpoint materializes the real runtime,
+        # attribute access delegates to it for both existing and newly-added
+        # runtime APIs.
         return getattr(self._require_runtime(), name)
 
 
@@ -194,6 +203,10 @@ async def worker():
             event_plane=config.event_plane,
         )
     else:
+        # vLLM/SGLang snapshot paths build the engine before creating a runtime.
+        # TRT-LLM's engine is built inside init_worker(), so pass a guarded
+        # runtime proxy through that shared path and materialize the real runtime
+        # only after the snapshot hook restores.
         runtime = _SnapshotRuntimeProxy(checkpoint_config)
         loop = asyncio.get_running_loop()
 
