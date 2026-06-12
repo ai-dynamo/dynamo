@@ -92,33 +92,3 @@ runs:
         vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" || true
         echo "::endgroup::"
 
-    - name: Delete host namespace
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.vcluster_namespace }}
-      run: |
-        echo "::group::Delete namespace $NAMESPACE"
-        set -euo pipefail
-
-        if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
-          echo "Namespace ${NAMESPACE} is already deleted"
-          echo "::endgroup::"
-          exit 0
-        fi
-
-        if ! kubectl delete namespace "${NAMESPACE}" --wait=true --timeout=300s; then
-          echo "::error::Namespace ${NAMESPACE} did not delete cleanly"
-          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
-          kubectl get all -n "${NAMESPACE}" -o wide || true
-          kubectl describe namespace "${NAMESPACE}" || true
-          exit 1
-        fi
-
-        if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
-          echo "::error::Namespace ${NAMESPACE} still exists after delete completed"
-          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
-          exit 1
-        fi
-
-        echo "Namespace ${NAMESPACE} deleted"
-        echo "::endgroup::"

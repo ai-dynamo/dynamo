@@ -77,8 +77,6 @@ runs:
       shell: bash
       env:
         INPUT_VCLUSTER_NAME: ${{ inputs.vcluster_name }}
-        INPUT_NAMESPACE: ${{ inputs.vcluster_namespace }}
-        BRANCH: ${{ github.ref_name }}
       run: |
         if [ -n "${INPUT_VCLUSTER_NAME}" ]; then
           echo "vcluster_name=${INPUT_VCLUSTER_NAME}" >> "$GITHUB_OUTPUT"
@@ -86,17 +84,7 @@ runs:
           echo "vcluster_name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
         fi
 
-        if [ -n "${INPUT_NAMESPACE}" ]; then
-          echo "namespace=${INPUT_NAMESPACE}" >> "$GITHUB_OUTPUT"
-        else
-          BRANCH_SANITIZED="${BRANCH//\//-}"
-          BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
-          BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-          BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
-          echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
-          echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
-        fi
-
+        echo "namespace=dynamo-deploy-test" >> "$GITHUB_OUTPUT"
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
 
     - name: Setup host kubeconfig
@@ -114,24 +102,15 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
-        NAMESPACE_SUFFIX: ${{ steps.resolve-names.outputs.namespace_suffix }}
       run: |
         echo "::group::Create host namespace $NAMESPACE"
         set -euo pipefail
         set -x
         kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-
-        LABELS=(
-          nscleanup/enabled=true \
-          nscleanup/ttl=7200 \
-          dynamo.github/run-id="${{ github.run_id }}" \
+        kubectl label namespaces "${NAMESPACE}" \
           ngc-api=enabled \
-          nvcr-imagepull=enabled
-        )
-        if [[ -n "${NAMESPACE_SUFFIX}" ]]; then
-          LABELS+=(dynamo.github/cleanup-key="${NAMESPACE_SUFFIX}")
-        fi
-        kubectl label namespaces "${NAMESPACE}" "${LABELS[@]}" --overwrite
+          nvcr-imagepull=enabled \
+          --overwrite
         echo "::endgroup::"
 
     - name: Create vCluster
