@@ -35,10 +35,7 @@ pub struct MultimodalEmbeddingCachePublisher {
 
 impl MultimodalEmbeddingCachePublisher {
     pub fn new() -> Self {
-        Self {
-            tx: OnceLock::new(),
-            cancellation_token: CancellationToken::new(),
-        }
+        Self::default()
     }
 
     pub fn publish_delta(&self, added_keys: Vec<String>, removed_keys: Vec<String>) -> Result<()> {
@@ -81,6 +78,15 @@ impl MultimodalEmbeddingCachePublisher {
         })?;
         tx.send(update)
             .map_err(|_| anyhow::anyhow!("multimodal embedding cache publisher channel closed"))
+    }
+}
+
+impl Default for MultimodalEmbeddingCachePublisher {
+    fn default() -> Self {
+        Self {
+            tx: OnceLock::new(),
+            cancellation_token: CancellationToken::new(),
+        }
     }
 }
 
