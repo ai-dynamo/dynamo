@@ -44,7 +44,7 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # Plain color-check payload; disagg KV semantics make the
             # cached-tokens hit-rate assertions inapplicable here.
             "pd_no_encoder": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=500,
                 profiled_vram_gib=22.0,
                 requested_sglang_kv_tokens=8192,
