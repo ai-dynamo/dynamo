@@ -129,7 +129,7 @@ runs:
           ${EXTRA_PYTEST_ARGS} \
           -v -s \
           --durations=10 \
-          --junitxml=test-results/pytest_deploy_${TEST_NAME}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
+          --junitxml=test-results/junit.xml \
           --alluredir=test-results/allure-results \
           --log-cli-level=INFO
 
@@ -178,12 +178,38 @@ runs:
         fi
         echo "name=${TEST_NAME}" >> $GITHUB_OUTPUT
 
+    - name: Ensure JUnit Report
+      if: always()
+      shell: bash
+      env:
+        DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+        TEST_NAME: ${{ steps.test-name.outputs.name }}
+      run: |
+        if [[ -f test-results/junit.xml ]]; then
+          echo "✅ JUnit XML generated successfully"
+          exit 0
+        fi
+
+        STATUS="${DEPLOY_OUTCOME:-failure}"
+        if [[ "${STATUS}" == "skipped" ]]; then
+          STATUS="failure"
+        fi
+        echo "⚠️  JUnit XML file not found - writing fallback junit.xml"
+        PYTHON_BIN="$(command -v python3 || command -v python)"
+        "${PYTHON_BIN}" "${GITHUB_WORKSPACE}/.github/scripts/write_junit_report.py" \
+          --suite-name "deploy-${TEST_NAME:-unknown}" \
+          --test-name "${TEST_NAME:-deploy}" \
+          --status "${STATUS}" \
+          --output test-results/junit.xml \
+          --message "Deploy test did not produce a JUnit XML report. The deploy step completed with status ${STATUS}."
+
     - name: Upload Test Results
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
         name: test-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_deploy_${{ steps.test-name.outputs.name }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        path: test-results/junit.xml
+        if-no-files-found: error
         retention-days: 7
 
     - name: Upload Pod Logs

@@ -155,6 +155,13 @@ jobs:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test
         run: make -C deploy/helm/charts/platform lint test
+      - name: Upload JUnit Report
+        if: always()
+        uses: ./.github/actions/junit-report
+        with:
+          suite-name: helm-chart-tests
+          status: ${{ job.status }}
+          artifact-name: junit-helm-chart-tests-${{ github.run_id }}-${{ job.check_run_id }}
 
 # ============================================================================
 # Snapshot Agent

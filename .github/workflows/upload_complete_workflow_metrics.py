@@ -894,9 +894,7 @@ class WorkflowMetricsUploader:
                 framework = metadata.get("framework", "unknown")
                 test_type = metadata.get("test_type", "unknown")
                 step_name = metadata.get("step_name", "Run tests")
-                junit_xml_file = metadata.get(
-                    "junit_xml_file", "pytest_test_report.xml"
-                )
+                junit_xml_file = metadata.get("junit_xml_file", "junit.xml")
 
                 # Construct step ID from metadata
                 test_step_id = f"{job_id}_{step_name.lower().replace(' ', '_')}"
@@ -907,10 +905,25 @@ class WorkflowMetricsUploader:
                 print(f"   Step Name: {step_name}")
                 print(f"   Step ID: {test_step_id}")
 
-                # Find the corresponding XML file
-                xml_file = f"{test_results_dir}/{junit_xml_file}"
-                if not os.path.exists(xml_file):
-                    print(f"⚠️  JUnit XML file not found: {xml_file}")
+                # Find the corresponding XML file. Prefer the standardized name
+                # while keeping the old pytest filename for older artifacts.
+                xml_candidates = list(
+                    dict.fromkeys(
+                        [junit_xml_file, "junit.xml", "pytest_test_report.xml"]
+                    )
+                )
+                xml_file = next(
+                    (
+                        f"{test_results_dir}/{candidate}"
+                        for candidate in xml_candidates
+                        if os.path.exists(f"{test_results_dir}/{candidate}")
+                    ),
+                    None,
+                )
+                if not xml_file:
+                    print(
+                        f"⚠️  JUnit XML file not found. Tried: {', '.join(xml_candidates)}"
+                    )
                     continue
 
                 print(f"📄 Processing JUnit XML: {xml_file}")

@@ -24,3 +24,10 @@ jobs:
           NVBUILD_VERBOSITY: DETAILED
         timeout-minutes: 2
         working-directory: /workspace
+      - name: Upload JUnit Report
+        if: always()
+        uses: ./.github/actions/junit-report
+        with:
+          suite-name: copyright-checks
+          status: ${{ job.status }}
+          artifact-name: junit-copyright-checks-${{ github.run_id }}-${{ job.check_run_id }}

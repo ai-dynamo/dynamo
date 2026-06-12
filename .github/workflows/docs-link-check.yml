@@ -72,6 +72,15 @@ jobs:
           path: .lycheecache
           key: cache-lychee-${{ github.run_id }}
 
+      - name: Upload JUnit Report
+        if: always()
+        uses: ./.github/actions/junit-report
+        with:
+          suite-name: docs-link-check-lychee
+          test-name: lychee
+          status: ${{ job.status }}
+          artifact-name: junit-docs-link-check-lychee-${{ github.run_id }}-${{ job.check_run_id }}
+
   broken-links-check:
     name: Check for broken markdown links
     runs-on: ubuntu-latest
@@ -264,3 +273,12 @@ jobs:
             echo "   - A clickable GitHub URL to jump directly to the problem line"
             exit 1
           fi
+
+      - name: Upload JUnit Report
+        if: always()
+        uses: ./.github/actions/junit-report
+        with:
+          suite-name: docs-link-check-broken-links
+          test-name: broken-links-check
+          status: ${{ job.status }}
+          artifact-name: junit-docs-link-check-broken-links-${{ github.run_id }}-${{ job.check_run_id }}

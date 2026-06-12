@@ -150,6 +150,13 @@ jobs:
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
+      - name: Upload JUnit Report
+        if: always()
+        uses: ./.github/actions/junit-report
+        with:
+          suite-name: dynamo-rust-gpu-checks
+          status: ${{ job.status }}
+          artifact-name: junit-dynamo-rust-gpu-checks-${{ github.run_id }}-${{ job.check_run_id }}
 
   mypy:
     needs: image
@@ -182,6 +189,13 @@ jobs:
         shell: bash
         run: |
           MYPYPATH=lib/bindings/python/src mypy -p dynamo
+      - name: Upload JUnit Report
+        if: always()
+        uses: ./.github/actions/junit-report
+        with:
+          suite-name: dynamo-mypy
+          status: ${{ job.status }}
+          artifact-name: junit-dynamo-mypy-${{ github.run_id }}-${{ job.check_run_id }}
 
   # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # below runs -n 0, so this job is NOT actually parallel right now.

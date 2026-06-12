@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'JUnit Job Report'
+description: 'Create and upload a job-level JUnit XML report'
+
+inputs:
+  suite-name:
+    description: 'JUnit test suite name'
+    required: true
+  test-name:
+    description: 'JUnit testcase name. Defaults to suite-name.'
+    required: false
+    default: ''
+  status:
+    description: 'Job status, usually ${{ job.status }}'
+    required: true
+  output:
+    description: 'Path to write the JUnit XML file'
+    required: false
+    default: test-results/junit.xml
+  artifact-name:
+    description: 'Artifact name for the JUnit XML upload'
+    required: true
+  retention-days:
+    description: 'Artifact retention in days'
+    required: false
+    default: '7'
+
+runs:
+  using: composite
+  steps:
+    - name: Write JUnit XML
+      id: write
+      shell: bash
+      env:
+        REPORT_STATUS: ${{ inputs.status }}
+        SUITE_NAME: ${{ inputs.suite-name }}
+        TEST_NAME: ${{ inputs.test-name }}
+        OUTPUT_PATH: ${{ inputs.output }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      run: |
+        set -euo pipefail
+
+        if PYTHON_BIN="$(command -v python3 || command -v python)"; then
+          "${PYTHON_BIN}" "${GITHUB_WORKSPACE}/.github/scripts/write_junit_report.py" \
+            --suite-name "${SUITE_NAME}" \
+            --test-name "${TEST_NAME}" \
+            --status "${REPORT_STATUS}" \
+            --output "${OUTPUT_PATH}" \
+            --message "GitHub Actions job completed with status ${REPORT_STATUS}" \
+            --artifact-name "${ARTIFACT_NAME}" \
+            --artifact-output-name artifact_name
+          exit 0
+        fi
+
+        xml_escape() {
+          local value="$1"
+          value="${value//&/&amp;}"
+          value="${value//</&lt;}"
+          value="${value//>/&gt;}"
+          value="${value//\"/&quot;}"
+          printf '%s' "${value}"
+        }
+
+        TEST_NAME="${TEST_NAME:-${SUITE_NAME}}"
+        MESSAGE="GitHub Actions job completed with status ${REPORT_STATUS}"
+        FAILURES=0
+        SKIPPED=0
+        if [[ "${REPORT_STATUS}" == "cancelled" || "${REPORT_STATUS}" == "skipped" ]]; then
+          SKIPPED=1
+        elif [[ "${REPORT_STATUS}" != "success" ]]; then
+          FAILURES=1
+        fi
+
+        mkdir -p "$(dirname "${OUTPUT_PATH}")"
+        {
+          echo '<?xml version="1.0" encoding="utf-8"?>'
+          echo "<testsuites tests=\"1\" failures=\"${FAILURES}\" errors=\"0\" skipped=\"${SKIPPED}\">"
+          echo "  <testsuite name=\"$(xml_escape "${SUITE_NAME}")\" tests=\"1\" failures=\"${FAILURES}\" errors=\"0\" skipped=\"${SKIPPED}\" time=\"0\">"
+          echo "    <testcase classname=\"$(xml_escape "${SUITE_NAME}")\" name=\"$(xml_escape "${TEST_NAME}")\" time=\"0\">"
+          if [[ "${SKIPPED}" == "1" ]]; then
+            echo "      <skipped message=\"$(xml_escape "${MESSAGE}")\" />"
+          elif [[ "${FAILURES}" == "1" ]]; then
+            echo "      <failure message=\"$(xml_escape "${MESSAGE}")\">$(xml_escape "${MESSAGE}")</failure>"
+          fi
+          echo "    </testcase>"
+          echo "  </testsuite>"
+          echo "</testsuites>"
+        } > "${OUTPUT_PATH}"
+
+        ARTIFACT_NAME="$(printf '%s' "${ARTIFACT_NAME}" | sed -E 's/[^A-Za-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//')"
+        echo "artifact_name=${ARTIFACT_NAME:-junit-results}" >> "${GITHUB_OUTPUT}"
+
+    - name: Upload JUnit XML
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ steps.write.outputs.artifact_name }}
+        path: ${{ inputs.output }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error

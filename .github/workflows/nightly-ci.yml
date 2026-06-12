@@ -548,6 +548,13 @@ jobs:
           ${{ matrix.dir }}/coverage-rust.txt
           ${{ matrix.dir }}/coverage-rust.lcov
         retention-days: 7
+    - name: Upload JUnit Report
+      if: always()
+      uses: ./.github/actions/junit-report
+      with:
+        suite-name: nightly-rust-coverage-${{ matrix.dir }}
+        status: ${{ job.status }}
+        artifact-name: junit-nightly-rust-coverage-${{ matrix.dir }}-${{ github.run_id }}-${{ job.check_run_id }}
 
   # ============================================================================
   # RELEASE (workflow_call into release.yml)
