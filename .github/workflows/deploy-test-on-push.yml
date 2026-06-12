@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Runs deploy tests on push without requiring a PR. Uses the ACR operator image
-# (pulled via explicit imagePullSecret) and the public NVCR vllm-runtime image.
-# Also triggerable manually via workflow_dispatch.
+# Runs an infra smoke test on push without requiring a PR. This validates that
+# the prod deploy-test runner can reach aws-dev-02 and create a GPU-requesting
+# Job in the static deploy-test namespace. It intentionally does not install the
+# Dynamo operator or create a DynamoGraphDeployment.
 
 name: Deploy Test on Push
 
@@ -18,68 +19,138 @@ on:
         description: 'kubectl context to target (e.g. nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02 or azure-ci). Defaults to kubeconfig current-context.'
         required: false
         default: ''
-      operator_tag:
-        description: 'Operator image tag (default: main-operator)'
-        required: false
-        default: 'main-operator'
 
 jobs:
-  deploy-operator:
+  gpu-job-smoke:
+    name: GPU Job Smoke Test
     runs-on: prod-deploy-tester-v1
-    outputs:
-      namespace: ${{ steps.setup.outputs.namespace }}
-      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
-      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    timeout-minutes: 25
+    env:
+      KUBE_CONTEXT: ${{ inputs.kube_context || 'nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02' }}
+      TEST_NAMESPACE: dynamo-deploy-test
+      GPU_SMOKE_IMAGE: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dockerhub/busybox:1.37
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
       - name: Set kubectl context
         shell: bash
         run: |
           cp /teleport/kubeconfig.yaml /tmp/kubeconfig.yaml
-          kubectl --kubeconfig=/tmp/kubeconfig.yaml config use-context "${{ inputs.kube_context || 'nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02' }}"
+          kubectl --kubeconfig=/tmp/kubeconfig.yaml config use-context "${KUBE_CONTEXT}"
           echo "KUBECONFIG=/tmp/kubeconfig.yaml" >> $GITHUB_ENV
-      - name: Setup vCluster and operator
-        id: setup
-        uses: ./.github/actions/setup-dynamo-operator
-        with:
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ inputs.operator_tag || 'main-operator' }}
-          acr_username: ${{ secrets.AZURE_ACR_USER }}
-          acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          install_grove: 'false'
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
-  deploy-test-smoke:
-    name: Smoke Deploy Test
-    needs: [deploy-operator]
-    uses: ./.github/workflows/shared-deploy-test.yml
-    with:
-      framework: vllm
-      profiles: '["agg"]'
-      image_full: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
-      namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
-      kube_context: ${{ inputs.kube_context }}
-    secrets: inherit
-
-  deploy-cleanup:
-    if: always()
-    needs: [deploy-operator, deploy-test-smoke]
-    runs-on: prod-deploy-tester-v1
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Set kubectl context
+      - name: Run GPU scheduling smoke job
         shell: bash
         run: |
-          cp /teleport/kubeconfig.yaml /tmp/kubeconfig.yaml
-          kubectl --kubeconfig=/tmp/kubeconfig.yaml config use-context "${{ inputs.kube_context || 'nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02' }}"
-          echo "KUBECONFIG=/tmp/kubeconfig.yaml" >> $GITHUB_ENV
-      - name: Teardown vCluster
-        if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
-        uses: ./.github/actions/teardown-dynamo-operator
-        with:
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          set -euo pipefail
+
+          JOB_NAME="gpu-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          POD_NAME=""
+
+          cleanup() {
+            echo "::group::Cleanup GPU smoke job"
+            kubectl delete job "${JOB_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true --timeout=120s || true
+            echo "::endgroup::"
+          }
+          trap cleanup EXIT
+
+          echo "::group::Verify deploy-test infrastructure"
+          kubectl get priorityclass ci-nightly-high-priority
+          kubectl get clusterpolicies.kyverno.io deploy-test-pod-policy
+          kubectl create namespace "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+          for _ in $(seq 1 120); do
+            if kubectl get resourcequota deploy-test-gpu-quota -n "${TEST_NAMESPACE}" >/dev/null 2>&1; then
+              kubectl get resourcequota deploy-test-gpu-quota -n "${TEST_NAMESPACE}" -o yaml
+              break
+            fi
+            echo "Waiting for deploy-test-gpu-quota in ${TEST_NAMESPACE}..."
+            sleep 2
+          done
+          kubectl get resourcequota deploy-test-gpu-quota -n "${TEST_NAMESPACE}" >/dev/null
+          echo "::endgroup::"
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB_NAME}
+            namespace: ${TEST_NAMESPACE}
+            labels:
+              app.kubernetes.io/name: gpu-scheduling-smoke
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 600
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: gpu-scheduling-smoke
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: gpu-smoke
+                    image: ${GPU_SMOKE_IMAGE}
+                    imagePullPolicy: IfNotPresent
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        set -eu
+                        echo "GPU smoke pod scheduled on \${NODE_NAME}"
+                        ls -l /dev/nvidia* || true
+                        sleep 30
+                    env:
+                      - name: NODE_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: spec.nodeName
+                    resources:
+                      requests:
+                        nvidia.com/gpu: "1"
+                      limits:
+                        nvidia.com/gpu: "1"
+          EOF
+
+          for _ in $(seq 1 60); do
+            POD_NAME=$(kubectl get pod -n "${TEST_NAMESPACE}" -l job-name="${JOB_NAME}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            if [ -n "${POD_NAME}" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "${POD_NAME}" ]; then
+            echo "::error::Job controller did not create a pod for ${JOB_NAME}"
+            kubectl describe job "${JOB_NAME}" -n "${TEST_NAMESPACE}" || true
+            exit 1
+          fi
+
+          echo "::group::Mutated pod scheduling fields"
+          kubectl get pod "${POD_NAME}" -n "${TEST_NAMESPACE}" \
+            -o jsonpath='priorityClassName={.spec.priorityClassName}{"\n"}nodeName={.spec.nodeName}{"\n"}nodeSelector={.spec.nodeSelector}{"\n"}tolerations={.spec.tolerations}{"\n"}'
+          echo "::endgroup::"
+
+          set +e
+          kubectl wait --for=condition=complete "job/${JOB_NAME}" -n "${TEST_NAMESPACE}" --timeout=15m
+          WAIT_STATUS=$?
+          set -e
+
+          echo "::group::GPU smoke status"
+          kubectl get job "${JOB_NAME}" -n "${TEST_NAMESPACE}" -o wide || true
+          kubectl get pod "${POD_NAME}" -n "${TEST_NAMESPACE}" -o wide || true
+          kubectl logs "${POD_NAME}" -n "${TEST_NAMESPACE}" --all-containers=true || true
+          echo "::endgroup::"
+
+          if [ "${WAIT_STATUS}" -ne 0 ]; then
+            echo "::group::GPU smoke diagnostics"
+            kubectl describe job "${JOB_NAME}" -n "${TEST_NAMESPACE}" || true
+            kubectl describe pod "${POD_NAME}" -n "${TEST_NAMESPACE}" || true
+            kubectl get events -n "${TEST_NAMESPACE}" --sort-by='.lastTimestamp' | tail -80 || true
+            echo "::endgroup::"
+            exit "${WAIT_STATUS}"
+          fi
+
+          echo "### GPU smoke PASSED" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "- Namespace: \`${TEST_NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Job: \`${JOB_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Pod: \`${POD_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
