@@ -10,12 +10,12 @@ import pytest
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
-    _extract_media_urls,
     _extract_sglang_stop_reason,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _user_stop_token_ids,
 )
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import extract_media_urls
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
@@ -45,16 +45,17 @@ def test_extract_media_urls_supports_string_and_wire_items():
         ]
     }
 
-    assert _extract_media_urls(mm_data, "video_url") == [
+    assert extract_media_urls(mm_data, "video_url") == [
         "file:///tmp/test.mp4",
         "https://example.com/test.mp4",
     ]
 
 
 def test_extract_media_urls_returns_none_for_missing_or_invalid_items():
-    assert _extract_media_urls({}, "image_url") is None
+    assert extract_media_urls({}, "image_url") is None
+    assert extract_media_urls(None, "image_url") is None
     assert (
-        _extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url") is None
+        extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url") is None
     )
 
 

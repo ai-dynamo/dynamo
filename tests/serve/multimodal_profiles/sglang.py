@@ -7,12 +7,15 @@ from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
     TopologyConfig,
+    make_image_payload,
     make_image_payload_cached_tokens,
 )
 
-# agg_router only for now; disagg/EPD variants when their scripts exist.
+# agg_router and disaggregated prefill+decode with no encode worker (pd_no_encoder,
+# single GPU) for now; EPD variants when their generic launch wiring exists.
 SGLANG_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg_router": "agg_multimodal_router.sh",
+    "pd_no_encoder": "disagg_same_gpu.sh",
 }
 
 # VLM coverage mirrors the vLLM profile registry. SINGLE_GPU=true packs both
@@ -38,6 +41,19 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         )
                     )
                 ],
+            ),
+            # Disaggregated prefill+decode on one GPU, no encode worker. Smoke
+            # test that the P/D multimodal path returns a correct image answer
+            # (prefill encodes + transfers KV; decode re-encodes for token-layout
+            # parity). Plain color-identification payload, since disagg KV
+            # semantics make the cached-tokens hit-rate assertions inapplicable.
+            "pd_no_encoder": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=500,
+                profiled_vram_gib=22.0,
+                requested_sglang_kv_tokens=8192,
+                delayed_start=10,
+                tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
     ),
