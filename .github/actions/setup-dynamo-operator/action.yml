@@ -34,6 +34,14 @@ inputs:
     description: 'Docker Hub password for helm registry login'
     required: false
     default: ''
+  acr_username:
+    description: 'Azure Container Registry username. When set alongside acr_password, creates an imagePullSecret inside the vCluster so nodes without managed-identity ACR access can pull the operator image.'
+    required: false
+    default: ''
+  acr_password:
+    description: 'Azure Container Registry password.'
+    required: false
+    default: ''
   vcluster_k8s_version:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
@@ -147,6 +155,24 @@ runs:
           -n default || true
         echo "::endgroup::"
 
+    - name: Create ACR image pull secret in vCluster
+      if: inputs.acr_username != '' && inputs.acr_password != '' && inputs.registry != ''
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        ACR_USER: ${{ inputs.acr_username }}
+        ACR_PASS: ${{ inputs.acr_password }}
+      run: |
+        echo "::group::Create ACR pull secret inside vCluster"
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          create secret docker-registry acr-pull-secret \
+          --docker-server="${REGISTRY}" \
+          --docker-username="${ACR_USER}" \
+          --docker-password="${ACR_PASS}" \
+          -n default --dry-run=client -o yaml | \
+          kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster apply -f -
+        echo "::endgroup::"
+
     - name: Login to Docker Hub for Helm
       if: inputs.dockerhub_username != '' && inputs.dockerhub_password != ''
       shell: bash
@@ -161,6 +187,7 @@ runs:
       env:
         REGISTRY: ${{ inputs.registry }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
+        ACR_USER: ${{ inputs.acr_username }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
         set -x
@@ -177,9 +204,15 @@ runs:
           echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
         fi
 
+        PULL_SECRET_ARGS=""
+        if [ -n "${ACR_USER}" ]; then
+          PULL_SECRET_ARGS="--set dynamo-operator.imagePullSecrets[0].name=acr-pull-secret"
+        fi
+
         KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
         helm upgrade --install dynamo-platform . --namespace default \
           ${IMAGE_ARGS} \
+          ${PULL_SECRET_ARGS} \
           --set dynamo-operator.gpuDiscovery.enabled=false \
           --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
