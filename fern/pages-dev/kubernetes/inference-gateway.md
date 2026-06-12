@@ -18,7 +18,7 @@ Integrate Dynamo with the Gateway API Inference Extension, also known as Inferen
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](../../recipes/qwen3-0.6b/vllm/agg/gaie).
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
