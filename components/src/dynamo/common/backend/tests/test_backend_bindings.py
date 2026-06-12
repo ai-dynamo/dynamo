@@ -63,28 +63,31 @@ def test_engine_config_required_model_only():
     cfg = backend.EngineConfig(model="m1")
     assert cfg.model == "m1"
     assert cfg.served_model_name is None
-    assert cfg.context_length is None
+    assert cfg.llm is None
 
 
 def test_engine_config_full_kwargs_round_trip_through_getters():
     cfg = backend.EngineConfig(
         model="m2",
         served_model_name="m2-serving",
-        context_length=2048,
-        kv_cache_block_size=16,
-        total_kv_blocks=1000,
-        max_num_seqs=64,
-        max_num_batched_tokens=2048,
         runtime_data={"sglang_worker_group_id": "group-a"},
+        llm=backend.LlmRegistration(
+            context_length=2048,
+            kv_cache_block_size=16,
+            total_kv_blocks=1000,
+            max_num_seqs=64,
+            max_num_batched_tokens=2048,
+        ),
     )
     assert cfg.model == "m2"
     assert cfg.served_model_name == "m2-serving"
-    assert cfg.context_length == 2048
-    assert cfg.kv_cache_block_size == 16
-    assert cfg.total_kv_blocks == 1000
-    assert cfg.max_num_seqs == 64
-    assert cfg.max_num_batched_tokens == 2048
     assert cfg.runtime_data == {"sglang_worker_group_id": "group-a"}
+    llm = cfg.llm
+    assert llm.context_length == 2048
+    assert llm.kv_cache_block_size == 16
+    assert llm.total_kv_blocks == 1000
+    assert llm.max_num_seqs == 64
+    assert llm.max_num_batched_tokens == 2048
 
 
 def test_worker_config_minimum_args():

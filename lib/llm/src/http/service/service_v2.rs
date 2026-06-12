@@ -25,7 +25,9 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::config::{env_is_falsey, env_is_truthy};
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
 use dynamo_runtime::metrics::{
@@ -63,6 +65,7 @@ pub struct State {
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
+    nvext_enabled: bool,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -72,6 +75,7 @@ pub struct State {
 struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    nvext_enabled: bool,
 }
 
 #[derive(Default, Debug)]
@@ -148,6 +152,7 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
             discovery_client,
+            nvext_enabled: config.nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -184,6 +189,13 @@ impl State {
     /// Check if the service is shutting down
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
+    }
+
+    /// Master switch for the `nvext` extension protocol (see
+    /// [`environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT`]).
+    #[inline]
+    pub fn nvext_enabled(&self) -> bool {
+        self.nvext_enabled
     }
 
     /// Get the cancellation token
@@ -241,6 +253,9 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+    /// RL worker discovery router, served on a dedicated port when enabled.
+    rl_router: Option<axum::Router>,
+    rl_port: u16,
 }
 
 #[derive(Clone, Builder)]
@@ -301,6 +316,36 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    /// When true, serve the RL worker discovery API on `rl_port`.
+    #[builder(default = "false")]
+    enable_rl: bool,
+
+    /// Master switch for the `nvext` extension protocol. Default `true`,
+    /// env-falsey on `DYN_ENABLE_FRONTEND_NVEXT` overrides to `false`.
+    #[builder(default = "true")]
+    enable_nvext: bool,
+
+    /// Master switch for the frontend admin API surface (`GET` /
+    /// `POST /busy_threshold`). Default `true`, env-falsey on
+    /// `DYN_ENABLE_FRONTEND_ADMIN_API` overrides to `false`.
+    #[builder(default = "true")]
+    enable_admin_api: bool,
+
+    /// Port for the RL worker discovery listener. Defaults to `DYN_RL_PORT` or 8001.
+    #[builder(default = "default_rl_port()")]
+    rl_port: u16,
+
+    /// Distributed runtime used by the RL worker discovery API.
+    #[builder(default = "None")]
+    runtime: Option<Arc<DistributedRuntime>>,
+}
+
+fn default_rl_port() -> u16 {
+    std::env::var("DYN_RL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8001)
 }
 
 impl HttpService {
@@ -413,6 +458,8 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
@@ -461,6 +508,8 @@ impl HttpService {
                 }
             };
 
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
@@ -479,6 +528,43 @@ impl HttpService {
             cancel_token.cancel();
         }
 
+        Ok(())
+    }
+
+    async fn spawn_rl_listener_if_configured(
+        &self,
+        cancel_token: &CancellationToken,
+    ) -> Result<()> {
+        let Some(rl_router) = self.rl_router.clone() else {
+            return Ok(());
+        };
+        let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        // Bind eagerly and fail fast: when RL discovery is enabled, a bind failure
+        // should abort service startup rather than silently leave RL discovery
+        // unavailable while the main HTTP service keeps running.
+        let listener = tokio::net::TcpListener::bind(&rl_addr).await.map_err(|e| {
+            tracing::error!(
+                address = %rl_addr,
+                error = %e,
+                "Failed to bind RL worker discovery listener"
+            );
+            anyhow::anyhow!("Failed to bind RL worker discovery listener on {rl_addr}: {e}")
+        })?;
+        tracing::info!(
+            address = %rl_addr,
+            "RL worker discovery listener started"
+        );
+        let rl_cancel = cancel_token.child_token();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, rl_router)
+                .with_graceful_shutdown(async move {
+                    rl_cancel.cancelled_owned().await;
+                })
+                .await
+            {
+                tracing::error!("RL worker discovery listener error: {e}");
+            }
+        });
         Ok(())
     }
 
@@ -541,6 +627,12 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
+        // Env-falsey overrides the builder; unset preserves the builder default.
+        let nvext_enabled =
+            config.enable_nvext && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_NVEXT);
+        let admin_api_enabled =
+            config.enable_admin_api && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
+
         let state = Arc::new(State::new(
             model_manager,
             discovery_client,
@@ -548,6 +640,7 @@ impl HttpServiceConfigBuilder {
             StateConfig {
                 metrics_config,
                 frontend_api_config,
+                nvext_enabled,
             },
         ));
         state
@@ -623,7 +716,7 @@ impl HttpServiceConfigBuilder {
         };
 
         // System routes (health, metrics, models) — debug-level spans
-        let system_routes = vec![
+        let mut system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
@@ -639,8 +732,18 @@ impl HttpServiceConfigBuilder {
             },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
-            super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
+        if admin_api_enabled {
+            system_routes.push(super::busy_threshold::busy_threshold_router(
+                state.clone(),
+                None,
+            ));
+        } else {
+            tracing::info!(
+                env = env_llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+                "frontend admin API disabled — busy_threshold routes not registered"
+            );
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             system_router = system_router.merge(route);
@@ -680,6 +783,30 @@ impl HttpServiceConfigBuilder {
         // Echo x-request-id from request to response headers for client correlation
         let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
 
+        let enable_rl_router = config.enable_rl || env_is_truthy("DYN_ENABLE_RL");
+        let rl_router = if enable_rl_router {
+            let Some(drt) = config.runtime.as_ref() else {
+                return Err(anyhow::anyhow!(
+                    "RL worker discovery was requested (DYN_ENABLE_RL=true \
+                     or enable_rl) but HttpServiceConfig.runtime is not set."
+                ));
+            };
+            let router = super::openai::rl_router(drt.clone())?;
+            tracing::info!(
+                rl_port = config.rl_port,
+                "RL worker discovery enabled at /v1/rl/workers"
+            );
+            Some(
+                router.layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(make_system_request_span)
+                        .on_response(on_response),
+                ),
+            )
+        } else {
+            None
+        };
+
         Ok(HttpService {
             state,
             router,
@@ -689,6 +816,8 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            rl_router,
+            rl_port: config.rl_port,
         })
     }
 
@@ -857,5 +986,116 @@ mod tests {
 
         // Clean up
         handle.abort();
+    }
+
+    /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
+    /// returns 404, not 503 or 405. Inference is unaffected (covered by other
+    /// tests).
+    #[tokio::test]
+    async fn test_admin_api_disabled_404s_busy_threshold() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_admin_api(false)
+            .build()
+            .unwrap();
+
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{}/busy_threshold", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // And /live still works (sanity: only the admin surface is gated).
+        let live = reqwest::Client::new()
+            .get(format!("http://localhost:{}/live", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(live.status(), reqwest::StatusCode::OK);
+
+        cancel_token.cancel();
+        handle.abort();
+    }
+
+    /// `enable_nvext` is wired from the builder onto `State.nvext_enabled` and
+    /// exposed via the accessor used by the openai handlers.
+    #[test]
+    fn test_enable_nvext_propagates_through_builder_to_state() {
+        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
+
+        // `build()` ANDs the builder flag with the env var, so this test must
+        // pin the env to unset. Going through `temp_env` also serializes it
+        // against `test_dyn_enable_frontend_nvext_env_var_mirror`, which mutates
+        // the same process-global var in parallel.
+        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+            let on = HttpService::builder().enable_nvext(true).build().unwrap();
+            assert!(on.state.nvext_enabled());
+
+            let off = HttpService::builder().enable_nvext(false).build().unwrap();
+            assert!(!off.state.nvext_enabled());
+
+            let default = HttpService::builder().build().unwrap();
+            assert!(
+                default.state.nvext_enabled(),
+                "default should preserve current behavior (nvext on)"
+            );
+        });
+    }
+
+    /// `DYN_ENABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
+    /// flag. Unset → builder default wins (on). Truthy strings → on.
+    /// Falsey strings (`0` / `false` / `no` / `off`, case-insensitive) →
+    /// off, regardless of what the builder asked for.
+    #[test]
+    fn test_dyn_enable_frontend_nvext_env_var_mirror() {
+        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
+
+        // Unset → builder default (true) wins.
+        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+            let svc = HttpService::builder().build().unwrap();
+            assert!(
+                svc.state.nvext_enabled(),
+                "unset env + default builder = on"
+            );
+        });
+
+        // Explicit truthy → on (builder default also on; env doesn't flip it off).
+        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+            let svc = HttpService::builder().build().unwrap();
+            assert!(svc.state.nvext_enabled(), "env=true + default builder = on");
+        });
+
+        // Explicit falsey → off, even though the builder default is on.
+        for falsey in ["false", "0", "no", "off", "FALSE"] {
+            temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some(falsey), || {
+                let svc = HttpService::builder().build().unwrap();
+                assert!(
+                    !svc.state.nvext_enabled(),
+                    "env={falsey:?} should override builder default to off"
+                );
+            });
+        }
+
+        // Builder=false short-circuits regardless of env.
+        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+            let svc = HttpService::builder().enable_nvext(false).build().unwrap();
+            assert!(
+                !svc.state.nvext_enabled(),
+                "builder=false wins even if env=true"
+            );
+        });
     }
 }

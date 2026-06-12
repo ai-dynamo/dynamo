@@ -26,7 +26,7 @@ spec:
           env:
           - name: HF_HOME
             value: /home/dynamo/.cache/huggingface
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
           name: main
           resources:
             limits:
@@ -77,7 +77,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-efa-amd64
           name: main
           resources:
             limits:
@@ -140,7 +140,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-efa-amd64
           name: main
           resources:
             limits:

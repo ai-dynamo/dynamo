@@ -23,6 +23,7 @@ ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
+ARG MODELEXPRESS_VERSION
 
 WORKDIR /workspace
 
@@ -192,6 +193,17 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
 {% endif %}
+
+{% if context.vllm.enable_modelexpress == "true" %}
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# vLLM runtime dependency stack.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    uv pip install --system --no-deps \
+        "modelexpress==${MODELEXPRESS_VERSION}"
+{% endif %}
+
 {% endif %}
 
 {% if context.vllm.enable_media_ffmpeg == "true" %}

@@ -307,6 +307,11 @@ impl LocalModelBuilder {
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
 
+        // Override max number of tokens in context. This is usually used to limit kv cache allocation.
+        if let Some(context_length) = self.context_length {
+            self.runtime_config.context_length = Some(context_length);
+        }
+
         // Pick up a stable routing id from `DYN_STABLE_ROUTING_ID`. No-op if the caller
         // already supplied one or the env var is unset. Published in etcd so routing
         // layers can keep cache assignments stable across worker restarts.
@@ -381,11 +386,6 @@ impl LocalModelBuilder {
         card.set_name(self.model_name.as_deref().unwrap_or(&alt));
 
         card.kv_cache_block_size = self.kv_cache_block_size;
-
-        // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
-        if let Some(context_length) = self.context_length {
-            card.context_length = context_length;
-        }
 
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();

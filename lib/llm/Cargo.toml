@@ -61,6 +61,7 @@ required-features = ["agent-trace-bench"]
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
+dynamo-rl = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokenizers = { workspace = true }
 dynamo-renderer = { workspace = true }
@@ -127,7 +128,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { version = "=0.10.1", optional = true }
+nixl-sys = { version = "=1.0.1", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
