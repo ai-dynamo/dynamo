@@ -151,24 +151,42 @@ class TestVllmKvEventsApi:
             f"  - Update this test's expected_fields."
         )
 
-    def test_kv_cache_event_uses_array_like(self):
-        """Verify KVCacheEvent uses array_like=True serialization.
+    def test_event_batch_uses_array_like(self):
+        """Verify EventBatch keeps array_like=True serialization.
 
-        Our Rust deserializers expect msgpack arrays, not objects.
-        If this changes, deserialization will break.
+        The Rust KvEventBatch deserializer expects the batch itself as a
+        msgpack array; if this changes, deserialization will break.
         """
-        # msgspec structs with array_like=True have this attribute
+        struct_config = getattr(EventBatch, "__struct_config__", None)
+        assert struct_config is not None, "EventBatch is not a msgspec Struct"
+        assert struct_config.array_like is True, (
+            "EventBatch no longer uses array_like=True! "
+            "This will break Rust deserialization "
+            "(lib/kv-router/src/zmq_wire/deserialize.rs)."
+        )
+
+    def test_kv_cache_event_encoding_is_supported(self):
+        """Verify KVCacheEvent uses an encoding our Rust decoder accepts.
+
+        Since vLLM #42892, KVCacheEvent variants may be map-encoded instead
+        of array_like tuples. lib/kv-router/src/zmq_wire/deserialize.rs
+        accepts both ("a kv event encoded as a tagged map or sequence"), so
+        either encoding is a supported contract — but it must be a msgspec
+        Struct and must carry a tag (asserted separately below) for variant
+        identification in both encodings.
+        """
         struct_config = getattr(KVCacheEvent, "__struct_config__", None)
         assert struct_config is not None, "KVCacheEvent is not a msgspec Struct"
-        assert struct_config.array_like is True, (
-            "KVCacheEvent no longer uses array_like=True! "
-            "This will break Rust deserialization."
+        assert struct_config.array_like in (True, False), (
+            "KVCacheEvent struct config is malformed"
         )
 
     def test_kv_cache_event_uses_tag(self):
         """Verify KVCacheEvent uses tag=True for variant identification.
 
-        The tag (e.g., 'BlockStored') is the first element in the msgpack array.
+        The tag (e.g., 'BlockStored') is the first element of the msgpack
+        array in tuple encoding, and the discriminator field in map encoding;
+        the Rust decoder keys on it in both visit paths.
         """
         struct_config = getattr(KVCacheEvent, "__struct_config__", None)
         assert struct_config is not None, "KVCacheEvent is not a msgspec Struct"
@@ -208,7 +226,29 @@ class TestVllmKvEventsApi:
         encoded = msgspec.msgpack.encode(event)
         decoded = msgspec.msgpack.decode(encoded)
 
-        # Should be an array with tag as first element
+        if isinstance(decoded, dict):
+            # Map encoding (vLLM >= #42892): fields are keyed by name and the
+            # tag lives under "type". The Rust decoder's visit_map path reads
+            # by key, so names (not positions) are the contract here.
+            assert decoded["type"] == "BlockStored"
+            assert decoded["block_hashes"] == [123, 456]
+            assert decoded["parent_block_hash"] == 789
+            assert decoded["token_ids"] == [1, 2, 3, 4]
+            assert decoded["block_size"] == 16
+            assert decoded["medium"] == "GPU"
+            # omit_defaults: default-valued fields may be absent entirely
+            assert decoded.get("lora_id") is None
+            assert decoded.get("lora_name") is None
+            assert decoded.get("extra_keys") is None
+            if _has_group_idx(BlockStored):
+                assert decoded.get("group_idx", 0) == 0
+            if _has_kv_cache_spec_kind(BlockStored):
+                assert decoded["kv_cache_spec_kind"] == "full_attention"
+            if _has_kv_cache_spec_sliding_window(BlockStored):
+                assert decoded["kv_cache_spec_sliding_window"] == 128
+            return
+
+        # Tuple encoding (vLLM < #42892): an array with tag as first element
         assert isinstance(decoded, list), f"Expected list, got {type(decoded)}"
         assert (
             decoded[0] == "BlockStored"
@@ -276,6 +316,14 @@ class TestVllmKvEventsApi:
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
 
+        if isinstance(decoded, dict):
+            assert decoded["type"] == "BlockStored"
+            assert decoded["extra_keys"] == [[[mm_hash, 7]]], (
+                "vLLM multimodal extra_keys no longer serialize as nested "
+                f"tuple/list payloads. Decoded: {decoded['extra_keys']!r}"
+            )
+            return
+
         assert decoded[0] == "BlockStored"
         assert decoded[8] == [[[mm_hash, 7]]], (
             "vLLM multimodal extra_keys no longer serialize as nested tuple/list "
@@ -316,6 +364,16 @@ class TestVllmKvEventsApi:
         event = BlockRemoved(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+
+        if isinstance(decoded, dict):
+            assert decoded["type"] == "BlockRemoved"
+            assert decoded["block_hashes"] == [123, 456]
+            assert decoded["medium"] == "GPU"
+            if _has_kv_cache_spec_kind(BlockRemoved):
+                assert decoded["kv_cache_spec_kind"] == "full_attention"
+            if _has_kv_cache_spec_sliding_window(BlockRemoved):
+                assert decoded["kv_cache_spec_sliding_window"] == 128
+            return
 
         assert decoded[0] == "BlockRemoved"
         expected_len = (
