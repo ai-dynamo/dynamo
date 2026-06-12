@@ -17,7 +17,7 @@ use crate::http::service::metrics::{
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
 use crate::kv_router::KV_METRICS_SUBJECT;
-use crate::kv_router::metrics::{WORKER_LOAD_METRICS, router_worker_status_metrics};
+use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
@@ -29,7 +29,7 @@ use dynamo_runtime::transports::event_plane::EventSubscriber;
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 
-/// Clean up all Prometheus metrics for a worker across the specified dp_ranks.
+/// Clean up load and latency Prometheus metrics for a worker across the specified dp_ranks.
 ///
 /// This removes metrics with the given worker_id, dp_rank, and worker_type label combination.
 /// Called when workers are removed to prevent stale metrics from accumulating.
@@ -44,9 +44,6 @@ fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
         let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(labels);
-        if let Some(metrics) = router_worker_status_metrics() {
-            metrics.remove_worker(worker_id, *dp_rank, worker_type);
-        }
     }
 
     let unset_labels = &[worker_id_str.as_str(), UNSET_DP_RANK_LABEL, worker_type];
