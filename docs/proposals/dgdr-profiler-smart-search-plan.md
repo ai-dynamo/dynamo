@@ -1,16 +1,18 @@
-# Profiler V2: Smart Sweeping Tool for Dynamo Deployments
+# Profiler V2 (Spica): Smart Sweeping Tool for Dynamo Deployments
+
+*Spica, the brightest star in Virgo, takes its name from the Latin spīca — the ear of grain held by the harvest maiden, the star whose rising once told farmers when to plant and reap. Around 129 BC, Hipparchus measured it against centuries-old records and found it had shifted, revealing that the sky itself slowly turns. The star that guided the harvest became the fixed point by which we measure change and calibrate our bearings.*
 
 ## Motivation
 
 Dynamo deployments are hard to configure. A good setup depends on multiple interacting components, including engines, routers, planners, KV policy, replica counts, and parallelization choices. The right choice can also change under dynamic traffic, where static rules of thumb are often not enough.
 
-Replay gives us a fast way to try candidate configurations before deployment, but today the process still needs a human expert to decide what to try next. Profiler V2 should automate that loop: generate legal candidates, evaluate them with replay, and use Vizier to guide the next sweep samples.
+Replay gives us a fast way to try candidate configurations before deployment, but today the process still needs a human expert to decide what to try next. Spica should automate that loop: generate legal candidates, evaluate them with replay, and use Vizier to guide the next sweep samples.
 
 This sweeper is not an engine/kernel autotuner. Its focus is high-level Dynamo configuration: scheduling, routing, autoscaling, deployment shape, replica counts, and runtime capacity knobs that affect serving behavior.
 
 ## Scope
 
-This plan defines the Profiler V2 smart-search surface. Profiler V2 uses Vizier as the smart sweeping optimizer. This document inventories deployment, engine, KV manager, router, and planner knobs, then classifies each knob by optimizer treatment. It does not define how the search inputs are populated.
+This plan defines the Spica smart-search surface. Spica uses Vizier as the smart sweeping optimizer. This document inventories deployment, engine, KV manager, router, and planner knobs, then classifies each knob by optimizer treatment. It does not define how the search inputs are populated.
 
 ## V2 Refactor Direction
 
@@ -20,11 +22,11 @@ V2 should not change the existing V1 profiler defaults or k8s controller/operato
 
 ## Overview
 
-Profiler V2 uses two sweep paths. The main Vizier sweep is manually branched by deployment mode, so `agg` and `disagg` each expose a flat search space. Vizier samples are guided by replay's virtual-clock simulation, and replay evaluations can run in parallel on CPU. Planner load prediction can be tuned separately with an independent simple grid sweep when throughput planner is enabled.
+Spica uses two sweep paths. The main Vizier sweep is manually branched by deployment mode, so `agg` and `disagg` each expose a flat search space. Vizier samples are guided by replay's virtual-clock simulation, and replay evaluations can run in parallel on CPU. Planner load prediction can be tuned separately with an independent simple grid sweep when throughput planner is enabled.
 
 ```mermaid
 flowchart TD
-    input["Search space + goal + replay traces"] --> profiler["Profiler V2"]
+    input["Search space + goal + replay traces"] --> profiler["Spica"]
     profiler --> throughputPlanner{"Throughput planner enabled?"}
     throughputPlanner -->|yes| loadPredictor["Independent planner load predictor sweep"]
     loadPredictor --> predictorPreset["Selected predictor preset"]
@@ -53,7 +55,7 @@ Treatment labels:
 
 ## Optimization Goal
 
-Profiler V2 does not return a single tuned configuration. Its goal is to produce a list of viable deployment candidates ranked by performance, so the user can compare the top recommendation against ranked alternatives.
+Spica does not return a single tuned configuration. Its goal is to produce a list of viable deployment candidates ranked by performance, so the user can compare the top recommendation against ranked alternatives.
 
 The optimization goal is user-owned and `Pinned`; it is never a search dimension:
 
@@ -447,9 +449,9 @@ Standalone, this is driven by `python -m dynamo.profiler.v2 --config smart_sweep
 
 ## AIC Integration
 
-Profiler V2 is built standalone under `components/src/dynamo/profiler/v2/` first, then connected to AIConfigurator (AIC) **without inverting the dependency direction**: AIC stays the lower-layer forward-pass / memory provider, Replay (driven by Profiler V2) is the deployment evaluator, and AIC never imports Dynamo — Dynamo injects into AIC.
+Spica is built standalone under `components/src/dynamo/profiler/v2/` first, then connected to AIConfigurator (AIC) **without inverting the dependency direction**: AIC stays the lower-layer forward-pass / memory provider, Replay (driven by Spica) is the deployment evaluator, and AIC never imports Dynamo — Dynamo injects into AIC.
 
-AIC's `sweep` module already separates candidate enumeration from per-point evaluation and already injects a per-worker `Predictor` strategy. Two *additive* seams connect Profiler V2 without touching the existing analytic path or its V1/V2 parity tests.
+AIC's `sweep` module already separates candidate enumeration from per-point evaluation and already injects a per-worker `Predictor` strategy. Two *additive* seams connect Spica without touching the existing analytic path or its V1/V2 parity tests.
 
 ### Seam 1 — a smart sweep path
 
