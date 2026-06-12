@@ -111,7 +111,11 @@ ROUTER_OVERLOAD_503_CASES = (
 ROUTER_DISAGG_OVERLOAD_503_CASES = (
     pytest.param(
         {
-            "num_prefill": 2,
+            # A single prefill worker is sufficient to verify
+            # overloaded -> no free prefill worker -> 503, and --enforce-disagg
+            # means the model only lists once the prefill router has activated,
+            # so frontend readiness already gates on prefill registration.
+            "num_prefill": 1,
             "num_decode": 1,
             "max_tokens": 1,
             # Gate the PREFILL pool only (this was a silent no-op in disagg
@@ -1015,10 +1019,9 @@ def test_mocker_disagg_router_overload_503(
         num_prefill_mockers=overload_case["num_prefill"],
         num_decode_mockers=overload_case["num_decode"],
         enable_disagg_bootstrap=False,
-    ) as (prefill_workers, decode_workers):
+    ) as (_prefill_workers, decode_workers):
         frontend_port = get_unique_ports(request, num_ports=1)[0]
         _test_disagg_router_overload_503(
-            prefill_workers=prefill_workers,
             decode_workers=decode_workers,
             block_size=4,
             request=request,
