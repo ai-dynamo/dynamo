@@ -172,6 +172,31 @@ impl FrontendApiConfig {
         }
     }
 
+    pub fn from_optional_flags(
+        enable_anthropic_api: Option<bool>,
+        strip_anthropic_preamble: Option<bool>,
+        enable_streaming_tool_dispatch: Option<bool>,
+        enable_streaming_reasoning_dispatch: Option<bool>,
+    ) -> Option<Self> {
+        if enable_anthropic_api.is_none()
+            && strip_anthropic_preamble.is_none()
+            && enable_streaming_tool_dispatch.is_none()
+            && enable_streaming_reasoning_dispatch.is_none()
+        {
+            return None;
+        }
+
+        let defaults = Self::default();
+        Some(Self::from_flags(
+            enable_anthropic_api.unwrap_or_else(|| defaults.anthropic().enabled()),
+            strip_anthropic_preamble.unwrap_or_else(|| defaults.anthropic().strip_preamble()),
+            enable_streaming_tool_dispatch
+                .unwrap_or_else(|| defaults.streaming_dispatch().tool_dispatch()),
+            enable_streaming_reasoning_dispatch
+                .unwrap_or_else(|| defaults.streaming_dispatch().reasoning_dispatch()),
+        ))
+    }
+
     pub fn anthropic(&self) -> &AnthropicApiConfig {
         &self.anthropic
     }
@@ -186,5 +211,55 @@ impl FrontendApiConfig {
 
     pub fn streaming_dispatch_mut(&mut self) -> &mut StreamingDispatchConfig {
         &mut self.streaming_dispatch
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_flags_return_none_when_all_values_are_unspecified() {
+        let config = FrontendApiConfig::from_optional_flags(None, None, None, None);
+
+        assert_eq!(config, None);
+    }
+
+    #[test]
+    fn optional_flags_preserve_explicit_false_values() {
+        let config = FrontendApiConfig::from_optional_flags(
+            Some(false),
+            Some(true),
+            Some(false),
+            Some(true),
+        )
+        .expect("explicit flags should produce a config");
+
+        assert!(!config.anthropic().enabled());
+        assert!(config.anthropic().strip_preamble());
+        assert!(!config.streaming_dispatch().tool_dispatch());
+        assert!(config.streaming_dispatch().reasoning_dispatch());
+    }
+
+    #[test]
+    fn optional_flags_use_env_defaults_for_unspecified_values() {
+        temp_env::with_vars(
+            [
+                (env_llm::DYN_ENABLE_ANTHROPIC_API, Some("1")),
+                (env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE, Some("1")),
+                (env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH, Some("1")),
+                (env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH, Some("1")),
+            ],
+            || {
+                let config =
+                    FrontendApiConfig::from_optional_flags(Some(false), None, None, Some(false))
+                        .expect("partial flags should produce a config");
+
+                assert!(!config.anthropic().enabled());
+                assert!(config.anthropic().strip_preamble());
+                assert!(config.streaming_dispatch().tool_dispatch());
+                assert!(!config.streaming_dispatch().reasoning_dispatch());
+            },
+        );
     }
 }
