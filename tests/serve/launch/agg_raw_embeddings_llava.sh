@@ -11,9 +11,6 @@
 #            accept chat/completions requests whose image_url points
 #            to the embeddings file (file:///tmp/llava_embeddings.safetensors).
 #
-# Known limitation: The default revision of llava-hf/llava-v1.6-mistral-7b-hf
-# may crash with certain TRT-LLM versions.  Set MODEL_REVISION to pin a
-# safe commit (e.g. 52320fb52229).
 
 set -e
 trap 'echo Cleaning up...; rm -f "${EMBEDDINGS_FILE:-/tmp/llava_embeddings.safetensors}" /tmp/_resolved_model_path.txt; kill 0' EXIT
@@ -25,7 +22,7 @@ export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 source "${DYNAMO_HOME}/examples/common/launch_utils.sh"
 export MODEL_PATH=${MODEL_PATH:-"llava-hf/llava-v1.6-mistral-7b-hf"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"llava-hf/llava-v1.6-mistral-7b-hf"}
-export MODEL_REVISION=${MODEL_REVISION:-"52320fb52229"}
+export MODEL_REVISION=${MODEL_REVISION:-""}
 export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/encode.yaml"}
 export PD_ENGINE_ARGS=${PD_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/agg.yaml"}
 export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"0"}

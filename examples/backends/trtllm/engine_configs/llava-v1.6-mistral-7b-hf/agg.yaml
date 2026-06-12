@@ -32,7 +32,7 @@ model_kwargs:
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.10
-  enable_block_reuse: false
+  enable_block_reuse: true
 
 cache_transceiver_config:
   backend: DEFAULT
