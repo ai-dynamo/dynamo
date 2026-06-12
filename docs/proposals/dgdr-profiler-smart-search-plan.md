@@ -81,8 +81,6 @@ Deployment owns model identity, hardware target, topology, backend type, and bud
 | deployment mode | `deployment_mode`: `agg`, `disagg` | all | `Pinned`+`Branch` | Pin when user specifies one mode; otherwise split studies outside Vizier and rank branches globally. |
 | backend type | `backend` + `engine_type`: `vllm`, `sglang`, `trtllm` | all | `Search` | Search only across candidate backends with comparable replay+perf model support; can be pinned by user override. Disagg first pass uses one shared backend type for prefill+decode unless mixed-backend deployment is explicitly enabled. |
 | objective | `optimization_target`: `throughput`, `e2e_latency`, `goodput`, `goodput_per_gpu`; optional SLA targets: `ttft_ms`+`itl_ms` or `e2e_ms` | profiler+planner | `Pinned` | User-selected replay objective. `goodput` and `goodput_per_gpu` require an SLA target. |
-| component enablement | `enable_kvrouter` | deployment | `Pinned` | Controls whether V2 emits/evaluates KV-router config; not a search knob. |
-| component enablement | `enable_planner` | deployment | `Pinned` | Controls whether V2 emits planner config; not a search knob. |
 | replica+parallel config | `workers`, `prefill_workers`, `decode_workers`, parallel strategy: `tp`, `tep`, `dep` (MLA) | replay+profiler+AIC | `Composite Search` | Search legal per-component parallel configs using the current profiler's TP+TEP+DEP (MLA) sweep, then compute replica counts from `gpu_budget` and combine them into one categorical candidate. PP is pinned outside this search. |
 | budget | `gpu_budget`, `max_gpu_budget`, `min_gpu_budget`, `min_endpoint` | hardware+planner | `Pinned` | `gpu_budget` is the single max-GPU budget concept and maps to planner `max_gpu_budget`; min constraints are pinned deployment inputs used by candidate generation. |
 
@@ -253,8 +251,10 @@ class SearchSpace(BaseModel):
     knob) followed by the `Pinned` knobs that group needs (scalars). When
     `deployment_mode` lists both branches the optimizer runs one flat study per
     branch and ranks across both; engine batching is read per branch
-    (prefill/decode for disagg, agg for aggregated). This is the main-sweep
-    space; planner load-predictor tuning is a separate grid sweep (see below)."""
+    (prefill/decode for disagg, agg for aggregated). Most fields drive the main
+    Vizier sweep; `load_predictor_presets` is the exception — it is swept by a
+    separate deterministic forecast-loss grid (see below), with its winner
+    pinned into the main sweep."""
     model_config = ConfigDict(extra="forbid")
 
     # deployment: branch + backend + legal parallel shapes
@@ -267,8 +267,6 @@ class SearchSpace(BaseModel):
     gpu_budget: int = 32                            # max GPUs per candidate
     min_gpu_budget: int | None = None                # lower bound for candidate generation
     min_endpoint: int | None = None                 # min replicas per component
-    enable_kvrouter: bool = True                    # emit/evaluate KV-router config
-    enable_planner: bool = True                     # emit planner config
     context_length: int | None = None               # model + runtime constraint
     startup_time: float | None = None               # worker startup time (s)
     aic_nextn: int | None = None                    # speculative-decode (MTP) depth, 1..5
@@ -327,8 +325,18 @@ class SearchSpace(BaseModel):
     ]
     planner_fpm_sampling: list[str] = ["small", "default", "large", "fine"]
     planner_load_sensitivity: list[str] = ["aggressive", "default", "conservative"]
-    # pinned
-    load_predictor_preset: str | None = None         # chosen by the separate load-predictor grid sweep
+
+    # planner load predictor — independent grid sweep (ranked by one-step-ahead
+    # forecast loss, NOT the main Vizier loop); the winning preset is pinned
+    # into the main sweep. Only relevant under predictive throughput scaling.
+    load_predictor_presets: list[str] = [
+        "constant_last",
+        "arima_raw", "arima_log1p",
+        "prophet_w20_raw", "prophet_w20_log1p",
+        "prophet_w50_raw", "prophet_w50_log1p",
+        "kalman_default_raw", "kalman_default_log1p",
+        "kalman_reactive_raw", "kalman_reactive_log1p",
+    ]
 
 
 class OptimizationTarget(str, Enum):
@@ -412,7 +420,7 @@ def run_smart_search(config: SmartSearchConfig, *, evaluator: Any = None) -> lis
 
 Each returned `Candidate` carries its decoded knob assignment (`config`) and measured `metrics`. The list is sorted best-first by `score`, which normalizes objective direction so larger is always better: `throughput`, `goodput`, and `goodput_per_gpu` use the metric directly (pick the max), while `e2e_latency` uses its negative (pick the min latency). `goodput_per_gpu` divides goodput by `used_gpus`.
 
-`SearchSpace` mirrors the deployment, engine, KV-manager, router, and planner inventories above: each group lists its `Search` / `Composite Search` dimensions (list-typed) followed by the `Pinned` knobs it needs (scalar). Planner load-predictor tuning is deliberately excluded — it runs as a separate deterministic grid sweep (see [Planner Load Predictor Independent Grid Sweep](#planner-load-predictor-independent-grid-sweep)), and its selected preset is pinned (`load_predictor_preset`) before the main sweep.
+`SearchSpace` mirrors the deployment, engine, KV-manager, router, and planner inventories above: each group lists its `Search` / `Composite Search` dimensions (list-typed) followed by the `Pinned` knobs it needs (scalar). The planner load-predictor candidate set (`load_predictor_presets`) is part of `SearchSpace` too, but it is swept by a separate deterministic grid — ranked by forecast loss, not the Vizier loop (see [Planner Load Predictor Independent Grid Sweep](#planner-load-predictor-independent-grid-sweep)) — and the winning preset is pinned into the main sweep.
 
 A single YAML maps to `SmartSearchConfig`, so the whole run is `--config`-driven:
 
