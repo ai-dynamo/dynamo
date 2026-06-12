@@ -224,25 +224,17 @@ runs:
           --debug
         echo "::endgroup::"
 
-    - name: Extend operator deployment progress deadline
+    - name: Wait for operator CRDs to be established
       shell: bash
       run: |
-        echo "::group::Patch operator progressDeadlineSeconds"
-        # The default 600s progressDeadlineSeconds can be hit on clusters where
-        # the vCluster syncer is slow to propagate pod Ready status back into
-        # virtual Deployment objects. Set to 3600s so rollout status has time.
+        echo "::group::Wait for Dynamo operator CRDs inside vCluster"
+        # CRDs live in the chart's crds/ directory so Helm installs them before any pod
+        # starts. Waiting for Established is independent of vCluster syncer pod-Ready
+        # latency, which is unreliable on some clusters (e.g. AWS with LimitRange QoS mismatch).
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          patch deployment dynamo-platform-dynamo-operator-controller-manager \
-          -n default --type=merge \
-          -p '{"spec":{"progressDeadlineSeconds":3600}}'
-        echo "::endgroup::"
-
-    - name: Wait for operator rollout
-      shell: bash
-      run: |
-        echo "::group::Wait for operator rollout inside vCluster"
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          rollout status deployment -n default --watch --timeout=900s
+          wait --for=condition=established \
+          crd/dynamographdeployments.nvidia.com \
+          --timeout=1800s
         echo "::endgroup::"
 
     - name: Debug deployment failure
