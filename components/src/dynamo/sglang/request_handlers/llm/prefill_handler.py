@@ -131,10 +131,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         input_param = self._get_input_param(inner_request)
 
-        # Multimodal: the prefill worker always runs vision encoding so the KV
-        # cache it transfers to decode includes the image/video context. The
-        # shared helper extracts the URLs identically to the decode side so both
-        # reproduce the same expanded token layout.
+        # Prefill encodes the media so the KV it transfers carries the vision
+        # context; decode extracts the same URLs to match the token layout.
         mm_kwargs = build_disagg_mm_kwargs(inner_request)
 
         routing = inner_request.get("routing") or {}

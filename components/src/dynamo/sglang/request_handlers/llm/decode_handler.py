@@ -376,9 +376,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
-            # Multimodal: decode re-encodes the image/video so it reproduces the
-            # same expanded token layout prefill used and the transferred KV lines
-            # up. Shared with prefill so both sides extract media identically.
+            # Decode re-extracts the media so its token layout matches prefill's
+            # and the transferred KV lines up.
             decode_mm_kwargs = build_disagg_mm_kwargs(request)
 
             decode = await self.engine.async_generate(

@@ -11,8 +11,7 @@ from tests.utils.multimodal import (
     make_image_payload_cached_tokens,
 )
 
-# agg_router and disaggregated prefill+decode with no encode worker (pd_no_encoder,
-# single GPU) for now; EPD variants when their generic launch wiring exists.
+# pd_no_encoder = disaggregated prefill+decode, single GPU, no encode worker.
 SGLANG_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg_router": "agg_multimodal_router.sh",
     "pd_no_encoder": "disagg_same_gpu.sh",
@@ -42,11 +41,8 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     )
                 ],
             ),
-            # Disaggregated prefill+decode on one GPU, no encode worker. Smoke
-            # test that the P/D multimodal path returns a correct image answer
-            # (prefill encodes + transfers KV; decode re-encodes for token-layout
-            # parity). Plain color-identification payload, since disagg KV
-            # semantics make the cached-tokens hit-rate assertions inapplicable.
+            # Plain color-check payload; disagg KV semantics make the
+            # cached-tokens hit-rate assertions inapplicable here.
             "pd_no_encoder": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,

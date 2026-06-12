@@ -1,27 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared helpers for multimodal inputs in disaggregated prefill/decode (P/D) serving.
-
-In disaggregated serving the prefill worker computes the KV cache (including the
-vision context) and transfers it to the decode worker over NIXL. The decode
-worker still has to reproduce the same *token layout* — the image placeholder
-must expand to the same number of patch tokens prefill used — so the transferred
-KV indices and mRoPE positions line up.
-
-Both workers achieve this by feeding the image/video URLs to ``async_generate``;
-SGLang's multimodal path downloads + encodes them and expands the placeholder
-tokens identically on each side. This matches upstream SGLang's own native PD
-behavior (its router dispatches the request to both prefill and decode, each of
-which processes the media independently). The decode worker's vision encode is
-redundant with the transferred KV, but guarantees the layout is consistent.
-
-Follow-up (not implemented here): decode could skip the GPU vision tower by
-feeding SGLang a synthetic ``precomputed_embedding`` sized from a grid forwarded
-by prefill, mirroring the dynamo vLLM backend. On SGLang that requires either a
-frontend change to forward the grid (prefill runs asynchronously under the
-bootstrap router, so it cannot hand decode the grid) or re-deriving the grid in
-decode. Tracked as a separate optimization.
+"""Multimodal media extraction shared by the disaggregated prefill and decode
+workers, so both feed identical image/video URLs to the engine and reproduce the
+same token layout the transferred KV depends on.
 """
 
 import logging
@@ -36,21 +18,9 @@ VIDEO_URL_KEY = "video_url"
 def extract_media_urls(
     mm_data: Optional[Dict[str, Any]], media_key: str
 ) -> list[str] | None:
-    """Normalize multimodal URL items from the frontend wire format.
-
-    The Rust frontend populates ``multi_modal_data`` as
-    ``{"image_url": [{"Url": "..."}, ...], "video_url": [...]}``. Plain string
-    items are also accepted for forward/backward compatibility. Returns ``None``
-    when the modality is absent so callers can pass it straight through to
-    ``async_generate`` (which treats ``None`` as "no media").
-
-    Malformed or unsupported payloads raise ``ValueError`` rather than silently
-    degrading to text. In disaggregated serving both workers depend on this
-    helper, so a dropped item would not just be a local parse bug — it would
-    desync the prefill/decode token layout and corrupt the answer. This mirrors
-    the explicit wire-variant validation in ``MultimodalEncodeWorkerHandler``;
-    in particular, frontend-decoded (``Decoded``) media is rejected because the
-    disaggregated path is URL-passthrough only.
+    """Return the URLs under ``media_key`` (``{"Url": ...}`` or string items), or
+    ``None`` if absent. Raises on malformed or frontend-decoded payloads rather
+    than silently degrading a multimodal request to text.
     """
     if not mm_data:
         return None
@@ -84,15 +54,8 @@ def extract_media_urls(
 
 
 def build_disagg_mm_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the ``image_data``/``video_data`` kwargs for a disaggregated
-    worker's ``async_generate`` call.
-
-    Both the prefill and decode workers call this so they extract the media
-    identically and reproduce the same expanded token layout — a divergence
-    between the two sides would misalign the transferred KV (the exact failure
-    this module guards against). Always returns both keys (value ``None`` when a
-    modality is absent), matching the aggregated path's long-standing call shape;
-    SGLang treats ``None`` as "no media".
+    """Build the ``image_data``/``video_data`` kwargs for a disaggregated worker's
+    ``async_generate`` call. Both keys are always present (``None`` when absent).
     """
     mm_data = request.get("multi_modal_data") or {}
     image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)

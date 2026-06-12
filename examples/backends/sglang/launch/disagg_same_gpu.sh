@@ -21,11 +21,8 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 
 MODEL="Qwen/Qwen3-0.6B"
 
-# Parse command line arguments. --model lets the test harness / caller serve a
-# different model (e.g. a small VLM to exercise the disaggregated multimodal
-# P/D path). --single-gpu is accepted as a no-op: this script already co-locates
-# both workers on one GPU, so the flag is only here for parity with the other
-# multimodal launch scripts that the test harness drives uniformly.
+# --model overrides the default (e.g. a VLM for the multimodal P/D test).
+# --single-gpu is a no-op kept for parity with the other launch scripts.
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
