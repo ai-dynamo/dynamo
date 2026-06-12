@@ -177,10 +177,6 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
-    if config.tokenizer_backend == "fastokens":
-        os.environ["DYN_TOKENIZER"] = "fastokens"
-    else:
-        os.environ.pop("DYN_TOKENIZER", None)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
         if config.migration_max_seq_len is not None
@@ -251,6 +247,7 @@ async def async_main():
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
+        "tokenizer_backend": config.tokenizer_backend,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len

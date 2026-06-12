@@ -10,6 +10,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
+    local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -103,6 +104,7 @@ pub async fn run(
                 chat_engine_factory.clone(),
                 prefill_load_estimator.clone(),
                 local_model_path,
+                model.runtime_config().tokenizer_backend,
             )
             .await?;
             http_service
@@ -183,6 +185,7 @@ async fn run_watcher(
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
+    tokenizer_backend: Option<TokenizerBackend>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
@@ -195,6 +198,7 @@ async fn run_watcher(
         metrics.clone(),
     );
     watch_obj.set_local_model_path(local_model_path);
+    watch_obj.set_tokenizer_backend(tokenizer_backend);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

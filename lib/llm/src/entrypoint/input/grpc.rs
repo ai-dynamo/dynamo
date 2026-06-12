@@ -10,6 +10,7 @@ use crate::{
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
     http::service::metrics::Metrics,
+    local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -61,6 +62,7 @@ pub async fn run(
                 prefill_load_estimator.clone(),
                 local_model_path,
                 model.metrics_prefix(),
+                model.runtime_config().tokenizer_backend,
             )
             .await?;
             grpc_service
@@ -129,6 +131,7 @@ async fn run_watcher(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     metrics_prefix: Option<String>,
+    tokenizer_backend: Option<TokenizerBackend>,
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
     let metrics = Arc::new(Metrics::new_with_prefix(metrics_prefix));
@@ -143,6 +146,7 @@ async fn run_watcher(
         metrics,
     );
     watch_obj.set_local_model_path(local_model_path);
+    watch_obj.set_tokenizer_backend(tokenizer_backend);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
