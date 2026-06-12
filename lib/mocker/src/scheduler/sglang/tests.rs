@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use dynamo_kv_router::indexer::{METRIC_EVENT_REMOVED, METRIC_EVENT_STORED};
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_kv_router::protocols::{BlockHashOptions, WorkerId, compute_block_hash_for_seq};
 use rstest::rstest;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -776,6 +776,49 @@ mod router_events {
         assert!(harness.ok_count(METRIC_EVENT_STORED) >= 2);
         harness.assert_no_event_warnings();
         harness.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_completed_output_block_uses_router_token_identity() {
+        let uuid = Uuid::from_u128(0x5a17);
+        let prompt_tokens = vec![101, 202];
+        let mut expected_request = SglangRequest {
+            uuid,
+            prompt_tokens: prompt_tokens.iter().map(|&token| token as u64).collect(),
+            max_output_tokens: 2,
+            output_ids: Vec::new(),
+            last_node: None,
+            kv_indices: Vec::new(),
+            materialized_tokens: 0,
+            cached_tokens: 0,
+            allocated_tokens: 0,
+        };
+        let first_output = expected_request.next_output_token();
+        expected_request.append_output_token(first_output);
+        let second_output = expected_request.next_output_token();
+
+        let mut expected_tokens = prompt_tokens;
+        expected_tokens.extend([first_output, second_output]);
+        let expected_hashes =
+            compute_block_hash_for_seq(&expected_tokens, 4, BlockHashOptions::default());
+
+        let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 16), ROUTER_TEST_WORKER_ID);
+        let mut request = direct_request(expected_tokens[..2].to_vec(), 2);
+        request.uuid = Some(uuid);
+        core.receive(request);
+
+        let mut now_ms = 0.0;
+        let mut hashes = Vec::new();
+        while !core.is_empty() {
+            let pass = core.execute_pass_internal(None, now_ms);
+            now_ms = pass.end_ms;
+            hashes.extend(stored_hashes(&pass.kv_events));
+        }
+
+        assert_eq!(
+            hashes, expected_hashes,
+            "completed prompt+output block should hash the same u32 token identity that SGLang generated"
+        );
     }
 
     #[tokio::test]

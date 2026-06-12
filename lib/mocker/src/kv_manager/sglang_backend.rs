@@ -150,9 +150,11 @@ impl SglangKvManager {
         token_ids: &[u64],
         kv_indices: &[usize],
         last_node: NodeId,
+        first_new_token: usize,
     ) {
-        self.publish_stored_event(token_ids, kv_indices, 0);
+        self.publish_stored_event(token_ids, kv_indices, first_new_token);
         self.cache.insert(token_ids, kv_indices);
+        self.release_unretained_finished_indices(token_ids, kv_indices);
         self.cache.dec_lock_ref(last_node);
     }
 
@@ -169,8 +171,9 @@ impl SglangKvManager {
         token_ids: &[u64],
         kv_indices: &[usize],
         last_node: NodeId,
+        first_new_token: usize,
     ) -> NodeId {
-        self.publish_stored_event(token_ids, kv_indices, 0);
+        self.publish_stored_event(token_ids, kv_indices, first_new_token);
         self.cache.insert(token_ids, kv_indices);
 
         // Find the new deepest node after insert
@@ -261,6 +264,42 @@ impl SglangKvManager {
         indices
     }
 
+    fn release_unretained_finished_indices(&mut self, token_ids: &[u64], kv_indices: &[usize]) {
+        let block_size = self.cache.page_size();
+        let complete_len = token_ids.len().min(kv_indices.len()) / block_size * block_size;
+        if complete_len == 0 {
+            return;
+        }
+
+        let (matched_len, last_node) = self.cache.match_prefix(&token_ids[..complete_len]);
+        debug_assert_eq!(
+            matched_len, complete_len,
+            "completed SGLang sequence should be fully cached after insert"
+        );
+        if matched_len < complete_len {
+            return;
+        }
+
+        let canonical_indices = self.collect_path_indices(last_node);
+        debug_assert!(
+            canonical_indices.len() >= complete_len,
+            "cached SGLang sequence path should carry complete KV indices"
+        );
+        if canonical_indices.len() < complete_len {
+            return;
+        }
+
+        let mut unretained_indices = Vec::new();
+        for block_start in (0..complete_len).step_by(block_size) {
+            let block_end = block_start + block_size;
+            if canonical_indices[block_end - 1] != kv_indices[block_end - 1] {
+                unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
+            }
+        }
+
+        self.free_indices(&unretained_indices);
+    }
+
     /// Evict tokens from the cache, publish BlockRemoved events, and log a trace.
     pub fn evict(&mut self, num_tokens: usize) {
         let (evicted, evicted_indices) = self.cache.evict(num_tokens);
@@ -288,28 +327,29 @@ impl SglangKvManager {
         token_ids: &[u64],
         indices: &[usize],
         first_new_token: usize,
-    ) {
+    ) -> usize {
         if self.kv_event_publishers.is_empty() {
-            return;
+            return 0;
         }
 
         let block_size = self.cache.page_size();
         let complete_len = token_ids.len().min(indices.len()) / block_size * block_size;
         if complete_len == 0 || first_new_token >= complete_len {
-            return;
+            return 0;
         }
 
         let mut computed_blocks = Vec::new();
-        let mut block_start = first_new_token / block_size * block_size;
-        while block_start + block_size <= complete_len {
+        let first_block_start = first_new_token / block_size * block_size;
+        let local_hashes = self.local_hashes_for_range(&token_ids[first_block_start..complete_len]);
+
+        for (block_idx, tokens_hash) in local_hashes.iter().copied().enumerate() {
+            let block_start = first_block_start + block_idx * block_size;
             let block_end = block_start + block_size;
             let representative_idx = indices[block_end - 1];
             if self.idx_to_block_hash.contains_key(&representative_idx) {
-                block_start = block_end;
                 continue;
             }
 
-            let tokens_hash = self.local_hash_for_block(&token_ids[block_start..block_end]);
             let parent_hash = if block_start == 0 {
                 None
             } else {
@@ -337,14 +377,15 @@ impl SglangKvManager {
                 },
                 *refcount,
             ));
-            block_start = block_end;
         }
+
+        let hashed_blocks = local_hashes.len();
 
         let first_new = computed_blocks
             .iter()
             .position(|(_, _, refcount)| *refcount == 1);
         let Some(first_new) = first_new else {
-            return;
+            return hashed_blocks;
         };
 
         let parent_hash = computed_blocks[first_new].0;
@@ -368,21 +409,24 @@ impl SglangKvManager {
         if let Err(e) = self.kv_event_publishers.publish(event, None) {
             tracing::warn!("Failed to publish SGLang KV event: {e}");
         }
+
+        hashed_blocks
     }
 
-    fn local_hash_for_block(&self, token_ids: &[u64]) -> LocalBlockHash {
+    fn local_hashes_for_range(&self, token_ids: &[u64]) -> Vec<LocalBlockHash> {
         let tokens = token_ids
             .iter()
-            .map(|&token| token as u32)
+            .map(|&token| {
+                u32::try_from(token).unwrap_or_else(|_| {
+                    panic!("local_hashes_for_range: token {token} exceeds router u32 token domain")
+                })
+            })
             .collect::<Vec<_>>();
         compute_block_hash_for_seq(
             &tokens,
             self.cache.page_size() as u32,
             BlockHashOptions::default(),
         )
-        .into_iter()
-        .next()
-        .expect("complete SGLang block must produce a local hash")
     }
 
     fn publish_removed_event(&mut self, evicted_indices: &[usize]) {
@@ -430,7 +474,11 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::common::protocols::KvCacheEventSink;
-    use dynamo_kv_router::protocols::compute_seq_hash_for_block;
+    use crate::scheduler::capture_router_event_sink;
+    use crate::scheduler::test_utils::{RouterIndexerHarness, stored_hashes};
+    use dynamo_kv_router::protocols::{RouterEvent, WorkerId, compute_seq_hash_for_block};
+
+    const ROUTER_TEST_WORKER_ID: WorkerId = 31;
 
     struct MockSink {
         events: Mutex<Vec<KvCacheEvent>>,
@@ -459,6 +507,30 @@ mod tests {
         }
     }
 
+    fn stored_event_count(events: &[RouterEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event.event.data, KvCacheEventData::Stored(_)))
+            .count()
+    }
+
+    fn removed_event_count(events: &[RouterEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+            .count()
+    }
+
+    fn removed_block_count(events: &[RouterEvent]) -> usize {
+        events
+            .iter()
+            .filter_map(|event| match &event.event.data {
+                KvCacheEventData::Removed(remove) => Some(remove.block_hashes.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
     #[test]
     fn test_allocate_cache_miss() {
         let mut mgr = SglangKvManager::new(100, 1, KvEventPublishers::default(), 0);
@@ -476,7 +548,7 @@ mod tests {
         // First request: allocate and cache
         let r1 = mgr.allocate_for_request(&[1, 2, 3, 4, 5]).unwrap();
         assert_eq!(r1.kv_indices.len(), 5); // 5 pages (page_size=1)
-        mgr.cache_finished_req(&[1, 2, 3, 4, 5], &r1.kv_indices, r1.last_node);
+        mgr.cache_finished_req(&[1, 2, 3, 4, 5], &r1.kv_indices, r1.last_node, 0);
 
         // Second request with shared prefix
         let r2 = mgr.allocate_for_request(&[1, 2, 3, 4, 5, 6, 7]).unwrap();
@@ -505,7 +577,7 @@ mod tests {
         let r = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
         assert_eq!(sink.event_count(), 1); // BlockStored for 3 new pages
 
-        mgr.cache_finished_req(&[1, 2, 3], &r.kv_indices, r.last_node);
+        mgr.cache_finished_req(&[1, 2, 3], &r.kv_indices, r.last_node, 0);
 
         // Second request with full cache hit → no new events
         let r2 = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
@@ -520,7 +592,7 @@ mod tests {
             SglangKvManager::new(100, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
 
         let r = mgr.allocate_for_request(&[1, 2, 3, 4, 5, 6]).unwrap();
-        mgr.cache_finished_req(&[1, 2, 3, 4, 5, 6], &r.kv_indices, r.last_node);
+        mgr.cache_finished_req(&[1, 2, 3, 4, 5, 6], &r.kv_indices, r.last_node, 0);
 
         let events = sink.clone_events();
         assert_eq!(events.len(), 1);
@@ -537,6 +609,56 @@ mod tests {
             store.blocks[0].block_hash,
             ExternalSequenceBlockHash(expected_sequence[0])
         );
+    }
+
+    #[test]
+    fn test_cache_materialization_processes_only_newly_completed_blocks() {
+        let sink = Arc::new(MockSink::new());
+        let mut mgr = SglangKvManager::new(100, 2, KvEventPublishers::default(), 0);
+        let out_of_domain_token = u32::MAX as u64 + 1;
+        let tokens = [out_of_domain_token, 2, 3, 4, 5, 6];
+
+        let alloc = mgr.allocate_for_request(&tokens[..2]).unwrap();
+        let first_last_node =
+            mgr.cache_unfinished_req(&tokens[..2], &alloc.kv_indices, alloc.last_node, 0);
+
+        let mut kv_indices = alloc.kv_indices;
+        kv_indices.extend_from_slice(&mgr.cache_mut().token_pool.allocate(4).unwrap());
+        mgr.kv_event_publishers = KvEventPublishers::new(Some(sink.clone()), None);
+
+        let last_after_first_cache =
+            mgr.cache_unfinished_req(&tokens[..4], &kv_indices[..4], first_last_node, 2);
+        let events = sink.clone_events();
+        assert_eq!(events.len(), 1);
+        let KvCacheEventData::Stored(first_store) = &events[0].data else {
+            panic!("expected first cache event to be Stored");
+        };
+        assert_eq!(
+            first_store.blocks.len(),
+            1,
+            "first unfinished cache should store only the newly completed block"
+        );
+
+        mgr.cache_finished_req(&tokens, &kv_indices, last_after_first_cache, 4);
+        let events = sink.clone_events();
+        assert_eq!(events.len(), 2);
+        let KvCacheEventData::Stored(final_store) = &events[1].data else {
+            panic!("expected final cache event to be Stored");
+        };
+        assert_eq!(
+            final_store.blocks.len(),
+            1,
+            "finished cache should store only the newly completed block"
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "local_hashes_for_range: token 4294967296 exceeds router u32 token domain"
+    )]
+    fn test_local_hashes_reject_out_of_domain_tokens() {
+        let mgr = SglangKvManager::new(100, 1, KvEventPublishers::default(), 0);
+        let _ = mgr.local_hashes_for_range(&[u32::MAX as u64 + 1]);
     }
 
     #[test]
@@ -567,6 +689,85 @@ mod tests {
         assert_eq!(remove.block_hashes.len(), 3);
     }
 
+    #[tokio::test]
+    async fn test_duplicate_completion_releases_unretained_indices_and_removes_on_eviction() {
+        let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
+        let harness = RouterIndexerHarness::new(1, ROUTER_TEST_WORKER_ID);
+        let mut mgr = SglangKvManager::new(100, 1, KvEventPublishers::new(Some(sink), None), 0);
+        let tokens = [1, 2, 3];
+
+        let req1 = mgr.allocate_for_request(&tokens).unwrap();
+        let req2 = mgr.allocate_for_request(&tokens).unwrap();
+        assert_eq!(
+            mgr.cache().token_pool.available(),
+            94,
+            "both identical requests should allocate before either is cached"
+        );
+
+        let allocation_events = buffer.drain();
+        assert_eq!(
+            stored_event_count(&allocation_events),
+            1,
+            "duplicate allocation should emit only one logical Stored event"
+        );
+        let query_hashes = stored_hashes(&allocation_events);
+        assert_eq!(query_hashes.len(), tokens.len());
+        harness.apply_events(allocation_events).await;
+
+        mgr.cache_finished_req(&tokens, &req1.kv_indices, req1.last_node, 0);
+        let req1_completion_events = buffer.drain();
+        assert_eq!(
+            stored_event_count(&req1_completion_events),
+            0,
+            "first completion should not re-emit Stored blocks"
+        );
+        assert_eq!(
+            removed_event_count(&req1_completion_events),
+            0,
+            "canonical completion should not emit Removed blocks"
+        );
+        assert_eq!(
+            mgr.cache().token_pool.available(),
+            94,
+            "canonical completion should retain the first request's slots"
+        );
+
+        mgr.cache_finished_req(&tokens, &req2.kv_indices, req2.last_node, 0);
+        let req2_completion_events = buffer.drain();
+        assert_eq!(
+            stored_event_count(&req2_completion_events),
+            0,
+            "duplicate completion should not re-emit Stored blocks"
+        );
+        assert_eq!(
+            removed_event_count(&req2_completion_events),
+            0,
+            "duplicate completion should only decrement duplicate refcounts"
+        );
+        assert_eq!(
+            mgr.cache().token_pool.available(),
+            97,
+            "duplicate completion should return unretained request slots"
+        );
+        assert_eq!(harness.overlap_for_hashes(query_hashes.clone()).await, 3);
+
+        mgr.evict(tokens.len());
+        let eviction_events = buffer.drain();
+        assert_eq!(
+            removed_event_count(&eviction_events),
+            1,
+            "evicting the canonical sequence should emit one logical Removed event"
+        );
+        assert_eq!(
+            removed_block_count(&eviction_events),
+            tokens.len(),
+            "Removed event should cover every cached block"
+        );
+        harness.apply_events(eviction_events).await;
+        assert_eq!(harness.overlap_for_hashes(query_hashes).await, 0);
+        harness.shutdown();
+    }
+
     #[test]
     fn test_allocate_oom() {
         let mut mgr = SglangKvManager::new(3, 1, KvEventPublishers::default(), 0);
@@ -587,8 +788,12 @@ mod tests {
         let chunk2_len = 6;
 
         let alloc1 = mgr.allocate_for_request(&tokens[..chunk1_len]).unwrap();
-        let new_last =
-            mgr.cache_unfinished_req(&tokens[..chunk1_len], &alloc1.kv_indices, alloc1.last_node);
+        let new_last = mgr.cache_unfinished_req(
+            &tokens[..chunk1_len],
+            &alloc1.kv_indices,
+            alloc1.last_node,
+            0,
+        );
 
         let alloc2 = mgr.allocate_for_request(&tokens[..chunk2_len]).unwrap();
         mgr.free_request(new_last);
