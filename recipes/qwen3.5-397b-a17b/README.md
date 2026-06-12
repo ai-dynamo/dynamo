@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Qwen3.5-397B-A17B-FP8 — 1P1D Disaggregation (K8s)
+# Qwen3.5-397B-A17B-FP8 — Disaggregation (K8s)
 
-Prefill/decode (1P1D) disaggregation benchmark for **`Qwen/Qwen3.5-397B-A17B-FP8`**
+Prefill/decode disaggregation benchmark for **`Qwen/Qwen3.5-397B-A17B-FP8`**
 (397B total / 17B active MoE, **hybrid Gated-Delta-Net + full-attention**) on
 Dynamo + vLLM, with an aggregated single-node baseline for comparison.
 
@@ -27,13 +27,16 @@ and emits tokens, they are just wrong past the prefill boundary. The GSM8K
 FP8 weights ≈ 397 GB fit **TP8 on one 8×H100 node** (~50 GB/GPU), so each worker
 is a single-node TP8 pod:
 
-| Config   | Services                                   | Nodes |
-|----------|--------------------------------------------|-------|
-| `disagg` | Frontend + Prefill(TP8) + Decode(TP8)      | **2** |
-| `agg`    | Frontend + single Worker(TP8)              | **1** |
+| Config   | Services                                                     | Nodes                           |
+|----------|--------------------------------------------------------------|---------------------------------|
+| `disagg` | Frontend + Prefill×`NUM_PREFILL_REPLICAS` + Decode×`NUM_DECODE_REPLICAS` (TP8 each) | `P + D` (default 1P1D = 2) |
+| `agg`    | Frontend + single Worker(TP8)                                | **1**                           |
 
-No `multinode.nodeCount` — two `gpu:"8"` workers land on separate 8-GPU nodes by
-scheduler placement. Prefill carries `--disaggregation-mode prefill` +
+Replica counts are set via `NUM_PREFILL_REPLICAS` / `NUM_DECODE_REPLICAS` env vars
+(default 1 each) before calling `envsubst` — see Usage step 2.
+
+No `multinode.nodeCount` — each `gpu:"8"` worker pod lands on a separate 8-GPU
+node by scheduler placement. Prefill carries `--disaggregation-mode prefill` +
 `--kv-transfer-config` (NixlConnector); decode omits `--disaggregation-mode`.
 
 ## Prerequisites
@@ -74,7 +77,10 @@ kubectl -n <ns> wait --for=condition=Complete job/qwen35-model-download --timeou
 **2. Deploy** a config (`disagg` shown; baseline = `qwen35-agg` + `deploy/agg.yaml`):
 ```bash
 DGD=qwen35-disagg
-envsubst '$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS' \
+# Set replica counts (default 1 each); e.g. 1P3D: NUM_PREFILL_REPLICAS=1 NUM_DECODE_REPLICAS=3
+export NUM_PREFILL_REPLICAS=${NUM_PREFILL_REPLICAS:-1}
+export NUM_DECODE_REPLICAS=${NUM_DECODE_REPLICAS:-1}
+envsubst '$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $NUM_PREFILL_REPLICAS $NUM_DECODE_REPLICAS' \
   < deploy/disagg.yaml | kubectl -n <ns> apply -f -
 
 # Operator stamps a dedicated SA ~5-10s later — patch it for the private image,

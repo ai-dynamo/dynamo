@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Qwen3.5-397B-A17B-FP8 — prefill/decode (1P1D) DISAGGREGATION.
+# Qwen3.5-397B-A17B-FP8 — prefill/decode DISAGGREGATION (configurable NpMd).
 #
 # Hybrid Gated-Delta-Net + full-attention MoE. P/D disagg of a GDN model
 # needs the decode worker to receive the GDN conv/recurrent state over the
@@ -10,9 +10,14 @@
 # image from Dynamo main — see README.
 #
 # Topology: FP8 weights ~397 GB fit TP8 on ONE 8xH100 node (~50 GB/GPU),
-# so each worker is a single-node TP8 pod. 1P1D = prefill pod (node A) +
-# decode pod (node B) = 2 nodes. No `multinode.nodeCount`: two gpu:"8"
-# workers land on separate 8-GPU nodes by scheduler placement.
+# so each worker is a single-node TP8 pod. No `multinode.nodeCount`: each
+# gpu:"8" worker lands on a separate 8-GPU node by scheduler placement.
+#
+# Replica counts are controlled by env vars (default 1 each):
+#   NUM_PREFILL_REPLICAS   number of prefill pods  (default: 1)
+#   NUM_DECODE_REPLICAS    number of decode pods   (default: 1)
+# Export before calling envsubst, e.g. for 1P3D:
+#   NUM_PREFILL_REPLICAS=1 NUM_DECODE_REPLICAS=3
 #
 # Prefill carries `--disaggregation-mode prefill` + mandatory
 # `--kv-transfer-config`; decode OMITS `--disaggregation-mode` (the
@@ -117,7 +122,7 @@ spec:
               add:
                 - IPC_LOCK
                 - SYS_RESOURCE
-      replicas: 1
+      replicas: ${NUM_PREFILL_REPLICAS}
       resources:
         requests:
           gpu: "8"
@@ -176,7 +181,7 @@ spec:
               add:
                 - IPC_LOCK
                 - SYS_RESOURCE
-      replicas: 1
+      replicas: ${NUM_DECODE_REPLICAS}
       resources:
         requests:
           gpu: "8"
