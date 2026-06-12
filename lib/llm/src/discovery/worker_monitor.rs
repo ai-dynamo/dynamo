@@ -340,9 +340,11 @@ impl OverloadedWorkerTracker {
     }
 
     fn remove_workers(&mut self, removed_workers: &[u64]) -> bool {
-        removed_workers
-            .iter()
-            .any(|worker_id| self.overloaded_workers.remove(worker_id))
+        let mut changed = false;
+        for worker_id in removed_workers {
+            changed |= self.overloaded_workers.remove(worker_id);
+        }
+        changed
     }
 
     #[cfg(test)]
@@ -900,10 +902,10 @@ mod tests {
         assert!(tracker.replace(HashSet::from([1, 3, 5])));
         assert!(!tracker.replace(HashSet::from([1, 3, 5])));
 
-        assert!(tracker.remove_workers(&[3, 4]));
+        assert!(tracker.remove_workers(&[3, 5]));
         assert!(tracker.contains(1));
         assert!(!tracker.contains(3));
-        assert!(tracker.contains(5));
+        assert!(!tracker.contains(5));
 
         assert!(!tracker.remove_workers(&[2, 4]));
     }
