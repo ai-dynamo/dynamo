@@ -323,6 +323,11 @@ const DefaultSeccompProfile = "profiles/block-iouring.json"
 type CheckpointConfiguration struct {
 	// Enabled indicates if checkpoint functionality is enabled
 	Enabled bool `json:"enabled"`
+	// DisableCudaCheckpointLaunchJob disables rewriting multi-GPU checkpoint
+	// Jobs to run under `cuda-checkpoint --launch-job`. Set this for
+	// helper-only deployments whose images do not include the cuda-checkpoint
+	// launcher binary.
+	DisableCudaCheckpointLaunchJob bool `json:"disableCudaCheckpointLaunchJob,omitempty"`
 	// Seccomp controls the localhost seccomp profile applied to checkpoint and
 	// restore pods. A nil value means "use the default profile"; set
 	// Seccomp.Disabled=true to disable seccomp injection entirely.

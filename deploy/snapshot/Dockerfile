@@ -10,6 +10,12 @@
 # Optional targets for CI:
 #   docker build --target linter .   # Run linting
 #   docker build --target tester .   # Run tests
+#
+# For arm64 helper-only images, omit the amd64-only NVIDIA cuda-checkpoint
+# launcher binary:
+#   docker build --platform linux/arm64 --target agent \
+#     --build-arg SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=false \
+#     -t snapshot-agent:arm64 .
 
 # =============================================================================
 # Build Arguments
@@ -23,6 +29,7 @@ ARG GO_VERSION=1.26.3
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
+ARG SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=true
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
@@ -100,6 +107,8 @@ FROM ubuntu:24.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
+ARG TARGETARCH=amd64
+ARG SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -130,7 +139,28 @@ RUN git init /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
+RUN if [ "${SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY}" = "true" ]; then \
+      if [ "${TARGETARCH}" != "amd64" ]; then \
+        echo "ERROR: cuda-checkpoint launcher binary is only available for amd64; set SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=false for helper-only ${TARGETARCH} builds" >&2; \
+        exit 1; \
+      fi; \
+      git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint; \
+    else \
+      mkdir -p /tmp/cuda-checkpoint; \
+    fi
+
+# =============================================================================
+# Stage: Optional CUDA checkpoint launcher binary installer
+# =============================================================================
+FROM criu-builder AS cuda-checkpoint-binary-installer
+
+ARG SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=true
+
+RUN mkdir -p /cuda-checkpoint-binary/usr/local/sbin /cuda-checkpoint-binary/legal/cuda-checkpoint \
+    && if [ "${SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY}" = "true" ]; then \
+      cp /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /cuda-checkpoint-binary/usr/local/sbin/cuda-checkpoint; \
+      cp /tmp/cuda-checkpoint/LICENSE /cuda-checkpoint-binary/legal/cuda-checkpoint/LICENSE; \
+    fi
 
 # =============================================================================
 # Stage: Agent - Final snapshot-agent image
@@ -138,9 +168,10 @@ RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 FROM ${AGENT_BASE_IMAGE} AS agent
 
 ARG TARGETARCH=amd64
+ARG SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=true
 
-RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
+RUN if [ "${SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY}" = "true" ] && [ "${TARGETARCH}" != "amd64" ]; then \
+      echo "ERROR: cuda-checkpoint launcher binary is only available for amd64; set SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=false for helper-only ${TARGETARCH} builds" >&2; exit 1; \
     fi
 
 # Install CRIU runtime dependencies
@@ -167,11 +198,12 @@ COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
-# Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+# Copy CUDA checkpoint tooling. cuda-checkpoint is optional for helper-only
+# images; cuda-checkpoint-helper is always required by snapshot-agent.
+COPY --from=cuda-checkpoint-binary-installer /cuda-checkpoint-binary/ /
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
+RUN chmod +x /usr/local/bin/cuda-checkpoint-helper \
+    && if [ -f /usr/local/sbin/cuda-checkpoint ]; then chmod +x /usr/local/sbin/cuda-checkpoint; fi
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
@@ -194,12 +226,13 @@ FROM ${BASE_IMAGE} AS placeholder
 
 ARG BASE_IMAGE
 ARG TARGETARCH=amd64
+ARG SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=true
 ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
 
 USER root
 
-RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
+RUN if [ "${SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY}" = "true" ] && [ "${TARGETARCH}" != "amd64" ]; then \
+      echo "ERROR: cuda-checkpoint launcher binary is only available for amd64; set SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=false for helper-only ${TARGETARCH} builds" >&2; exit 1; \
     fi
 
 # Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter)
@@ -225,11 +258,12 @@ COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version && echo "CRIU installed successfully"
 
-# Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+# Copy CUDA checkpoint tooling. cuda-checkpoint is optional for helper-only
+# images; cuda-checkpoint-helper is always required by nsrestore.
+COPY --from=cuda-checkpoint-binary-installer /cuda-checkpoint-binary/ /
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
+RUN chmod +x /usr/local/bin/cuda-checkpoint-helper \
+    && if [ -f /usr/local/sbin/cuda-checkpoint ]; then chmod +x /usr/local/sbin/cuda-checkpoint; fi
 
 # Copy nsrestore binary (invoked by DaemonSet via nsenter)
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore

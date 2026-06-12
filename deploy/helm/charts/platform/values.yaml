@@ -263,6 +263,8 @@ dynamo-operator:
     enabled: false
     # -- Image used by best-effort artifact cleanup Jobs for automatically-created checkpoints. The image must provide /bin/sh and rm.
     cleanupImage: busybox:1.36
+    # -- Disable cuda-checkpoint --launch-job wrapping for helper-only snapshot images that do not include the amd64-only cuda-checkpoint launcher binary.
+    disableCudaCheckpointLaunchJob: false
     # -- Optional PVC storage used when the snapshot-agent is installed outside
     # workload namespaces with snapshot.storage.accessMode=podMount. Set
     # create=true for operator-managed namespace PVCs, or omit/create=false to

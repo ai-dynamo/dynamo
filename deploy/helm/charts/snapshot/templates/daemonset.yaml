@@ -56,10 +56,11 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- if and .Values.daemonset.affinity (hasKey .Values.daemonset.affinity "nodeAffinity") }}
-      {{- fail "daemonset.affinity.nodeAffinity is not supported because the chart already enforces kubernetes.io/arch=amd64; use daemonset.nodeSelector or daemonset.affinity.podAffinity/podAntiAffinity instead" }}
+      {{- fail "daemonset.affinity.nodeAffinity is not supported because the chart already enforces kubernetes.io/arch from daemonset.nodeArch; use daemonset.nodeSelector or daemonset.affinity.podAffinity/podAntiAffinity instead" }}
       {{- end }}
       affinity:
-        # cuda-checkpoint only supports x86_64 — never schedule on arm64 nodes
+        # The optional cuda-checkpoint launcher binary is amd64-only. Helper-only
+        # images may set daemonset.nodeArch=arm64.
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
@@ -67,7 +68,7 @@ spec:
                   - key: kubernetes.io/arch
                     operator: In
                     values:
-                      - amd64
+                      - {{ .Values.daemonset.nodeArch | default "amd64" | quote }}
         {{- with .Values.daemonset.affinity }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

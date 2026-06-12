@@ -109,6 +109,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `daemonset.image.repository` | Snapshot-agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
 | `daemonset.image.tag` | Snapshot-agent image tag | `1.0.0` |
+| `daemonset.nodeArch` | Required node architecture for the agent. Keep `amd64` when the image includes the cuda-checkpoint launcher; set `arm64` for helper-only images | `amd64` |
 | `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |

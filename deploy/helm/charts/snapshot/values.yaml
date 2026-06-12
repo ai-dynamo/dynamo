@@ -103,6 +103,12 @@ daemonset:
   nodeSelector:
     nvidia.com/gpu.present: "true"
 
+  # CPU architecture for the snapshot-agent DaemonSet. amd64 is the default
+  # because the optional cuda-checkpoint launcher binary is amd64-only. Set to
+  # arm64 when deploying a helper-only image built with
+  # SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=false.
+  nodeArch: amd64
+
   # Tolerations for GPU nodes
   tolerations:
     - key: nvidia.com/gpu

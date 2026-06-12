@@ -164,7 +164,7 @@ func buildCheckpointJob(
 			}
 		}
 	}
-	wrapLaunchJob := gpuCount > 1
+	wrapLaunchJob := gpuCount > 1 && !config.Checkpoint.DisableCudaCheckpointLaunchJob
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {

@@ -319,6 +319,32 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	}
 }
 
+func TestBuildCheckpointJobCanDisableCudaCheckpointLaunchJob(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers = []corev1.Container{
+		{
+			Name:    consts.MainContainerName,
+			Image:   "test-image:latest",
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2"),
+				},
+			},
+		},
+	}
+
+	r := makeCheckpointReconciler(s, ckpt)
+	r.Config.Checkpoint.DisableCudaCheckpointLaunchJob = true
+	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+
+	main := &job.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, main.Command)
+	assert.Empty(t, main.Args)
+}
+
 func TestBuildCheckpointJobDRAResourceClaimsForCudaCheckpoint(t *testing.T) {
 	tests := []struct {
 		name          string

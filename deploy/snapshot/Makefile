@@ -18,8 +18,14 @@ endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
 CONTAINER_TOOL ?= docker
-# Snapshot runtime images ship cuda-checkpoint and are amd64-only.
+# Defaults preserve the amd64 image that ships the cuda-checkpoint launcher.
+# For arm64 helper-only images, build with:
+#   make docker-build-agent RUNTIME_IMAGE_PLATFORM=linux/arm64 SNAPSHOT_HELPER_ONLY=true
 RUNTIME_IMAGE_PLATFORM ?= linux/amd64
+SNAPSHOT_HELPER_ONLY ?= false
+SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY ?= true
+EFFECTIVE_SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY = $(if $(filter true,$(SNAPSHOT_HELPER_ONLY)),false,$(SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY))
+SNAPSHOT_BUILD_ARGS = --build-arg SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY=$(EFFECTIVE_SNAPSHOT_USE_CUDA_CHECKPOINT_BINARY)
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 SHELL = /usr/bin/env bash -o pipefail
@@ -65,13 +71,14 @@ build: fmt vet ## Build snapshot-agent binary.
 ##@ Docker
 
 .PHONY: docker-build-agent
-docker-build-agent: ## Build snapshot-agent docker image (linux/amd64 only).
+docker-build-agent: ## Build snapshot-agent docker image.
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target agent \
 		$(CRIU_BUILD_ARGS) \
+		$(SNAPSHOT_BUILD_ARGS) \
 		-t ${IMG} .
 
 .PHONY: docker-build-placeholder
-docker-build-placeholder: ## Build placeholder image for checkpoint restore (linux/amd64 only). Requires PLACEHOLDER_BASE_IMG.
+docker-build-placeholder: ## Build placeholder image for checkpoint restore. Requires PLACEHOLDER_BASE_IMG.
 ifndef PLACEHOLDER_BASE_IMG
 	$(error PLACEHOLDER_BASE_IMG is required. Example: make docker-build-placeholder PLACEHOLDER_BASE_IMG=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1-cuda13)
 endif
@@ -83,6 +90,7 @@ endif
 	if [ -z "$$BASE_IMAGE_USER" ]; then BASE_IMAGE_USER=root; fi; \
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target placeholder \
 		$(CRIU_BUILD_ARGS) \
+		$(SNAPSHOT_BUILD_ARGS) \
 		--build-arg BASE_IMAGE=${PLACEHOLDER_BASE_IMG} \
 		--build-arg BASE_IMAGE_USER=$$BASE_IMAGE_USER \
 		-t ${PLACEHOLDER_IMG} .
