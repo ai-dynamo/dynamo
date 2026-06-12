@@ -70,6 +70,29 @@ def should_register_model_ignore_weights(config: Config) -> bool:
     return uses_modelexpress_load_format(config)
 
 
+def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
+    """Pick the path passed to `register_model` for MDC construction.
+
+    When `--model` is an object-storage URI (`s3://...`, `gs://...`, `az://...`),
+    vLLM's `maybe_pull_model_tokenizer_for_runai` (vllm/config/model.py) pulls
+    metadata files to a local temp dir and rewrites `vllm_config.model_config`:
+
+      - `.model_weights = <original URI>`  (used by runai-streamer / mx plugin)
+      - `.model = <local temp dir>`        (contains config.json, tokenizer, …)
+
+    Dynamo's `register_model` would otherwise try to resolve the raw URI via
+    `hub.rs` → ModelExpress, which has no S3 provider and 404s. Returning the
+    local dir lets `register_model` take its `fs::exists` shortcut.
+
+    Temporary vLLM-only workaround until `hub.rs` learns object-storage routing.
+    Falls back to `config.model` whenever vLLM did not pull (HF id, local path,
+    or older vLLM without `model_weights`).
+    """
+    if getattr(vllm_config.model_config, "model_weights", ""):
+        return vllm_config.model_config.model
+    return config.model
+
+
 def build_headless_namespace(config: Config) -> argparse.Namespace:
     """Build an argparse Namespace from engine_args for vLLM's run_headless().
 
@@ -673,7 +696,7 @@ async def register_vllm_model(
         model_input,
         model_type,
         generate_endpoint,
-        config.model,
+        _register_model_source_path(config, vllm_config),
         config.served_model_name,
         context_length=vllm_config.model_config.max_model_len,
         kv_cache_block_size=runtime_values["kv_event_block_size"],
