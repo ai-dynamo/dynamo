@@ -38,6 +38,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -55,7 +56,7 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: 'Both:'
+        normal_text: 'Both: '
       vllm:
         calls:
         - name: get_weather
@@ -68,6 +69,7 @@ cases:
       sglang:
         calls: []
         normal_text: 'Both:'
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -90,6 +92,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.2.b:
     description: Two back-to-back fence pairs — not applicable to this family
     reason: |-

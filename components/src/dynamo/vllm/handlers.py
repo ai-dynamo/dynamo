@@ -477,6 +477,18 @@ def _attach_prompt_logprobs_engine_data(
         engine_data["prompt_logprobs"] = prompt_logprobs
 
 
+def _attach_routed_experts_engine_data(
+    tok: Dict[str, Any], routed_experts: Dict[str, Any]
+) -> None:
+    # routed_experts rides the engine's opaque engine_data passthrough (surfaced
+    # by the Rust postprocessor as nvext.routed_experts); disaggregated_params
+    # stays KV-transfer only. Merge via setdefault so we don't clobber any
+    # prompt_logprobs already attached to engine_data on the final chunk.
+    engine_data = tok.setdefault("engine_data", {})
+    if isinstance(engine_data, dict):
+        engine_data["routed_experts"] = routed_experts
+
+
 def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
     """Yield each nvext dict on the request, in priority order:
 
@@ -641,7 +653,9 @@ def _accumulate_engine_data(
     tok["engine_data"] = engine_data
 
 
-def _serialize_routed_experts(routed_experts: Any) -> Optional[Dict[str, Any]]:
+def _serialize_routed_experts(
+    routed_experts: Any, start: int = 0
+) -> Optional[Dict[str, Any]]:
     if routed_experts is None:
         return None
 
@@ -655,10 +669,15 @@ def _serialize_routed_experts(routed_experts: Any) -> Optional[Dict[str, Any]]:
         return None
 
     return {
-        "data": base64.b85encode(tobytes()).decode("ascii"),
+        # base64, matching vLLM-native encoding.
+        "data": base64.b64encode(tobytes()).decode("ascii"),
         "shape": [int(dim) for dim in shape],
+        # Row offset of the first returned routing entry within the full
+        # sequence (= SamplingParams.routed_experts_prompt_start; vLLM trims the
+        # leading prompt rows). Lets the RL consumer align the completion.
+        "start": int(start),
         # Encode dtype so the consumer decodes the raw bytes with the right
-        # element type instead of assuming int32.
+        # element type instead of assuming a fixed width.
         "dtype": str(getattr(routed_experts, "dtype", "")),
     }
 
@@ -733,6 +752,19 @@ def build_sampling_params(
             continue
         if value is not None and hasattr(sampling_params, key):
             setattr(sampling_params, key, value)
+
+    # routed_experts_prompt_start (RL capture offset) must be a non-negative
+    # int; reject bad client values so the worker emits a sane `start` instead
+    # of a bogus offset the consumer cannot align (vLLM clamps the upper bound).
+    reps = getattr(sampling_params, "routed_experts_prompt_start", None)
+    if reps is not None and (
+        isinstance(reps, bool) or not isinstance(reps, int) or reps < 0
+    ):
+        logger.warning(
+            "Ignoring invalid routed_experts_prompt_start=%r (want non-negative int)",
+            reps,
+        )
+        sampling_params.routed_experts_prompt_start = 0
 
     # Apply stop_conditions
     for key, value in request.get("stop_conditions", {}).items():
@@ -2046,6 +2078,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             }
 
                             runtime_config = ModelRuntimeConfig()
+                            runtime_config.context_length = self.model_max_len
                             runtime_config.tool_call_parser = (
                                 self.config.dyn_tool_call_parser
                             )
@@ -2980,7 +3013,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "token_ids": token_ids,
                     }
                     # Capture the raw routed_experts cheaply here; serialize it
-                    # only once on the final chunk (base85-encoding a tensor on
+                    # only once on the final chunk (base64-encoding a tensor on
                     # every streamed chunk would be wasted work, since only the
                     # final value is emitted).
                     raw_routed_experts = getattr(output, "routed_experts", None)
@@ -3010,16 +3043,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
                             )
+                        # Emit the EFFECTIVE trim offset: clamp the requested
+                        # routed_experts_prompt_start to the prompt length. vLLM
+                        # clamps the returned routing rows the same way, so an
+                        # out-of-range request (e.g. start=999 on a 100-token
+                        # prompt) would otherwise publish a `start` the consumer
+                        # cannot align to the (clamped) tensor.
+                        raw_start = int(
+                            getattr(sampling_params, "routed_experts_prompt_start", 0)
+                            or 0
+                        )
+                        prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
+                        effective_start = min(raw_start, prompt_len)
                         routed_experts = _serialize_routed_experts(
-                            raw_routed_experts_by_output.get(output_idx)
+                            raw_routed_experts_by_output.get(output_idx),
+                            start=effective_start,
                         )
                         if routed_experts is not None:
-                            existing = out.get("disaggregated_params")
-                            disaggregated_params: Dict[str, Any] = (
-                                dict(existing) if isinstance(existing, dict) else {}
-                            )
-                            disaggregated_params["routed_experts"] = routed_experts
-                            out["disaggregated_params"] = disaggregated_params
+                            _attach_routed_experts_engine_data(out, routed_experts)
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "

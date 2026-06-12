@@ -199,7 +199,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -226,6 +226,7 @@ impl KvRouterConfig {
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
         mut overlap_score_credit: f64,
+        overlap_score_credit_decay: f64,
         mut prefill_load_scale: f64,
         router_queue_by_incoming_missing_isl: Option<Vec<(usize, usize)>>,
     ) -> PyResult<Self> {
@@ -239,6 +240,7 @@ impl KvRouterConfig {
 
         let inner = RsKvRouterConfig {
             overlap_score_credit,
+            overlap_score_credit_decay,
             prefill_load_scale,
             host_cache_hit_weight,
             disk_cache_hit_weight,
@@ -304,6 +306,20 @@ impl KvRouterConfig {
     }
 
     #[getter]
+    fn overlap_score_credit_decay(&self) -> f64 {
+        self.inner.overlap_score_credit_decay
+    }
+
+    #[setter]
+    fn set_overlap_score_credit_decay(&mut self, value: f64) -> PyResult<()> {
+        let mut inner = self.inner.clone();
+        inner.overlap_score_credit_decay = value;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    #[getter]
     fn overlap_score_weight(&self) -> f64 {
         self.inner.prefill_load_scale
     }
@@ -335,16 +351,20 @@ impl KvRouterConfig {
         Ok(())
     }
 
-    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, prefill_load_scale=None))]
+    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, overlap_score_credit_decay=None, prefill_load_scale=None))]
     fn with_overrides(
         &self,
         overlap_score_weight: Option<f64>,
         overlap_score_credit: Option<f64>,
+        overlap_score_credit_decay: Option<f64>,
         prefill_load_scale: Option<f64>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(credit) = overlap_score_credit {
             inner.overlap_score_credit = credit;
+        }
+        if let Some(decay) = overlap_score_credit_decay {
+            inner.overlap_score_credit_decay = decay;
         }
         if let Some(scale) = prefill_load_scale {
             inner.prefill_load_scale = scale;
@@ -446,8 +466,8 @@ pub(crate) struct EntrypointArgs {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
-    metrics_config: MetricsConfig,
-    frontend_api_config: FrontendApiConfig,
+    metrics_config: Option<MetricsConfig>,
+    frontend_api_config: Option<FrontendApiConfig>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
@@ -467,7 +487,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, metrics_prefix=None, enable_anthropic_api=false, strip_anthropic_preamble=false, enable_streaming_tool_dispatch=false, enable_streaming_reasoning_dispatch=false, tokenizer_backend=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, tokenizer_backend=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -495,10 +515,10 @@ impl EntrypointArgs {
         chat_engine_factory: Option<PyObject>,
         aic_perf_config: Option<AicPerfConfig>,
         metrics_prefix: Option<String>,
-        enable_anthropic_api: bool,
-        strip_anthropic_preamble: bool,
-        enable_streaming_tool_dispatch: bool,
-        enable_streaming_reasoning_dispatch: bool,
+        enable_anthropic_api: Option<bool>,
+        strip_anthropic_preamble: Option<bool>,
+        enable_streaming_tool_dispatch: Option<bool>,
+        enable_streaming_reasoning_dispatch: Option<bool>,
         tokenizer_backend: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
@@ -554,8 +574,8 @@ impl EntrypointArgs {
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             http_metrics_port,
-            metrics_config: MetricsConfig::new(metrics_prefix),
-            frontend_api_config: FrontendApiConfig::from_flags(
+            metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
+            frontend_api_config: FrontendApiConfig::from_optional_flags(
                 enable_anthropic_api,
                 strip_anthropic_preamble,
                 enable_streaming_tool_dispatch,
@@ -609,9 +629,14 @@ pub fn make_engine<'p>(
         .migration_max_seq_len(args.migration_max_seq_len)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
-        .http_metrics_port(args.http_metrics_port)
-        .metrics_config(args.metrics_config.clone())
-        .frontend_api_config(args.frontend_api_config.clone())
+        .http_metrics_port(args.http_metrics_port);
+    if let Some(metrics_config) = args.metrics_config.clone() {
+        builder.metrics_config(metrics_config);
+    }
+    if let Some(frontend_api_config) = args.frontend_api_config.clone() {
+        builder.frontend_api_config(frontend_api_config);
+    }
+    builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))

@@ -75,6 +75,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.4.e:
     description: Malformed-prefix recovery — n/a for this family's syntax
     reason: |-

@@ -114,14 +114,14 @@ async def test_first_fire_anchored_on_registration_time():
     fire on the first pipeline tick — it must wait the full interval
     since registration before its first call.
 
-    This is the PSM-parity semantic: PSM's ``initial_tick(start_s)``
-    schedules the first throughput-cadence fire at ``start_s +
-    throughput_adjustment_interval_seconds``, not at ``start_s`` itself.
+    This preserves the intended cadence: the first throughput-cadence
+    fire happens at ``start_s + throughput_adjustment_interval_seconds``,
+    not at ``start_s`` itself.
 
     Pre-fix the first-ever branch in ``_is_due`` returned True
     regardless of interval, which would cause PR #2's
     ``BuiltinThroughputPropose`` (``interval=180s``) to fire on the
-    first 5s load tick and permanently drift 5s ahead of PSM's
+    first 5s load tick and permanently drift 5s ahead of the intended
     180/360/540 cadence.
     """
     server, scheduler, _, clock = _make_ctx()
@@ -271,8 +271,7 @@ async def test_accept_only_plugin_respects_execution_interval():
     server, scheduler, _, clock = _make_ctx()
     await _register(server, "p1", "propose", 10, execution_interval_seconds=10.0)
     # First fire happens when the full interval elapses since
-    # registration (PSM-parity anchor — see test_first_fire_anchored_
-    # on_registration_time).
+    # registration (see test_first_fire_anchored_on_registration_time).
     clock.advance(10.0)
     active = scheduler.compute_active_set(clock.monotonic(), "propose")
     assert [p.plugin_id for p in active.triggered] == ["p1"]

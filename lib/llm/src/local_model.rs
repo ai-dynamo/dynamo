@@ -41,13 +41,17 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
-    match std::env::var(ENV_SELF_HOST_METADATA) {
-        Ok(v) => matches!(
-            v.trim().to_lowercase().as_str(),
+    let value = std::env::var(ENV_SELF_HOST_METADATA).ok();
+    self_host_metadata_default(value.as_deref())
+}
+
+fn self_host_metadata_default(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
+        )
+    })
 }
 
 pub struct LocalModelBuilder {
@@ -314,6 +318,11 @@ impl LocalModelBuilder {
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
 
+        // Override max number of tokens in context. This is usually used to limit kv cache allocation.
+        if let Some(context_length) = self.context_length {
+            self.runtime_config.context_length = Some(context_length);
+        }
+
         // Pick up a stable routing id from `DYN_STABLE_ROUTING_ID`. No-op if the caller
         // already supplied one or the env var is unset. Published in etcd so routing
         // layers can keep cache assignments stable across worker restarts.
@@ -388,11 +397,6 @@ impl LocalModelBuilder {
         card.set_name(self.model_name.as_deref().unwrap_or(&alt));
 
         card.kv_cache_block_size = self.kv_cache_block_size;
-
-        // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
-        if let Some(context_length) = self.context_length {
-            card.context_length = context_length;
-        }
 
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
@@ -859,24 +863,21 @@ fn harvest_extra_files(
 mod env_self_host_metadata_tests {
     use super::*;
 
-    #[serial_test::serial]
     #[test]
     fn env_default_parsing() {
-        // SAFETY: all env mutations are serialized via serial_test.
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
-        assert!(!env_self_host_metadata_default(), "unset → default OFF");
+        assert!(!self_host_metadata_default(None), "unset → default OFF");
 
         for v in [
             "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
         ] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(!env_self_host_metadata_default(), "expected OFF for {v:?}");
+            assert!(
+                !self_host_metadata_default(Some(v)),
+                "expected OFF for {v:?}"
+            );
         }
         for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(env_self_host_metadata_default(), "expected ON for {v:?}");
+            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
         }
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
     }
 }
 

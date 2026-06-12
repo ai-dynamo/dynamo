@@ -189,7 +189,17 @@ kubectl get pvc snapshot-pvc -n ${NAMESPACE}
 
 ### 4. Create a standalone `DynamoCheckpoint`
 
-The checkpoint Job pod template should match the worker container you want to checkpoint. For a standalone checkpoint, the important parts are the legacy `spec.identity` metadata, a container named `main`, and the placeholder image; the rest of the pod template should mirror your normal worker config. Extra containers are allowed, but only `main` is checkpointed unless `spec.job.targetContainerName` selects another container.
+> [!WARNING]
+> `checkpoint.mode` is deprecated. Use `checkpoint.enabled` and omit `mode`.
+> `spec.identity` is legacy v1alpha1 compatibility only; use `checkpointRef`
+> to restore an existing checkpoint.
+
+The checkpoint Job pod template should match the worker container you want to
+checkpoint. For a standalone checkpoint, the important parts are the deprecated
+legacy `spec.identity` metadata, a container named `main`, and the placeholder
+image; the rest of the pod template should mirror your normal worker config.
+Extra containers are allowed, but only `main` is checkpointed unless
+`spec.job.targetContainerName` selects another container.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -287,40 +297,80 @@ kubectl get pods -n ${NAMESPACE} -w
 
 The `VllmDecodeWorker` pod should restore from the ready checkpoint instead of creating a new one.
 
-## DGD Auto Flow
+## Choosing a DGD checkpoint flow
 
-`checkpointRef` is the most explicit path. If you set it, the DGD uses that
-existing `DynamoCheckpoint` and does not create a new automatic checkpoint for
-the component. This is the escape hatch for users who intentionally want to
-reuse a retained or pre-warmed checkpoint and accept the compatibility risk.
-Treat the pod template as a compatibility template for the same workload: once
-the checkpoint is ready, restore admission replaces the target container's
-command and args with the restore placeholder, and the restored process resumes
-from the checkpointed state rather than from newly supplied command-line or
-environment settings.
+Enable checkpointing with `checkpoint.enabled: true`. The presence of
+`checkpointRef` selects the restore flow:
 
-Without `checkpointRef`, `mode: Auto` is the DGD-managed path: for each
-checkpoint-enabled worker generation, the DGD controller creates a DGD-owned
-`DynamoCheckpoint` and the checkpoint controller starts a checkpoint Job.
-Automatic DGD checkpoints are not reused across DGDs, even when two manifests
-are identical.
+| Config | What happens | Use when |
+|--------|--------------|----------|
+| `enabled: true` and no `checkpointRef` | The DGD creates and owns one automatic checkpoint per worker generation. | Normal DGD-managed checkpointing. |
+| `enabled: true` and `checkpointRef: <name>` | The DGD restores from the named existing checkpoint and creates none. | Explicit restore from a retained or pre-warmed checkpoint. |
 
-The automatic checkpoint ID is derived from the DGD namespace/name/UID, component name, and active worker hash. The DGD UID prevents cross-DGD reuse; the worker hash keeps a scale down/up on the same worker generation using the same DGD-scoped checkpoint while creating a new checkpoint for a new worker generation.
+In v1beta1, replace the old `mode: Auto` form with:
 
-By default, when the DGD is deleted, the operator deletes DGD-owned automatic
-`DynamoCheckpoint` CRs. The checkpoint finalizer then removes the corresponding
-checkpoint artifact from the checkpoint PVC. Set `deletionPolicy: Retain` to
-keep the automatic checkpoint CR and stored artifact after the DGD is deleted.
-Retained checkpoints can later be used explicitly with `checkpointRef`.
+```yaml
+experimental:
+  checkpoint:
+    enabled: true
+```
 
-By default, `startupPolicy: Immediate` starts workers cold while the checkpoint job runs in the background. Once the checkpoint becomes `Ready`, only newly-created Pods restore from it. Existing Pods are not mutated or restarted just because the checkpoint became ready.
-
-If you want workers to wait for the checkpoint before starting, set `startupPolicy: WaitForCheckpoint`. That policy keeps normal worker replicas at zero until the checkpoint is `Ready`, then starts workers from the checkpoint.
+In v1alpha1, keep the existing enable flag and omit `mode`:
 
 ```yaml
 checkpoint:
   enabled: true
-  mode: Auto
+```
+
+The old `mode` field is deprecated. Omit it in new configs.
+
+`startupPolicy` controls when normal workers start relative to checkpoint
+readiness. `Immediate` starts workers cold while the checkpoint job runs;
+`WaitForCheckpoint` keeps replicas at zero until the checkpoint is ready.
+
+`deletionPolicy` applies only to DGD-owned automatic checkpoints. `Delete` removes
+the checkpoint CR and artifact with the DGD; `Retain` keeps them so they can be
+used later with `checkpointRef`.
+
+## DGD-managed automatic checkpoints
+
+Without `checkpointRef`, the DGD-managed path is used. For each
+checkpoint-enabled worker generation, the DGD controller creates a DGD-owned
+`DynamoCheckpoint`, and the checkpoint controller starts a checkpoint Job.
+Automatic checkpoints are not reused across DGDs, even when two manifests are
+identical.
+
+The automatic checkpoint ID is derived from the DGD namespace/name/UID,
+component name, and active worker hash. The DGD UID prevents cross-DGD reuse;
+the worker hash lets a scale down/up on the same worker generation use the same
+DGD-scoped checkpoint while creating a new checkpoint for a new worker
+generation.
+
+Treat a restored pod template as a compatibility template for the same workload:
+once the checkpoint is ready, restore admission replaces the target container's
+command and args with the restore placeholder, and the restored process resumes
+from the checkpointed state rather than newly supplied command-line or
+environment settings.
+
+With `startupPolicy: Immediate`, existing Pods are not mutated or restarted just
+because the checkpoint became ready. Scale or roll the worker to create restored
+Pods after the checkpoint is ready.
+
+For v1beta1 components, the automatic checkpoint config is:
+
+```yaml
+experimental:
+  checkpoint:
+    enabled: true
+    startupPolicy: Immediate # default; optional
+    deletionPolicy: Delete  # default; use Retain to keep CR/artifact after DGD deletion
+```
+
+For v1alpha1 services, the automatic checkpoint config is:
+
+```yaml
+checkpoint:
+  enabled: true
   startupPolicy: Immediate # default; optional
   deletionPolicy: Delete  # default; use Retain to keep CR/artifact after DGD deletion
 ```
@@ -346,7 +396,6 @@ spec:
       replicas: 1
       checkpoint:
         enabled: true
-        mode: Auto
         startupPolicy: Immediate
         deletionPolicy: Delete
       extraPodSpec:
@@ -438,10 +487,9 @@ this ID is scoped to a single DGD/component worker generation. It is not a
 compatibility claim across DGDs, and identical manifests are not treated as
 proof that a checkpoint can be reused safely.
 
-The legacy `spec.identity` shape is still required on standalone
-`DynamoCheckpoint` objects and remains the fallback for explicit/manual
-workflows. When a standalone checkpoint does not already have
-`status.checkpointID` or the checkpoint-ID label, the operator computes the
+The deprecated legacy `spec.identity` shape is still required on standalone
+v1alpha1 `DynamoCheckpoint` objects. When a standalone checkpoint does not
+already have `status.checkpointID` or the checkpoint-ID label, the operator computes the
 legacy **16-character SHA256 hash** (64 bits) from these fields:
 
 | Legacy field | Required | Affects legacy hash | Example |
@@ -462,10 +510,14 @@ Fields that do **not** change the legacy hash include:
 - resource requests/limits
 - logging or observability configuration
 
-DGD-managed automatic checkpoints ignore this legacy identity as a reuse
-boundary. The DGD controller creates its own DGD-scoped checkpoint ID and
-synthesizes a legacy identity only because the v1alpha1 `DynamoCheckpoint` API
-still requires the field.
+DGD-managed automatic checkpoints ignore legacy identity as a reuse boundary:
+omit `identity`; use `checkpointRef` to restore an existing checkpoint. The DGD
+controller creates a DGD-scoped checkpoint ID and only synthesizes legacy
+identity because the v1alpha1 `DynamoCheckpoint` API still requires it.
+
+Checkpoint job launch behavior is inferred from the checkpoint Job pod template
+(GPU resources or DRA claims), not from legacy identity fields such as
+`tensorParallelSize` or `pipelineParallelSize`.
 
 ## `DynamoCheckpoint` CRD
 
