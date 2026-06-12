@@ -114,8 +114,8 @@ ROUTER_DISAGG_OVERLOAD_503_CASES = (
             "num_prefill": 2,
             "num_decode": 1,
             "max_tokens": 1,
-            # Gate the PREFILL pool only (DYN-3212: this was a silent no-op in
-            # disagg before the fix). Decode/queue thresholds disabled.
+            # Gate the PREFILL pool only (this was a silent no-op in disagg
+            # before the fix). Decode/queue thresholds disabled.
             "thresholds": {
                 "blocks_threshold": "None",
                 "tokens_threshold": 1,
@@ -988,7 +988,7 @@ def test_mocker_disagg_router_overload_503(
     """Disaggregated load shedding: clients get 503 when the gated pool is busy.
 
     - prefill-tokens: a low ``--active-prefill-tokens-threshold`` must gate the
-      PREFILL pool. This was a silent no-op in disagg before DYN-3212 (the
+      PREFILL pool. This was previously a silent no-op in disagg (the
       overloaded set landed on the decode pool and the prefill router never saw
       it), so this case is the regression guard for that fix.
     - decode-blocks: a low ``--active-decode-blocks-threshold`` must gate the

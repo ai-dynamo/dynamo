@@ -94,7 +94,7 @@ fn compute_overloaded_instances(
 /// `active_prefill_tokens`, but unless the set is published to the prefill Client
 /// the `PrefillRouter`'s scheduler never consults it — making
 /// `--active-prefill-tokens-threshold` (and its `_frac` variant) a silent no-op on
-/// the prefill path (DYN-3212). Ids that are not members of a given pool are
+/// the prefill path. Ids that are not members of a given pool are
 /// ignored when that Client derives its free workers, so publishing the full set
 /// to both Clients is safe.
 fn publish_overloaded_instances(
@@ -445,7 +445,7 @@ impl KvWorkerMonitor {
     ///
     /// This is what wires prefill backpressure end-to-end: once attached, the monitor
     /// publishes the overloaded set to the prefill `Client` (so the PrefillRouter excludes
-    /// overloaded workers / sheds when all are over — DYN-3212) and watches the prefill
+    /// overloaded workers / sheds when all are over) and watches the prefill
     /// endpoint to clean up TTFT gauges when prefill workers disappear.
     ///
     /// This method can be called after `start_monitoring` - the monitoring loop will
@@ -655,7 +655,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // Mirror the prune to the prefill Client (disagg). Prefill workers are
                         // routed by a separate PrefillRouter with its own Client, so its
                         // overloaded set must be cleared too or removed prefill ids would
-                        // linger as phantom-overloaded entries (DYN-3212).
+                        // linger as phantom-overloaded entries.
                         if let Some(prefill_client) = prefill_client_holder.read().unwrap().clone() {
                             prefill_client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
@@ -851,7 +851,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             // overloaded set. The prefill router can activate after KV events
                             // have already been processed; without this seed the prefill pool
                             // would not learn about already-overloaded workers until the next
-                            // KV event arrives (DYN-3212).
+                            // KV event arrives.
                             let cfg = thresholds.read().unwrap().clone();
                             let overloaded_instances =
                                 compute_overloaded_instances(&worker_load_states, &cfg);
@@ -1177,7 +1177,7 @@ mod tests {
 
         let states = DashMap::new();
 
-        // Prefill worker far over the prefill-token threshold (the DYN-3212 case).
+        // Prefill worker far over the prefill-token threshold.
         let mut prefill = WorkerLoadState::default();
         prefill.active_prefill_tokens.insert(0, 300_000);
         states.insert(1u64, prefill);
@@ -1197,7 +1197,7 @@ mod tests {
         assert_eq!(overloaded, HashSet::from([1]));
     }
 
-    /// Regression for DYN-3212: the overloaded set must reach the prefill
+    /// Regression: the overloaded set must reach the prefill
     /// router's Client, not only the decode/main router's Client. Without the
     /// prefill propagation, `--active-prefill-tokens-threshold` is a silent
     /// no-op in disaggregated serving.

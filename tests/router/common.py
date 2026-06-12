@@ -1320,8 +1320,8 @@ def _test_disagg_router_overload_503(
     Two configurations exercise the two pools (driven by the thresholds the
     caller passes):
     - Prefill rejection: low ``tokens_threshold`` (active-prefill-tokens),
-      decode threshold disabled. Gates the prefill pool — the path that was a
-      silent no-op before DYN-3212.
+      decode threshold disabled. Gates the prefill pool — the path that was
+      previously a silent no-op.
     - Decode rejection: low ``blocks_threshold`` (active-decode-blocks), prefill
       threshold disabled. Gates the decode pool.
 

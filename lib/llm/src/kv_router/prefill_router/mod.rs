@@ -251,7 +251,7 @@ impl
             PrefillResolveDecision::Rejected(error) => {
                 // All eligible prefill workers are overloaded. Surface the typed
                 // (ResourceExhausted) rejection unchanged instead of falling back
-                // to the synchronous prefill path (DYN-3212).
+                // to the synchronous prefill path.
                 drop(prefill_phase_barrier);
                 return Err(error);
             }

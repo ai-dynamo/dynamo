@@ -435,7 +435,7 @@ impl PrefillRouter {
 /// (see `map_scheduler_error`); it must be surfaced verbatim as `Rejected` so the
 /// frontend returns a proper 503 backpressure signal. Collapsing it to
 /// `Unavailable` would fall back to the synchronous prefill path, which re-enters
-/// the saturated scheduler and masks the rejection as a generic 500 (DYN-3212).
+/// the saturated scheduler and masks the rejection as a generic 500.
 /// Any other error is a genuine lookup failure that should fall back.
 fn classify_prefill_query_error(error: anyhow::Error) -> PrefillResolveDecision {
     if dynamo_runtime::error::match_error_chain(
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(room_a % 48, 7);
     }
 
-    /// DYN-3212: a `ResourceExhausted` selection error (all eligible prefill
+    /// A `ResourceExhausted` selection error (all eligible prefill
     /// workers overloaded) must surface as `Rejected`, preserving the typed error
     /// so the frontend returns 503 — not collapse to `Unavailable` (→ fallback →
     /// generic 500).
