@@ -39,7 +39,13 @@ use crate::error::KvHashingError;
 /// `lib/kv-router/src/protocols.rs:79` (`options.lora_name.filter(|n| !n.is_empty())`)
 /// so a client that sends `lora_name = ""` shares the cache with a client that sends
 /// `lora_name = None`.
-pub(crate) fn compute_salt_hash(
+///
+/// Prefer [`crate::Request::salt_hash`] when you already hold a [`crate::Request`].
+/// This free function is the seam for producers that drive a
+/// `dynamo_tokens::TokenBlockSequence` directly (e.g. incremental block formation
+/// during decode) and need the salt without constructing a throwaway `Request`
+/// around tokens they own elsewhere.
+pub fn compute_salt_hash(
     salt: Option<&str>,
     lora_name: Option<&str>,
 ) -> Result<SaltHash, KvHashingError> {
