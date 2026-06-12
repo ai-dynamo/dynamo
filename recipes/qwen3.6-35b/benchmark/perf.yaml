@@ -50,8 +50,13 @@ spec:
           aiperf --version
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
+          MODEL_WAIT_DEADLINE=$(( $(date +%s) + ${MODEL_READY_TIMEOUT_SECONDS:-900} ))
           until curl -s "http://${FRONTEND}:8000/v1/models" \
               | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            if (( $(date +%s) >= MODEL_WAIT_DEADLINE )); then
+              echo "Timed out after ${MODEL_READY_TIMEOUT_SECONDS:-900}s waiting for model '${MODEL_NAME}'" >&2
+              exit 1
+            fi
             echo "[$(date '+%H:%M:%S')] not ready, sleeping 10s"
             sleep 10
           done
@@ -124,6 +129,8 @@ spec:
           value: "1800"
         - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
           value: "1800"
+        - name: MODEL_READY_TIMEOUT_SECONDS
+          value: "900"
       resources:
         requests:
           cpu: "8"
