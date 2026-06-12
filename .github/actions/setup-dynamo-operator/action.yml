@@ -46,6 +46,10 @@ inputs:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
     default: 'v1.32.13'
+  install_grove:
+    description: 'Whether to install the Grove operator via Helm (default: true). Set to false on clusters where Grove is not needed to avoid rollout failures.'
+    required: false
+    default: 'true'
 
 outputs:
   namespace:
@@ -188,6 +192,7 @@ runs:
         REGISTRY: ${{ inputs.registry }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
         ACR_USER: ${{ inputs.acr_username }}
+        INSTALL_GROVE: ${{ inputs.install_grove }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
         set -x
@@ -214,25 +219,30 @@ runs:
           ${IMAGE_ARGS} \
           ${PULL_SECRET_ARGS} \
           --set dynamo-operator.gpuDiscovery.enabled=false \
-          --set global.grove.install=true \
+          --set global.grove.install=${INSTALL_GROVE} \
           --set global.kai-scheduler.install=false \
           --debug
+        echo "::endgroup::"
+
+    - name: Extend operator deployment progress deadline
+      shell: bash
+      run: |
+        echo "::group::Patch operator progressDeadlineSeconds"
+        # The default 600s progressDeadlineSeconds can be hit on clusters where
+        # the vCluster syncer is slow to propagate pod Ready status back into
+        # virtual Deployment objects. Set to 3600s so rollout status has time.
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          patch deployment dynamo-platform-dynamo-operator-controller-manager \
+          -n default --type=merge \
+          -p '{"spec":{"progressDeadlineSeconds":3600}}'
         echo "::endgroup::"
 
     - name: Wait for operator rollout
       shell: bash
       run: |
         echo "::group::Wait for operator rollout inside vCluster"
-        # Wait directly on pod readiness rather than deployment rollout status.
-        # vCluster's syncer can be slow to propagate pod Ready status back into
-        # virtual Deployment objects, causing `rollout status` to report
-        # ProgressDeadlineExceeded even when pods are actually running.
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          wait pod \
-          -l 'control-plane=controller-manager' \
-          --for=condition=ready \
-          -n default \
-          --timeout=900s
+          rollout status deployment -n default --watch --timeout=900s
         echo "::endgroup::"
 
     - name: Debug deployment failure
