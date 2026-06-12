@@ -64,7 +64,6 @@ use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_bloc
 use scheduler_inputs::{
     CacheHitEstimates, KvRouterOverlapRefresher, WorkerCacheHitEstimate,
     cache_hit_estimates_from_tiered_matches, cache_hit_for_worker, shared_cache_overlap_score,
-    tier_overlap_blocks_from_tiered_matches,
 };
 
 use crate::{
@@ -431,7 +430,7 @@ where
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
 
         let TieredLookupResult {
-            tiered_matches,
+            tiered_matches: _tiered_matches,
             shared_cache_hits,
             indexer_duration,
             shared_cache_duration,
@@ -456,8 +455,6 @@ where
             })
             .unwrap_or((None, None));
 
-        let tier_overlap_blocks = tier_overlap_blocks_from_tiered_matches(&tiered_matches);
-        let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
@@ -473,9 +470,9 @@ where
                 isl_tokens,
                 maybe_seq_hashes,
                 block_hashes_for_refresh,
-                tier_overlap_blocks,
-                cache_hit_estimates.effective_overlap_blocks,
-                cache_hit_estimates.cached_tokens,
+                Default::default(),
+                HashMap::new(),
+                HashMap::new(),
                 router_config_override,
                 update_states,
                 lora_name,
