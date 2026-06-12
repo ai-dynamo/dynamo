@@ -105,6 +105,29 @@ runs:
           --overwrite
         echo "::endgroup::"
 
+    - name: Delete any stale vCluster
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Delete stale vClusters in ${NAMESPACE}"
+        # vCluster only allows one instance per namespace. If a previous run's
+        # cleanup job overlaps with this run's setup, its StatefulSet may still
+        # exist when we reach vcluster create, causing a fatal conflict.
+        STALE=$(kubectl get statefulsets -n "${NAMESPACE}" \
+          --no-headers -o custom-columns=':metadata.name' 2>/dev/null || true)
+        for vc in ${STALE}; do
+          [ -z "${vc}" ] && continue
+          echo "Deleting stale vCluster: ${vc}"
+          vcluster delete "${vc}" --namespace "${NAMESPACE}" 2>&1 || \
+            kubectl delete statefulset "${vc}" -n "${NAMESPACE}" --ignore-not-found 2>&1 || true
+        done
+        if [ -n "${STALE}" ]; then
+          kubectl wait statefulsets --all -n "${NAMESPACE}" \
+            --for=delete --timeout=120s 2>/dev/null || true
+        fi
+        echo "::endgroup::"
+
     - name: Create vCluster
       shell: bash
       env:
