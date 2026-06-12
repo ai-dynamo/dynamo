@@ -244,6 +244,14 @@ runs:
           --set dynamo-operator.gpuDiscovery.enabled=false \
           --set global.grove.install=${INSTALL_GROVE} \
           --set global.kai-scheduler.install=false \
+          --set 'nats.container.merge.resources.requests.cpu=100m' \
+          --set 'nats.container.merge.resources.requests.memory=128Mi' \
+          --set 'nats.container.merge.resources.limits.cpu=500m' \
+          --set 'nats.container.merge.resources.limits.memory=512Mi' \
+          --set 'nats.reloader.merge.resources.requests.cpu=10m' \
+          --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
+          --set 'nats.reloader.merge.resources.limits.cpu=100m' \
+          --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
           --debug
         echo "::endgroup::"
 
