@@ -4,8 +4,8 @@
 use std::{
     collections::HashSet,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -17,8 +17,8 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    publisher::{MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCacheUpdate},
     MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
+    publisher::{MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCacheUpdate},
 };
 
 #[derive(Clone, Default)]
@@ -28,13 +28,24 @@ pub struct EmbeddingCacheIndexer {
     started: Arc<AtomicBool>,
 }
 
-impl EmbeddingCacheIndexer {
-    pub fn new() -> Self {
-        Self::default()
+pub async fn try_build_cache_indexer(
+    component: &Component,
+) -> Option<Arc<dyn MultimodalCacheIndex>> {
+    match EmbeddingCacheIndexer::for_component(component).await {
+        Ok(indexer) => Some(Arc::new(indexer) as Arc<dyn MultimodalCacheIndex>),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "embedding cache indexer subscriber not available; skipping cache-state sync"
+            );
+            None
+        }
     }
+}
 
+impl EmbeddingCacheIndexer {
     pub async fn for_component(component: &Component) -> anyhow::Result<Self> {
-        let indexer = Self::new();
+        let indexer = Self::default();
         indexer.start_subscriber(component).await?;
         Ok(indexer)
     }
@@ -113,7 +124,7 @@ impl EmbeddingCacheIndexer {
     }
 
     pub async fn start_subscriber(&self, component: &Component) -> anyhow::Result<()> {
-        if self.started.swap(true, Ordering::SeqCst) {
+        if self.started.swap(true, Ordering::AcqRel) {
             tracing::debug!("Embedding cache indexer subscriber already started, skipping");
             return Ok(());
         }
@@ -127,7 +138,7 @@ impl EmbeddingCacheIndexer {
         {
             Ok(subscriber) => subscriber.typed::<MultimodalEmbeddingCacheEvent>(),
             Err(error) => {
-                self.started.store(false, Ordering::SeqCst);
+                self.started.store(false, Ordering::Release);
                 return Err(error);
             }
         };
@@ -160,7 +171,7 @@ impl EmbeddingCacheIndexer {
                 }
             }
 
-            indexer.started.store(false, Ordering::SeqCst);
+            indexer.started.store(false, Ordering::Release);
         });
 
         Ok(())
@@ -229,7 +240,7 @@ mod tests {
 
     #[test]
     fn delta_removes_stale_worker_keys() {
-        let indexer = EmbeddingCacheIndexer::new();
+        let indexer = EmbeddingCacheIndexer::default();
 
         indexer.apply_event(&MultimodalEmbeddingCacheEvent {
             worker_id: 7,
@@ -251,7 +262,7 @@ mod tests {
 
     #[test]
     fn workers_with_cached_keys_requires_all_requested_keys() {
-        let indexer = EmbeddingCacheIndexer::new();
+        let indexer = EmbeddingCacheIndexer::default();
 
         indexer.apply_event(&MultimodalEmbeddingCacheEvent {
             worker_id: 1,
@@ -273,7 +284,7 @@ mod tests {
 
     #[test]
     fn delta_updates_reverse_index() {
-        let indexer = EmbeddingCacheIndexer::new();
+        let indexer = EmbeddingCacheIndexer::default();
 
         indexer.apply_event(&MultimodalEmbeddingCacheEvent {
             worker_id: 3,

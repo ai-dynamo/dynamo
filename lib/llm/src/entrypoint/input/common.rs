@@ -12,7 +12,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::indexer::EmbeddingCacheIndexer,
+    kv_router::indexer::try_build_cache_indexer,
     kv_router::{
         DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
     },
@@ -152,22 +152,7 @@ pub async fn build_preprocessed_routing(
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
-    let embedding_cache_indexer = match EmbeddingCacheIndexer::for_component(
-        router_client.endpoint.component(),
-    )
-    .await
-    {
-        Ok(indexer) => {
-            Some(Arc::new(indexer) as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>)
-        }
-        Err(error) => {
-            tracing::warn!(
-                "Embedding cache indexer subscriber not available ({}), skipping cache-state sync.",
-                error
-            );
-            None
-        }
-    };
+    let embedding_cache_indexer = try_build_cache_indexer(router_client.endpoint.component()).await;
 
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);

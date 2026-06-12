@@ -33,7 +33,7 @@ use crate::{
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{PrefillRouter, indexer::EmbeddingCacheIndexer},
+    kv_router::{PrefillRouter, indexer::try_build_cache_indexer},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -309,24 +309,24 @@ impl ModelWatcher {
                     // validate that the new worker's checksum matches. Different
                     // WorkerSets (different namespaces) are allowed to have different checksums to support rolling updates.
                     let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
-                    if let Some(model) = self.manager.get_model(card.name())
-                        && !model.is_checksum_compatible(&ws_key, card.mdcsum())
-                    {
-                        tracing::error!(
-                            model_name = card.name(),
-                            namespace = mcid.namespace,
-                            new_checksum = card.mdcsum(),
-                            "Checksum for new worker does not match existing WorkerSet's checksum. \
-                             Drain all old workers in this namespace before deploying a new version."
-                        );
-                        // TODO: mark that instance down in clients
-                        // Not obvious how to do that given the current design
-                        // Instances come from an `InstanceSource` in a `Client` in a `PushRouter`.
-                        // Calling `report_instance_down` on the Client should do it (although
-                        // needs more testing).
-                        // The `PushRouter` is in `ModelMananger` (`self.manager` here), but inside
-                        // interface `AsyncEngine` which only has a `generate` method.
-                        continue;
+                    if let Some(model) = self.manager.get_model(card.name()) {
+                        if !model.is_checksum_compatible(&ws_key, card.mdcsum()) {
+                            tracing::error!(
+                                model_name = card.name(),
+                                namespace = mcid.namespace,
+                                new_checksum = card.mdcsum(),
+                                "Checksum for new worker does not match existing WorkerSet's checksum. \
+                                 Drain all old workers in this namespace before deploying a new version."
+                            );
+                            // TODO: mark that instance down in clients
+                            // Not obvious how to do that given the current design
+                            // Instances come from an `InstanceSource` in a `Client` in a `PushRouter`.
+                            // Calling `report_instance_down` on the Client should do it (although
+                            // needs more testing).
+                            // The `PushRouter` is in `ModelMananger` (`self.manager` here), but inside
+                            // interface `AsyncEngine` which only has a `generate` method.
+                            continue;
+                        }
                     }
 
                     // Spawn each handle_put into its own task so that a slow
@@ -573,29 +573,29 @@ impl ModelWatcher {
         let namespace = mcid.namespace.clone();
         let ws_key = worker_set_key(&namespace, card.model_type, card.worker_type);
 
-        if let Some(model) = self.manager.get_model(&model_name)
-            && model.has_worker_set(&ws_key)
-        {
-            if !model.is_checksum_compatible(&ws_key, card.mdcsum()) {
-                tracing::error!(
+        if let Some(model) = self.manager.get_model(&model_name) {
+            if model.has_worker_set(&ws_key) {
+                if !model.is_checksum_compatible(&ws_key, card.mdcsum()) {
+                    tracing::error!(
+                        model_name = card.name(),
+                        namespace = namespace,
+                        new_checksum = card.mdcsum(),
+                        "Checksum for new worker does not match existing WorkerSet's checksum. \
+                         Drain all old workers in this namespace before deploying a new version."
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Checksum mismatch for worker in namespace {namespace}"
+                    ));
+                }
+                self.manager
+                    .save_model_card(&mcid.to_path(), card.clone())?;
+                tracing::debug!(
                     model_name = card.name(),
                     namespace = namespace,
-                    new_checksum = card.mdcsum(),
-                    "Checksum for new worker does not match existing WorkerSet's checksum. \
-                     Drain all old workers in this namespace before deploying a new version."
+                    "Worker joined existing WorkerSet, skipping pipeline build"
                 );
-                return Err(anyhow::anyhow!(
-                    "Checksum mismatch for worker in namespace {namespace}"
-                ));
+                return Ok(());
             }
-            self.manager
-                .save_model_card(&mcid.to_path(), card.clone())?;
-            tracing::debug!(
-                model_name = card.name(),
-                namespace = namespace,
-                "Worker joined existing WorkerSet, skipping pipeline build"
-            );
-            return Ok(());
         }
 
         // Guard against concurrent pipeline construction for the same (model, namespace, type)
@@ -689,17 +689,17 @@ impl ModelWatcher {
         }
 
         // Validate checksum against the registered model
-        if let Some(model) = self.manager.get_model(model_name)
-            && !model.is_checksum_compatible(ws_key, card.mdcsum())
-        {
-            tracing::error!(
-                model_name = card.name(),
-                namespace = namespace,
-                new_checksum = card.mdcsum(),
-                "Checksum for new worker does not match existing WorkerSet's checksum. \
-                 Drain all old workers in this namespace before deploying a new version."
-            );
-            return Ok(false);
+        if let Some(model) = self.manager.get_model(model_name) {
+            if !model.is_checksum_compatible(ws_key, card.mdcsum()) {
+                tracing::error!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    new_checksum = card.mdcsum(),
+                    "Checksum for new worker does not match existing WorkerSet's checksum. \
+                     Drain all old workers in this namespace before deploying a new version."
+                );
+                return Ok(false);
+            }
         }
 
         // If the first registration failed or timed out, no WorkerSet exists.
@@ -1090,23 +1090,7 @@ impl ModelWatcher {
                 || card.model_type.supports_audios()
                 || card.model_type.supports_videos())
         {
-            let multimodal_cache_indexer = match EmbeddingCacheIndexer::for_component(
-                client.endpoint.component(),
-            )
-            .await
-            {
-                Ok(indexer) => {
-                    Some(Arc::new(indexer)
-                        as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>)
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        "Embedding cache indexer subscriber not available ({}), skipping cache-state sync.",
-                        error
-                    );
-                    None
-                }
-            };
+            let multimodal_cache_indexer = try_build_cache_indexer(client.endpoint.component()).await;
 
             // Image/Audio/Video models can also support chat completions (vLLM omni way)
             if card.model_type.supports_chat() {
@@ -1159,7 +1143,7 @@ impl ModelWatcher {
                     client.clone(),
                     router_config.router_mode,
                     None,
-                    multimodal_cache_indexer.clone(),
+                    None,
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));

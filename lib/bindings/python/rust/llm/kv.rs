@@ -270,8 +270,7 @@ pub(crate) struct MultimodalEmbeddingCachePublisher {
 impl MultimodalEmbeddingCachePublisher {
     #[new]
     fn new() -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher::new()
-            .map_err(to_pyerr)?;
+        let inner = llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher::new();
         Ok(Self {
             inner: inner.into(),
         })

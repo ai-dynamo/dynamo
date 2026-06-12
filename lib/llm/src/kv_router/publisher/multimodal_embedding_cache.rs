@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, OnceLock};
+use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -27,30 +29,23 @@ pub struct MultimodalEmbeddingCacheEvent {
 }
 
 pub struct MultimodalEmbeddingCachePublisher {
-    worker_id: OnceLock<u64>,
-    publisher: OnceLock<Arc<EventPublisher>>,
-    runtime_handle: OnceLock<tokio::runtime::Handle>,
+    tx: OnceLock<mpsc::UnboundedSender<MultimodalEmbeddingCacheUpdate>>,
+    cancellation_token: CancellationToken,
 }
 
 impl MultimodalEmbeddingCachePublisher {
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            worker_id: OnceLock::new(),
-            publisher: OnceLock::new(),
-            runtime_handle: OnceLock::new(),
-        })
+    pub fn new() -> Self {
+        Self {
+            tx: OnceLock::new(),
+            cancellation_token: CancellationToken::new(),
+        }
     }
 
     pub fn publish_delta(
         &self,
-        mut added_keys: Vec<String>,
-        mut removed_keys: Vec<String>,
+        added_keys: Vec<String>,
+        removed_keys: Vec<String>,
     ) -> Result<()> {
-        added_keys.sort();
-        added_keys.dedup();
-        removed_keys.sort();
-        removed_keys.dedup();
-
         if added_keys.is_empty() && removed_keys.is_empty() {
             return Ok(());
         }
@@ -62,43 +57,122 @@ impl MultimodalEmbeddingCachePublisher {
     }
 
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
-        let runtime_handle = tokio::runtime::Handle::try_current().map_err(|e| {
-            anyhow::anyhow!(
-                "multimodal embedding cache publisher create_endpoint requires a Tokio runtime: {e}"
-            )
-        })?;
-        let worker_id = component.drt().connection_id();
-        let publisher = Arc::new(
-            EventPublisher::for_component(&component, MULTIMODAL_EMBEDDING_CACHE_SUBJECT).await?,
-        );
+        if self.tx.get().is_some() {
+            return Ok(());
+        }
 
-        let _ = self.runtime_handle.set(runtime_handle);
-        let _ = self.worker_id.set(worker_id);
-        let _ = self.publisher.set(publisher);
+        let worker_id = component.drt().connection_id();
+        let publisher =
+            EventPublisher::for_component(&component, MULTIMODAL_EMBEDDING_CACHE_SUBJECT).await?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancellation_token = self.cancellation_token.clone();
+
+        if self.tx.set(tx).is_err() {
+            return Ok(());
+        }
+
+        component.drt().runtime().secondary().spawn(async move {
+            run_multimodal_embedding_cache_processor(
+                publisher,
+                worker_id,
+                cancellation_token,
+                rx,
+            )
+            .await;
+        });
+
         Ok(())
     }
 
     fn publish_update(&self, update: MultimodalEmbeddingCacheUpdate) -> Result<()> {
-        let worker_id = *self.worker_id.get().ok_or_else(|| {
+        let tx = self.tx.get().ok_or_else(|| {
             anyhow::anyhow!("multimodal embedding cache publisher not initialized")
         })?;
-        let publisher = self.publisher.get().cloned().ok_or_else(|| {
-            anyhow::anyhow!("multimodal embedding cache publisher not initialized")
-        })?;
-        let runtime_handle = self.runtime_handle.get().cloned().ok_or_else(|| {
-            anyhow::anyhow!("multimodal embedding cache publisher runtime not initialized")
-        })?;
-        let event = MultimodalEmbeddingCacheEvent { worker_id, update };
+        tx.send(update).map_err(|_| {
+            anyhow::anyhow!("multimodal embedding cache publisher channel closed")
+        })
+    }
+}
 
-        runtime_handle.spawn(async move {
-            if let Err(error) = publisher.publish(&event).await {
-                tracing::warn!(
-                    "Failed to publish multimodal embedding cache state: {}",
-                    error
-                );
+impl Drop for MultimodalEmbeddingCachePublisher {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
+}
+
+async fn run_multimodal_embedding_cache_processor(
+    publisher: EventPublisher,
+    worker_id: u64,
+    cancellation_token: CancellationToken,
+    mut rx: mpsc::UnboundedReceiver<MultimodalEmbeddingCacheUpdate>,
+) {
+    loop {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                tracing::debug!("Multimodal embedding cache publisher received cancellation signal");
+                break;
             }
-        });
+            update = rx.recv() => {
+                let Some(update) = update else {
+                    tracing::debug!("Multimodal embedding cache publisher channel closed");
+                    break;
+                };
 
-        Ok(())
+                let event = MultimodalEmbeddingCacheEvent {
+                    worker_id,
+                    update: coalesce_delta_backlog(update, &mut rx),
+                };
+
+                if let Err(error) = publisher.publish(&event).await {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to publish embedding cache state"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn coalesce_delta_backlog(
+    first_update: MultimodalEmbeddingCacheUpdate,
+    rx: &mut mpsc::UnboundedReceiver<MultimodalEmbeddingCacheUpdate>,
+) -> MultimodalEmbeddingCacheUpdate {
+    let mut net_delta = BTreeMap::new();
+    merge_delta(&mut net_delta, first_update);
+
+    while let Ok(update) = rx.try_recv() {
+        merge_delta(&mut net_delta, update);
+    }
+
+    let mut added_keys = Vec::new();
+    let mut removed_keys = Vec::new();
+    for (key, added) in net_delta {
+        if added {
+            added_keys.push(key);
+        } else {
+            removed_keys.push(key);
+        }
+    }
+
+    MultimodalEmbeddingCacheUpdate::Delta {
+        added_keys,
+        removed_keys,
+    }
+}
+
+fn merge_delta(net_delta: &mut BTreeMap<String, bool>, update: MultimodalEmbeddingCacheUpdate) {
+    match update {
+        MultimodalEmbeddingCacheUpdate::Delta {
+            added_keys,
+            removed_keys,
+        } => {
+            for key in added_keys {
+                net_delta.insert(key, true);
+            }
+            for key in removed_keys {
+                net_delta.insert(key, false);
+            }
+        }
     }
 }
