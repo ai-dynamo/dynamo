@@ -366,6 +366,11 @@ class MinioBaseModelConfig:
             "AWS_REGION": "us-east-1",
             "AWS_ALLOW_HTTP": "true",
             "RUNAI_STREAMER_S3_ENDPOINT": self.endpoint,
+            # Gates the modelexpress ModelStreamer load strategy.
+            # Without this env, the strategy's `is_available()` short-circuits
+            # to False and the worker falls back through RDMA / GDS / Default
+            # — none of which work in a local-MinIO setup.
+            "MX_MODEL_URI": self.get_s3_uri(),
         }
 
 
