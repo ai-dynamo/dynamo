@@ -172,10 +172,10 @@ deployments, use `kv` when you want prefix-cache-aware routing and
 request routing hints. For detailed mode definitions, see
 [Router Guide](../components/router/router-guide.md#routing-modes-router-mode).
 
-KV-aware routing has two independent pieces: the frontend must run in `kv`
-mode, and workers must publish KV cache events for event-driven prefix-cache
-state. If worker event publication is not configured, keep
-`DYN_ROUTER_MODE=kv` but run the frontend in approximate KV mode:
+KV-aware routing can use event-driven prefix-cache state or approximate
+prefix matching. The frontend still runs in `kv` mode in both cases. If you
+do not configure worker KV-event publication, set
+`DYN_ROUTER_USE_KV_EVENTS=false` to use approximate KV mode:
 
 ```yaml
 spec:
@@ -193,16 +193,13 @@ spec:
                 value: "false"
 ```
 
-When you do want event-driven prefix-cache state, configure event publication
-on the generated worker service that handles prefill. In aggregated serving,
-the single worker handles both prefill and decode, so configure that worker.
-In disaggregated serving, configure prefill workers only; prefix-overlap
-scoring (`dyn-prefill-scorer`) runs at the prefill stage, while decode workers
-are scored on load (`dyn-decode-scorer`) and normally omit KV-event publishing
-flags. For vLLM, that means prefill workers get `--enable-prefix-caching` and
-`--kv-events-config`; decode workers omit both flags. Service names depend on
-the selected backend and topology, so inspect the generated DGD first,
-especially when `autoApply: false`.
+For event-driven prefix-cache state, enable worker event publication only
+where prefill happens: the single worker in aggregated serving, or prefill
+workers in disaggregated serving. Decode workers are scored by load
+(`dyn-decode-scorer`), not prefix overlap (`dyn-prefill-scorer`), so vLLM
+decode workers omit both `--enable-prefix-caching` and `--kv-events-config`.
+Service names depend on the selected backend and topology, so inspect the
+generated DGD first, especially when `autoApply: false`.
 
 For example, a generated vLLM disaggregated deployment may contain a
 `VllmPrefillWorker` service. This override appends the vLLM KV-event publishing
