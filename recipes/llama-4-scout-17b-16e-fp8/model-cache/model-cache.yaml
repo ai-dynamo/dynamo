@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Llama-4-Scout-17B-16E-Instruct-FP8 weights are ~109 GB on disk.
+# model-cache: holds the downloaded Hugging Face weights (~109 GB for the FP8
+# checkpoint). ReadWriteMany so prefill/decode worker pods can mount it concurrently.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 150Gi
+  storageClassName: "your-storage-class-name"
+---
+# compilation-cache: stores vLLM / torch.compile compiled-graph artifacts so they
+# are reused across pod restarts instead of being recompiled on every startup.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: compilation-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: "your-storage-class-name"
+---
+# perf-cache: stores performance/kernel autotuning results, persisted so the
+# tuning step does not re-run on every restart.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: perf-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: "your-storage-class-name"

@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DynamoGraphDeployment for nvidia/Llama-4-Scout-17B-16E-Instruct-FP8,
+# single-node disaggregated with decode scale-out.
+#
+# Layout (1 × 8×H100-80GB node, all 8 GPUs used):
+#   Frontend            x1   (no GPU)
+#   VllmPrefillWorker   x1   (TP=2, 2 GPUs)  — kv_producer
+#   VllmDecodeWorker    x3   (TP=2, 2 GPUs ea.) — kv_consumer, 6 decode GPUs
+#
+# Why TP=2:
+#   ~109 GB FP8 / 2 GPUs = ~55 GB/GPU on 80 GB H100 → ~25 GB/GPU headroom.
+#   TP=1 won't fit (single-GPU < 109 GB). TP=4 underutilizes the per-GPU
+#   budget and burns idle GPUs to no benefit.
+#
+# Why 1P + 3D (decode-heavy):
+#   Llama-4 Scout's decode is HBM-bandwidth-bound at steady state, while
+#   prefill compute saturates earlier. Adding decode replicas pushes more
+#   aggregate decode throughput per node than adding prefill. Scale prefill
+#   back up (1P → 2P, decode 3D → 2D) for very long-prompt workloads where
+#   prefill becomes the queue.
+#
+# Architecture: Llama4ForCausalLM (16 experts, 17B active per token).
+# Native vLLM path — uses the stock dynamo runtime image, no custom
+# transformers override needed.
+#
+# Tested on nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1 (1.0.x disagg API).
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-llama-4-scout-disagg
+spec:
+  pvcs:
+  - create: false
+    name: model-cache
+  - create: false
+    name: compilation-cache
+  services:
+
+    # ─────────────────────────────────────────────────────────────────
+    # FRONTEND — OpenAI-compat API + KV-aware router
+    # ─────────────────────────────────────────────────────────────────
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace
+          command: [python, -m, dynamo.frontend]
+          args:
+            - --router-mode
+            # MUST be "kv" for disagg. Under "round_robin" the frontend treats
+            # prefill and decode endpoints as interchangeable → half the
+            # traffic skips NIXL handoff and the prefill worker sits idle.
+            - kv
+      resources:
+        requests:
+          cpu: "8"
+        limits:
+          cpu: "8"
+
+    # ─────────────────────────────────────────────────────────────────
+    # DECODE WORKER — autoregressive generation, HBM-bandwidth-bound.
+    # TP=2, 2 GPUs per replica. 3 replicas → 6 decode GPUs.
+    # ─────────────────────────────────────────────────────────────────
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      replicas: 3   # Drop to 1 for the minimal 1P+1D layout (4 GPUs total).
+      extraPodSpec:
+        hostIPC: true   # Required by NixlConnector.
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace
+          command: [python3, -m, dynamo.vllm]
+          args:
+          - --model
+          - nvidia/Llama-4-Scout-17B-16E-Instruct-FP8
+          - --trust-remote-code
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+          - --tensor-parallel-size
+          - "2"
+          - --gpu-memory-utilization
+          # 0.88 is the validated decode value carried over from the 235B
+          # incidents. Plenty of weight headroom at TP=2 here (~25 GB free),
+          # but the same allocator/NCCL collision class applies. Raise to
+          # 0.92 only if KV pool becomes the binding constraint.
+          - "0.88"
+          - --max-num-seqs
+          # 1024 lifts the scheduler ceiling so decode batch density (~95
+          # in-flight observed) is bounded by ingress rate rather than the
+          # scheduler.
+          - "1024"
+          - --max-num-batched-tokens
+          - "32768"
+          - --max-model-len
+          # Llama 4 native context is huge (10M); pin to 4096 to keep the KV pool predictable.
+          # Prefill MUST match this — NIXL KV shape is a strict contract between workers.
+          - "4096"
+          - --enable-chunked-prefill
+          - --no-enable-prefix-caching   # Benchmark hygiene.
+          - --disable-custom-all-reduce  # Custom AR + hostIPC collide between
+                                         # prefill and decode on the same node.
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          - name: UCX_MEMTYPE_CACHE
+            # Avoid stale-mapping race between PyTorch VMM remap and UCX's cached (addr→memtype) lookups → cuMemcpyAsync illegal-memory-
+            # access kills all TP ranks together. <1% overhead.
+            value: "n"
+          - name: PYTORCH_CUDA_ALLOC_CONF
+            # Required to avoid decode fragmentation OOM under sustained load
+            value: expandable_segments:True
+          - name: NCCL_CUMEM_ENABLE
+            # Companion to expandable_segments — forces NCCL onto cudaMalloc
+            # to avoid VMM collision with PyTorch (cudaErrorIllegalAddress).
+            value: "0"
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]   # mlock pinned host pages for ibv_reg_mr().
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /home/dynamo/.cache/huggingface
+      - name: compilation-cache
+        mountPoint: /home/dynamo/.cache/vllm
+        useAsCompilationCache: true
+      sharedMemory:
+        size: 16Gi   # NIXL control buffers/descriptors. 16 GiB at TP=2
+
+    # ─────────────────────────────────────────────────────────────────
+    # PREFILL WORKER — full-prompt attention, produces KV cache.
+    # TP=2, 2 GPUs. Compute-bound on long prompts.
+    # ─────────────────────────────────────────────────────────────────
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      replicas: 1
+      extraPodSpec:
+        hostIPC: true
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace
+          command: [python3, -m, dynamo.vllm]
+          args:
+          - --model
+          - nvidia/Llama-4-Scout-17B-16E-Instruct-FP8
+          - --trust-remote-code
+          - --is-prefill-worker
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+          - --tensor-parallel-size
+          - "2"
+          - --gpu-memory-utilization
+          # 0.85 — flashinfer MoE workspace is the binding constraint on prefill
+          - "0.85"
+          - --max-num-seqs
+          - "1024"
+          - --max-num-batched-tokens
+          - "32768"   # Larger prefill chunks → push more KV/sec to decode.
+          - --max-model-len
+          - "4096"    # MUST match decode (NIXL shape contract).
+          - --enable-chunked-prefill
+          - --no-enable-prefix-caching
+          - --disable-custom-all-reduce
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          - name: UCX_MEMTYPE_CACHE
+            value: "n"
+          # NOTE: expandable_segments and NCCL_CUMEM_ENABLE are intentionally
+          # NOT set on the prefill worker. expandable_segments + CUDA graphs
+          # caused a replay segfault (allocator VMM remap left
+          # captured raw pointers dangling). Prefill uses classic cudaMalloc
+          # + lower gpu-memory-utilization for headroom.
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /home/dynamo/.cache/huggingface
+      - name: compilation-cache
+        mountPoint: /home/dynamo/.cache/vllm
+        useAsCompilationCache: true
+      sharedMemory:
+        size: 16Gi

@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-llama-4-scout-disagg-benchmark
+  labels:
+    app: benchmark
+spec:
+  containers:
+  - name: python
+    image: python:3.11
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        ulimit -n 1048576
+        ulimit -u 65536
+        apt update && apt install tmux wget curl jq -y
+
+        pip install aiperf==0.6.0
+
+        echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
+        until curl -s "http://${FRONTEND}:8000/v1/models" | jq -e --arg model "${MODEL_NAME}" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+          echo "[$(date '+%H:%M:%S')] Model not ready, retrying in 5s..."
+          sleep 5
+        done
+        echo "Model '${MODEL_NAME}' is ready!"
+
+        mkdir -p ${BASE_DIR}/artifacts
+        export MODEL_BASE_NAME="${MODEL_NAME##*/}"
+        export FRONTEND_LIB="${FRONTEND%-frontend}"
+        export ARTIFACT_DIR="${BASE_DIR}/artifacts/${MODEL_BASE_NAME}_${FRONTEND_LIB}"
+        mkdir -p "${ARTIFACT_DIR}"
+
+        # ISL=1024 / OSL=512, c=36 — mirrors the head-to-head sweep where the
+        # 1P+3D disagg layout beat the aggregated baseline on throughput,
+        # p50 latency, and tok/Wh.
+        tmux new-session -d -s benchmark -c "${ARTIFACT_DIR}"
+        tmux send-keys -t benchmark "aiperf profile \
+          -m ${MODEL_NAME} \
+          --url http://${FRONTEND}:8000 \
+          --streaming \
+          --synthetic-input-tokens-mean 1024 \
+          --synthetic-input-tokens-stddev 0 \
+          --output-tokens-mean 512 \
+          --output-tokens-stddev 0 \
+          --concurrency 36 \
+          --request-count 720 \
+          --artifact-dir ${ARTIFACT_DIR} \
+          --goodput \"time_to_first_token:3000 inter_token_latency:40\"" C-m
+        sleep 7200
+    env:
+      - name: MODEL_NAME
+        value: nvidia/Llama-4-Scout-17B-16E-Instruct-FP8
+      - name: FRONTEND
+        value: vllm-llama-4-scout-disagg-frontend
+      - name: BASE_DIR
+        value: /perf-cache
+    resources:
+      requests:
+        cpu: "8"
+        memory: 16Gi
+      limits:
+        cpu: "16"
+        memory: 32Gi
+    volumeMounts:
+    - name: model-cache
+      mountPath: /home/dynamo/.cache/huggingface
+    - name: perf-cache
+      mountPath: /perf-cache
+    workingDir: /workspace
+  volumes:
+  - name: model-cache
+    persistentVolumeClaim:
+      claimName: model-cache
+  - name: perf-cache
+    persistentVolumeClaim:
+      claimName: perf-cache
+  restartPolicy: Never
