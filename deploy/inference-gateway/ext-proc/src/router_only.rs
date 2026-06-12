@@ -17,9 +17,9 @@
 //!   `mem` discovery backend (no etcd/NATS). See
 //!   [`crate::epp::Router::from_router_only`].
 //!
-//! This module defines the configuration surface for router-only mode, parses it
-//! from the environment, and (for now) provides a stub `Router::from_router_only`
-//! constructor. The runtime wiring lands in later changes.
+//! This module defines the configuration surface for router-only mode and
+//! parses it from the environment; the constructor that consumes it is
+//! [`crate::epp::Router::from_router_only`].
 
 use anyhow::{Context, Result};
 
@@ -133,35 +133,6 @@ impl RouterOnlyConfig {
     /// (a prefill/decode role label is set).
     pub fn is_disaggregated(&self) -> bool {
         self.role_label.is_some()
-    }
-}
-
-impl crate::epp::Router {
-    /// Initialize the router in router-only ("on-ramp") mode.
-    ///
-    /// Router-only mode fronts a fleet of raw `vllm serve` pods with no Dynamo
-    /// control plane: discovery is a Kubernetes label selector, KV-cache state
-    /// comes from each pod's native vLLM ZMQ event stream (republished onto the
-    /// embedded router's event plane), and the runtime uses the inert `mem`
-    /// discovery backend (no etcd/NATS). See [`RouterOnlyConfig`] and
-    /// `deploy/inference-gateway/ext-proc/examples/onramp/`.
-    ///
-    /// NOTE: this is currently a stub. The construction path (offline
-    /// preprocessor, mem-backed component, label-selector reflector, and the
-    /// ZMQ KV republisher) lands in subsequent changes. It is defined here so
-    /// the `DYN_EPP_MODE` mode switch and configuration surface can be
-    /// reviewed independently — and so this change touches no existing
-    /// `epp.rs` (Dynamo-mode) code.
-    pub async fn from_router_only(cfg: RouterOnlyConfig) -> Result<Self> {
-        anyhow::bail!(
-            "router-only mode (DYN_EPP_MODE=router-only) is not yet implemented: \
-             parsed config for model '{}' (block_size={}, selector='{}', disagg={}). \
-             Use the default Dynamo mode for now.",
-            cfg.model_name,
-            cfg.block_size,
-            cfg.pod_selector,
-            cfg.is_disaggregated(),
-        )
     }
 }
 
