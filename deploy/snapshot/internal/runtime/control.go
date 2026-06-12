@@ -28,8 +28,77 @@ func WriteControlSentinel(hostPID int, name string) error {
 	if hostPID <= 0 {
 		return fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
 	}
-	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotprotocol.SnapshotControlMountPath)
+	dir := controlDirForHostPID(hostPID)
 	return writeSentinelInDir(dir, name)
+}
+
+// WriteRestoreControlSentinel writes the restore sentinel into both control
+// views that need it after CRIU restore: the restored workload's root for the
+// polling process and the placeholder root for kubelet startup probes.
+func WriteRestoreControlSentinel(placeholderHostPID, restoredPID int, name string) error {
+	dirs, err := restoreControlDirs(placeholderHostPID, restoredPID)
+	if err != nil {
+		return err
+	}
+	for _, dir := range dirs {
+		if err := writeSentinelInDir(dir, name); err != nil {
+			return fmt.Errorf("write restore control sentinel in %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+// WriteRestoredControlSentinel writes a sentinel through the CRIU-restored
+// process root instead of the placeholder container root.
+//
+// restoredPID is namespace-relative: it is the PID returned by CRIU while
+// nsrestore is running inside the placeholder container's PID namespace. The
+// snapshot agent reaches that procfs view through the placeholder's root at
+// /host/proc/<placeholderHostPID>/root/proc/<restoredPID>/root.
+func WriteRestoredControlSentinel(placeholderHostPID, restoredPID int, name string) error {
+	dir, err := restoredControlDir(placeholderHostPID, restoredPID)
+	if err != nil {
+		return err
+	}
+	return writeSentinelInDir(dir, name)
+}
+
+func controlDirForHostPID(hostPID int) string {
+	return filepath.Join(
+		HostProcPath,
+		strconv.Itoa(hostPID),
+		"root",
+		snapshotprotocol.SnapshotControlMountPath,
+	)
+}
+
+func restoreControlDirs(placeholderHostPID, restoredPID int) ([]string, error) {
+	restoredDir, err := restoredControlDir(placeholderHostPID, restoredPID)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		restoredDir,
+		controlDirForHostPID(placeholderHostPID),
+	}, nil
+}
+
+func restoredControlDir(placeholderHostPID, restoredPID int) (string, error) {
+	if placeholderHostPID <= 0 {
+		return "", fmt.Errorf("invalid placeholder host PID %d for control sentinel", placeholderHostPID)
+	}
+	if restoredPID <= 0 {
+		return "", fmt.Errorf("invalid restored PID %d for control sentinel", restoredPID)
+	}
+	return filepath.Join(
+		HostProcPath,
+		strconv.Itoa(placeholderHostPID),
+		"root",
+		"proc",
+		strconv.Itoa(restoredPID),
+		"root",
+		snapshotprotocol.SnapshotControlMountPath,
+	), nil
 }
 
 func writeSentinelInDir(dir, name string) error {

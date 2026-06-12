@@ -67,3 +67,60 @@ func TestWriteControlSentinel_RejectsInvalidPID(t *testing.T) {
 		t.Fatal("expected error for negative PID")
 	}
 }
+
+func TestRestoredControlDirUsesRestoredProcessRoot(t *testing.T) {
+	got, err := restoredControlDir(1234, 106)
+	if err != nil {
+		t.Fatalf("restoredControlDir: %v", err)
+	}
+
+	want := filepath.Join(
+		HostProcPath,
+		"1234",
+		"root",
+		"proc",
+		"106",
+		"root",
+		"/snapshot-control",
+	)
+	if got != want {
+		t.Fatalf("restoredControlDir() = %q, want %q", got, want)
+	}
+	if got == controlDirForHostPID(1234) {
+		t.Fatalf("restoredControlDir() unexpectedly matched placeholder control dir %q", got)
+	}
+}
+
+func TestRestoreControlDirsIncludesRestoredAndPlaceholderViews(t *testing.T) {
+	dirs, err := restoreControlDirs(1234, 106)
+	if err != nil {
+		t.Fatalf("restoreControlDirs: %v", err)
+	}
+	if len(dirs) != 2 {
+		t.Fatalf("len(restoreControlDirs()) = %d, want 2: %v", len(dirs), dirs)
+	}
+
+	restoredDir, err := restoredControlDir(1234, 106)
+	if err != nil {
+		t.Fatalf("restoredControlDir: %v", err)
+	}
+	placeholderDir := controlDirForHostPID(1234)
+	if dirs[0] != restoredDir {
+		t.Fatalf("first restore control dir = %q, want restored dir %q", dirs[0], restoredDir)
+	}
+	if dirs[1] != placeholderDir {
+		t.Fatalf("second restore control dir = %q, want placeholder dir %q", dirs[1], placeholderDir)
+	}
+	if dirs[0] == dirs[1] {
+		t.Fatalf("restore control dirs should be distinct, got %v", dirs)
+	}
+}
+
+func TestWriteRestoredControlSentinel_RejectsInvalidPIDs(t *testing.T) {
+	if err := WriteRestoredControlSentinel(0, 106, "restore-complete"); err == nil {
+		t.Fatal("expected error for invalid placeholder PID")
+	}
+	if err := WriteRestoredControlSentinel(1234, 0, "restore-complete"); err == nil {
+		t.Fatal("expected error for invalid restored PID")
+	}
+}

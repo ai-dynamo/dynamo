@@ -789,7 +789,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
 	}
-	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
+	restoreResult, err := executor.Restore(restoreCtx, w.runtime, log, req)
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
@@ -806,15 +806,17 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		}
 		return nil
 	}
-	// Any PID inside the container mount namespace reaches the control
-	// volume through /host/proc/<pid>/root.
-	if err := snapshotruntime.WriteControlSentinel(placeholderHostPID, snapshotprotocol.RestoreCompleteFile); err != nil {
+	// CRIU may restore the workload into a different mount namespace from the
+	// placeholder PID 1 process. Signal both views: the restored process polls
+	// its own root, while kubelet startup probes still run in the placeholder
+	// container view.
+	if err := snapshotruntime.WriteRestoreControlSentinel(restoreResult.PlaceholderHostPID, restoreResult.RestoredPID, snapshotprotocol.RestoreCompleteFile); err != nil {
 		log.Error(err, "Failed to write restore-complete sentinel")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
 		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
 			return statusErr
 		}
-		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
+		if killErr := snapshotruntime.SendSignalToPID(log, restoreResult.PlaceholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
 			log.Error(killErr, "Failed to kill placeholder after restore sentinel failure")
 		}
 		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
