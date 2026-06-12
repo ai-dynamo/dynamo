@@ -27,6 +27,7 @@ from dynamo.common.configuration.utils import (
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
     "overlap_score_credit",
+    "overlap_score_credit_decay",
     "prefill_load_scale",
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
@@ -109,6 +110,7 @@ class KvRouterConfigBase(ConfigBase):
 
     overlap_score_weight: Optional[float] = None
     overlap_score_credit: float
+    overlap_score_credit_decay: float
     prefill_load_scale: float
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
@@ -180,6 +182,20 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="overlap_score_credit",
+        )
+        add_argument(
+            g,
+            flag_name="--router-kv-overlap-score-credit-decay",
+            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+            default=0.0,
+            help=(
+                "KV Router: Decay rate for device-local overlap credit as active "
+                "prefill load rises above the least-loaded eligible worker. "
+                "0 disables decay; 1 halves credit at one request-equivalent "
+                "of excess active prefill load."
+            ),
+            arg_type=float,
+            dest="overlap_score_credit_decay",
         )
         g.add_argument(
             "--router-kv-overlap-score-weight",

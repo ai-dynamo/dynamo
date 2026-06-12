@@ -18,6 +18,7 @@ from dynamo.common.backend.engine import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.engine_response import normalize_finish_reason
@@ -85,14 +86,16 @@ class TokenspeedLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model,
             served_model_name=self.server_args.served_model_name,
-            context_length=self._model_max_len,
-            kv_cache_block_size=block_size,
-            total_kv_blocks=total_kv_blocks,
-            max_num_seqs=_optional_int(
-                scheduler_info.get("max_num_seqs")
-                or getattr(self.server_args, "max_num_seqs", None)
+            llm=LlmRegistration(
+                context_length=self._model_max_len,
+                kv_cache_block_size=block_size,
+                total_kv_blocks=total_kv_blocks,
+                max_num_seqs=_optional_int(
+                    scheduler_info.get("max_num_seqs")
+                    or getattr(self.server_args, "max_num_seqs", None)
+                ),
+                max_num_batched_tokens=max_num_batched_tokens,
             ),
-            max_num_batched_tokens=max_num_batched_tokens,
         )
 
     async def generate(

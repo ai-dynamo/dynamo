@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -44,9 +45,13 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import Config, _uses_dynamo_connector, parse_args
+from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
 from .cache_info import get_configured_kv_event_block_size
-from .capacity import per_rank_kv_blocks
+from .capacity import (
+    get_metrics_model_name,
+    get_spec_decode_runtime_data,
+    per_rank_kv_blocks,
+)
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -56,6 +61,22 @@ from .snapshot import prepare_snapshot_engine
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+MX_LOAD_FORMATS = {"modelexpress", "mx"}
+
+
+def uses_modelexpress_load_format(config: Config) -> bool:
+    return getattr(config.engine_args, "load_format", None) in MX_LOAD_FORMATS
+
+
+def should_prefetch_model(config: Config) -> bool:
+    if os.path.exists(config.model):
+        return False
+    return not uses_modelexpress_load_format(config)
+
+
+def should_register_model_ignore_weights(config: Config) -> bool:
+    return uses_modelexpress_load_format(config)
 
 
 def build_headless_namespace(config: Config) -> argparse.Namespace:
@@ -79,7 +100,7 @@ def run_dynamo_headless(config: Config) -> None:
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
     # Propagate worker_cls for custom load formats so headless workers use
-    # the same model loader and patches as the leader node.
+    # the same model loader settings as the leader node.
     if config.engine_args.load_format == "gms":
         config.engine_args.worker_cls = (
             "gpu_memory_service.integrations.vllm.worker.GMSWorker"
@@ -95,8 +116,8 @@ def run_dynamo_headless(config: Config) -> None:
             configure_gms_lock_mode(config.engine_args)
             configure_mx_ports(config.engine_args)
 
-    elif config.engine_args.load_format in ("mx-source", "mx-target"):
-        config.engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
+    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
+    # Dynamo does not set a custom worker class here.
 
     # Keep the upstream CLI import local so tests that only exercise
     # build_headless_namespace() do not pull in vLLM's full CLI import graph.
@@ -116,8 +137,12 @@ async def worker() -> None:
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
 
-    # Download the model if necessary using modelexpress.
+    configure_rl_logprobs_mode(config)
+
+    # Download the model if necessary using Dynamo's generic model fetch path.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
+    # When vLLM uses the ModelExpress plugin, the plugin owns acquisition through
+    # P2P, ModelStreamer, GDS, or vLLM's native fallback.
     #
     # We don't set `config.engine_args.model` to the local path fetch_model returns
     # because vllm will send that name to its Ray pipeline-parallel workers, which
@@ -125,7 +150,7 @@ async def worker() -> None:
     # vllm will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
-    if not os.path.exists(config.model):
+    if should_prefetch_model(config):
         await fetch_model(config.model)
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
@@ -204,6 +229,7 @@ def setup_metrics_collection(
         injected into engine metrics to align Python metrics with Rust auto-labels.
         Additional labels can be provided via inject_labels parameter.
     """
+    metrics_model_name = get_metrics_model_name(config)
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
         # IMPORTANT: We do NOT use MultiProcessCollector for DYNAMO_COMPONENT_REGISTRY
@@ -237,7 +263,7 @@ def setup_metrics_collection(
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
-                    model_name=config.model,
+                    model_name=metrics_model_name,
                 )
             except ValueError as e:
                 # Conflict: metrics already in REGISTRY, MultiProcessCollector tries to add same metrics from .db files
@@ -257,7 +283,7 @@ def setup_metrics_collection(
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
-                    model_name=config.model,
+                    model_name=metrics_model_name,
                 )
                 # Multiproc registry has .db file metrics (lmcache, possibly vllm duplicates)
                 register_engine_metrics_callback(
@@ -267,7 +293,7 @@ def setup_metrics_collection(
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
-                    model_name=config.model,
+                    model_name=metrics_model_name,
                 )
         else:
             if multiproc_dir:
@@ -283,8 +309,31 @@ def setup_metrics_collection(
                 namespace_name=config.namespace,
                 component_name=config.component,
                 endpoint_name=config.endpoint,
-                model_name=config.model,
+                model_name=metrics_model_name,
             )
+
+
+def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional[int]:
+    """Routing-side image-placeholder token id for the served model.
+
+    Resolved via the SAME Rust logic the frontend uses
+    (`dynamo._core.resolve_routing_image_token_id` ->
+    `lightseek_mm::resolve_routing_tokens`), returning `chat_placeholder_token_id`
+    so the KV-event normalizer keys on the identical token the frontend
+    substitutes `pad_value` over — no per-family drift between the two.
+
+    Returns None when the bindings lack the `mm-routing` feature or the model
+    isn't in the MM-routing registry — in both cases the frontend also skips MM
+    routing, so a worker-side no-op is consistent (events pass through).
+    """
+    try:
+        from dynamo._core import resolve_routing_image_token_id
+    except ImportError:
+        return None
+
+    # vLLM has already resolved the model to a local dir (config.json +
+    # tokenizer.json on disk) during engine init; read from there.
+    return resolve_routing_image_token_id(config.model, vllm_config.model_config.model)
 
 
 def setup_kv_event_publisher(
@@ -331,6 +380,12 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
+    # The image-placeholder token id the frontend substitutes pad_value over.
+    # Passed to the KV publisher so the router-side normalizer rewrites those
+    # runs in vLLM BlockStored events to the same canonical pad_value scheme.
+    # None (no mm-routing, model not in registry, text-only) leaves events
+    # unchanged — consistent with the frontend also skipping MM routing.
+    image_token_id = _resolve_image_token_id(config, vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -356,6 +411,7 @@ def setup_kv_event_publisher(
             zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
+            image_token_id=image_token_id,
         )
         kv_publishers.append(kv_publisher)
 
@@ -488,21 +544,8 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
-    if engine_args.load_format in ("mx-source", "mx-target"):
-        try:
-            from modelexpress import register_modelexpress_loaders
-
-            # Ensure the ModelExpress server URL env var is set for the model loader
-            if config.model_express_url:
-                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
-            register_modelexpress_loaders()
-            # Use wrapper worker to ensure loaders are registered in spawned worker processes
-            engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
-        except ImportError as e:
-            raise ImportError(
-                f"ModelExpress package required for --load-format={engine_args.load_format}. "
-                "Install with: pip install modelexpress"
-            ) from e
+    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
+    # Dynamo does not register loaders or set a custom worker class here.
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
@@ -618,7 +661,7 @@ async def register_vllm_model(
     config: Config,
     engine_client: AsyncLLM,
     vllm_config: VllmConfig,
-    worker_type: WorkerType | None = None,
+    worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
 ) -> None:
     """
@@ -626,19 +669,23 @@ async def register_vllm_model(
 
     Args:
         model_input: Input type for the model (e.g., ModelInput.Tokens)
-        model_type: Type of model (e.g., ModelType.Chat, ModelType.Prefill)
+        model_type: OpenAI surface this card exposes (e.g., ModelType.Chat).
+            Prefill workers have no OpenAI surface — their role is carried by
+            `worker_type=WorkerType.Prefill` — but pass the legacy
+            `ModelType.Prefill` marker bit (not a surface) so an old frontend
+            still detects them during the cross-version rollout.
         generate_endpoint: Endpoint to register
         config: Configuration object
         engine_client: vLLM engine client
         vllm_config: vLLM configuration
         worker_type: The disaggregation role this worker plays
-            (Prefill / Decode / Encode / Aggregated). Required for the
-            frontend's topology readiness check once strict mode lands.
+            (Prefill / Decode / Encode / Aggregated). Required by the
+            frontend's model-serving-readiness check.
         needs: Peer worker types required to serve traffic, in DNF form
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
-    runtime_config.backend_framework = "vllm"
+    runtime_config.context_length = vllm_config.model_config.max_model_len
 
     # Get runtime configuration from vLLM engine
     logging.info(
@@ -669,8 +716,10 @@ async def register_vllm_model(
         and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
-    # Add tool/reasoning parsers for decode models
-    if model_type != ModelType.Prefill:
+    # Add tool/reasoning parsers for decode/aggregated workers. Prefill
+    # workers have no OpenAI surface and don't run a parser — key off
+    # `worker_type` to skip them.
+    if worker_type != WorkerType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
     runtime_config.exclude_tools_when_tool_choice_none = (
@@ -688,6 +737,13 @@ async def register_vllm_model(
     stream_interval = getattr(config.engine_args, "stream_interval", None)
     if stream_interval is not None:
         runtime_config.set_engine_specific("stream_interval", str(stream_interval))
+
+    spec_decode = get_spec_decode_runtime_data(config, vllm_config)
+    if spec_decode is not None:
+        runtime_config.set_engine_specific(
+            SPEC_DECODE_RUNTIME_KEY, json.dumps(spec_decode)
+        )
+        logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
 
     runtime_config.data_parallel_start_rank = dp_range[0]
     runtime_config.data_parallel_size = dp_range[1]
@@ -716,7 +772,6 @@ async def register_vllm_model(
         generate_endpoint,
         config.model,
         config.served_model_name,
-        context_length=vllm_config.model_config.max_model_len,
         kv_cache_block_size=runtime_values["kv_event_block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
@@ -724,6 +779,7 @@ async def register_vllm_model(
         media_fetcher=media_fetcher,
         worker_type=worker_type,
         needs=needs,
+        ignore_weights=should_register_model_ignore_weights(config),
     )
 
 

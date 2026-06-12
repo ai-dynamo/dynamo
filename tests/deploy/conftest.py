@@ -44,7 +44,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--frontend-image",
         type=str,
         default=None,
-        help="Frontend container image (used by GAIE deploy tests).",
+        help="Frontend container image (used by GAIE and checkpoint deploy tests).",
     )
 
 

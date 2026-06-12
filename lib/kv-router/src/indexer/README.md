@@ -13,12 +13,13 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 | `types.rs` | `KvRouterError`, `MatchRequest`, `WorkerTask`, channel message types |
 | `metrics.rs` | `KvIndexerMetrics` — Prometheus counters and histograms |
 | `kv_indexer.rs` | `KvIndexer` — single-threaded async wrapper around `RadixTree` with tokio mpsc channels |
-| `radix_tree.rs` | `RadixTree` — single-threaded tree with `Rc<RefCell<RadixBlock>>` nodes, tracks per-block frequency |
+| `compressed_radix.rs` | Shared immutable compressed-edge and worker-coverage state |
+| `radix_tree.rs` | `RadixTree` — single-threaded compressed tree with `Rc<RefCell<RadixBlock>>` nodes |
 | `concurrent_radix_tree.rs` | `ConcurrentRadixTree` — thread-safe variant with `Arc<RwLock<Block>>` nodes and `DashMap` lookup |
 | `positional.rs` | `PositionalIndexer` — flat `DashMap<(pos, hash), SeqEntry>` with jump optimization |
 | `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTree` or `PositionalIndexer` |
 | `local.rs` | `LocalKvIndexer` — thin wrapper around `KvIndexer` with a circular event buffer for worker-side decentralized routing |
-| `pruning.rs` | `PruneManager` — TTL-based expiration and size-based pruning via `BinaryHeap<BlockEntry>` |
+| `pruning.rs` | `PruneManager` — TTL-based approximate expiration via 100ms buckets and per-worker pruning queues |
 | `naive.rs` | Brute-force baseline indexers (bench-only, behind `bench` feature flag) |
 | `tests.rs` | Integration tests for all indexer variants |
 
@@ -108,10 +109,12 @@ RadixTree
 └── lookup: HashMap<Worker, HashMap<SeqHash, SharedRadixBlock>>
 
 RadixBlock
+├── state.edge: Vec<(LocalBlockHash, SeqHash)>
+├── state.edge_index: HashMap<SeqHash, Position>
+├── state.worker_cutoffs: HashMap<Worker, Position>
+├── state.full_edge_workers: HashSet<Worker>
 ├── children: HashMap<LocalBlockHash, SharedRadixBlock>
-├── workers: HashSet<Worker>
-├── block_hash: Option<SeqHash>
-└── recent_uses: VecDeque<Instant>
+└── internal: bool
 ```
 
 ### Visual Representation
@@ -197,7 +200,8 @@ find_matches() ──→ │   Arc<ConcurrentRadixTree>       │ ← reads go i
 
 This same pattern — inline reads on the caller thread, sticky-routed writes through a thread pool — is shared with `PositionalIndexer` (see below). Both implement the `SyncIndexer` trait and are wrapped in `ThreadPoolIndexer`.
 
-One trade-off: `ConcurrentRadixTree` drops the `recent_uses` frequency tracking from `RadixTree`, keeping `find_matches` fully read-only (no mutable state updates on the read path).
+All indexers keep `find_matches` read-only. The legacy `OverlapScores.frequencies`
+wire field remains present for compatibility and is returned empty.
 
 ---
 

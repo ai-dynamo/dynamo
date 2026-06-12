@@ -284,6 +284,21 @@ pub mod llm {
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
+    /// Master switch for the `nvext` extension protocol on the frontend.
+    /// Default `true`. Falsy values (`0` / `false` / `no` / `off`,
+    /// case-insensitive) cause the frontend to drop `request.nvext` at
+    /// handler entry, ignore the routing-override headers
+    /// (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
+    /// `x-prefill-dp-rank`), and silently ignore the response-side
+    /// `extra_fields` opt-in.
+    pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
+
+    /// Master switch for the frontend's HTTP admin API surface.
+    /// Default `true`. Falsy values prevent registration of `GET` /
+    /// `POST /busy_threshold`. Inference, metrics, models, health, and
+    /// liveness routes are unaffected.
+    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
@@ -421,6 +436,40 @@ pub mod llm {
         pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
             "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
+
+    /// Per-request replay trace configuration
+    pub mod request_trace {
+        /// Master switch. Truthy enables per-request replay tracing.
+        pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
+
+        /// Request trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
+        pub const DYN_REQUEST_TRACE_SINKS: &str = "DYN_REQUEST_TRACE_SINKS";
+
+        /// Local output path for request trace records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
+        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_REQUEST_TRACE_OUTPUT_PATH: &str = "DYN_REQUEST_TRACE_OUTPUT_PATH";
+
+        /// In-process trace bus capacity.
+        pub const DYN_REQUEST_TRACE_CAPACITY: &str = "DYN_REQUEST_TRACE_CAPACITY";
+
+        /// JSONL sink buffer size in bytes.
+        pub const DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES: &str =
+            "DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES";
+
+        /// JSONL sink periodic flush interval in milliseconds.
+        pub const DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
+            "DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
+        pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES: &str =
+            "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES";
+
+        /// Rotating gzip JSONL sink roll threshold in record lines.
+        pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES: &str =
+            "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES";
+    }
 }
 
 /// Model loading and caching environment variables
@@ -495,6 +544,18 @@ pub mod event_plane {
 
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+
+    /// Bounded capacity of the direct ZMQ event-subscriber's merged event channel.
+    ///
+    /// Many peer publishers (e.g. every other frontend under replica-sync) feed
+    /// this single-consumer channel; an unbounded channel grows RSS without limit
+    /// when the consumer can't keep up. When the channel is full, new events are
+    /// dropped — the event plane is already best-effort/lossy (ZMQ RCVHWM), so a
+    /// dropped event costs routing-estimate freshness, not correctness.
+    /// Default: 100_000 (matches ZMQ_RCVHWM). Applies only to the direct ZMQ
+    /// subscriber path.
+    pub const DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY: &str =
+        "DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY";
 }
 
 /// ZMQ Broker environment variables
@@ -670,6 +731,14 @@ mod tests {
             llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
             llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::request_trace::DYN_REQUEST_TRACE,
+            llm::request_trace::DYN_REQUEST_TRACE_SINKS,
+            llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
+            llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
+            llm::request_trace::DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -688,6 +757,7 @@ mod tests {
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,
             zmq_broker::DYN_ZMQ_BROKER_ENABLED,

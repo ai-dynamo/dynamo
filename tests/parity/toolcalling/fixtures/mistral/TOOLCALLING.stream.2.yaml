@@ -49,10 +49,12 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: '[/TOOL_CALLS]'
+        normal_text: ''
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang's Mistral detector emits no tool call when the [TOOL_CALLS] payload is split across streaming chunks; Dynamo buffers the fragments and recovers the calls.
       vllm:
         calls: []
         normal_text: '[TOOL_CAL'
+        reason: vLLM leaks the partial start marker prefix into content when [TOOL_CALLS] is split across chunks and emits no call; Dynamo buffers the marker fragments and recovers the calls with empty normal_text.

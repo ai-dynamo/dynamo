@@ -129,9 +129,9 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 [mm-kv-routing]: ../features/multimodal/multimodal-kv-routing.md
 
 {/* Feature-specific */}
-[lora]: ../kubernetes-deployment/deploy-models/managing-models-with-dynamo-model
+[lora]: ../kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
 [vllm-spec]: ../additional-resources/speculative-decoding/speculative-decoding-with-v-llm
 [trtllm-eagle]: ../additional-resources/tensor-rt-llm-details/llama-4-eagle
 
 {/* Dynamo Snapshot */}
-[snapshot]: ../kubernetes-deployment/advanced-platform/snapshot
+[snapshot]: ../kubernetes-deployment/deployment-guide/snapshot

@@ -16,7 +16,6 @@ const DEFAULT_JSONL_GZ_ROLL_BYTES: u64 = 256 * 1024 * 1024;
 
 const DEFAULT_SINK: &str = "jsonl_gz";
 const DEFAULT_OUTPUT_PATH: &str = "/tmp/dynamo-agent-trace";
-const DEFAULT_TOOL_EVENTS_ZMQ_ENDPOINT: &str = "tcp://127.0.0.1:20390";
 
 #[derive(Clone, Debug)]
 pub struct AgentTracePolicy {
@@ -53,12 +52,12 @@ fn load_from_env() -> AgentTracePolicy {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| is_on.then(|| DEFAULT_OUTPUT_PATH.to_string()));
+    // Tool-event ingress is opt-in: bind the ZMQ endpoint only when set explicitly.
     let tool_events_zmq_endpoint =
         std::env::var(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
             .ok()
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .or_else(|| is_on.then(|| DEFAULT_TOOL_EVENTS_ZMQ_ENDPOINT.to_string()));
+            .filter(|value| !value.is_empty());
     let tool_events_zmq_topic =
         std::env::var(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC)
             .ok()
@@ -151,7 +150,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn master_switch_enables_with_default_sink_path_and_endpoint() {
+    fn master_switch_enables_sinks_and_path_but_not_tool_endpoint() {
         temp_env::with_vars(
             [
                 (env_agent_trace::DYN_AGENT_TRACE, Some("1")),
@@ -170,10 +169,7 @@ mod tests {
                     policy.output_path.as_deref(),
                     Some("/tmp/dynamo-agent-trace"),
                 );
-                assert_eq!(
-                    policy.tool_events_zmq_endpoint.as_deref(),
-                    Some("tcp://127.0.0.1:20390"),
-                );
+                assert!(policy.tool_events_zmq_endpoint.is_none());
             },
         );
     }
