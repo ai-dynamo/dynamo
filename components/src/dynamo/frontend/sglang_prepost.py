@@ -756,12 +756,6 @@ class SglangStreamingPostProcessor:
     - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
     """
 
-    # Lookback window size for incremental detokenization.  UTF-8 characters
-    # can span up to 4 bytes, each potentially its own token.  A lookback of
-    # 6 covers the worst case (4-token char) plus margin for BPE merges that
-    # cross the old/new boundary.
-    LOOKBACK = 6
-
     def __init__(
         self,
         *,

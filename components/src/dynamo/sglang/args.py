@@ -24,7 +24,10 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import enable_disjoint_streaming_output
+from dynamo.sglang._compat import (
+    disable_skip_tokenizer_init,
+    enable_disjoint_streaming_output,
+)
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -70,9 +73,9 @@ def _preprocess_for_encode_config(
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
-        "serving_mode": config.serving_mode.value
-        if config.serving_mode is not None
-        else "None",
+        "serving_mode": (
+            config.serving_mode.value if config.serving_mode is not None else "None"
+        ),
     }
 
 
@@ -384,6 +387,8 @@ async def parse_args(args: list[str]) -> Config:
     # behavior behind incremental_streaming_output, while older releases used
     # stream_output.
     enable_disjoint_streaming_output(server_args)
+
+    disable_skip_tokenizer_init(server_args)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
