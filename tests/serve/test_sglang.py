@@ -1031,7 +1031,17 @@ def test_sglang_aggregated_s3_model_path(
         # detects is_remote_url and pulls *config.json to a temp dir,
         # rewriting model_config.model_path and setting model_weights.
         model="Qwen/Qwen3-0.6B",
-        script_args=["--model-path", minio_config.get_s3_uri()],
+        # remote_instance + modelexpress backend activates SGLang's
+        # runai-streamer weight load path AND gates Dynamo's prefetch skip via
+        # use_modelexpress_remote_instance.
+        script_args=[
+            "--model-path",
+            minio_config.get_s3_uri(),
+            "--load-format",
+            "remote_instance",
+            "--remote-instance-weight-loader-backend",
+            "modelexpress",
+        ],
         timeout=180,
         env=minio_config.get_env_vars(),
         request_payloads=[chat_payload_default()],

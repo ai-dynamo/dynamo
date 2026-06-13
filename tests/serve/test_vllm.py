@@ -1234,7 +1234,15 @@ def test_vllm_aggregated_s3_model(
         # detects is_runai_obj_uri, pulls *.json/*.py/*.model into a temp dir,
         # rewrites model_config.model and sets model_weights = <original URI>.
         model="Qwen/Qwen3-0.6B",
-        script_args=["--model", minio_config.get_s3_uri()],
+        # --load-format modelexpress activates the modelexpress vLLM plugin
+        # (gates Dynamo's prefetch skip via uses_modelexpress_load_format AND
+        # enables the runai-streamer weight load path).
+        script_args=[
+            "--model",
+            minio_config.get_s3_uri(),
+            "--load-format",
+            "modelexpress",
+        ],
         timeout=180,
         env=minio_config.get_env_vars(),
         request_payloads=[chat_payload_default()],
