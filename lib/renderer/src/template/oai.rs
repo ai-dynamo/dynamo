@@ -373,6 +373,57 @@ fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
     }
 }
 
+fn gemma4_reasoning_content_to_text(reasoning_content: serde_json::Value) -> Option<String> {
+    match reasoning_content {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s),
+        serde_json::Value::Array(segments) => {
+            let text_segments: Vec<&str> = segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect();
+            (!text_segments.is_empty()).then(|| text_segments.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+fn adapt_gemma4_reasoning_content_into_reasoning(messages: &mut serde_json::Value) {
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+
+    for msg in msgs.iter_mut() {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        let Some(obj) = msg.as_object_mut() else {
+            continue;
+        };
+        let Some(reasoning_content) = obj.remove("reasoning_content") else {
+            continue;
+        };
+
+        let has_tool_calls = obj
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .is_some_and(|calls| !calls.is_empty());
+        if !has_tool_calls || obj.contains_key("reasoning") {
+            continue;
+        }
+
+        if let Some(reasoning) = gemma4_reasoning_content_to_text(reasoning_content) {
+            obj.insert(
+                "reasoning".to_string(),
+                serde_json::Value::String(reasoning),
+            );
+        }
+    }
+}
+
 /// Default [`OAIChatLikeRequest`] impl for the bare `dynamo-protocols` chat
 /// request. Lets any consumer (e.g. a standalone OpenAI frontend over an
 /// engine) render HF chat templates directly from the wire type, without
@@ -503,6 +554,10 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         // `arguments is string` opt-out only covers the modern `tool_calls`
         // branch.
         normalize_function_call_arguments_in_messages(&mut messages_for_template);
+
+        if self.template_uses_gemma4_reasoning {
+            adapt_gemma4_reasoning_content_into_reasoning(&mut messages_for_template);
+        }
 
         // Inject reasoning_content as <think> blocks into content — but only if
         // the template doesn't handle it natively. Templates like Nemotron and

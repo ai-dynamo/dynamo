@@ -99,6 +99,9 @@ struct HfTokenizerConfigJsonFormatter {
     /// True if the chat template natively references `reasoning_content`.
     /// When true, skip injection — the template handles it.
     template_handles_reasoning: bool,
+    /// True for unchanged Gemma4 tool templates that expect `message.reasoning`
+    /// instead of Dynamo's `reasoning_content`.
+    template_uses_gemma4_reasoning: bool,
     /// Per-family placeholder template for image content parts when flattening
     /// mixed text+image content arrays into a single string (`preserve_arrays`
     /// = false path). `{n}` in the template is substituted with the 1-based

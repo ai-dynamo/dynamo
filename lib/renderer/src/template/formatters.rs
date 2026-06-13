@@ -37,6 +37,21 @@ fn detect_content_array_usage(env: &Environment) -> bool {
     out_array.contains("template_test") && !out_string.contains("template_test")
 }
 
+/// Detects the Gemma4 tool template shape that uses the upstream/vLLM-style
+/// `message.reasoning` field for thought-channel replay.
+fn is_gemma4_reasoning_field_template_source(source: &str) -> bool {
+    source.contains("<|channel>thought")
+        && source.contains("<|tool_call>call:")
+        && (source.contains("message.get('reasoning')")
+            || source.contains("message.get(\"reasoning\")"))
+        && !source.contains("reasoning_content")
+}
+
+fn detect_gemma4_reasoning_field_template(env: &Environment) -> bool {
+    env.templates()
+        .any(|(_, tmpl)| is_gemma4_reasoning_field_template_source(tmpl.source()))
+}
+
 /// Picks an image-placeholder template by sniffing the chat template source
 /// for distinctive role/end markers.
 ///
@@ -317,7 +332,6 @@ impl HfTokenizerConfigJsonFormatter {
         env.add_function("strftime_now", strftime_now);
 
         let mut supports_add_generation_prompt = None;
-
         match &chat_template.0 {
             Either::Left(x) => {
                 if x.contains("add_generation_prompt") {
@@ -383,6 +397,7 @@ impl HfTokenizerConfigJsonFormatter {
         let template_handles_reasoning = env
             .templates()
             .any(|(_, tmpl)| tmpl.source().contains("reasoning_content"));
+        let template_uses_gemma4_reasoning = detect_gemma4_reasoning_field_template(&env);
 
         // Detect if a given template branches on `tool_call.arguments is string` (Qwen3, Hermes).
         // Such templates render a JSON-string `arguments` field verbatim; if we pre-parse
@@ -412,6 +427,7 @@ impl HfTokenizerConfigJsonFormatter {
             requires_content_arrays,
             exclude_tools_when_tool_choice_none,
             template_handles_reasoning,
+            template_uses_gemma4_reasoning,
             image_placeholder_template,
             default_template_handles_tool_calls_arguments_string,
             tool_use_template_handles_tool_calls_arguments_string,
@@ -440,6 +456,135 @@ mod tests {
         let mut env = JinjaEnvironment::default().env();
         env.add_template_owned("default", src.to_string()).unwrap();
         env
+    }
+
+    fn make_gemma4_formatter() -> crate::PromptFormatter {
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": include_str!("../../../../examples/chat_templates/gemma4_tool.jinja")
+        }))
+        .unwrap();
+
+        crate::PromptFormatter::from_parts(chat_template, ContextMixins::new(&[]), true).unwrap()
+    }
+
+    #[test]
+    fn test_gemma4_template_adapts_reasoning_content_without_jinja_change() {
+        use dynamo_protocols::types::CreateChatCompletionRequest as NvCreateChatCompletionRequest;
+
+        let formatter = make_gemma4_formatter();
+
+        assert!(
+            !include_str!("../../../../examples/chat_templates/gemma4_tool.jinja")
+                .contains("reasoning_content")
+        );
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "gemma4-test",
+            "messages": [
+                {"role": "user", "content": "check the current directory"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": [
+                        "I need to inspect the shell state.",
+                        "Then I can answer from the result."
+                    ],
+                    "tool_calls": [{
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": "{\"cmd\":\"pwd\"}"
+                        }
+                    }]
+                }
+            ]
+        }))
+        .unwrap();
+
+        let rendered = match &formatter {
+            crate::PromptFormatter::OAI(formatter) => formatter.render(&request).unwrap(),
+        };
+
+        assert!(
+            rendered.contains(
+                "<|channel>thought\nI need to inspect the shell state.\nThen I can answer from the result.\n<channel|>"
+            ),
+            "Gemma4 reasoning_content should render through the thought channel, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("<|tool_call>call:exec_command{"),
+            "tool call should still render, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<think>"),
+            "Gemma4 should not receive generic <think> fallback tokens, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("reasoning_content"),
+            "raw reasoning_content field should not leak into prompt"
+        );
+    }
+
+    #[test]
+    fn test_gemma4_template_handles_pure_thinking_and_pure_tool_call_paths() {
+        use dynamo_protocols::types::CreateChatCompletionRequest as NvCreateChatCompletionRequest;
+
+        let formatter = make_gemma4_formatter();
+
+        let pure_thinking_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "gemma4-test",
+                "messages": [
+                    {"role": "user", "content": "answer directly"},
+                    {
+                        "role": "assistant",
+                        "content": "Direct answer.",
+                        "reasoning_content": "This must not become a generic think block."
+                    },
+                    {"role": "user", "content": "thanks"}
+                ]
+            }))
+            .unwrap();
+
+        let pure_thinking_rendered = match &formatter {
+            crate::PromptFormatter::OAI(formatter) => {
+                formatter.render(&pure_thinking_request).unwrap()
+            }
+        };
+        assert!(pure_thinking_rendered.contains("Direct answer."));
+        assert!(!pure_thinking_rendered.contains("<think>"));
+        assert!(!pure_thinking_rendered.contains("This must not become a generic think block."));
+
+        let pure_tool_call_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "gemma4-test",
+                "messages": [
+                    {"role": "user", "content": "check the current directory"},
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_0",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        }]
+                    }
+                ]
+            }))
+            .unwrap();
+
+        let pure_tool_call_rendered = match &formatter {
+            crate::PromptFormatter::OAI(formatter) => {
+                formatter.render(&pure_tool_call_request).unwrap()
+            }
+        };
+        assert!(pure_tool_call_rendered.contains("<|tool_call>call:exec_command{"));
+        assert!(!pure_tool_call_rendered.contains("<think>"));
+        assert!(!pure_tool_call_rendered.contains("reasoning_content"));
     }
 
     #[test]
