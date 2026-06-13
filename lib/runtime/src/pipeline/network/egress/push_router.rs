@@ -114,6 +114,7 @@ pub trait WorkerLoadMonitor: Send + Sync {
 /// Query interface for routing against multimodal embedding cache state.
 pub trait MultimodalCacheIndex: Send + Sync {
     fn workers_with_all_cache_keys(&self, cache_keys: &[String]) -> Vec<u64>;
+    fn remove_worker(&self, worker_id: u64);
 }
 
 #[derive(Clone)]
@@ -158,6 +159,7 @@ where
     worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
 
     /// Optional cache index for direct multimodal embedding cache lookups.
+    /// Currently consumed by `RouterMode::DeviceAwareWeighted`.
     multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
@@ -306,6 +308,10 @@ fn device_aware_candidate_group(
 static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
     std::sync::OnceLock::new();
 
+/// At most one multimodal cache cleanup watcher per endpoint.
+static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
+    std::sync::OnceLock::new();
+
 /// Watch discovery for instance removals and cancel pending response-stream
 /// registrations on the removed instance, unblocking queued requests with
 /// a migratable `Disconnected` error. Uses raw `list_and_watch` events
@@ -424,6 +430,95 @@ fn spawn_instance_removal_watcher(
     });
 }
 
+/// Watch discovery removals for cache-aware routers and drop stale worker cache entries.
+fn spawn_multimodal_cache_cleanup_watcher(
+    endpoint: Endpoint,
+    indexer: Arc<dyn MultimodalCacheIndex>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) {
+    use crate::discovery::{DiscoveryEvent, DiscoveryInstanceId, DiscoveryQuery};
+    use tokio_stream::StreamExt as _;
+
+    let guard = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+    let endpoint_id = endpoint.id();
+    if guard.insert(endpoint_id.clone(), ()).is_some() {
+        tracing::debug!(
+            ?endpoint_id,
+            "Multimodal cache cleanup watcher already running for this endpoint, skipping"
+        );
+        return;
+    }
+
+    let endpoint_name = endpoint.name().to_string();
+    let namespace = endpoint.component().namespace().name();
+    let component = endpoint.component().name().to_string();
+
+    tokio::spawn(async move {
+        struct GuardRelease(EndpointId);
+        impl Drop for GuardRelease {
+            fn drop(&mut self) {
+                if let Some(map) = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get() {
+                    map.remove(&self.0);
+                }
+            }
+        }
+        let _release = GuardRelease(endpoint_id);
+
+        const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+        'reconnect: loop {
+            let query = DiscoveryQuery::Endpoint {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint_name.clone(),
+            };
+
+            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::warn!(
+                        endpoint = %endpoint_name,
+                        "Failed to start multimodal cache cleanup watcher (will retry): {error}"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
+                        _ = cancel_token.cancelled() => break 'reconnect,
+                    }
+                }
+            };
+
+            loop {
+                tokio::select! {
+                    event = stream.next() => {
+                        match event {
+                            Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
+                                indexer.remove_worker(eid.instance_id);
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(error)) => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Multimodal cache cleanup watcher stream error: {error}"
+                                );
+                                continue 'reconnect;
+                            }
+                            None => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Multimodal cache cleanup watcher stream ended; reconnecting"
+                                );
+                                continue 'reconnect;
+                            }
+                        }
+                    }
+                    _ = cancel_token.cancelled() => break 'reconnect,
+                }
+            }
+        }
+
+        tracing::debug!(endpoint = %endpoint_name, "Multimodal cache cleanup watcher exiting");
+    });
+}
+
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     AddressedPushRouter::from_runtime_provider(endpoint).await
 }
@@ -526,6 +621,15 @@ where
             addressed.clone(),
             client.endpoint.drt().primary_token(),
         );
+
+        // Drop stale cache-index entries when workers leave discovery.
+        if let Some(indexer) = multimodal_cache_indexer.clone() {
+            spawn_multimodal_cache_cleanup_watcher(
+                client.endpoint.clone(),
+                indexer,
+                client.endpoint.drt().primary_token(),
+            );
+        }
 
         let router = PushRouter {
             client,

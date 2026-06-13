@@ -229,6 +229,10 @@ impl MultimodalCacheIndex for EmbeddingCacheIndexer {
     fn workers_with_all_cache_keys(&self, cache_keys: &[String]) -> Vec<WorkerId> {
         self.workers_with_cached_keys(cache_keys.iter().map(|key| key.as_str()))
     }
+
+    fn remove_worker(&self, worker_id: WorkerId) {
+        EmbeddingCacheIndexer::remove_worker(self, worker_id);
+    }
 }
 
 #[cfg(test)]
