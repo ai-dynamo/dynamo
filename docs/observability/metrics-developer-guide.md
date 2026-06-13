@@ -12,6 +12,10 @@ All metrics created via the Dynamo metrics API are automatically exposed on the 
 
 - `DYN_SYSTEM_PORT=<port>` - Port for the metrics endpoint (set to positive value to enable, default: `-1` disabled)
 
+You can also add deployment-wide constant Prometheus labels by setting `DYNAMO_CONST_LABELS` to semicolon-delimited `key:value` pairs, for example `namespace:prod;model_version:v2`. The legacy alias `MICHAEL_ADD_LABELS` is also accepted.
+
+Keep these labels stable and low-cardinality. Good values are deployment metadata such as namespace, cluster, model version, or region. Avoid request IDs, user IDs, timestamps, or anything that changes per request.
+
 Example:
 ```bash
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>

@@ -13,6 +13,7 @@ while Dynamo runtime metrics are available immediately after component creation.
 
 import enum
 import logging
+import os
 import re
 import threading
 from collections.abc import Mapping
@@ -35,6 +36,84 @@ if TYPE_CHECKING:
 #
 # Rust counterpart: lib/runtime/src/metrics.rs create_metric() function
 # Label constants defined in: lib/runtime/src/metrics/prometheus_names.rs labels module
+
+_PROMETHEUS_LABEL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+_GLOBAL_CONST_LABEL_ENV_VARS = ("DYNAMO_CONST_LABELS", "MICHAEL_ADD_LABELS")
+
+
+def _parse_const_label_pairs(raw_labels: str, env_var_name: str) -> dict[str, str]:
+    """Parse ``key:value`` pairs from a semicolon-delimited label string.
+
+    Prometheus label names must match ``[a-zA-Z_][a-zA-Z0-9_]*``. Values may be
+    empty, but the input must not contain duplicate label names or malformed
+    pairs.
+    """
+
+    parsed_labels: dict[str, str] = {}
+    for entry in raw_labels.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+
+        if ":" not in entry:
+            raise ValueError(
+                f"{env_var_name} must use 'key:value' pairs separated by ';'"
+            )
+
+        label_name, label_value = entry.split(":", 1)
+        label_name = label_name.strip()
+        label_value = label_value.strip()
+
+        if not label_name:
+            raise ValueError(f"{env_var_name} contains an empty label name")
+
+        if not _PROMETHEUS_LABEL_NAME.match(label_name):
+            raise ValueError(
+                f"{env_var_name} contains invalid Prometheus label name '{label_name}'"
+            )
+
+        if label_name in parsed_labels:
+            raise ValueError(
+                f"{env_var_name} defines '{label_name}' more than once"
+            )
+
+        parsed_labels[label_name] = label_value
+
+    return parsed_labels
+
+
+@lru_cache(maxsize=1)
+def _global_const_labels_cached() -> tuple[tuple[str, str], ...]:
+    merged_labels: dict[str, str] = {}
+
+    for env_var_name in _GLOBAL_CONST_LABEL_ENV_VARS:
+        raw_labels = os.environ.get(env_var_name)
+        if not raw_labels:
+            continue
+
+        parsed_labels = _parse_const_label_pairs(raw_labels, env_var_name)
+        conflicting_names = set(merged_labels).intersection(parsed_labels)
+        if conflicting_names:
+            logging.warning(
+                "Ignoring duplicate global const label names from %s: %s",
+                env_var_name,
+                ", ".join(sorted(conflicting_names)),
+            )
+        merged_labels.update(parsed_labels)
+
+    return tuple(merged_labels.items())
+
+
+def global_const_labels() -> dict[str, str]:
+    """Return globally configured Prometheus constant labels.
+
+    Labels are read once from ``DYNAMO_CONST_LABELS`` or the legacy
+    ``MICHAEL_ADD_LABELS`` alias and cached for the process lifetime.
+    Keep values stable and low-cardinality; avoid request IDs, user IDs,
+    timestamps, or other per-request data.
+    """
+
+    return dict(_global_const_labels_cached())
 
 
 # Single source of truth for embedding cache metric names.
@@ -265,8 +344,12 @@ def get_prometheus_expfmt(
     from prometheus_client import CollectorRegistry, generate_latest
 
     try:
-        # If label injection requested, wrap registry with custom collector
+        const_labels = global_const_labels()
         if inject_custom_labels:
+            const_labels = {**const_labels, **inject_custom_labels}
+
+        # If label injection requested, wrap registry with custom collector
+        if const_labels:
             # Delayed import: LabelInjectingCollector imports prometheus_client.registry.Collector
             # at module level. This import must happen AFTER set_prometheus_multiproc_dir() is
             # called by SGLang's engine initialization. Importing at the top of this file would
@@ -278,9 +361,7 @@ def get_prometheus_expfmt(
 
             # Create temporary registry with label-injecting collector
             temp_registry = CollectorRegistry()
-            temp_registry.register(
-                LabelInjectingCollector(registry, inject_custom_labels)
-            )
+            temp_registry.register(LabelInjectingCollector(registry, const_labels))
             registry = temp_registry
 
         # Generate metrics in Prometheus text format
@@ -473,7 +554,7 @@ def register_embedding_cache_metrics(
     # Lazy import: prometheus_client must be imported AFTER set_prometheus_multiproc_dir()
     # in SGLang's multiprocess mode. This matches the existing pattern used by
     # get_prometheus_expfmt() and LLMBackendMetrics.__init__() in this file.
-    from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
+    from prometheus_client import CollectorRegistry, Counter, Gauge
 
     registry = CollectorRegistry()
     label_names = [labels.MODEL, labels.COMPONENT]
@@ -555,7 +636,7 @@ def register_embedding_cache_metrics(
             current_bytes_gauge.labels(**label_values).set(stats["current_bytes"])
             entries_gauge.labels(**label_values).set(stats["entries"])
 
-            return generate_latest(registry).decode("utf-8")
+            return get_prometheus_expfmt(registry)
 
     endpoint.metrics.register_prometheus_expfmt_callback(
         _collect_embedding_cache_metrics

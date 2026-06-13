@@ -18,6 +18,7 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 |----------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | Backend component metrics/health port | `-1` (disabled) | `8081` |
 | `DYN_HTTP_PORT` | Frontend HTTP port (also configurable via `--http-port` flag) | `8000` | `8000` |
+| `DYNAMO_CONST_LABELS` | Optional semicolon-delimited constant Prometheus labels added to exported metrics. Legacy alias: `MICHAEL_ADD_LABELS`. Keep values low-cardinality and deployment-scoped. | unset | `namespace:prod;model_version:v2` |
 | `NIXL_TELEMETRY_ENABLE` | Enable NIXL telemetry (see [NIXL Telemetry Metrics](#nixl-telemetry-metrics)). Options: `y`, `n` | `n` (disabled) | `y` |
 
 ## Getting Started Quickly
