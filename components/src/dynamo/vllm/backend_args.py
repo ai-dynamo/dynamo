@@ -3,6 +3,7 @@
 
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
+import logging
 import warnings
 from typing import Optional, Union
 
@@ -15,6 +16,13 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 
 from . import __version__
 from .constants import DisaggregationMode, EmbeddingTransferMode
+
+logger = logging.getLogger(__name__)
+
+
+def _warn_deprecated(message: str) -> None:
+    logger.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoVllmArgGroup(ArgGroup):
@@ -394,10 +402,10 @@ class DynamoVllmConfig(ConfigBase):
            --disaggregation-mode is set.
         """
         if self.multimodal_decode_worker:
-            warnings.warn(
-                "--multimodal-decode-worker is deprecated, use --disaggregation-mode=decode and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-decode-worker is deprecated; use "
+                "--enable-multimodal --disaggregation-mode=decode. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -407,11 +415,12 @@ class DynamoVllmConfig(ConfigBase):
                     f"Cannot set --multimodal-decode-worker while --disaggregation-mode is not '{DisaggregationMode.DECODE.value}'"
                 )
             self.disaggregation_mode = DisaggregationMode.DECODE
+            self.enable_multimodal = True
         if self.multimodal_encode_worker:
-            warnings.warn(
-                "--multimodal-encode-worker is deprecated, use --disaggregation-mode=encode and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-encode-worker is deprecated; use "
+                "--enable-multimodal --disaggregation-mode=encode. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -421,11 +430,12 @@ class DynamoVllmConfig(ConfigBase):
                     f"Cannot set --multimodal-encode-worker while --disaggregation-mode is not '{DisaggregationMode.ENCODE.value}'"
                 )
             self.disaggregation_mode = DisaggregationMode.ENCODE
+            self.enable_multimodal = True
         if self.multimodal_worker:
-            warnings.warn(
-                "--multimodal-worker is deprecated, use --disaggregation-mode=agg or --disaggregation-mode=prefill and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-worker is deprecated; use --enable-multimodal "
+                "with --disaggregation-mode=agg or --disaggregation-mode=prefill. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -439,6 +449,7 @@ class DynamoVllmConfig(ConfigBase):
             # '--disaggregation-mode=prefill' as prefill workers in P/D disaggregation or without for aggregation.
             if self.disaggregation_mode is None:
                 self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            self.enable_multimodal = True
 
     def _count_multimodal_roles(self) -> int:
         """Return the number of multimodal worker roles set (0 or 1 allowed).

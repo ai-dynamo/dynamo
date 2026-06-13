@@ -4,6 +4,8 @@
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
 import argparse
+import logging
+import warnings
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -15,6 +17,13 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 from dynamo.common.constants import EmbeddingTransferMode
 
 from . import __version__
+
+logger = logging.getLogger(__name__)
+
+
+def _warn_deprecated(message: str) -> None:
+    logger.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoSGLangArgGroup(ArgGroup):
@@ -49,14 +58,28 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--multimodal-encode-worker",
             env_var="DYN_SGL_MULTIMODAL_ENCODE_WORKER",
             default=False,
-            help="Run as multimodal encode worker component for processing images/videos.",
+            help="DEPRECATED: use --enable-multimodal --disaggregation-mode=encode.",
         )
         add_negatable_bool_argument(
             g,
             flag_name="--multimodal-worker",
             env_var="DYN_SGL_MULTIMODAL_WORKER",
             default=False,
-            help="Run as multimodal worker component for LLM inference with multimodal data.",
+            help=(
+                "DEPRECATED: use --enable-multimodal with "
+                "--disaggregation-mode=agg/prefill/decode."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-multimodal",
+            env_var="DYN_SGL_ENABLE_MULTIMODAL",
+            default=False,
+            help=(
+                "Enable multimodal processing. When an explicit "
+                "--disaggregation-mode is provided, this selects the matching "
+                "Dynamo multimodal EPD worker role."
+            ),
         )
 
         add_argument(
@@ -134,6 +157,7 @@ class DynamoSGLangConfig(ConfigBase):
     use_sglang_tokenizer: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
+    enable_multimodal: bool = False
     embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
     image_diffusion_worker: bool
@@ -157,6 +181,25 @@ class DynamoSGLangConfig(ConfigBase):
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
             )
 
+        if self.multimodal_encode_worker:
+            _warn_deprecated(
+                "--multimodal-encode-worker is deprecated; use "
+                "--enable-multimodal --disaggregation-mode=encode. "
+                "This release will map the legacy flag to the new arguments."
+            )
+            self.enable_multimodal = True
+        if self.multimodal_worker:
+            _warn_deprecated(
+                "--multimodal-worker is deprecated; use --enable-multimodal "
+                "with --disaggregation-mode=agg, --disaggregation-mode=prefill, "
+                "or --disaggregation-mode=decode. This release will map the "
+                "legacy flag to the new arguments."
+            )
+            self.enable_multimodal = True
+
+        self.validate_multimodal_topology()
+
+    def validate_multimodal_topology(self) -> None:
         if self.frontend_decoding and (
             self.multimodal_encode_worker or self.multimodal_worker
         ):

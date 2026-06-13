@@ -4,6 +4,8 @@
 """Dynamo TRT-LLM backend configuration ArgGroup."""
 
 import argparse
+import logging
+import warnings
 from typing import Optional
 
 from tensorrt_llm.llmapi import BuildConfig
@@ -19,6 +21,14 @@ from . import __version__
 from .constants import DisaggregationMode, Modality
 
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+CANONICAL_AGGREGATED_MODE = "agg"
+
+logger = logging.getLogger(__name__)
+
+
+def _warn_deprecated(message: str) -> None:
+    logger.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoTrtllmArgGroup(ArgGroup):
@@ -186,9 +196,23 @@ class DynamoTrtllmArgGroup(ArgGroup):
             g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
-            default=DisaggregationMode.AGGREGATED.value,
-            choices=[mode.value for mode in DisaggregationMode],
-            help="Mode to use for disaggregation.",
+            default=CANONICAL_AGGREGATED_MODE,
+            choices=[
+                CANONICAL_AGGREGATED_MODE,
+                *[mode.value for mode in DisaggregationMode],
+            ],
+            help=(
+                "Worker disaggregation mode. Use 'agg' for aggregated serving, "
+                "'prefill', 'decode', or 'encode'. The legacy "
+                "'prefill_and_decode' value remains accepted temporarily."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-multimodal",
+            env_var="DYN_TRTLLM_ENABLE_MULTIMODAL",
+            default=False,
+            help="Enable multimodal LLM request processing.",
         )
         add_argument(
             g,
@@ -196,7 +220,10 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_MODALITY",
             default=Modality.TEXT.value,
             choices=[m.value for m in Modality],
-            help="Modality to use for the model.",
+            help=(
+                "Modality to use for the model. For multimodal LLM serving, "
+                "prefer --enable-multimodal; diffusion modalities remain here."
+            ),
         )
         add_argument(
             g,
@@ -454,6 +481,7 @@ class DynamoTrtllmConfig(ConfigBase):
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
+    enable_multimodal: bool
     modality: Modality
     encode_endpoint: str
     allowed_local_media_path: str
@@ -485,8 +513,32 @@ class DynamoTrtllmConfig(ConfigBase):
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):
-            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+            if self.disaggregation_mode == CANONICAL_AGGREGATED_MODE:
+                self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            else:
+                if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
+                    _warn_deprecated(
+                        "--disaggregation-mode=prefill_and_decode is deprecated; "
+                        "use --disaggregation-mode=agg. This release will map "
+                        "the legacy value to the new argument."
+                    )
+                self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
             self.modality = Modality(self.modality)
+        if self.enable_multimodal:
+            if Modality.is_diffusion(self.modality):
+                raise ValueError(
+                    "--enable-multimodal cannot be combined with "
+                    f"--modality {self.modality.value}. Use --modality only for "
+                    "diffusion models."
+                )
+            self.modality = Modality.MULTIMODAL
+        elif self.modality == Modality.MULTIMODAL:
+            _warn_deprecated(
+                "--modality multimodal is deprecated for multimodal LLM serving; "
+                "use --enable-multimodal. This release will map the legacy value "
+                "to the new argument."
+            )
+            self.enable_multimodal = True
         if not self.served_model_name:
             self.served_model_name = None

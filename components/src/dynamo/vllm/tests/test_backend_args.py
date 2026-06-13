@@ -66,6 +66,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
             if mode is None or mode == DisaggregationMode.AGGREGATED:
                 config._resolve_disaggregation_model_from_legacy_multimodal_flags()
                 assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+                assert config.enable_multimodal is True
             else:
                 with pytest.raises(ValueError):
                     config._resolve_disaggregation_model_from_legacy_multimodal_flags()
@@ -78,6 +79,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         with pytest.warns(DeprecationWarning):
             config._resolve_disaggregation_model_from_legacy_multimodal_flags()
             assert config.disaggregation_mode == DisaggregationMode.PREFILL
+            assert config.enable_multimodal is True
 
     @pytest.mark.parametrize(
         "mode",
@@ -97,6 +99,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
             if mode is None or mode == DisaggregationMode.ENCODE:
                 config._resolve_disaggregation_model_from_legacy_multimodal_flags()
                 assert config.disaggregation_mode == DisaggregationMode.ENCODE
+                assert config.enable_multimodal is True
             else:
                 with pytest.raises(ValueError):
                     config._resolve_disaggregation_model_from_legacy_multimodal_flags()
@@ -119,6 +122,7 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
             if mode is None or mode == DisaggregationMode.DECODE:
                 config._resolve_disaggregation_model_from_legacy_multimodal_flags()
                 assert config.disaggregation_mode == DisaggregationMode.DECODE
+                assert config.enable_multimodal is True
             else:
                 with pytest.raises(ValueError):
                     config._resolve_disaggregation_model_from_legacy_multimodal_flags()

@@ -34,6 +34,7 @@ def _make_config(
     config.use_sglang_tokenizer = False
     config.multimodal_encode_worker = multimodal_encode_worker
     config.multimodal_worker = multimodal_worker
+    config.enable_multimodal = False
     config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
     config.embedding_worker = False
     config.image_diffusion_worker = False
@@ -45,13 +46,19 @@ def _make_config(
 
 def test_validate_rejects_frontend_decoding_with_encode_worker():
     config = _make_config(frontend_decoding=True, multimodal_encode_worker=True)
-    with pytest.raises(ValueError, match="--frontend-decoding is incompatible"):
+    with (
+        pytest.warns(DeprecationWarning, match="--multimodal-encode-worker"),
+        pytest.raises(ValueError, match="--frontend-decoding is incompatible"),
+    ):
         config.validate()
 
 
 def test_validate_rejects_frontend_decoding_with_multimodal_worker():
     config = _make_config(frontend_decoding=True, multimodal_worker=True)
-    with pytest.raises(ValueError, match="--frontend-decoding is incompatible"):
+    with (
+        pytest.warns(DeprecationWarning, match="--multimodal-worker"),
+        pytest.raises(ValueError, match="--frontend-decoding is incompatible"),
+    ):
         config.validate()
 
 
