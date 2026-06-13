@@ -16,12 +16,13 @@
 //! is not `Ready`, so in-flight rollouts and crash-looping pods don't receive
 //! traffic.
 //!
+//! For **disaggregated** deployments the pods additionally carry a role label
+//! (`DYN_EPP_ROLE_LABEL`, e.g. `dynamo-role=prefill|decode`); the reflector can
+//! then partition the Ready set into prefill vs decode workers.
+//!
 //! `worker_id` is `hash_pod_name(pod_name)` — identical to the Dynamo-mode
 //! scheme — so the IDs produced here line up with the scheduler and with the
 //! `KvRepublisher`'s per-pod event stamping.
-//!
-//! NOTE: this module is not yet wired into [`crate::epp::Router`]; the
-//! router-only constructor that consumes it lands in a subsequent change.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,6 +39,10 @@ use dynamo_runtime::discovery::hash_pod_name;
 /// continuing in the background (mirrors the Dynamo-mode reflector).
 const INITIAL_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Canonical role label values for disaggregated deployments.
+pub const ROLE_PREFILL: &str = "prefill";
+pub const ROLE_DECODE: &str = "decode";
+
 /// A label-selector-driven, Ready-filtered pod reflector for raw vLLM pods.
 ///
 /// Provides lock-free reads of the current pod set; no K8s API calls on the
@@ -46,16 +51,25 @@ pub struct RouterOnlyPodReflector {
     store: Store<Pod>,
     ready: Arc<AtomicBool>,
     target_port: u16,
+    /// Pod label key partitioning prefill vs decode pods in disaggregated mode.
+    /// `None` ⇒ aggregated (every Ready pod is a decode worker).
+    role_label: Option<String>,
 }
 
 impl RouterOnlyPodReflector {
     /// Start a background reflector watching pods that match `selector` in
-    /// `k8s_namespace`, resolving endpoints on `target_port`.
+    /// `k8s_namespace`, resolving endpoints on `target_port`. `role_label`
+    /// enables prefill/decode partitioning for disaggregated deployments.
     ///
     /// Returns once the initial LIST completes (or after [`INITIAL_SYNC_TIMEOUT`],
     /// after which it finishes in the background and [`is_ready`](Self::is_ready)
     /// flips to `true`).
-    pub async fn spawn(k8s_namespace: &str, selector: &str, target_port: u16) -> Result<Self> {
+    pub async fn spawn(
+        k8s_namespace: &str,
+        selector: &str,
+        target_port: u16,
+        role_label: Option<String>,
+    ) -> Result<Self> {
         use futures::StreamExt;
         use kube::{Api, Client, runtime::reflector, runtime::watcher};
 
@@ -72,6 +86,7 @@ impl RouterOnlyPodReflector {
             namespace = k8s_namespace,
             selector = selector,
             target_port,
+            role_label = ?role_label,
             "Starting router-only pod reflector for raw vLLM endpoint resolution"
         );
 
@@ -125,6 +140,7 @@ impl RouterOnlyPodReflector {
             store,
             ready,
             target_port,
+            role_label,
         })
     }
 
@@ -139,24 +155,37 @@ impl RouterOnlyPodReflector {
         self.ready.clone()
     }
 
-    /// `(worker_id, "ip:port")` for every currently-Ready pod.
+    /// Whether prefill/decode role partitioning is enabled (disaggregated mode).
+    pub fn is_role_aware(&self) -> bool {
+        self.role_label.is_some()
+    }
+
+    /// `(worker_id, "ip:port")` for every currently-Ready pod, regardless of role.
     pub fn ready_workers(&self) -> Vec<(u64, String)> {
-        self.store
-            .state()
-            .iter()
-            .filter(|pod| pod_is_ready(pod))
-            .filter_map(|pod| {
-                let name = pod.metadata.name.as_deref()?;
-                let endpoint = pod_endpoint_by_port(pod, self.target_port)?;
-                Some((hash_pod_name(name), endpoint))
-            })
-            .collect()
+        self.collect_ready(|_pod| true)
     }
 
     /// Worker IDs of all Ready pods — the admission set to register with the
     /// scheduler so it never selects a worker outside the live fleet.
     pub fn ready_worker_ids(&self) -> HashSet<u64> {
         self.ready_workers().into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// `(worker_id, "ip:port")` for every Ready pod whose `role_label` value
+    /// equals `role_value`. Empty when role partitioning is disabled.
+    pub fn ready_workers_for_role(&self, role_value: &str) -> Vec<(u64, String)> {
+        let Some(role_label) = self.role_label.as_deref() else {
+            return Vec::new();
+        };
+        self.collect_ready(|pod| pod_label(pod, role_label) == Some(role_value))
+    }
+
+    /// Worker IDs of Ready pods with the given role.
+    pub fn ready_worker_ids_for_role(&self, role_value: &str) -> HashSet<u64> {
+        self.ready_workers_for_role(role_value)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Resolve a `worker_id` to its `ip:port`, if the pod is reflected and Ready.
@@ -181,6 +210,30 @@ impl RouterOnlyPodReflector {
             .filter(|pod| pod_is_ready(pod))
             .find_map(|pod| pod_endpoint_by_port(pod, self.target_port))
     }
+
+    /// Collect `(worker_id, ip:port)` for Ready pods passing `predicate`.
+    fn collect_ready(&self, predicate: impl Fn(&Pod) -> bool) -> Vec<(u64, String)> {
+        self.store
+            .state()
+            .iter()
+            .filter(|pod| pod_is_ready(pod))
+            .filter(|pod| predicate(pod))
+            .filter_map(|pod| {
+                let name = pod.metadata.name.as_deref()?;
+                let endpoint = pod_endpoint_by_port(pod, self.target_port)?;
+                Some((hash_pod_name(name), endpoint))
+            })
+            .collect()
+    }
+}
+
+/// Read a pod label value by key.
+fn pod_label<'a>(pod: &'a Pod, key: &str) -> Option<&'a str> {
+    pod.metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(key))
+        .map(String::as_str)
 }
 
 /// A pod is routable only when its `Ready` condition is `True`.
@@ -208,11 +261,17 @@ mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
     use kube::api::ObjectMeta;
+    use std::collections::BTreeMap;
 
-    fn pod(name: &str, ip: Option<&str>, ready: Option<&str>) -> Pod {
+    fn pod(name: &str, ip: Option<&str>, ready: Option<&str>, role: Option<&str>) -> Pod {
         Pod {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                labels: role.map(|r| {
+                    let mut m = BTreeMap::new();
+                    m.insert("dynamo-role".to_string(), r.to_string());
+                    m
+                }),
                 ..Default::default()
             },
             status: Some(PodStatus {
@@ -232,20 +291,47 @@ mod tests {
 
     #[test]
     fn ready_requires_ready_condition_true() {
-        assert!(pod_is_ready(&pod("a", Some("10.0.0.1"), Some("True"))));
-        assert!(!pod_is_ready(&pod("a", Some("10.0.0.1"), Some("False"))));
-        assert!(!pod_is_ready(&pod("a", Some("10.0.0.1"), None)));
+        assert!(pod_is_ready(&pod(
+            "a",
+            Some("10.0.0.1"),
+            Some("True"),
+            None
+        )));
+        assert!(!pod_is_ready(&pod(
+            "a",
+            Some("10.0.0.1"),
+            Some("False"),
+            None
+        )));
+        assert!(!pod_is_ready(&pod("a", Some("10.0.0.1"), None, None)));
     }
 
     #[test]
     fn endpoint_is_ip_plus_target_port() {
         assert_eq!(
-            pod_endpoint_by_port(&pod("a", Some("10.0.0.5"), Some("True")), 8000).as_deref(),
+            pod_endpoint_by_port(&pod("a", Some("10.0.0.5"), Some("True"), None), 8000).as_deref(),
             Some("10.0.0.5:8000")
         );
-        // No IP yet -> not resolvable.
         assert_eq!(
-            pod_endpoint_by_port(&pod("a", None, Some("True")), 8000),
+            pod_endpoint_by_port(&pod("a", None, Some("True"), None), 8000),
+            None
+        );
+    }
+
+    #[test]
+    fn pod_label_reads_role() {
+        assert_eq!(
+            pod_label(
+                &pod("a", Some("1.1.1.1"), Some("True"), Some("prefill")),
+                "dynamo-role"
+            ),
+            Some("prefill")
+        );
+        assert_eq!(
+            pod_label(
+                &pod("a", Some("1.1.1.1"), Some("True"), None),
+                "dynamo-role"
+            ),
             None
         );
     }
