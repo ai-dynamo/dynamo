@@ -14,15 +14,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, ErrorObject, FunctionToolCall, InputTokenDetails, Instructions, OutputContent,
-    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseFailedEvent,
-    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
-    ResponseInProgressEvent, ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
-    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
-    ResponseUsage, ServiceTier, Status, TextResponseFormatConfiguration, ToolChoiceOptions,
-    ToolChoiceParam, Truncation,
+    AssistantRole, ErrorObject, FunctionToolCall, IncompleteDetails, InputTokenDetails,
+    Instructions, OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    OutputTextContent, OutputTokenDetails, Response, ResponseCompletedEvent,
+    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
+    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseStreamEvent,
+    ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTier,
+    Status, TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use serde::{
     Serialize,
@@ -59,6 +59,7 @@ pub struct ResponseStreamConverter {
     // Usage stats from the backend's final chunk
     usage: Option<ResponseUsage>,
     nvext: Option<Value>,
+    incomplete_reason: Option<String>,
 }
 
 struct FunctionCallState {
@@ -95,6 +96,7 @@ impl ResponseStreamConverter {
             next_output_index: 0,
             usage: None,
             nvext: None,
+            incomplete_reason: None,
         }
     }
 
@@ -213,6 +215,30 @@ impl ResponseStreamConverter {
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
         merge_response_nvext(&mut self.nvext, chunk.nvext.clone());
+        if self.params.completion_token_logprobs {
+            let logprobs = chunk
+                .inner
+                .choices
+                .iter()
+                .flat_map(|choice| {
+                    choice
+                        .logprobs
+                        .as_ref()
+                        .and_then(|value| value.content.as_ref())
+                        .into_iter()
+                        .flatten()
+                        .map(|token| f64::from(token.logprob))
+                })
+                .collect::<Vec<_>>();
+            if !logprobs.is_empty() {
+                merge_response_nvext(
+                    &mut self.nvext,
+                    Some(serde_json::json!({
+                        "completion_token_logprobs": logprobs
+                    })),
+                );
+            }
+        }
 
         // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
         if let Some(ref u) = chunk.inner.usage {
@@ -238,6 +264,17 @@ impl ResponseStreamConverter {
         }
 
         for choice in &chunk.inner.choices {
+            if let Some(finish_reason) = choice.finish_reason {
+                self.incomplete_reason = match finish_reason {
+                    dynamo_protocols::types::FinishReason::Length => {
+                        Some("max_output_tokens".to_string())
+                    }
+                    dynamo_protocols::types::FinishReason::ContentFilter => {
+                        Some("content_filter".to_string())
+                    }
+                    _ => None,
+                };
+            }
             let delta = &choice.delta;
 
             // Handle text content deltas — extract text from the enum
@@ -527,26 +564,42 @@ impl ResponseStreamConverter {
         }
     }
 
-    pub fn emit_completed_event(
-        &mut self,
-        response: Response,
-    ) -> Vec<Result<Event, anyhow::Error>> {
-        let completed = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
-            sequence_number: self.next_seq(),
-            response,
-        });
-        vec![self.make_sse_event(&completed)]
+    pub fn emit_terminal_event(&mut self, response: Response) -> Vec<Result<Event, anyhow::Error>> {
+        let event = if response.status == Status::Incomplete {
+            ResponseStreamEvent::ResponseIncomplete(ResponseIncompleteEvent {
+                sequence_number: self.next_seq(),
+                response,
+            })
+        } else {
+            ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+                sequence_number: self.next_seq(),
+                response,
+            })
+        };
+        vec![self.make_sse_event(&event)]
     }
 
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = self.emit_output_done_events();
-        let response = self.completed_response();
-        events.extend(self.emit_completed_event(response));
+        let response = self.final_response();
+        events.extend(self.emit_terminal_event(response));
         events
     }
 
-    pub fn completed_response(&self) -> Response {
-        self.make_response(Status::Completed, self.completed_output())
+    pub fn final_response(&self) -> Response {
+        let status = if self.incomplete_reason.is_some() {
+            Status::Incomplete
+        } else {
+            Status::Completed
+        };
+        let mut response = self.make_response(status, self.completed_output());
+        response.incomplete_details =
+            self.incomplete_reason
+                .as_ref()
+                .map(|reason| IncompleteDetails {
+                    reason: reason.clone(),
+                });
+        response
     }
 
     fn completed_output(&self) -> Vec<OutputItem> {
@@ -623,10 +676,11 @@ impl ResponseStreamConverter {
         let mut data = self.serialize_event_data(event)?;
         if let Some(nvext) = &self.nvext {
             let mut value: Value = serde_json::from_str(&data)?;
-            if let Value::Object(ref mut obj) = value
-                && let Some(Value::Object(inner)) = obj.get_mut("response")
-            {
-                inner.insert("nvext".to_string(), nvext.clone());
+            if let Value::Object(ref mut obj) = value {
+                obj.insert("nvext".to_string(), nvext.clone());
+                if let Some(Value::Object(inner)) = obj.get_mut("response") {
+                    inner.insert("nvext".to_string(), nvext.clone());
+                }
             }
             data = serde_json::to_string(&value)?;
         }
@@ -927,8 +981,9 @@ mod tests {
     use super::*;
     use crate::protocols::unified::ResponsesContext;
     use dynamo_protocols::types::{
-        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-        ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
+        ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
+        ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+        ChatCompletionTokenLogprob, FinishReason, FunctionCallStream, FunctionType,
     };
 
     fn default_params() -> ResponseParams {
@@ -1049,6 +1104,28 @@ mod tests {
         serde_json::from_str(&converter.serialize_event_data(event).unwrap()).unwrap()
     }
 
+    #[test]
+    fn test_length_finish_emits_incomplete_terminal_event() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let mut chunk = text_chunk("limited");
+        chunk.inner.choices[0].finish_reason = Some(FinishReason::Length);
+
+        conv.process_chunk(&chunk);
+        let response = conv.final_response();
+        assert_eq!(response.status, Status::Incomplete);
+        assert_eq!(
+            response
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("max_output_tokens")
+        );
+        assert_eq!(
+            event_types(&conv.emit_terminal_event(response)),
+            vec!["response.incomplete"]
+        );
+    }
+
     /// Complete tool call emits function_call_arguments.done + output_item.done inline.
     #[test]
     fn test_complete_tool_call_emits_done_inline() {
@@ -1139,22 +1216,60 @@ mod tests {
         );
     }
 
-    /// Text-only response: no tool-related events at all.
+    /// Text-only response streams cumulative exact token metadata on every event.
     #[test]
     fn test_text_response_nvext_and_failed_event() {
-        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let params = ResponseParams {
+            completion_token_logprobs: true,
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
         let _ = conv.emit_start_events();
 
         let mut chunk = text_chunk("Hello world");
         chunk.nvext = Some(serde_json::json!({ "completion_token_ids": [11, 22] }));
+        chunk.inner.choices[0].logprobs = Some(ChatChoiceLogprobs {
+            content: Some(vec![
+                ChatCompletionTokenLogprob {
+                    token: "token_id:11".into(),
+                    logprob: -0.1,
+                    bytes: Some(vec![11]),
+                    top_logprobs: vec![],
+                },
+                ChatCompletionTokenLogprob {
+                    token: "token_id:22".into(),
+                    logprob: -0.2,
+                    bytes: Some(vec![22]),
+                    top_logprobs: vec![],
+                },
+            ]),
+            refusal: None,
+        });
         let events = conv.process_chunk(&chunk);
         let types = event_types(&events);
         assert!(
             !types.contains(&"response.function_call_arguments.done".to_string()),
             "no tool events in text-only: {types:?}"
         );
+        let delta_event = events
+            .iter()
+            .find(|event| event_type(event) == "response.output_text.delta")
+            .unwrap();
+        let delta_debug = format!("{:?}", delta_event.as_ref().unwrap());
+        assert!(delta_debug.contains("completion_token_ids"));
+        assert!(delta_debug.contains("completion_token_logprobs"));
+
         let mut chunk = text_chunk("!");
         chunk.nvext = Some(serde_json::json!({ "completion_token_ids": [33] }));
+        chunk.inner.choices[0].logprobs = Some(ChatChoiceLogprobs {
+            content: Some(vec![ChatCompletionTokenLogprob {
+                token: "token_id:33".into(),
+                logprob: -0.3,
+                bytes: Some(vec![33]),
+                top_logprobs: vec![],
+            }]),
+            refusal: None,
+        });
         let _ = conv.process_chunk(&chunk);
 
         let end_events = conv.emit_end_events();
@@ -1167,10 +1282,16 @@ mod tests {
             end_types.contains(&"response.completed".to_string()),
             "completed in end events: {end_types:?}"
         );
+        let nvext = conv.nvext.as_ref().unwrap();
         assert_eq!(
-            conv.nvext,
-            Some(serde_json::json!({ "completion_token_ids": [11, 22, 33] }))
+            nvext["completion_token_ids"],
+            serde_json::json!([11, 22, 33])
         );
+        let logprobs = nvext["completion_token_logprobs"].as_array().unwrap();
+        let expected = [-0.1_f64, -0.2, -0.3];
+        for (actual, expected) in logprobs.iter().zip(expected) {
+            assert!((actual.as_f64().unwrap() - expected).abs() < 1e-6);
+        }
 
         let events = conv.emit_failed_event("server_error", "store failed");
         let response = conv.make_failed_response("server_error", "store failed");

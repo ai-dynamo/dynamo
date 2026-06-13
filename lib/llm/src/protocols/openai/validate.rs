@@ -102,6 +102,8 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "cache_salt",
     "stop_token_ids",
     "detokenize",
+    "no_stop_trim",
+    "spaces_between_special_tokens",
     "allowed_token_ids",
     "bad_words_token_ids",
 ];
@@ -129,10 +131,16 @@ pub fn validate_no_unsupported_fields(
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
     }
-    if let Some(value) = unsupported_fields.get("detokenize")
-        && !value.is_boolean()
-    {
-        anyhow::bail!("`detokenize` must be a boolean");
+    for key in [
+        "detokenize",
+        "no_stop_trim",
+        "spaces_between_special_tokens",
+    ] {
+        if let Some(value) = unsupported_fields.get(key)
+            && !value.is_boolean()
+        {
+            anyhow::bail!("`{key}` must be a boolean");
+        }
     }
     if let Some(value) = unsupported_fields.get("allowed_token_ids") {
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())

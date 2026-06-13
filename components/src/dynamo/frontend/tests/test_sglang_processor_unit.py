@@ -379,7 +379,7 @@ class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer
         assert _map_finish_reason("cancelled") == "stop"
 
     def test_content_filter(self):
-        assert _map_finish_reason("content_filter") == "stop"
+        assert _map_finish_reason("content_filter") == "content_filter"
 
     def test_unknown_passthrough(self):
         """Unknown reasons pass through unchanged."""

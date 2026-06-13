@@ -562,22 +562,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
 
-                if metadata_uploader is None:
-                    # Extract logprobs for new tokens if available
-                    (
-                        log_probs,
-                        top_logprobs,
-                        next_logprobs_total,
-                    ) = self._extract_logprobs(
-                        meta_info,
-                        output_logprobs_per_choice.get(output_idx, 0),
-                        return_tokens_as_token_ids=return_tokens_as_token_ids,
-                    )
-                    output_logprobs_per_choice[output_idx] = next_logprobs_total
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
+                # Chosen-token logprobs stay on the stream so cancelled RL
+                # requests retain an exact trainable prefix. Large top-logprob and
+                # routed-expert payloads remain in the metadata upload.
+                (
+                    log_probs,
+                    top_logprobs,
+                    next_logprobs_total,
+                ) = self._extract_logprobs(
+                    meta_info,
+                    output_logprobs_per_choice.get(output_idx, 0),
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                )
+                output_logprobs_per_choice[output_idx] = next_logprobs_total
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None and metadata_uploader is None:
+                    out["top_logprobs"] = top_logprobs
 
                 routed_experts = meta_info.get("routed_experts")
                 if routed_experts is not None and metadata_uploader is None:

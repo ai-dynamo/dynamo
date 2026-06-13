@@ -2046,6 +2046,16 @@ async fn responses(
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier,
         include: request.inner.include.clone(),
+        top_logprobs: request.inner.top_logprobs,
+        completion_token_logprobs: request
+            .nvext
+            .as_ref()
+            .and_then(|nvext| nvext.extra_fields.as_ref())
+            .is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|field| field == "completion_token_logprobs")
+            }),
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
         // the response serializer can default to 0.0 without hardcoding at the
@@ -2184,13 +2194,13 @@ async fn responses(
                 converter.append_error_events(&mut events);
             } else {
                 converter.append_end_events(&mut events);
-                let completed_response = converter.completed_response();
+                let final_response = converter.final_response();
                 if let Err(err) = state_for_store
                     .responses_context_store()
                     .persist_response(
                         &expanded_for_store,
-                        &completed_response.id,
-                        &completed_response.output,
+                        &final_response.id,
+                        &final_response.output,
                     )
                     .await
                 {
@@ -2201,7 +2211,7 @@ async fn responses(
                         "Failed to persist stateful Responses context.",
                     ));
                 } else {
-                    events.extend(converter.emit_completed_event(completed_response));
+                    events.extend(converter.emit_terminal_event(final_response));
                 }
             }
 

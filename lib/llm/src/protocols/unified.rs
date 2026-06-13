@@ -416,11 +416,7 @@ impl OpenAIStopConditionsProvider for UnifiedRequest {
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
-        self.inner
-            .inner
-            .stop
-            .as_ref()
-            .and_then(|stop| stop.token_ids())
+        OpenAIStopConditionsProvider::get_stop_token_ids(&self.inner)
     }
 
     fn nvext(&self) -> Option<&NvExt> {

@@ -67,7 +67,7 @@ _FINISH_REASON_MAP: dict[str, str] = {
     "error": "error",
     "abort": "stop",
     "cancelled": "stop",
-    "content_filter": "stop",
+    "content_filter": "content_filter",
 }
 
 

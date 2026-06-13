@@ -78,6 +78,16 @@ struct DecoderUnfoldState {
     skip_special_tokens: bool,
 }
 
+fn truncate_token_aligned_fields(data: &mut LLMEngineOutput, retained_tokens: usize) {
+    data.token_ids.truncate(retained_tokens);
+    if let Some(log_probs) = data.log_probs.as_mut() {
+        log_probs.truncate(retained_tokens);
+    }
+    if let Some(top_logprobs) = data.top_logprobs.as_mut() {
+        top_logprobs.truncate(retained_tokens);
+    }
+}
+
 struct DecoderParams {
     prompt_token_ids: Vec<TokenIdType>,
     stop_conditions: StopConditions,
@@ -305,6 +315,7 @@ impl
 
                     let text = result.text;
                     let tokens = result.tokens;
+                    let retained_tokens = tokens.len();
 
                     if state.validate_engine_decode {
                         if data.finish_reason != finish_reason {
@@ -327,6 +338,7 @@ impl
                     // update output in-place
                     let mut output = output;
                     let mut data = output.data.take().unwrap();
+                    truncate_token_aligned_fields(&mut data, retained_tokens);
 
                     // NOTE: If `finish_reason.is_some()`, then one of the stop conditions was triggered
                     // by the token generation. We should update the `data.finish_reason` in that case.
@@ -739,6 +751,77 @@ mod tests {
     use super::*;
     use crate::tokenizers::traits;
     use std::sync::Arc;
+
+    struct MappingDecoder;
+
+    impl traits::Encoder for MappingDecoder {
+        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            Ok(crate::tokenizers::Encoding::Sp(vec![]))
+        }
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            Ok(vec![])
+        }
+    }
+
+    impl traits::Decoder for MappingDecoder {
+        fn decode(
+            &self,
+            token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<traits::DecodeResult> {
+            let text = token_ids
+                .iter()
+                .map(|token_id| match token_id {
+                    1 => "a",
+                    2 => "STOP",
+                    3 => "z",
+                    _ => "?",
+                })
+                .collect::<String>();
+            Ok(text.into())
+        }
+    }
+
+    impl traits::Tokenizer for MappingDecoder {}
+
+    #[test]
+    fn test_string_stop_inside_chunk_reports_retained_token_count() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(MappingDecoder);
+        let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
+        let stop_conditions = StopConditions {
+            stop: Some(vec!["STOP".to_string()]),
+            ..Default::default()
+        };
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+
+        let result = decoder.process_token_ids(&[1, 2, 3]).unwrap();
+
+        assert_eq!(result.tokens.len(), 2);
+        assert_eq!(result.text.as_deref(), Some("a"));
+        assert!(matches!(
+            result.stop_trigger,
+            Some(StopTrigger::HiddenStopSequenceDetected(ref value)) if value == "STOP"
+        ));
+    }
+
+    #[test]
+    fn test_truncate_token_aligned_fields() {
+        let mut data = LLMEngineOutput {
+            token_ids: vec![1, 2, 3],
+            log_probs: Some(vec![-0.1, -0.2, -0.3]),
+            top_logprobs: Some(vec![vec![], vec![], vec![]]),
+            ..Default::default()
+        };
+
+        truncate_token_aligned_fields(&mut data, 2);
+
+        assert_eq!(data.token_ids, vec![1, 2]);
+        assert_eq!(data.log_probs, Some(vec![-0.1, -0.2]));
+        assert_eq!(data.top_logprobs, Some(vec![vec![], vec![]]));
+    }
 
     #[test]
     fn test_char_boundary_drain() {

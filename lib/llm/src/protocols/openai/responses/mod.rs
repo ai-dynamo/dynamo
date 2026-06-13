@@ -6,13 +6,13 @@ pub mod stream_converter;
 use std::collections::HashMap;
 
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
-    InputOutputMessageContent, InputParam, InputRole, InputTokenDetails, Instructions, Item,
-    MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, Response,
-    ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status, SummaryPart,
-    SummaryTextContent, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
-    Truncation,
+    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
+    InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
+    Instructions, Item, LogProb, MessageItem, OutputItem, OutputMessage, OutputMessageContent,
+    OutputStatus, OutputTextContent, OutputTokenDetails, PromptCacheRetention, Reasoning,
+    ReasoningItem, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier,
+    Status, SummaryPart, SummaryTextContent, TextResponseFormatConfiguration, Tool,
+    ToolChoiceOptions, ToolChoiceParam, TopLogProb as ResponseTopLogProb, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -34,7 +34,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse};
-use super::nvext::{NvExt, NvExtProvider};
+use super::common_ext::CommonExt;
+use super::nvext::{NvExt, NvExtProvider, merge_response_nvext};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
 /// Request body for `POST /v1/responses`. Uses a plain
@@ -749,7 +750,29 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             }
         }
 
+        let return_logprobs =
+            resp.inner.top_logprobs.is_some()
+                || resp.inner.include.as_ref().is_some_and(|include| {
+                    include.contains(&IncludeEnum::MessageOutputTextLogprobs)
+                })
+                || resp
+                    .nvext
+                    .as_ref()
+                    .and_then(|nvext| nvext.extra_fields.as_ref())
+                    .is_some_and(|fields| {
+                        fields
+                            .iter()
+                            .any(|field| field == "completion_token_logprobs")
+                    });
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
+        let common = CommonExt {
+            ignore_eos: resp.inner.ignore_eos,
+            min_tokens: resp.inner.min_tokens,
+            top_k: resp.inner.top_k,
+            include_stop_str_in_output: resp.inner.include_stop_str_in_output,
+            skip_special_tokens: resp.inner.skip_special_tokens,
+            ..Default::default()
+        };
 
         // Convert tools if present
         let tools = resp
@@ -787,10 +810,17 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 model: resp.inner.model.unwrap_or_default(),
                 temperature: resp.inner.temperature,
                 top_p: resp.inner.top_p,
+                seed: resp.inner.seed,
                 max_completion_tokens: resp.inner.max_output_tokens,
                 store: resp.inner.store,
                 parallel_tool_calls: resp.inner.parallel_tool_calls,
-                top_logprobs,
+                logprobs: return_logprobs.then_some(true),
+                top_logprobs: if return_logprobs {
+                    top_logprobs.or(Some(0))
+                } else {
+                    top_logprobs
+                },
+                stop: resp.inner.stop,
                 metadata: resp
                     .inner
                     .metadata
@@ -803,13 +833,13 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 service_tier,
                 ..Default::default()
             },
-            common: Default::default(),
+            common,
             nvext: resp.nvext,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
-            return_tokens_as_token_ids: None,
-            unsupported_fields: Default::default(),
+            return_tokens_as_token_ids: return_logprobs.then_some(true),
+            unsupported_fields: resp.inner.unsupported_fields,
         })
     }
 }
@@ -910,6 +940,8 @@ pub struct ResponseParams {
     pub text: Option<ResponseTextParam>,
     pub service_tier: Option<ServiceTier>,
     pub include: Option<Vec<IncludeEnum>>,
+    pub top_logprobs: Option<u8>,
+    pub completion_token_logprobs: bool,
     pub truncation: Option<Truncation>,
     /// OpenResponses spec requires these fields on the response body. Upstream
     /// `CreateResponse` doesn't model them on the request yet, so for now they
@@ -964,6 +996,39 @@ fn make_text_message(id: String, text: String) -> OutputItem {
     })
 }
 
+fn convert_chat_logprobs(
+    logprobs: Option<&dynamo_protocols::types::ChatChoiceLogprobs>,
+) -> Vec<LogProb> {
+    logprobs
+        .and_then(|logprobs| logprobs.content.as_ref())
+        .map(|content| {
+            content
+                .iter()
+                .map(|token| LogProb {
+                    bytes: token
+                        .bytes
+                        .clone()
+                        .unwrap_or_else(|| token.token.as_bytes().to_vec()),
+                    logprob: f64::from(token.logprob),
+                    token: token.token.clone(),
+                    top_logprobs: token
+                        .top_logprobs
+                        .iter()
+                        .map(|top| ResponseTopLogProb {
+                            bytes: top
+                                .bytes
+                                .clone()
+                                .unwrap_or_else(|| top.token.as_bytes().to_vec()),
+                            logprob: f64::from(top.logprob),
+                            token: top.token.clone(),
+                        })
+                        .collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Build a function call output item with generated IDs.
 fn make_function_call(name: String, arguments: String) -> OutputItem {
     OutputItem::FunctionCall(FunctionToolCall {
@@ -983,15 +1048,29 @@ pub fn chat_completion_to_response(
     params: &ResponseParams,
     api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
-    let nvext = nv_resp.nvext.clone();
+    let mut nvext = nv_resp.nvext.clone();
     let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
     let choice = chat_resp.choices.into_iter().next();
+    let finish_reason = choice.as_ref().and_then(|choice| choice.finish_reason);
     let mut output = Vec::new();
+    let mut output_logprobs = Vec::new();
 
     if let Some(choice) = choice {
+        output_logprobs = convert_chat_logprobs(choice.logprobs.as_ref());
+        if params.completion_token_logprobs {
+            merge_response_nvext(
+                &mut nvext,
+                Some(serde_json::json!({
+                    "completion_token_logprobs": output_logprobs
+                        .iter()
+                        .map(|token| token.logprob)
+                        .collect::<Vec<_>>()
+                })),
+            );
+        }
         // Handle structured tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
             for tc in &tool_calls {
@@ -1067,30 +1146,48 @@ pub fn chat_completion_to_response(
         .include
         .as_ref()
         .is_some_and(|inc| inc.contains(&IncludeEnum::MessageOutputTextLogprobs));
+    let has_function_calls = output
+        .iter()
+        .any(|item| matches!(item, OutputItem::FunctionCall(_)));
+    let mut attached_logprobs = false;
     for item in &mut output {
         if let OutputItem::Message(msg) = item {
             for content in &mut msg.content {
-                if let OutputMessageContent::OutputText(text) = content
-                    && (!keep_logprobs || text.logprobs.is_none())
-                {
-                    text.logprobs = Some(Vec::new());
+                if let OutputMessageContent::OutputText(text) = content {
+                    if keep_logprobs && !has_function_calls && !attached_logprobs {
+                        text.logprobs = Some(output_logprobs.clone());
+                        attached_logprobs = true;
+                    } else {
+                        text.logprobs = Some(Vec::new());
+                    }
                 }
             }
         }
     }
 
     let created_at = chat_resp.created as u64;
+    let incomplete_reason = match finish_reason {
+        Some(dynamo_protocols::types::FinishReason::Length) => Some("max_output_tokens"),
+        Some(dynamo_protocols::types::FinishReason::ContentFilter) => Some("content_filter"),
+        _ => None,
+    };
+    let status = if incomplete_reason.is_some() {
+        Status::Incomplete
+    } else {
+        Status::Completed
+    };
+    let completed_at = (status == Status::Completed).then_some(created_at);
     let response = Response {
         id: response_id,
         object: "response".to_string(),
         created_at,
-        completed_at: Some(created_at),
+        completed_at,
         model: if chat_resp.model == "unknown" {
             params.model.clone().unwrap_or(chat_resp.model)
         } else {
             chat_resp.model
         },
-        status: Status::Completed,
+        status,
         output,
         // Spec-required defaults (OpenResponses requires these as non-null)
         background: Some(false),
@@ -1118,7 +1215,9 @@ pub fn chat_completion_to_response(
         billing: None,
         conversation: None,
         error: None,
-        incomplete_details: None,
+        incomplete_details: incomplete_reason.map(|reason| IncompleteDetails {
+            reason: reason.to_string(),
+        }),
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
         previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
@@ -1128,7 +1227,7 @@ pub fn chat_completion_to_response(
         reasoning: params.reasoning.clone(),
         safety_identifier: params.safety_identifier.clone(),
         service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
-        top_logprobs: Some(0),
+        top_logprobs: Some(params.top_logprobs.unwrap_or(0)),
         usage: chat_resp.usage.map(|u| ResponseUsage {
             input_tokens: u.prompt_tokens,
             input_tokens_details: InputTokenDetails {
@@ -1243,6 +1342,53 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    #[test]
+    fn test_rl_responses_controls_forwarded_to_chat_request() {
+        let response_req: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "input": "hello",
+            "include": ["message.output_text.logprobs"],
+            "top_k": 17,
+            "ignore_eos": true,
+            "min_tokens": 5,
+            "seed": 1234,
+            "skip_special_tokens": false,
+            "include_stop_str_in_output": true,
+            "stop": ["done"],
+            "stop_token_ids": [32, 34],
+            "no_stop_trim": true,
+            "spaces_between_special_tokens": false,
+            "nvext": {
+                "extra_fields": ["completion_token_logprobs"]
+            }
+        }))
+        .unwrap();
+
+        let chat_req: NvCreateChatCompletionRequest = response_req.try_into().unwrap();
+
+        assert_eq!(chat_req.common.top_k, Some(17));
+        assert_eq!(chat_req.common.ignore_eos, Some(true));
+        assert_eq!(chat_req.common.min_tokens, Some(5));
+        assert_eq!(chat_req.common.skip_special_tokens, Some(false));
+        assert_eq!(chat_req.common.include_stop_str_in_output, Some(true));
+        assert_eq!(chat_req.inner.seed, Some(1234));
+        assert_eq!(chat_req.inner.logprobs, Some(true));
+        assert_eq!(chat_req.inner.top_logprobs, Some(0));
+        assert_eq!(chat_req.return_tokens_as_token_ids, Some(true));
+        assert_eq!(chat_req.get_stop(), Some(vec!["done".to_string()]));
+        assert_eq!(chat_req.get_stop_token_ids(), Some(vec![32, 34]));
+        assert_eq!(
+            chat_req.unsupported_fields.get("no_stop_trim"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            chat_req
+                .unsupported_fields
+                .get("spaces_between_special_tokens"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[test]
@@ -2947,6 +3093,62 @@ thinking
             }
         }
         assert!(found_text, "Expected text output");
+    }
+
+    #[test]
+    fn test_response_preserves_selected_logprobs_and_incomplete_status() {
+        use dynamo_protocols::types::{
+            ChatChoiceLogprobs, ChatCompletionTokenLogprob, FinishReason,
+        };
+
+        let mut chat_resp = make_chat_resp_with_text("hello");
+        chat_resp.inner.choices[0].finish_reason = Some(FinishReason::Length);
+        chat_resp.inner.choices[0].logprobs = Some(ChatChoiceLogprobs {
+            content: Some(vec![ChatCompletionTokenLogprob {
+                token: "token_id:42".into(),
+                logprob: -0.25,
+                bytes: Some(vec![42]),
+                top_logprobs: vec![],
+            }]),
+            refusal: None,
+        });
+        let params = ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            completion_token_logprobs: true,
+            ..Default::default()
+        };
+
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+
+        assert_eq!(resp.inner.status, Status::Incomplete);
+        assert_eq!(
+            resp.inner
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("max_output_tokens")
+        );
+        assert_eq!(
+            resp.nvext.as_ref().unwrap()["completion_token_logprobs"],
+            serde_json::json!([-0.25])
+        );
+        let logprobs = resp
+            .inner
+            .output
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::Message(message) => {
+                    message.content.iter().find_map(|content| match content {
+                        OutputMessageContent::OutputText(text) => text.logprobs.as_ref(),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(logprobs.len(), 1);
+        assert_eq!(logprobs[0].token, "token_id:42");
+        assert_eq!(logprobs[0].logprob, -0.25);
     }
 
     #[test]

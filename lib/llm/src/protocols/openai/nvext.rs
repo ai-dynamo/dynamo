@@ -163,7 +163,7 @@ pub(crate) fn merge_response_nvext(
             // Token IDs are chunk deltas, so aggregation concatenates them.
             for (key, value) in incoming_obj {
                 match key.as_str() {
-                    "completion_token_ids" => {
+                    "completion_token_ids" | "completion_token_logprobs" => {
                         let entry = target_obj
                             .entry(&key)
                             .or_insert_with(|| serde_json::Value::Array(Vec::new()));

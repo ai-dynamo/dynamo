@@ -336,6 +336,10 @@ pub struct CreateResponse {
     pub conversation: Option<ConversationParam>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<IncludeEnum>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_stop_str_in_output: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore_eos: Option<bool>,
     pub input: InputParam,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -343,6 +347,8 @@ pub struct CreateResponse {
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_calls: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -362,13 +368,19 @@ pub struct CreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_identifier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<crate::types::Stop>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<ResponseStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_special_tokens: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -380,9 +392,13 @@ pub struct CreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<Truncation>,
+    #[serde(flatten, default, skip_serializing)]
+    pub unsupported_fields: HashMap<String, serde_json::Value>,
 }
 
 #[cfg(test)]

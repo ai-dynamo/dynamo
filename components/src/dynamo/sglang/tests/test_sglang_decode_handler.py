@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -483,7 +484,7 @@ async def test_process_token_stream_uploads_large_metadata(tmp_path):
 
     assert len(chunks) == 1
     chunk = chunks[0]
-    assert "log_probs" not in chunk
+    assert chunk["log_probs"] == [-0.1]
     assert "top_logprobs" not in chunk
     assert "disaggregated_params" not in chunk
     assert "engine_data" not in chunk
@@ -537,8 +538,8 @@ async def test_process_token_stream_uploads_only_final_meta_info(tmp_path):
     )
 
     assert len(chunks) == 2
-    assert "log_probs" not in chunks[0]
-    assert "log_probs" not in chunks[1]
+    assert chunks[0]["log_probs"] == [-0.1]
+    assert chunks[1]["log_probs"] == [-0.2]
     payload = _read_zstd_payload(
         tmp_path / "metadata/rollout-final/choice_0.msgpack.zst"
     )
