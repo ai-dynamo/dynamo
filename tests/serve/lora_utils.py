@@ -376,7 +376,14 @@ class MinioBaseModelConfig:
             # uses virtual by default — that's why the production DGD
             # doesn't set this. libstreamer (runai-streamer's C++ S3 client,
             # AWS SDK C++ based) reads this env directly.
-            "RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING": "false",
+            # Canonical value per vLLM docs is "0" (not "false").
+            "RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING": "0",
+            # Without this, AWS SDK C++ tries to fetch credentials from the
+            # EC2 instance metadata service (169.254.169.254). In a local /
+            # non-EC2 env that hangs until timeout and surfaces as a generic
+            # `Unknown Error` from libstreamer. Disabling IMDS lookup makes
+            # the SDK use the env-var creds (AWS_ACCESS_KEY_ID etc.) directly.
+            "AWS_EC2_METADATA_DISABLED": "true",
         }
 
 
