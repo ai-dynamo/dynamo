@@ -33,7 +33,7 @@ use crate::{
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{PrefillRouter, indexer::try_build_cache_indexer},
+    kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -1090,19 +1090,13 @@ impl ModelWatcher {
                 || card.model_type.supports_audios()
                 || card.model_type.supports_videos())
         {
-            let multimodal_cache_indexer =
-                try_build_cache_indexer(client.endpoint.component()).await;
-
             // Image/Audio/Video models can also support chat completions (vLLM omni way)
             if card.model_type.supports_chat() {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_state(
-                    client.clone(),
-                    router_config.router_mode,
-                    None,
-                    multimodal_cache_indexer.clone(),
+                    client.clone(), router_config.router_mode, None, None
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -1113,10 +1107,7 @@ impl ModelWatcher {
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
                 >::from_client_with_state(
-                    client.clone(),
-                    router_config.router_mode,
-                    None,
-                    multimodal_cache_indexer.clone(),
+                    client.clone(), router_config.router_mode, None, None
                 )
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
@@ -1127,10 +1118,7 @@ impl ModelWatcher {
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
                 >::from_client_with_state(
-                    client.clone(),
-                    router_config.router_mode,
-                    None,
-                    multimodal_cache_indexer.clone(),
+                    client.clone(), router_config.router_mode, None, None
                 )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
