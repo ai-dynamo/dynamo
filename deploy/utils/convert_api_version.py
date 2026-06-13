@@ -208,12 +208,11 @@ def call_webhook(review: dict, service: dict) -> dict:
         f"/api/v1/namespaces/{service['namespace']}"
         f"/services/https:{service['name']}:{service['port']}/proxy/{path}"
     )
-    tmp = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         "w", suffix=".json", delete=False, encoding="utf-8"
-    )
-    try:
+    ) as tmp:
         json.dump(review, tmp)
-        tmp.close()
+    try:
         out = _kubectl(["create", "--raw", proxy_path, "-f", tmp.name])
     finally:
         os.unlink(tmp.name)

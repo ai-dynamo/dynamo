@@ -20,6 +20,8 @@ from pathlib import Path as _Path
 import convert_api_version as c
 import pytest
 
+pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
+
 
 def c_test_normalize(value):
     """Recursively drop None values and empty dict/list members so two
