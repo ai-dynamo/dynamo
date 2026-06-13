@@ -96,6 +96,7 @@ pub struct SchedulingRequest {
     pub router_config_override: Option<RouterConfigOverride>,
     pub track_prefill_tokens: bool,
     pub priority_jump: f64,
+    pub strict_priority: u32,
 
     // Overlap and cache signals.
     pub tier_overlap_blocks: TierOverlapBlocks,

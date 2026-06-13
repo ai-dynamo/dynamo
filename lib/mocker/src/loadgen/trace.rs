@@ -88,6 +88,8 @@ impl TurnTrace {
             uuid: Some(request_uuid),
             dp_rank: 0,
             arrival_timestamp_ms,
+            priority: self.priority,
+            strict_priority: self.strict_priority,
         })
     }
 
@@ -220,6 +222,8 @@ impl Trace {
                 .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
             let timestamp_ms = raw.timestamp;
             let explicit_delay_ms = raw.delay;
+            let priority = raw.priority.unwrap_or(0);
+            let strict_priority = raw.strict_priority.unwrap_or(0);
 
             let session_index = *session_indices
                 .entry(session_id.clone())
@@ -285,6 +289,8 @@ impl Trace {
                 max_output_tokens: output_length,
                 hash_ids,
                 delay_after_previous_ms,
+                priority,
+                strict_priority,
             });
             if let Some(timestamp_ms) = timestamp_ms {
                 last_timestamps[session_index] = Some(timestamp_ms);
@@ -406,6 +412,7 @@ impl Trace {
                     max_output_tokens: raw.assistant_response_length[turn_idx],
                     hash_ids: hash_ids.clone(),
                     delay_after_previous_ms: next_turn_delay_ms,
+                    ..Default::default()
                 });
 
                 current_input_length = current_input_length
@@ -433,6 +440,7 @@ impl Trace {
                 max_output_tokens: raw.final_assistant_response_length,
                 hash_ids,
                 delay_after_previous_ms: next_turn_delay_ms,
+                ..Default::default()
             });
 
             sessions.push(SessionTrace {
@@ -524,6 +532,7 @@ impl Trace {
                     } else {
                         sample_delay_ms(&spec.inter_turn_delays, &mut rng)?
                     },
+                    ..Default::default()
                 });
             }
 
@@ -1035,6 +1044,8 @@ impl AgenticTrace {
                 hash_ids,
                 first_ready_timestamp_ms: raw.timestamp,
                 delay_after_dependencies_ms,
+                priority: raw.priority.unwrap_or(0),
+                strict_priority: raw.strict_priority.unwrap_or(0),
                 wait_for: raw.wait_for,
                 prefix_reset: raw.prefix_reset.unwrap_or(false),
             });

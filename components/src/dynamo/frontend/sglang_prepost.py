@@ -22,6 +22,10 @@ from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
+from sglang.srt.parser.jinja_template_utils import (
+    detect_jinja_template_content_format,
+    process_content_for_template_format,
+)
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from .utils import random_call_id
@@ -537,6 +541,38 @@ def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
     return list(ids)
 
 
+def _normalize_messages_for_template(
+    messages: list[dict[str, Any]], tokenizer: Any
+) -> list[dict[str, Any]]:
+    """Normalize OpenAI media chunks (``image_url``/``video_url``/``audio_url``)
+    to the simple ``image``/``video``/``audio`` types most VLM chat templates
+    branch on. Without this, templates that gate placeholder emission on
+    ``item.type == 'image'`` never fire for raw OpenAI input, and the
+    rendered prompt has no slot for the media bytes that
+    ``extract_mm_urls()`` forwards in parallel. Mirrors the equivalent
+    step in sglang's own OpenAI server and dynamo's Rust default path.
+    """
+    chat_template = getattr(tokenizer, "chat_template", None) or ""
+    content_format = detect_jinja_template_content_format(chat_template)
+    # The media-data side outputs are discarded: dynamo's separate
+    # ``extract_mm_urls()`` channel is the source of truth for the worker.
+    image_sink: list = []
+    video_sink: list = []
+    audio_sink: list = []
+    modality_sink: list = []
+    return [
+        process_content_for_template_format(
+            msg,
+            content_format,
+            image_data=image_sink,
+            video_data=video_sink,
+            audio_data=audio_sink,
+            modalities=modality_sink,
+        )
+        for msg in messages
+    ]
+
+
 def preprocess_chat_request(
     request: dict[str, Any],
     *,
@@ -625,8 +661,10 @@ def preprocess_chat_request(
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
+        template_messages = _normalize_messages_for_template(messages, tokenizer)
+
         prompt_token_ids = _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(messages, **template_kwargs)
+            tokenizer.apply_chat_template(template_messages, **template_kwargs)
         )
 
     # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
