@@ -7,7 +7,11 @@
 //! valid stream item and the source has acknowledged commit. Before that point,
 //! every failure resumes the original source stream.
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank};
@@ -26,6 +30,7 @@ use dynamo_runtime::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::{
     kv_router::{FindBestMatchOutcome, KvRouter},
@@ -321,6 +326,7 @@ pub struct DecodeMigration {
     selector: Option<Arc<dyn MigrationSelector>>,
     control: Option<Arc<dyn MigrationControl>>,
     destination_backend: Arc<dyn MigrationBackend>,
+    source_gates: StdMutex<HashMap<(u64, u32), Arc<AsyncMutex<()>>>>,
 }
 
 impl DecodeMigration {
@@ -354,6 +360,7 @@ impl DecodeMigration {
             selector,
             control,
             destination_backend,
+            source_gates: StdMutex::new(HashMap::new()),
         }))
     }
 
@@ -370,7 +377,20 @@ impl DecodeMigration {
             destination_backend: Arc::new(EngineMigrationBackend {
                 engine: backend_engine,
             }),
+            source_gates: StdMutex::new(HashMap::new()),
         })
+    }
+
+    fn source_gate(&self, worker: WorkerWithDpRank) -> Arc<AsyncMutex<()>> {
+        let mut gates = self
+            .source_gates
+            .lock()
+            .expect("decode migration source gate lock poisoned");
+        Arc::clone(
+            gates
+                .entry((worker.worker_id, worker.dp_rank))
+                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+        )
     }
 
     pub(crate) fn into_operator(
@@ -437,6 +457,7 @@ impl
             "decode migration source selected"
         );
         pin_request(&mut source_request, source_worker);
+        let source_gate = self.source_gate(source_worker);
         source_request.decode_migration = None;
         let original_request = source_request.clone();
         source_request.decode_migration_state = Some(DecodeMigrationRequestState {
@@ -534,6 +555,15 @@ impl
                     "decode migration destination selected"
                 );
 
+                // SGLang's initial exact-quiescence implementation pauses the
+                // whole source scheduler. Serialize only the short transfer
+                // transaction per source rank so concurrent trigger hits wait
+                // instead of failing open with a worker "busy" response.
+                let source_gate_guard = source_gate.clone().lock_owned().await;
+                if parent_context.is_stopped() || parent_context.is_killed() {
+                    return;
+                }
+
                 let source_description = match control.call(
                     ControlEndpoint::Sync,
                     source_worker.worker_id,
@@ -569,6 +599,7 @@ impl
                     migration_id.clone(),
                     source_worker.worker_id,
                     destination_worker.worker_id,
+                    source_gate_guard,
                 );
                 let reserve_tokens = original_request.token_ids.len()
                     + original_request.stop_conditions.max_tokens.unwrap_or_default() as usize;
@@ -1070,6 +1101,7 @@ struct MigrationCleanup {
     active: bool,
     source_may_be_quiesced: bool,
     committed: bool,
+    source_gate_guard: Option<OwnedMutexGuard<()>>,
 }
 
 impl MigrationCleanup {
@@ -1079,6 +1111,7 @@ impl MigrationCleanup {
         migration_id: String,
         source_worker: u64,
         destination_worker: u64,
+        source_gate_guard: OwnedMutexGuard<()>,
     ) -> Self {
         Self {
             control,
@@ -1089,11 +1122,13 @@ impl MigrationCleanup {
             active: true,
             source_may_be_quiesced: false,
             committed: false,
+            source_gate_guard: Some(source_gate_guard),
         }
     }
 
     fn disarm(&mut self) {
         self.active = false;
+        self.source_gate_guard.take();
     }
 
     fn mark_source_quiesce_started(&mut self) {
@@ -1103,12 +1138,14 @@ impl MigrationCleanup {
     fn mark_committed(&mut self) {
         self.committed = true;
         self.active = false;
+        self.source_gate_guard.take();
     }
 }
 
 impl Drop for MigrationCleanup {
     fn drop(&mut self) {
         if !self.active || self.committed {
+            self.source_gate_guard.take();
             return;
         }
         let control = self.control.clone();
@@ -1117,6 +1154,7 @@ impl Drop for MigrationCleanup {
         let source_worker = self.source_worker;
         let destination_worker = self.destination_worker;
         let source_may_be_quiesced = self.source_may_be_quiesced;
+        let source_gate_guard = self.source_gate_guard.take();
         tokio::spawn(async move {
             let _ = control
                 .call(
@@ -1143,6 +1181,7 @@ impl Drop for MigrationCleanup {
                     )
                     .await;
             }
+            drop(source_gate_guard);
         });
     }
 }
@@ -1186,6 +1225,25 @@ mod tests {
     fn token_trigger_matches_any_position_in_stream_interval() {
         let trigger = DecodeMigrationTrigger::TokenId { token_id: 7 };
         assert!(trigger_matches(&trigger, 10, 4, &[4, 7, 9, 10]));
+    }
+
+    #[tokio::test]
+    async fn source_gate_serializes_only_the_same_worker_rank() {
+        let harness = integration_harness(Scenario::SuccessCoalesced);
+        let worker = WorkerWithDpRank::new(1, 0);
+        let first_gate = harness.operator.source_gate(worker);
+        let first_guard = first_gate.clone().lock_owned().await;
+
+        let same_gate = harness.operator.source_gate(worker);
+        assert!(same_gate.clone().try_lock_owned().is_err());
+
+        let other_gate = harness.operator.source_gate(WorkerWithDpRank::new(1, 1));
+        assert!(other_gate.try_lock_owned().is_ok());
+
+        drop(first_guard);
+        tokio::time::timeout(Duration::from_secs(1), same_gate.lock_owned())
+            .await
+            .expect("same-rank migration gate did not unblock");
     }
 
     #[test]
