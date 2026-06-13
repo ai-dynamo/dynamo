@@ -438,6 +438,7 @@ impl SelectionCore {
                 false,
                 req.prompt.lora_name.clone(),
                 req.priority_jump.unwrap_or_default(),
+                0, // strict_priority: baseline tier
                 req.expected_output_tokens,
                 req.pinned_worker,
                 req.allowed_worker_ids,
@@ -473,6 +474,7 @@ impl SelectionCore {
                 true,
                 req.prompt.lora_name.clone(),
                 req.priority_jump.unwrap_or_default(),
+                0, // strict_priority: baseline tier
                 req.expected_output_tokens,
                 req.pinned_worker,
                 req.allowed_worker_ids,
