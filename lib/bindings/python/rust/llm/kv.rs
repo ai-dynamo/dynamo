@@ -4,6 +4,7 @@
 use pythonize::{depythonize, pythonize};
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
@@ -106,6 +107,18 @@ struct KvIndexerCli {
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
     peers: Option<String>,
+
+    /// Write access log (JSON lines) to this file
+    #[arg(long)]
+    access_log: Option<PathBuf>,
+
+    /// HTTP header name to extract trace-id from
+    #[arg(long, default_value = "x-trace-id")]
+    trace_id_header: String,
+
+    /// Use local timezone for access log timestamps (default: UTC)
+    #[arg(long)]
+    access_log_local_time: bool,
 }
 
 pub fn run_kv_indexer_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -120,8 +133,6 @@ where
                 .chain(args.into_iter().map(Into::into)),
         )?;
 
-        init_standalone_logging();
-
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(indexer::run_server(IndexerConfig {
             block_size: cli.block_size,
@@ -131,6 +142,9 @@ where
             model_name: cli.model_name,
             tenant_id: cli.tenant_id,
             peers: cli.peers,
+            access_log: cli.access_log,
+            trace_id_header: cli.trace_id_header,
+            access_log_local_time: cli.access_log_local_time,
         }))
     }
 
@@ -247,7 +261,6 @@ where
 }
 
 #[cfg(any(
-    feature = "kv-indexer",
     feature = "slot-tracker",
     feature = "select-service"
 ))]
