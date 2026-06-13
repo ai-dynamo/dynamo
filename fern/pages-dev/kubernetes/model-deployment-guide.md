@@ -415,7 +415,7 @@ backend explicitly in these cases:
 | MoE models (DeepSeek-R1, Qwen3-MoE) | `sglang` (full MoE support) |
 | Using `searchStrategy: thorough` | Any except `auto` (required) |
 | TensorRT-LLM compilation caching | `trtllm` (add a compilation cache PVC) |
-| Need load-based planner scaling (FPM) | `vllm` (any config) or `trtllm` (non-attention-DP only). SGLang FPM is wired in Dynamo but the upstream module is not in the 1.2.0 runtime image. |
+| Need load-based planner scaling (FPM) | `vllm` (any config) or `trtllm` (non-attention-DP only). SGLang FPM is wired in Dynamo but the upstream module is not in the 1.2.1 runtime image. |
 
 <Warning>
 TensorRT-LLM does not support Python 3.11. If your environment uses

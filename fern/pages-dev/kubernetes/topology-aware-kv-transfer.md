@@ -77,7 +77,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           env:
           - name: DYN_ROUTER_MODE
             value: kv
@@ -88,7 +88,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command: ["python3", "-m", "dynamo.vllm"]
           args: ["--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill"]
           envFrom:
@@ -104,7 +104,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command: ["python3", "-m", "dynamo.vllm"]
           args: ["--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "decode"]
           envFrom:
@@ -158,7 +158,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           env:
           - name: DYN_ROUTER_MODE
             value: kv
@@ -177,7 +177,7 @@ spec:
                   values: ["az-1"]
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -196,7 +196,7 @@ spec:
                   values: ["az-1"]
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -215,7 +215,7 @@ spec:
                   values: ["az-2"]
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -234,7 +234,7 @@ spec:
                   values: ["az-2"]
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           envFrom:
           - secretRef:
               name: hf-token-secret
