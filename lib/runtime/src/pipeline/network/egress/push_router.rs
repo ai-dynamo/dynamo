@@ -309,8 +309,9 @@ static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId,
     std::sync::OnceLock::new();
 
 /// At most one multimodal cache cleanup watcher per endpoint.
-static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
-    std::sync::OnceLock::new();
+static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
+    dashmap::DashMap<EndpointId, ()>,
+> = std::sync::OnceLock::new();
 
 /// Watch discovery for instance removals and cancel pending response-stream
 /// registrations on the removed instance, unblocking queued requests with
