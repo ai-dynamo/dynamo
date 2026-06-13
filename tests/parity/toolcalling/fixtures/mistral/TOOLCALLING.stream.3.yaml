@@ -36,7 +36,7 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: '[/TOOL_CALLS]'
+        normal_text: ''
       sglang:
         calls: []
         normal_text: ''

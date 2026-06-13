@@ -49,7 +49,7 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: '[/TOOL_CALLS]'
+        normal_text: ''
       sglang:
         calls: []
         normal_text: ''

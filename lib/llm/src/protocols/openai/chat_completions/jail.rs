@@ -1271,16 +1271,17 @@ impl JailedStream {
                 if self.marker_can_complete_with_json_depth()
                     && let Some(json_base) = self.marker_json_completion_base(accumulated_content)
                 {
-                    let Some(split_pos) = progress
+                    let Some(json_split_pos) = progress
                         .json
                         .complete_end_from(accumulated_content, json_base)
                     else {
                         return JailCompletion::Incomplete;
                     };
 
-                    if self
-                        .should_keep_semicolon_continuation_jailed(accumulated_content, split_pos)
-                    {
+                    if self.should_keep_semicolon_continuation_jailed(
+                        accumulated_content,
+                        json_split_pos,
+                    ) {
                         let parse_result = self
                             .parse_marker_tool_calls(accumulated_content, false)
                             .await;
@@ -1298,6 +1299,12 @@ impl JailedStream {
                             });
                         }
                     }
+
+                    let Some(split_pos) = self.tool_call_parser.as_deref().and_then(|parser| {
+                        find_tool_call_end_position(accumulated_content, Some(parser))
+                    }) else {
+                        return JailCompletion::Incomplete;
+                    };
 
                     let jailed_part = &accumulated_content[..split_pos];
                     let parse_result = self.parse_marker_tool_calls(jailed_part, false).await;
