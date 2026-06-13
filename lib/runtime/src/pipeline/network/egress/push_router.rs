@@ -920,9 +920,24 @@ where
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
-                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
-                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
-                    self.client.report_instance_down(instance_id);
+                if self.fault_detection_enabled {
+                    if is_inhibited(err.as_ref()) {
+                        tracing::debug!(
+                            "Reporting instance {instance_id} down due to error: {err}"
+                        );
+                        self.client.report_instance_down(instance_id);
+                    } else if match_error_chain(err.as_ref(), &[ErrorType::ResourceExhausted], &[])
+                    {
+                        // Backpressure: worker said "my queue is full,
+                        // retry later". Mark overloaded so this FE skips it on
+                        // the next selection; the next ActiveLoad event from the
+                        // worker monitor overwrites the overloaded set from fresh
+                        // metrics. This is NOT report_instance_down (fault path).
+                        tracing::debug!(
+                            "Marking instance {instance_id} overloaded due to backpressure: {err}"
+                        );
+                        self.client.mark_overloaded_immediate(instance_id);
+                    }
                 }
                 return Err(err);
             }

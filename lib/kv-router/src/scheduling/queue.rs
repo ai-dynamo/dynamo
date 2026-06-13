@@ -467,6 +467,9 @@ impl<
             return;
         }
 
+        // Strict priority only orders requests parked in `pending`. Preserve
+        // direct admission for eligible arrivals to avoid global head-of-line
+        // blocking across requests with different worker eligibility.
         self.admit_one(request, decay_now);
     }
 
@@ -1277,6 +1280,7 @@ mod tests {
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1308,6 +1312,43 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_strict_priority_drains_before_policy_score() {
+        let isl = 512;
+        let (queue, slots) = make_queue(1, 16, isl, Some(0.0));
+
+        let (first, first_rx) = make_request("first", isl);
+        queue.enqueue(first).await;
+        first_rx.await.unwrap().unwrap();
+
+        let (mut low, mut low_rx) = make_request("low", isl);
+        low.priority_jump = 10_000.0;
+        queue.enqueue(low).await;
+
+        let (mut high, high_rx) = make_request("high", isl);
+        high.strict_priority = 1;
+        queue.enqueue(high).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        slots.free(&"first".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        let high_response = high_rx.await.unwrap().unwrap();
+        assert_eq!(high_response.best_worker, WorkerWithDpRank::new(0, 0));
+        assert!(
+            low_rx.try_recv().is_err(),
+            "lower strict priority should remain queued"
+        );
+
+        slots.free(&"high".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        low_rx.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+
+        slots.free(&"low".to_string(), decay_now()).unwrap();
         slots.assert_completely_drained(decay_now());
     }
 
@@ -1865,6 +1906,7 @@ mod tests {
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: Some(allowed),

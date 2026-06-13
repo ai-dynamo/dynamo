@@ -390,6 +390,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
@@ -397,6 +398,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(101.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
@@ -404,6 +406,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(500.0),
+                ..Default::default()
             },
         ]
     }
@@ -421,12 +424,14 @@ mod tests {
                             max_output_tokens: 2,
                             hash_ids: vec![1, 2, 3],
                             delay_after_previous_ms: 0.0,
+                            ..Default::default()
                         },
                         TurnTrace {
                             input_length: 5,
                             max_output_tokens: 2,
                             hash_ids: vec![4, 5, 6, 7, 8],
                             delay_after_previous_ms: 5.0,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -438,6 +443,7 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![9, 10, 11, 12],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -797,6 +803,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(900.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![1, 2, 3, 4, 5, 9, 10, 11],
@@ -804,6 +811,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(1000.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![12, 13, 14, 15, 16, 17, 18, 19],
@@ -811,6 +819,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
         ];
         let manual = run_concurrency_manually(&args, requests.clone(), 2);
@@ -890,6 +899,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
         };
 
         let report = simulate_concurrency_single(
@@ -913,6 +923,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(arrival_ms),
+            ..Default::default()
         }
     }
 

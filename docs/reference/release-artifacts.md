@@ -14,7 +14,7 @@ Release history in this document begins at v0.6.0.
 ## Current Release: Dynamo v1.2.0
 
 - **GitHub Release:** [v1.2.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0)
-- **Docs:** [v1.2.0](https://docs.dynamo.nvidia.com/dynamo)
+- **Docs:** [v1.2.0](https://docs.nvidia.com/dynamo)
 - **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
 
 > **Experimental:** [v1.2.0-deepseek-v4-dev.3](#v120-deepseek-v4-dev3) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* is available as an experimental preview. Tagged **Pre-Releases** and experimental builds are listed under [Pre-Release Artifacts](#pre-release-artifacts).
@@ -242,19 +242,19 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Version | Release Date | GitHub | Docs | Notes |
 |---------|--------------|--------|------|-------|
-| `v1.2.0` | Jun 2, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
+| `v1.2.0` | Jun 2, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0) | [Docs](https://docs.nvidia.com/dynamo) | |
 | `v1.2.0-deepseek-v4-dev.3` | May 9, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.3) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
 | `v1.2.0-deepseek-v4-dev.2` | May 1, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
 | `v1.2.0-sglang-deepseek-v4-dev.1` | Apr 25, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-sglang-deepseek-v4-dev.1) | — | Experimental (SGLang container only; DeepSeek-V4 Blackwell preview) |
-| `v1.1.1` | May 5, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
-| `v1.1.0` | May 1, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
+| `v1.1.1` | May 5, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1) | [Docs](https://docs.nvidia.com/dynamo) | |
+| `v1.1.0` | May 1, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) | [Docs](https://docs.nvidia.com/dynamo) | |
 | `v1.1.0-dev.3` | Apr 18, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.3) | — | Pre-Release (TRT-LLM Runtime Image + Wheels; see Pre-Release Artifacts) |
 | `v1.1.0-dev.2` | Apr 9, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.2) | — | Pre-Release (SGLang + TRT-LLM Runtime Images + Wheels; see Pre-Release Artifacts) |
 | `v1.1.0-dev.1` | Mar 17, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.1) | — | Experimental |
-| `v1.0.2` | Apr 22, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.2) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
-| `v1.0.1` | Mar 16, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
-| `v1.0.0` | Mar 12, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
-| `v0.9.1` | Mar 4, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) |
+| `v1.0.2` | Apr 22, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.2) | [Docs](https://docs.nvidia.com/dynamo) | |
+| `v1.0.1` | Mar 16, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) | [Docs](https://docs.nvidia.com/dynamo) | |
+| `v1.0.0` | Mar 12, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0) | [Docs](https://docs.nvidia.com/dynamo) | |
+| `v0.9.1` | Mar 4, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1) | [Docs](https://docs.nvidia.com/dynamo) |
 | `v0.9.0` | Feb 11, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0) | Archived docs unavailable |
 | `v0.8.1` | Jan 23, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1) | Archived docs unavailable |
 | `v0.8.0` | Jan 15, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0) | Archived docs unavailable |

@@ -1114,6 +1114,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
         };
 
         let err = simulate_trace_requests_with_router_mode(
@@ -1184,6 +1185,7 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![1],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
                 SessionTrace {
@@ -1194,6 +1196,7 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![2],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -1220,6 +1223,7 @@ mod tests {
                     max_output_tokens: 1,
                     hash_ids: vec![1],
                     delay_after_previous_ms: 0.0,
+                    ..Default::default()
                 }],
             }],
         };
@@ -1245,12 +1249,14 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![1],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![2],
                         delay_after_previous_ms: 10.0,
+                        ..Default::default()
                     },
                 ],
             }],
