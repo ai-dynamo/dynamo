@@ -10,7 +10,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
+        - image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
           name: main
     replicas: 1
     type: frontend

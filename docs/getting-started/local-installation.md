@@ -37,13 +37,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
 To run frontend and worker in the same container, either:
@@ -219,10 +219,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 ```
 
 ## Next Steps

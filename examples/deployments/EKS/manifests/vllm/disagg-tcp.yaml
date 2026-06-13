@@ -18,7 +18,7 @@ spec:
                   matchLabels:
                     nvidia.com/dynamo-graph-deployment-name: "vllm-disagg"
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker

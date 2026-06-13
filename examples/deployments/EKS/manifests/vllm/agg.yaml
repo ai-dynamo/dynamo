@@ -11,7 +11,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
