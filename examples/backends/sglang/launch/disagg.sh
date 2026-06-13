@@ -72,6 +72,7 @@ python3 -m dynamo.frontend &
 OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
 python3 -m "$WORKER_MODULE" \
+  --enable-multimodal \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
@@ -90,6 +91,7 @@ python3 -m "$WORKER_MODULE" \
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=1 python3 -m "$WORKER_MODULE" \
+  --enable-multimodal \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \

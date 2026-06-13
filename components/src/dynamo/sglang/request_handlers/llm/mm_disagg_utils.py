@@ -16,19 +16,6 @@ VIDEO_URL_KEY = "video_url"
 _SUPPORTED_MULTIMODAL_CONTENT_TYPES = frozenset({IMAGE_URL_KEY, VIDEO_URL_KEY})
 
 
-def _request_has_multimodal(
-    request: Dict[str, Any],
-    *,
-    mm_data: Dict[str, Any] | None = None,
-    raw_types: set[str] | None = None,
-) -> bool:
-    if mm_data is None:
-        mm_data = _multi_modal_data(request)
-    if raw_types is None:
-        raw_types = _raw_multimodal_content_types(request)
-    return bool(mm_data or raw_types)
-
-
 def _multi_modal_data(request: Dict[str, Any]) -> Dict[str, Any]:
     if "multi_modal_data" not in request or request.get("multi_modal_data") is None:
         return {}
@@ -66,7 +53,7 @@ def raise_if_unextracted_multimodal(request: Dict[str, Any]) -> None:
 
     mm_data = _multi_modal_data(request)
     raw_types = _raw_multimodal_content_types(request)
-    if not _request_has_multimodal(request, mm_data=mm_data, raw_types=raw_types):
+    if not (mm_data or raw_types):
         return
 
     missing_mm_types = {
