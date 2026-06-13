@@ -298,6 +298,17 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_throughput_reason_decode = None
 
     def _build_diagnostics(self) -> TickDiagnostics:
+        pm_obs_p, pm_obs_d = None, None
+        pm_ready_p, pm_ready_d = None, None
+        if not self._is_easy:
+            if self._is_agg:
+                pm_obs_d, pm_ready_d = self._agg_regression.readiness_snapshot()
+            else:
+                if self._has_prefill:
+                    pm_obs_p, pm_ready_p = self._prefill_regression.readiness_snapshot()
+                if self._has_decode:
+                    pm_obs_d, pm_ready_d = self._decode_regression.readiness_snapshot()
+
         return TickDiagnostics(
             estimated_ttft_ms=self._diag_estimated_ttft_ms,
             estimated_itl_ms=self._diag_estimated_itl_ms,
@@ -307,6 +318,10 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             predicted_kv_hit_rate=self._diag_predicted_kv_hit_rate,
             engine_rps_prefill=self._diag_engine_rps_prefill,
             engine_rps_decode=self._diag_engine_rps_decode,
+            perf_model_observations_prefill=pm_obs_p,
+            perf_model_observations_decode=pm_obs_d,
+            perf_model_ready_prefill=pm_ready_p,
+            perf_model_ready_decode=pm_ready_d,
             throughput_lower_bound_prefill=self._throughput_lower_bound_p,
             throughput_lower_bound_decode=self._throughput_lower_bound_d,
             load_decision_reason=self._diag_load_reason,

@@ -149,6 +149,24 @@ class PlannerPrometheusMetrics:
             "Single decode engine capacity under SLA (req/s)",
         )
 
+        # -- Diagnostics: perf model readiness --------------------------
+        self.perf_model_observations_prefill = Gauge(
+            f"{PREFIX}_perf_model_observations_prefill",
+            "Retained FPM observations in the prefill perf model",
+        )
+        self.perf_model_observations_decode = Gauge(
+            f"{PREFIX}_perf_model_observations_decode",
+            "Retained FPM observations in the decode perf model",
+        )
+        self.perf_model_ready_prefill = Gauge(
+            f"{PREFIX}_perf_model_ready_prefill",
+            "1 if prefill perf model has sufficient data, 0 otherwise",
+        )
+        self.perf_model_ready_decode = Gauge(
+            f"{PREFIX}_perf_model_ready_decode",
+            "1 if decode perf model has sufficient data, 0 otherwise",
+        )
+
         # -- Diagnostics: scaling decision enums --------------------------
         self.load_scaling_decision = Enum(
             f"{PREFIX}_load_scaling_decision",

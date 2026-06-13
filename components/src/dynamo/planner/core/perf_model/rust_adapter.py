@@ -638,6 +638,14 @@ class PlannerEnginePerfModel:
             return True
         return False
 
+    def readiness_snapshot(self) -> tuple[int, bool]:
+        """Return (num_observations, is_ready) from a single FFI call."""
+        diag = self._rust_diagnostics()
+        obs = diag.get("retained_observations", 0)
+        num_obs = int(obs) if isinstance(obs, int) else 0
+        ready = self._rust_model is not None and diag.get("readiness") == "ready"
+        return num_obs, ready
+
     @property
     def num_observations(self) -> int:
         value = self._rust_diagnostics().get("retained_observations", 0)

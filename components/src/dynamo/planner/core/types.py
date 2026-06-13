@@ -122,6 +122,12 @@ class TickDiagnostics:
     engine_rps_prefill: Optional[float] = None
     engine_rps_decode: Optional[float] = None
 
+    # Perf-model readiness: observation count and fitted status per component.
+    perf_model_observations_prefill: Optional[int] = None
+    perf_model_observations_decode: Optional[int] = None
+    perf_model_ready_prefill: Optional[bool] = None
+    perf_model_ready_decode: Optional[bool] = None
+
     # Throughput-scaling: lower bound on replicas
     throughput_lower_bound_prefill: Optional[int] = None
     throughput_lower_bound_decode: Optional[int] = None

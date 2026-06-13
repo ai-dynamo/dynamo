@@ -961,6 +961,15 @@ class NativePlannerBase:
         pm.engine_prefill_capacity_requests_per_second.set(diag.engine_rps_prefill or 0)
         pm.engine_decode_capacity_requests_per_second.set(diag.engine_rps_decode or 0)
 
+        if diag.perf_model_observations_prefill is not None:
+            pm.perf_model_observations_prefill.set(diag.perf_model_observations_prefill)
+        if diag.perf_model_observations_decode is not None:
+            pm.perf_model_observations_decode.set(diag.perf_model_observations_decode)
+        if diag.perf_model_ready_prefill is not None:
+            pm.perf_model_ready_prefill.set(1 if diag.perf_model_ready_prefill else 0)
+        if diag.perf_model_ready_decode is not None:
+            pm.perf_model_ready_decode.set(1 if diag.perf_model_ready_decode else 0)
+
         if tick.run_load_scaling:
             pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
         if tick.run_throughput_scaling:

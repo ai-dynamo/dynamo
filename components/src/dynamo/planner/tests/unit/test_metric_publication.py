@@ -417,3 +417,41 @@ class TestPlannerPrometheusMetricsHasSlaTargetGauges:
         assert (
             f"{PREFIX}_sla_target_itl_ms" in registered_names
         ), f"Expected Gauge name '{PREFIX}_sla_target_itl_ms' not registered"
+
+
+# ── Perf model readiness gauges ───────────────────────────────────
+
+
+class TestPerfModelReadinessGauges:
+    """Perf model observation count and readiness gauges must be published
+    when present in TickDiagnostics and skipped when None."""
+
+    def test_perf_model_gauges_published_when_present(self):
+        """All 4 perf model gauges are written with correct values."""
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        diag = TickDiagnostics(
+            perf_model_observations_prefill=12,
+            perf_model_observations_decode=30,
+            perf_model_ready_prefill=False,
+            perf_model_ready_decode=True,
+        )
+        planner._report_diagnostics(_tick(run_load=True, run_throughput=False), diag)
+
+        pm.perf_model_observations_prefill.set.assert_called_once_with(12)
+        pm.perf_model_observations_decode.set.assert_called_once_with(30)
+        pm.perf_model_ready_prefill.set.assert_called_once_with(0)
+        pm.perf_model_ready_decode.set.assert_called_once_with(1)
+
+    def test_perf_model_gauges_skipped_when_none(self):
+        """No gauge writes when all perf model fields are None."""
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(_tick(run_load=True, run_throughput=False), _diag())
+
+        pm.perf_model_observations_prefill.set.assert_not_called()
+        pm.perf_model_observations_decode.set.assert_not_called()
+        pm.perf_model_ready_prefill.set.assert_not_called()
+        pm.perf_model_ready_decode.set.assert_not_called()
