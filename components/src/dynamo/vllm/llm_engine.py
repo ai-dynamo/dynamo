@@ -35,6 +35,7 @@ from dynamo.common.backend.engine import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     LogitsProcessorSpec,
     is_generation_stage,
     logits_processors_for_request,
@@ -217,6 +218,7 @@ class VllmLLMEngine(LLMEngine):
         return engine, worker_config
 
     async def start(self, worker_id: int) -> EngineConfig:
+        """Start vLLM and return normalized metadata for runtime registration."""
         del worker_id  # vLLM's NixlConnector handles its own per-worker IDs
         os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -231,14 +233,13 @@ class VllmLLMEngine(LLMEngine):
 
         self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
 
-        self._default_sampling_params = (
-            self.engine_args.create_model_config().get_diff_sampling_param()
-        )
-
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
         self._vllm_config = vllm_config
+        self._default_sampling_params = (
+            vllm_config.model_config.get_diff_sampling_param()
+        )
 
         self._dp_range = get_dp_range_for_worker(vllm_config)
         self._stat_logger_factory = _UnifiedStatLoggerFactory()
@@ -270,15 +271,17 @@ class VllmLLMEngine(LLMEngine):
 
         return EngineConfig(
             model=self.engine_args.model,
-            served_model_name=self.engine_args.served_model_name,
-            context_length=self._model_max_len,
-            kv_cache_block_size=block_size,
-            total_kv_blocks=per_rank_num_gpu_blocks,
-            max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
-            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-            # Router needs the rank range to enumerate per-rank load.
-            data_parallel_start_rank=self._dp_range[0],
-            data_parallel_size=self._dp_range[1],
+            served_model_name=self._served_model_name,
+            llm=LlmRegistration(
+                context_length=self._model_max_len,
+                kv_cache_block_size=block_size,
+                total_kv_blocks=per_rank_num_gpu_blocks,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                # Router needs the rank range to enumerate per-rank load.
+                data_parallel_start_rank=self._dp_range[0],
+                data_parallel_size=self._dp_range[1],
+            ),
         )
 
     async def generate(

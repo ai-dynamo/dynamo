@@ -40,7 +40,7 @@ use dynamo_llm::{self as llm_rs};
 
 use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 
-use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints};
+use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints, parse_tensor_model_config};
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
@@ -168,6 +168,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
+    m.add_function(wrap_pyfunction!(run_select_service, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -252,7 +253,11 @@ where
 }
 
 fn standalone_to_pyerr(err: anyhow::Error) -> PyErr {
-    #[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
+    #[cfg(any(
+        feature = "kv-indexer",
+        feature = "slot-tracker",
+        feature = "select-service"
+    ))]
     if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
         let _ = clap_error.print();
         return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());
@@ -288,6 +293,14 @@ fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_slot_tracker_cli(argv))
+        .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_select_service")]
+#[pyo3(signature = (argv=None))]
+fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || llm::kv::run_select_service_cli(argv))
         .map_err(standalone_to_pyerr)
 }
 
@@ -333,7 +346,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -342,7 +355,6 @@ fn register_model<'p>(
     endpoint: Endpoint,
     model_path: &str,
     model_name: Option<&str>,
-    context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
     router_config: Option<PyRouterConfig>,
     runtime_config: Option<ModelRuntimeConfig>,
@@ -355,6 +367,8 @@ fn register_model<'p>(
     worker_type: Option<WorkerType>,
     needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
+    tensor_model_config: Option<&Bound<'p, PyDict>>,
+    ignore_weights: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -416,6 +430,12 @@ fn register_model<'p>(
     let is_realtime = model_type.inner.supports_realtime();
 
     let model_type_obj = model_type.inner;
+    let tensor_model_config = parse_tensor_model_config(tensor_model_config)?;
+    if tensor_model_config.is_some() && !is_tensor_based {
+        return Err(PyValueError::new_err(
+            "tensor_model_config is only valid for TensorBased models",
+        ));
+    }
 
     // Model-serving-readiness fields on the MDC. `worker_type` is required
     // (see the check above). Non-Aggregated workers must declare their peers
@@ -498,6 +518,8 @@ fn register_model<'p>(
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let runtime_config = runtime_config.unwrap_or_default();
+
         // For TensorBased, Images, Videos, and Realtime models, skip
         // HuggingFace downloads and register directly. These model types
         // handle model loading internally; no tokenizer extraction is
@@ -511,9 +533,8 @@ fn register_model<'p>(
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
 
-            if let Some(cfg) = runtime_config {
-                card.runtime_config = cfg.inner;
-            }
+            card.runtime_config = runtime_config.inner;
+            card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
@@ -531,16 +552,12 @@ fn register_model<'p>(
         }
 
         // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
-        // Pass ignore_weights=true: register_model only consumes metadata (config.json,
-        // tokenizer*, generation_config.json, chat template) when building the MDC, so any
-        // weight files would be downloaded and discarded. Engines load weights independently
-        // before register_model runs — SGLang and vLLM via an explicit fetch_model pre-flight,
-        // TRT-LLM via a pre-staged local path (which takes the fs::exists branch above) or
-        // via its own runtime resolving the HF repo.
+        // ModelExpress load paths pass ignore_weights=true because the engine already owns
+        // weight acquisition; other load paths keep the default full-fetch behavior.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, true)
+            LocalModel::fetch(&source_path, ignore_weights)
                 .await
                 .map_err(to_pyerr)?
         };
@@ -554,10 +571,9 @@ fn register_model<'p>(
             .source_path(source_path.clone().into())
             // --served_model_name
             .model_name(model_name.clone())
-            .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
-            .runtime_config(runtime_config.unwrap_or_default().inner)
+            .runtime_config(runtime_config.inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))

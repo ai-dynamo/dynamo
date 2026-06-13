@@ -204,7 +204,6 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
-            context_length=0,
             extra_engine_args=None,
             mocker_engine_args=worker_engine_args,
             runtime_config=runtime_config,

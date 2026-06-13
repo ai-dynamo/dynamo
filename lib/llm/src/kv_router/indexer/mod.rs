@@ -132,9 +132,8 @@ impl Indexer {
 
             let cancellation_token = component.drt().primary_token();
             return Ok(Self::KvIndexer {
-                primary: KvIndexer::new_with_frequency(
+                primary: KvIndexer::new_with_pruning(
                     cancellation_token,
-                    None,
                     block_size,
                     kv_indexer_metrics,
                     prune_config,
@@ -169,9 +168,8 @@ impl Indexer {
         let cancellation_token = component.drt().primary_token();
 
         Ok(Self::KvIndexer {
-            primary: KvIndexer::new_with_frequency(
+            primary: KvIndexer::new_with_pruning(
                 cancellation_token,
-                None,
                 block_size,
                 kv_indexer_metrics,
                 None,

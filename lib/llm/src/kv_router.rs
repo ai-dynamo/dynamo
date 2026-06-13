@@ -394,6 +394,7 @@ where
         return_routing_hashes: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -481,6 +482,7 @@ where
                 update_states,
                 lora_name,
                 priority_jump,
+                strict_priority,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -562,6 +564,7 @@ where
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
@@ -576,6 +579,7 @@ where
                 false,
                 lora_name,
                 priority_jump,
+                strict_priority,
                 expected_output_tokens,
                 None,
                 allowed_worker_ids,
@@ -663,6 +667,11 @@ where
     /// Number of requests currently parked in the scheduler queue.
     pub fn pending_count(&self) -> usize {
         self.scheduler.pending_count()
+    }
+
+    /// Sum of ISL tokens for requests currently parked in the scheduler queue.
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.scheduler.pending_isl_tokens()
     }
 
     fn prefill_load_hint_for(
@@ -962,7 +971,7 @@ where
 }
 
 // NOTE: KVRouter works like a PushRouter,
-// but without the reverse proxy functionality, but based on contract of 3 request types
+// but without the reverse proxy functionality, but based on the RouterRequest contract
 #[async_trait]
 impl<Sel> AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error>
     for KvRouter<Sel>
@@ -981,6 +990,9 @@ where
                 tokens,
                 block_mm_infos,
                 routing_constraints,
+                priority_jump,
+                strict_priority,
+                lora_name,
             } => {
                 match self
                     .find_best_match_details(
@@ -990,8 +1002,9 @@ where
                         None,
                         true,
                         false,
-                        None,
-                        0.0,
+                        lora_name,
+                        priority_jump,
+                        strict_priority,
                         None,
                         None,
                         None,
@@ -1020,9 +1033,31 @@ where
                     Err(error) => return Err(error),
                 }
             }
-            RouterRequest::MarkPrefill => RouterResponse::PrefillMarked {
-                success: self.mark_prefill_completed(&context_id).await.is_ok(),
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos,
+                lora_name,
+            } => RouterResponse::PotentialLoads {
+                loads: self
+                    .get_potential_loads(
+                        &tokens,
+                        None,
+                        block_mm_infos.as_deref(),
+                        lora_name.as_deref(),
+                    )
+                    .await?,
+                pending_count: self.pending_count(),
+                pending_isl_tokens: self.pending_isl_tokens(),
             },
+            RouterRequest::MarkPrefill { request_id } => {
+                let request_id = match request_id.as_deref() {
+                    Some(request_id) if !request_id.trim().is_empty() => request_id,
+                    _ => &context_id,
+                };
+                RouterResponse::PrefillMarked {
+                    success: self.mark_prefill_completed(request_id).await.is_ok(),
+                }
+            }
             RouterRequest::MarkFree { request_id } => {
                 let request_id = match request_id.as_deref() {
                     Some(request_id) if !request_id.trim().is_empty() => request_id,
@@ -1251,6 +1286,7 @@ mod tests {
                 false,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 RoutingConstraints::default(),
@@ -1285,6 +1321,7 @@ mod tests {
                 false,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 RoutingConstraints::default(),
@@ -1309,6 +1346,7 @@ mod tests {
                 false,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 RoutingConstraints::default(),
@@ -1349,6 +1387,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -1400,6 +1439,7 @@ mod tests {
                 false,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,

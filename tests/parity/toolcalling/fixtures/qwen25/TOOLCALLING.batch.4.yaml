@@ -18,7 +18,6 @@ cases:
             type: string
     expected:
       dynamo: &id001
-        reason: "Dynamo's qwen25 (hermes alias) parser leaves <tool_call> tag in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: <tool_call>not even json</tool_call>
       vllm:
@@ -31,17 +30,12 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
+      dynamo: &id003
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
+      sglang: *id003
   TOOLCALLING.batch.4.c:
     description: Missing name key
     ref: dynamo
@@ -49,13 +43,12 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id003
-        reason: "Dynamo's qwen25 (hermes alias) parser leaves <tool_call> tag in normal_text on malformed input (impl-defined recovery)"
+      dynamo: &id004
         calls: []
         normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *id003
+      sglang: *id004
   TOOLCALLING.batch.4.d:
     description: Missing </tool_call> close
     ref: dynamo
@@ -63,22 +56,19 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
+      dynamo:
+        calls: []
+        normal_text: ''
       sglang:
+        reason: 'Incomplete call (open <tool_call>, no close): Dynamo suppresses to empty, SGLang keeps raw. Non-parity by
+          design.'
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
   TOOLCALLING.batch.4.e:
-    description: Malformed-prefix recovery — n/a for this family's syntax
-    reason: |-
-      TOOLCALLING.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in TOOLCALLING.batch.4.a through 4.d.
+    description: Malformed-prefix recovery - n/a for this family's syntax
+    reason: 'n/a: llama3_json-specific raw-JSON-prefix resync; this family uses a framed grammar (see 4.a-4.d).'
   TOOLCALLING.batch.4.f:
     description: Tool-name XML tag case - n/a for this family's syntax
-    reason: |-
-      TOOLCALLING.batch.4.f is specific to Qwen3-Coder XML syntax, where the model may emit a tool-name tag such as <terminal> inside <tool_call> instead of the required <function=Terminal> opener. This family does not use Qwen3-Coder's <function=...> opener.
+    reason: 'n/a: Qwen3-Coder <function=...> XML syntax, not this family''s format.'

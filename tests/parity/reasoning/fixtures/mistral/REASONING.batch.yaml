@@ -155,3 +155,15 @@ cases:
       sglang:
         reasoning_text: 'preamble'
         normal_text: 'body[/THINK]answer'
+  REASONING.batch.3.c:
+    description: Recipientless Harmony commentary is not applicable to Mistral
+    reason: Mistral reasoning parsers do not use Harmony commentary channels; visible text and downstream tool handoff use Mistral-specific reasoning and tool-call markers.
+  REASONING.batch.3.d:
+    description: Directed Harmony commentary tool calls are not applicable to Mistral
+    reason: Mistral reasoning parsers do not use Harmony `commentary to=functions.*` envelopes; downstream tool calls use Mistral-specific tool-call markers.
+  REASONING.batch.3.e:
+    description: Directed Harmony analysis tool calls are not applicable to Mistral
+    reason: Mistral reasoning parsers do not use Harmony `analysis to=functions.*` envelopes; reasoning is represented by Mistral THINK tags.
+  REASONING.batch.3.f:
+    description: Harmony analysis/commentary/final channel sequencing is not applicable to Mistral
+    reason: Mistral reasoning parsers have no Harmony channel protocol, so mixed analysis, commentary tool call, and final-channel sequencing is outside their grammar.
