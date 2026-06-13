@@ -13,10 +13,12 @@ operations. The helper implements the subset used by the plugin. During
 restore, pass an optional device map from DYNAMO_CUDA_DEVICE_MAP so Dynamo can
 still support cross-GPU remapping when needed. DYNAMO_CUDA_FORCE_RESTORE_PLUGIN
 lets restore use this hook for checkpoints that were created before helper-only
-images loaded the CRIU CUDA plugin at dump time.
+images loaded the CRIU CUDA plugin at dump time, and makes helper/plugin
+availability mandatory so restore cannot silently fall back to a non-plugin
+CUDA resume path.
 ---
 diff --git a/plugins/cuda/cuda_plugin.c b/plugins/cuda/cuda_plugin.c
-index 9ccb04224..f53514572 100644
+index 9ccb042..1bcd9c3 100644
 --- a/plugins/cuda/cuda_plugin.c
 +++ b/plugins/cuda/cuda_plugin.c
 @@ -13,12 +13,15 @@
@@ -156,13 +158,23 @@ index 9ccb04224..f53514572 100644
  		if (status) {
  			pr_err("RESUME_DEVICES UNLOCK failed with %s\n", msg_buf);
  			ret = -1;
-@@ -569,8 +584,12 @@ int cuda_plugin_init(int stage)
+@@ -560,6 +575,7 @@ static bool is_cuda_device_available(void)
+ int cuda_plugin_init(int stage)
+ {
+ 	int ret;
++	bool force_restore = false;
+ 
+ 	/* Disable CUDA checkpointing with pre-dump */
+ 	if (stage == CR_PLUGIN_STAGE__PRE_DUMP) {
+@@ -568,27 +584,46 @@ int cuda_plugin_init(int stage)
+ 	}
  
  	if (stage == CR_PLUGIN_STAGE__RESTORE) {
++		force_restore = getenv(CUDA_CHECKPOINT_FORCE_RESTORE_ENV) != NULL;
  		if (!check_and_remove_inventory_plugin(CR_PLUGIN_DESC.name, strlen(CR_PLUGIN_DESC.name))) {
 -			plugin_disabled = true;
 -			return 0;
-+			if (getenv(CUDA_CHECKPOINT_FORCE_RESTORE_ENV) == NULL) {
++			if (!force_restore) {
 +				plugin_disabled = true;
 +				return 0;
 +			}
@@ -171,11 +183,27 @@ index 9ccb04224..f53514572 100644
  		}
  	}
  
-@@ -582,13 +601,13 @@ int cuda_plugin_init(int stage)
+ 	if (!fault_injected(FI_PLUGIN_CUDA_FORCE_ENABLE) && !is_cuda_device_available()) {
+-		pr_info("No GPU device found; CUDA plugin is disabled\n");
+-		plugin_disabled = true;
+-		return 0;
++		if (!force_restore) {
++			pr_info("No GPU device found; CUDA plugin is disabled\n");
++			plugin_disabled = true;
++			return 0;
++		}
++		pr_warn("forcing CUDA restore plugin despite missing /proc/driver/nvidia/gpus because %s is set\n",
++			CUDA_CHECKPOINT_FORCE_RESTORE_ENV);
+ 	}
  
  	ret = cuda_checkpoint_supports_flag("--action");
  	if (ret == -1) {
 -		pr_warn("check that %s is present in $PATH\n", CUDA_CHECKPOINT);
++		if (force_restore) {
++			pr_err("%s is required when %s is set\n", CUDA_CHECKPOINT_HELPER,
++			       CUDA_CHECKPOINT_FORCE_RESTORE_ENV);
++			return -1;
++		}
 +		pr_warn("check that %s is present\n", CUDA_CHECKPOINT_HELPER);
  		plugin_disabled = true;
  		return 0;
@@ -183,6 +211,11 @@ index 9ccb04224..f53514572 100644
  
  	if (ret == 0) {
 -		pr_warn("cuda-checkpoint --action flag not supported, an r555 or higher version driver is required. Disabling CUDA plugin\n");
++		if (force_restore) {
++			pr_err("cuda-checkpoint-helper --action flag support is required when %s is set\n",
++			       CUDA_CHECKPOINT_FORCE_RESTORE_ENV);
++			return -1;
++		}
 +		pr_warn("cuda-checkpoint-helper --action flag not supported, an r555 or higher version driver is required. Disabling CUDA plugin\n");
  		plugin_disabled = true;
  		return 0;

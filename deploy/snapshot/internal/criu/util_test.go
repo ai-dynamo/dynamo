@@ -2,6 +2,7 @@ package criu
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -147,6 +148,49 @@ func TestConfigureCUDAPluginRestoreEnv(t *testing.T) {
 		}
 		if got := os.Getenv(criuLibsDirEnv); got != "/custom/criu" {
 			t.Fatalf("%s = %q, want /custom/criu", criuLibsDirEnv, got)
+		}
+	})
+}
+
+func TestCopyRestoreLogToCheckpoint(t *testing.T) {
+	t.Run("copies from workdir", func(t *testing.T) {
+		checkpointPath := t.TempDir()
+		workDir := t.TempDir()
+		content := []byte("cuda_plugin: forcing CUDA restore plugin\n")
+		if err := os.WriteFile(filepath.Join(workDir, RestoreLogFilename), content, 0644); err != nil {
+			t.Fatalf("write workdir restore log: %v", err)
+		}
+
+		got, err := copyRestoreLogToCheckpoint(checkpointPath, workDir)
+		if err != nil {
+			t.Fatalf("copyRestoreLogToCheckpoint: %v", err)
+		}
+		wantPath := filepath.Join(checkpointPath, RestoreLogFilename)
+		if got != wantPath {
+			t.Fatalf("path = %q, want %q", got, wantPath)
+		}
+		gotContent, err := os.ReadFile(wantPath)
+		if err != nil {
+			t.Fatalf("read checkpoint restore log: %v", err)
+		}
+		if string(gotContent) != string(content) {
+			t.Fatalf("checkpoint restore log = %q, want %q", gotContent, content)
+		}
+	})
+
+	t.Run("uses checkpoint log when no workdir", func(t *testing.T) {
+		checkpointPath := t.TempDir()
+		logPath := filepath.Join(checkpointPath, RestoreLogFilename)
+		if err := os.WriteFile(logPath, []byte("restore log"), 0644); err != nil {
+			t.Fatalf("write checkpoint restore log: %v", err)
+		}
+
+		got, err := copyRestoreLogToCheckpoint(checkpointPath, "")
+		if err != nil {
+			t.Fatalf("copyRestoreLogToCheckpoint: %v", err)
+		}
+		if got != logPath {
+			t.Fatalf("path = %q, want %q", got, logPath)
 		}
 	})
 }

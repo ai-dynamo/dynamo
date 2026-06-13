@@ -84,11 +84,50 @@ func ExecuteRestore(
 	log.V(1).Info("Executing go-criu Restore call")
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
+		persistRestoreLog(checkpointPath, settings.WorkDir, log)
 		logging.LogRestoreErrors(checkpointPath, settings.WorkDir, log)
 		return 0, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 
+	persistRestoreLog(checkpointPath, settings.WorkDir, log)
 	return notify.restoredPID, nil
+}
+
+func persistRestoreLog(checkpointPath, workDir string, log logr.Logger) {
+	path, err := copyRestoreLogToCheckpoint(checkpointPath, workDir)
+	if err != nil {
+		log.V(1).Info("Failed to persist CRIU restore log", "error", err)
+		return
+	}
+	log.V(1).Info("Persisted CRIU restore log", "path", path)
+}
+
+func copyRestoreLogToCheckpoint(checkpointPath, workDir string) (string, error) {
+	if checkpointPath == "" {
+		return "", fmt.Errorf("checkpoint path is required")
+	}
+
+	srcDir := checkpointPath
+	if strings.TrimSpace(workDir) != "" {
+		srcDir = workDir
+	}
+	srcPath := filepath.Join(srcDir, RestoreLogFilename)
+	dstPath := filepath.Join(checkpointPath, RestoreLogFilename)
+	if srcPath == dstPath {
+		if _, err := os.Stat(srcPath); err != nil {
+			return "", fmt.Errorf("stat CRIU restore log %s: %w", srcPath, err)
+		}
+		return dstPath, nil
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("read CRIU restore log %s: %w", srcPath, err)
+	}
+	if err := os.WriteFile(dstPath, data, 0644); err != nil {
+		return "", fmt.Errorf("write CRIU restore log %s: %w", dstPath, err)
+	}
+	return dstPath, nil
 }
 
 func configureCUDAPluginRestoreEnv(m *types.CheckpointManifest, deviceMap string, log logr.Logger) (func(), error) {

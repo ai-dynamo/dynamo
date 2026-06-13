@@ -154,7 +154,7 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 		if pid <= 0 {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-restore-tid", "--pid", strconv.Itoa(pid))
+		cmd := exec.CommandContext(ctx, cudaCheckpointHelperPath, "--get-restore-tid", "--pid", strconv.Itoa(pid))
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -278,6 +278,31 @@ func RestoreAndUnlockProcessTreeIfNeeded(ctx context.Context, cudaPIDs []int, de
 		_, err := RestoreAndUnlockProcessTree(ctx, pending, deviceMap, log)
 		timings.TotalDuration = time.Since(start)
 		return timings, err
+	}
+
+	timings.TotalDuration = time.Since(start)
+	return timings, nil
+}
+
+// VerifyRestoredByCRIUPlugin verifies that CRIU's CUDA plugin restored all
+// CUDA processes. Dynamo forces the plugin during CUDA restore because it owns
+// the restore-thread ptrace choreography; do not mask plugin failures by
+// attempting a post-CRIU direct restore.
+func VerifyRestoredByCRIUPlugin(ctx context.Context, cudaPIDs []int, log logr.Logger) (RestorePhaseTimings, error) {
+	var timings RestorePhaseTimings
+
+	start := time.Now()
+	for _, pid := range cudaPIDs {
+		state, err := getState(ctx, pid)
+		if err != nil {
+			timings.TotalDuration = time.Since(start)
+			return timings, fmt.Errorf("verify CRIU CUDA plugin restore for pid %d: %w", pid, err)
+		}
+		if state != "running" {
+			timings.TotalDuration = time.Since(start)
+			return timings, fmt.Errorf("CRIU CUDA plugin did not restore pid %d: CUDA state is %q", pid, state)
+		}
+		log.Info("CUDA process already restored by CRIU plugin", "pid", pid)
 	}
 
 	timings.TotalDuration = time.Since(start)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -95,6 +96,54 @@ func TestBuildDeviceMap(t *testing.T) {
 			}
 		})
 	}
+}
+
+func installCUDAHelperStub(t *testing.T, state string) {
+	t.Helper()
+
+	helperPath := filepath.Join(t.TempDir(), "cuda-checkpoint-helper")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--get-state\" ]; then\n" +
+		"  printf '%s\\n' \"" + state + "\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--action\" ]; then\n" +
+		"  echo unexpected direct cuda restore >&2\n" +
+		"  exit 42\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(helperPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper stub: %v", err)
+	}
+
+	previousPath := cudaCheckpointHelperPath
+	cudaCheckpointHelperPath = helperPath
+	t.Cleanup(func() {
+		cudaCheckpointHelperPath = previousPath
+	})
+}
+
+func TestVerifyRestoredByCRIUPlugin(t *testing.T) {
+	t.Run("accepts running CUDA state", func(t *testing.T) {
+		installCUDAHelperStub(t, "running")
+
+		_, err := VerifyRestoredByCRIUPlugin(context.Background(), []int{123}, logr.Discard())
+		if err != nil {
+			t.Fatalf("VerifyRestoredByCRIUPlugin: %v", err)
+		}
+	})
+
+	t.Run("rejects checkpointed CUDA state", func(t *testing.T) {
+		installCUDAHelperStub(t, "checkpointed")
+
+		_, err := VerifyRestoredByCRIUPlugin(context.Background(), []int{123}, logr.Discard())
+		if err == nil {
+			t.Fatal("expected checkpointed CUDA state to fail")
+		}
+		if !strings.Contains(err.Error(), `CUDA state is "checkpointed"`) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
 type testPodResourcesServer struct {

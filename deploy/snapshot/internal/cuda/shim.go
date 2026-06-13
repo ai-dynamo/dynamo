@@ -25,6 +25,8 @@ const (
 	actionUnlock     = "unlock"
 )
 
+var cudaCheckpointHelperPath = cudaCheckpointHelperBinary
+
 func lock(ctx context.Context, pid int, log logr.Logger) error {
 	return runAction(ctx, pid, actionLock, "", log)
 }
@@ -42,7 +44,7 @@ func unlock(ctx context.Context, pid int, log logr.Logger) error {
 }
 
 func getState(ctx context.Context, pid int) (string, error) {
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-state", "--pid", strconv.Itoa(pid))
+	cmd := exec.CommandContext(ctx, cudaCheckpointHelperPath, "--get-state", "--pid", strconv.Itoa(pid))
 	output, err := cmd.CombinedOutput()
 	state := strings.TrimSpace(string(output))
 	if err != nil {
@@ -59,7 +61,7 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
+	cmd := exec.CommandContext(ctx, cudaCheckpointHelperPath, args...)
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,

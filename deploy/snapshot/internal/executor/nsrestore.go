@@ -11,6 +11,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -145,8 +146,9 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		)
 	}
 
-	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
-	// current visible restored PIDs before invoking cuda-checkpoint.
+	// CUDA restore verification: CRIU's CUDA plugin owns restore-thread ptrace
+	// choreography, so remap checkpoint-time innermost namespace PIDs onto the
+	// current visible restored PIDs and verify the plugin restored them.
 	if !m.CUDA.IsEmpty() {
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, int(restoredPID), m.CUDA.PIDs)
 		if err != nil {
@@ -157,8 +159,13 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTreeIfNeeded(ctx, restorePIDs, opts.CUDADeviceMap, log)
+		_, err = cuda.VerifyRestoredByCRIUPlugin(ctx, restorePIDs, log)
 		if err != nil {
+			logging.LogRestoreErrors(
+				opts.CheckpointPath,
+				m.CRIUDump.CRIU.WorkDir,
+				log,
+			)
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}
 	}
