@@ -54,7 +54,7 @@ spec:
             capabilities:
               add:
                 - IPC_LOCK
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-efa-amd64
           workingDir: /workspace/examples/backends/vllm
           command:
           - /bin/bash
@@ -99,7 +99,7 @@ spec:
             capabilities:
               add:
                 - IPC_LOCK
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-efa-amd64
           workingDir: /workspace/examples/backends/vllm
           command:
           - /bin/bash
