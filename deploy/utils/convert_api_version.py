@@ -28,6 +28,7 @@ import yaml
 
 GROUP = "nvidia.com"
 DEFAULT_TARGET = "nvidia.com/v1beta1"
+KUBECTL_TIMEOUT = 30  # seconds
 
 
 class ConversionError(Exception):
@@ -86,11 +87,8 @@ SERVER_METADATA_FIELDS = (
 )
 
 INTERNAL_ANNOTATIONS = (
-    "nvidia.com/dgd-spec",
     "nvidia.com/dgd-status",
-    "nvidia.com/dcd-spec",
     "nvidia.com/dcd-status",
-    "nvidia.com/dgdr-spec",
     "nvidia.com/dgdr-status",
     "kubectl.kubernetes.io/last-applied-configuration",
 )
@@ -136,7 +134,16 @@ def convert_docs(docs: list, target: str = DEFAULT_TARGET, webhook_fn=None) -> l
     results = [None] * len(docs)
     indices_by_kind: dict = {}
     for i, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            raise ConversionError(
+                f"document at index {i} is not a mapping: {type(doc).__name__}"
+            )
         if is_convertible(doc) and doc.get("apiVersion") != target:
+            if "kind" not in doc:
+                raise ConversionError(
+                    f"document at index {i} has an nvidia.com apiVersion "
+                    "but no 'kind'"
+                )
             indices_by_kind.setdefault(doc["kind"], []).append(i)
         else:
             results[i] = doc
@@ -161,10 +168,18 @@ def _kubectl(args: list) -> str:
     """Run kubectl and return stdout, raising ConversionError on failure."""
     try:
         proc = subprocess.run(
-            ["kubectl", *args], capture_output=True, text=True, check=True
+            ["kubectl", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=KUBECTL_TIMEOUT,
         )
     except FileNotFoundError as exc:
         raise ConversionError("kubectl not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ConversionError(
+            f"kubectl {' '.join(args)} timed out after {KUBECTL_TIMEOUT}s"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         raise ConversionError(
             f"kubectl {' '.join(args)} failed: {exc.stderr.strip()}"
@@ -216,7 +231,10 @@ def call_webhook(review: dict, service: dict) -> dict:
         out = _kubectl(["create", "--raw", proxy_path, "-f", tmp.name])
     finally:
         os.unlink(tmp.name)
-    return json.loads(out)
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise ConversionError(f"webhook returned invalid JSON: {exc}") from exc
 
 
 def default_webhook_fn(review: dict, kind: str) -> dict:

@@ -17,8 +17,9 @@ import shutil
 import subprocess as _sp
 from pathlib import Path as _Path
 
-import convert_api_version as c
 import pytest
+
+from deploy.utils import convert_api_version as c
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
@@ -221,6 +222,32 @@ def test_clean_for_authoring_strips_each_internal_annotation(ann):
     assert out["metadata"]["annotations"] == {"keep": "yes"}
 
 
+def test_convert_docs_preserves_spec_annotation_strips_status():
+    alpha = {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "a"},
+        "spec": {},
+    }
+    beta = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {
+            "name": "a",
+            "annotations": {
+                "nvidia.com/dgd-spec": "blob",
+                "nvidia.com/dgd-status": "blob",
+            },
+        },
+        "spec": {},
+    }
+    fn = _echo_webhook_fn_factory({"DynamoGraphDeployment": [beta]})
+    out = c.convert_docs([alpha], target="nvidia.com/v1beta1", webhook_fn=fn)
+    annotations = out[0]["metadata"]["annotations"]
+    assert annotations["nvidia.com/dgd-spec"] == "blob"
+    assert "nvidia.com/dgd-status" not in annotations
+
+
 def test_discover_conversion_service_parses_crd_clientconfig():
     crd_list = {
         "items": [
@@ -338,6 +365,7 @@ requires_cluster = pytest.mark.skipif(
 
 
 @requires_cluster
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize("name", CONFORMANCE_NAMES)
 def test_conformance_vllm_example_pair(name):
     alpha_path = REPO_ROOT / f"examples/backends/vllm/deploy/{name}.yaml"

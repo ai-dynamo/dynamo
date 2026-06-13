@@ -163,9 +163,9 @@ operator (the conversion webhook must be installed). Multi-document files and
 non-nvidia.com documents (passed through unchanged) are supported.
 
 ```bash
-python convert_api_version.py -i my-dgd.v1alpha1.yaml -o my-dgd.v1beta1.yaml
+python deploy/utils/convert_api_version.py -i my-dgd.v1alpha1.yaml -o my-dgd.v1beta1.yaml
 # explicit target version:
-python convert_api_version.py -i in.yaml -o out.yaml --to nvidia.com/v1beta1
+python deploy/utils/convert_api_version.py -i in.yaml -o out.yaml --to nvidia.com/v1beta1
 ```
 
 The converter POSTs an `apiextensions.k8s.io/v1` ConversionReview to the CRD's
