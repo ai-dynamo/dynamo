@@ -128,7 +128,6 @@ pip install -e .
 | [**Request Cancellation**](../../fault-tolerance/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
 | [**Observability**](sglang-observability.md) | ✅ | Metrics, tracing, and Grafana dashboards |
-| [**KVBM**](../../components/kvbm/README.md) | ❌ | Planned |
 
 ## Quick Start
 
