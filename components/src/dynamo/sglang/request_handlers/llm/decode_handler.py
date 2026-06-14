@@ -138,91 +138,114 @@ _CANCELLED_METADATA_UPLOAD_TIMEOUT_SECONDS = 10.0
 
 
 class _MetadataUploadTracker:
-    """Own the latest cumulative SGLang metadata snapshot for each choice."""
-
-    def __init__(self, uploader: MetadataUploader | None) -> None:
+    def __init__(self, uploader: MetadataUploader) -> None:
         self._uploader = uploader
-        self._latest: dict[int, dict[str, Any]] = {}
+        self._choice_index: int | None = None
+        self._metadata: dict[str, Any] | None = None
+        self._upload_task: asyncio.Task[None] | None = None
 
-    def retain(self, choice_index: int, metadata: dict[str, Any]) -> None:
-        if self._uploader is None:
-            return
+    def retain(self, choice_index: int, metadata: dict[str, Any]) -> dict[str, Any]:
+        if self._choice_index not in (None, choice_index):
+            raise RuntimeError("SGLang metadata upload supports only one choice")
 
-        previous = self._latest.get(choice_index)
+        previous = self._metadata
         if previous is metadata:
-            return
+            return metadata
         if previous is not None:
             for key, value in previous.items():
                 metadata.setdefault(key, value)
             previous.clear()
-        self._latest[choice_index] = metadata
+        self._choice_index = choice_index
+        self._metadata = metadata
+        return metadata
 
-    async def upload_terminal(self, choice_index: int) -> None:
-        if self._uploader is None:
+    async def upload_terminal(self) -> None:
+        if self._metadata is None or self._choice_index is None:
             return
-        metadata = self._latest.get(choice_index)
-        if metadata is None:
-            return
+        self._upload_task = asyncio.create_task(
+            self._uploader.upload_choice(self._choice_index, self._metadata)
+        )
         try:
-            await self._uploader.upload_choice(choice_index, metadata)
+            await asyncio.shield(self._upload_task)
         except asyncio.CancelledError:
-            # Keep the snapshot so the cancellation finalizer can retry it
-            # with an abort finish reason.
             raise
         except Exception:
-            self._latest.pop(choice_index, None)
-            metadata.clear()
+            self.clear()
             raise
         else:
-            self._latest.pop(choice_index, None)
-            metadata.clear()
+            self.clear()
 
     async def upload_cancelled(self) -> None:
-        if self._uploader is None:
+        if self._metadata is None or self._choice_index is None:
             return
 
-        for choice_index, metadata in list(self._latest.items()):
+        metadata = self._metadata
+        choice_index = self._choice_index
+        previous_upload = self._upload_task
+
+        async def replace_with_abort() -> None:
+            if previous_upload is not None:
+                try:
+                    await asyncio.shield(previous_upload)
+                except Exception:
+                    pass
             metadata["finish_reason"] = {"type": "abort"}
-            try:
-                await asyncio.wait_for(
-                    self._uploader.upload_choice(choice_index, metadata),
-                    timeout=_CANCELLED_METADATA_UPLOAD_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                logging.error(
-                    "Timed out uploading cancelled metadata for choice %d",
-                    choice_index,
-                )
-            except Exception:
-                logging.exception(
-                    "Failed to upload cancelled metadata for choice %d",
-                    choice_index,
-                )
-            finally:
-                metadata.clear()
-                self._latest.pop(choice_index, None)
+            await self._uploader.upload_choice(choice_index, metadata)
+
+        self._upload_task = asyncio.create_task(replace_with_abort())
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(self._upload_task),
+                timeout=_CANCELLED_METADATA_UPLOAD_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logging.error(
+                "Timed out uploading cancelled metadata for choice %d",
+                choice_index,
+            )
+            tasks = {self._upload_task}
+            if previous_upload is not None:
+                tasks.add(previous_upload)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # A cancelled to_thread call may still be serializing this dict.
+            # Drop tracker ownership without mutating the in-flight snapshot.
+            self._release()
+        except Exception:
+            logging.exception(
+                "Failed to upload cancelled metadata for choice %d",
+                choice_index,
+            )
+            self.clear()
+        else:
+            self.clear()
 
     def clear(self) -> None:
-        for metadata in self._latest.values():
-            metadata.clear()
-        self._latest.clear()
+        if self._metadata is not None:
+            self._metadata.clear()
+        self._release()
+
+    def _release(self) -> None:
+        self._choice_index = None
+        self._metadata = None
+        self._upload_task = None
 
 
 @asynccontextmanager
 async def _metadata_upload_lifecycle(
     tracker: _MetadataUploadTracker, context: Context
 ) -> AsyncGenerator[None, None]:
-    cancelled = False
+    is_cancelled = False
     try:
         yield
     except (asyncio.CancelledError, GeneratorExit):
-        cancelled = True
+        is_cancelled = True
         raise
     finally:
-        try:
-            if cancelled or context.is_stopped():
-                await tracker.upload_cancelled()
-        finally:
+        if is_cancelled or context.is_stopped():
+            await tracker.upload_cancelled()
+        else:
             tracker.clear()
 
 
@@ -596,6 +619,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             Dict with token_ids and optional finish_reason.
         """
+        if metadata_uploader is not None:
+            async for out in self._process_token_stream_with_metadata(
+                stream_source,
+                context,
+                metadata_uploader,
+                user_stop_token_ids=user_stop_token_ids,
+            ):
+                yield out
+            return
+
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
         # SGLang's token stream is asymmetric: output_ids are disjoint deltas
@@ -603,11 +636,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # With n>1, chunks for different choices are interleaved, so track the
         # cumulative-logprob cursor per choice index instead of globally.
         output_logprobs_per_choice: dict[int, int] = {}
-        metadata_tracker = _MetadataUploadTracker(metadata_uploader)
-        async with (
-            self._cancellation_monitor(request_id_future, context),
-            _metadata_upload_lifecycle(metadata_tracker, context),
-        ):
+        async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
                 # Extract SGLang request ID from the first response and set the future
@@ -624,7 +653,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # SGLang omits index for non-n/legacy chunks; treat those as
                 # choice 0 while preserving explicit indices for n>1.
                 output_idx = res.get("index") or 0
-                metadata_tracker.retain(output_idx, meta_info)
 
                 out: dict[str, Any] = {"index": output_idx}
                 finish_reason = meta_info["finish_reason"]
@@ -650,25 +678,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
 
-                if metadata_uploader is None:
-                    # Extract logprobs for new tokens if available
-                    (
-                        log_probs,
-                        top_logprobs,
-                        next_logprobs_total,
-                    ) = self._extract_logprobs(
-                        meta_info,
-                        output_logprobs_per_choice.get(output_idx, 0),
-                        return_tokens_as_token_ids=return_tokens_as_token_ids,
-                    )
-                    output_logprobs_per_choice[output_idx] = next_logprobs_total
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
+                # Extract logprobs for new tokens if available
+                (
+                    log_probs,
+                    top_logprobs,
+                    next_logprobs_total,
+                ) = self._extract_logprobs(
+                    meta_info,
+                    output_logprobs_per_choice.get(output_idx, 0),
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                )
+                output_logprobs_per_choice[output_idx] = next_logprobs_total
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
 
                 routed_experts = meta_info.get("routed_experts")
-                if routed_experts is not None and metadata_uploader is None:
+                if routed_experts is not None:
                     # sglang >= 0.5.11 base64-encodes routed_experts upstream. It rides
                     # the engine's opaque engine_data passthrough (surfaced by the frontend
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
@@ -686,8 +713,65 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "total_tokens": input_tokens + completion_tokens,
                         "prompt_tokens_details": prefill_prompt_tokens_details,
                     }
-                    if metadata_uploader is not None:
-                        await metadata_tracker.upload_terminal(output_idx)
+                if not context.is_stopped():
+                    yield out
+
+    async def _process_token_stream_with_metadata(
+        self,
+        stream_source: AsyncGenerator[Dict[str, Any], None],
+        context: Context,
+        metadata_uploader: MetadataUploader,
+        user_stop_token_ids: set[int] | None = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        request_id_future: asyncio.Future[str] = asyncio.Future()
+        metadata_tracker = _MetadataUploadTracker(metadata_uploader)
+        async with (
+            self._cancellation_monitor(request_id_future, context),
+            _metadata_upload_lifecycle(metadata_tracker, context),
+        ):
+            async for res in stream_source:
+                meta_info = res.get("meta_info", {})
+                if not request_id_future.done():
+                    sglang_request_id = meta_info.get("id")
+                    if sglang_request_id:
+                        request_id_future.set_result(sglang_request_id)
+                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+
+                output_idx = res.get("index") or 0
+                meta_info = metadata_tracker.retain(output_idx, meta_info)
+                out: dict[str, Any] = {"index": output_idx}
+                finish_reason = meta_info["finish_reason"]
+                if finish_reason:
+                    out["finish_reason"] = normalize_finish_reason(
+                        finish_reason["type"]
+                    )
+                    stop_reason = _extract_sglang_stop_reason(
+                        finish_reason, user_stop_token_ids
+                    )
+                    if stop_reason is not None:
+                        out["stop_reason"] = stop_reason
+
+                output_ids = res.get("output_ids", [])
+                if not output_ids and not finish_reason:
+                    if context.is_stopped():
+                        break
+                    continue
+
+                out["token_ids"] = output_ids
+                if finish_reason:
+                    input_tokens = meta_info["prompt_tokens"]
+                    completion_tokens = meta_info["completion_tokens"]
+                    cached_tokens = meta_info["cached_tokens"]
+                    prefill_prompt_tokens_details = None
+                    if cached_tokens is not None and cached_tokens > 0:
+                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
+                    out["completion_usage"] = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": input_tokens + completion_tokens,
+                        "prompt_tokens_details": prefill_prompt_tokens_details,
+                    }
+                    await metadata_tracker.upload_terminal()
                 if not context.is_stopped():
                     yield out
 
@@ -716,11 +800,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        metadata_tracker = _MetadataUploadTracker(metadata_uploader)
-        async with (
-            self._cancellation_monitor(request_id_future, context),
-            _metadata_upload_lifecycle(metadata_tracker, context),
-        ):
+        async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
                 # Extract SGLang request ID from the first response and set the future
@@ -737,7 +817,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Same defaulting as token mode: non-n chunks are choice 0.
                 index = res.get("index") or 0
-                metadata_tracker.retain(index, meta_info)
 
                 text = res.get("text", "")
 
@@ -777,7 +856,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # sglang >= 0.5.11 base64-encodes routed_experts upstream.
                     response_nvext["routed_experts"] = routed_experts
                 if finish_reason and metadata_uploader is not None:
-                    await metadata_tracker.upload_terminal(index)
+                    try:
+                        await metadata_uploader.upload_choice(index, meta_info)
+                    finally:
+                        meta_info.clear()
+                elif metadata_uploader is not None:
+                    meta_info.clear()
                 if response_nvext:
                     response["nvext"] = response_nvext
                 if not context.is_stopped():

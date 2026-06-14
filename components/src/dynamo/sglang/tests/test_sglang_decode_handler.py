@@ -3,12 +3,14 @@
 
 import asyncio
 import json
+import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
+from dynamo.sglang.request_handlers.llm import decode_handler as decode_handler_module
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
@@ -28,13 +30,27 @@ pytestmark = [
 ]
 
 
-def _read_zstd_payload(path):
+def _decode_zstd_payload(data):
+    import msgspec
     import zstandard as zstd
 
-    raw = zstd.ZstdDecompressor().decompress(path.read_bytes())
-    import msgspec
-
+    raw = zstd.ZstdDecompressor().decompress(data)
     return msgspec.msgpack.decode(raw)
+
+
+def _read_zstd_payload(path):
+    return _decode_zstd_payload(path.read_bytes())
+
+
+def _mock_memory_metadata_fs(monkeypatch):
+    fsspec = pytest.importorskip("fsspec")
+    memory_fs = fsspec.filesystem("memory")
+    memory_fs.store.clear()
+    monkeypatch.setattr(
+        "dynamo.common.storage.fsspec.filesystem",
+        lambda protocol, **kwargs: memory_fs,
+    )
+    return memory_fs
 
 
 def test_extract_media_urls_supports_string_and_wire_items():
@@ -472,6 +488,34 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
 
 
 @pytest.mark.asyncio
+async def test_process_token_stream_without_s3_does_not_create_tracker(monkeypatch):
+    handler = _new_decode_handler()
+    meta_info = {
+        "id": "request-1",
+        "finish_reason": None,
+        "output_token_logprobs": [(-0.1, 101, "a")],
+        "routed_experts": b"expert-bytes",
+    }
+
+    def fail_if_constructed(*args, **kwargs):
+        raise AssertionError("metadata tracker constructed without an uploader")
+
+    monkeypatch.setattr(
+        decode_handler_module, "_MetadataUploadTracker", fail_if_constructed
+    )
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream([{"index": 0, "output_ids": [101], "meta_info": meta_info}]),
+            _Context(),
+        )
+    )
+
+    assert chunks[0]["log_probs"] == [-0.1]
+    assert chunks[0]["engine_data"] == {"routed_experts": b"expert-bytes"}
+    assert meta_info["output_token_logprobs"] == [(-0.1, 101, "a")]
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_uploads_latest_metadata_when_cancelled(tmp_path):
     handler = _new_decode_handler()
     uploader = MetadataUploader(url=(tmp_path / "metadata/cancelled").as_uri())
@@ -521,24 +565,28 @@ async def test_process_token_stream_uploads_latest_metadata_when_cancelled(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_terminal_upload_cancel_retries_as_aborted_metadata():
+async def test_terminal_upload_cancel_writes_abort_after_inflight_upload(monkeypatch):
     handler = _new_decode_handler()
+    memory_fs = _mock_memory_metadata_fs(monkeypatch)
+    original_pipe_file = memory_fs.pipe_file
+    first_write_started = threading.Event()
+    release_first_write = threading.Event()
+    second_write_started = threading.Event()
+    finish_reasons = []
 
-    class BlockingUploader:
-        def __init__(self):
-            self.calls = 0
-            self.first_upload_started = asyncio.Event()
-            self.never_finish = asyncio.Event()
-            self.uploaded_metadata = None
+    def controlled_pipe_file(path, data, **kwargs):
+        finish_reason = _decode_zstd_payload(data)["metadata"]["finish_reason"]
+        finish_reasons.append(finish_reason)
+        if len(finish_reasons) == 1:
+            first_write_started.set()
+            if not release_first_write.wait(timeout=5):
+                raise TimeoutError("test did not release first metadata write")
+        else:
+            second_write_started.set()
+        return original_pipe_file(path, data, **kwargs)
 
-        async def upload_choice(self, choice_index, metadata):
-            self.calls += 1
-            if self.calls == 1:
-                self.first_upload_started.set()
-                await self.never_finish.wait()
-            self.uploaded_metadata = dict(metadata)
-
-    uploader = BlockingUploader()
+    monkeypatch.setattr(memory_fs, "pipe_file", controlled_pipe_file)
+    uploader = MetadataUploader(url="memory://metadata-race")
     collect_task = asyncio.create_task(
         _collect(
             handler._process_token_stream(
@@ -563,14 +611,142 @@ async def test_terminal_upload_cancel_retries_as_aborted_metadata():
             )
         )
     )
-    await asyncio.wait_for(uploader.first_upload_started.wait(), timeout=1)
+    assert await asyncio.to_thread(first_write_started.wait, 1)
     collect_task.cancel()
+    await asyncio.sleep(0.05)
+    assert not second_write_started.is_set()
+
+    release_first_write.set()
     with pytest.raises(asyncio.CancelledError):
         await collect_task
 
-    assert uploader.calls == 2
-    assert uploader.uploaded_metadata["finish_reason"] == {"type": "abort"}
-    assert uploader.uploaded_metadata["output_token_logprobs"] == [(-0.1, 101, "a")]
+    assert finish_reasons == [{"type": "stop"}, {"type": "abort"}]
+    payload = _decode_zstd_payload(memory_fs.cat("metadata-race/choice_0.msgpack.zst"))
+    assert payload["metadata"]["finish_reason"] == {"type": "abort"}
+    assert payload["metadata"]["output_token_logprobs"] == [[-0.1, 101, "a"]]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_metadata_upload_failure_preserves_cancellation(
+    monkeypatch, caplog
+):
+    handler = _new_decode_handler()
+    memory_fs = _mock_memory_metadata_fs(monkeypatch)
+    stream_blocked = asyncio.Event()
+    never_finish = asyncio.Event()
+    latest_meta_info = {
+        "id": "sglang-cancelled",
+        "finish_reason": None,
+        "output_token_logprobs": [(-0.1, 101, "a")],
+    }
+
+    def failing_pipe_file(path, data, **kwargs):
+        raise OSError("injected metadata write failure")
+
+    monkeypatch.setattr(memory_fs, "pipe_file", failing_pipe_file)
+
+    async def cancellable_stream():
+        yield {
+            "index": 0,
+            "output_ids": [101],
+            "meta_info": latest_meta_info,
+        }
+        stream_blocked.set()
+        await never_finish.wait()
+
+    collect_task = asyncio.create_task(
+        _collect(
+            handler._process_token_stream(
+                cancellable_stream(),
+                _Context(),
+                metadata_uploader=MetadataUploader(url="memory://metadata-failure"),
+            )
+        )
+    )
+    await asyncio.wait_for(stream_blocked.wait(), timeout=1)
+    collect_task.cancel()
+    with caplog.at_level("ERROR"):
+        with pytest.raises(asyncio.CancelledError):
+            await collect_task
+
+    assert "Failed to upload cancelled metadata for choice 0" in caplog.text
+    assert "injected metadata write failure" in caplog.text
+    assert latest_meta_info == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_metadata_upload_timeout_releases_tracker(monkeypatch, caplog):
+    handler = _new_decode_handler()
+    memory_fs = _mock_memory_metadata_fs(monkeypatch)
+    original_pipe_file = memory_fs.pipe_file
+    write_started = threading.Event()
+    release_write = threading.Event()
+    write_finished = threading.Event()
+    stream_blocked = asyncio.Event()
+    never_finish = asyncio.Event()
+    trackers = []
+    tracker_type = decode_handler_module._MetadataUploadTracker
+
+    class RecordingTracker(tracker_type):
+        def __init__(self, uploader):
+            super().__init__(uploader)
+            trackers.append(self)
+
+    def blocking_pipe_file(path, data, **kwargs):
+        write_started.set()
+        try:
+            if not release_write.wait(timeout=5):
+                raise TimeoutError("test did not release metadata write")
+            return original_pipe_file(path, data, **kwargs)
+        finally:
+            write_finished.set()
+
+    monkeypatch.setattr(
+        decode_handler_module, "_MetadataUploadTracker", RecordingTracker
+    )
+    monkeypatch.setattr(
+        decode_handler_module,
+        "_CANCELLED_METADATA_UPLOAD_TIMEOUT_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(memory_fs, "pipe_file", blocking_pipe_file)
+
+    async def cancellable_stream():
+        yield {
+            "index": 0,
+            "output_ids": [101],
+            "meta_info": {
+                "id": "sglang-timeout",
+                "finish_reason": None,
+                "output_token_logprobs": [(-0.1, 101, "a")],
+            },
+        }
+        stream_blocked.set()
+        await never_finish.wait()
+
+    collect_task = asyncio.create_task(
+        _collect(
+            handler._process_token_stream(
+                cancellable_stream(),
+                _Context(),
+                metadata_uploader=MetadataUploader(url="memory://metadata-timeout"),
+            )
+        )
+    )
+    await asyncio.wait_for(stream_blocked.wait(), timeout=1)
+    collect_task.cancel()
+    try:
+        with caplog.at_level("ERROR"):
+            with pytest.raises(asyncio.CancelledError):
+                await collect_task
+        assert write_started.is_set()
+        assert "Timed out uploading cancelled metadata for choice 0" in caplog.text
+        assert len(trackers) == 1
+        assert trackers[0]._metadata is None
+        assert trackers[0]._upload_task is None
+    finally:
+        release_write.set()
+        assert await asyncio.to_thread(write_finished.wait, 1)
 
 
 @pytest.mark.asyncio
