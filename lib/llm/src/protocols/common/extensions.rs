@@ -217,6 +217,12 @@ impl NvExt {
                 .any(|annotation| annotation.starts_with("query_instance_id:"))
         })
     }
+
+    pub fn requests_extra_field(&self, field: &str) -> bool {
+        self.extra_fields
+            .as_ref()
+            .is_some_and(|fields| fields.iter().any(|candidate| candidate == field))
+    }
 }
 
 impl NvExtBuilder {

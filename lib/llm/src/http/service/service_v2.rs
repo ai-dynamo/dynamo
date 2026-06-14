@@ -348,17 +348,17 @@ impl State {
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
         config: StateConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let responses_context_store = Arc::new(
-            ResponseContextStoreManager::from_env_with_shutdown(cancel_token.child_token())?,
+            ResponseContextStoreManager::from_env_with_shutdown(cancel_token.child_token()),
         );
-        Ok(Self::new_with_responses_context_store(
+        Self::new_with_responses_context_store(
             manager,
             discovery_client,
             cancel_token,
             config,
             responses_context_store,
-        ))
+        )
     }
 
     fn new_with_responses_context_store(
@@ -933,7 +933,7 @@ impl HttpServiceConfigBuilder {
             Some(store) => store,
             None => Arc::new(ResponseContextStoreManager::from_env_with_shutdown(
                 cancel_token.child_token(),
-            )?),
+            )),
         };
         let state = Arc::new(State::new_with_responses_context_store(
             model_manager,

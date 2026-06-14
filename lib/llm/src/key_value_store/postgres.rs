@@ -20,38 +20,26 @@ impl PostgresKeyValueStore {
             .connect(url)
             .await
             .context("failed to connect to PostgreSQL store")?;
-        let initialized: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema()
-                  AND table_name = 'dynamo_key_value_store'
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS dynamo_key_value_store (
+                namespace TEXT NOT NULL,
+                store_key TEXT NOT NULL,
+                value BYTEA NOT NULL,
+                expires_at BIGINT,
+                PRIMARY KEY (namespace, store_key)
             )",
         )
-        .fetch_one(&pool)
+        .execute(&pool)
         .await
-        .context("failed to inspect PostgreSQL store schema")?;
-        if !initialized {
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS dynamo_key_value_store (
-                    namespace TEXT NOT NULL,
-                    store_key TEXT NOT NULL,
-                    value BYTEA NOT NULL,
-                    expires_at BIGINT,
-                    PRIMARY KEY (namespace, store_key)
-                )",
-            )
-            .execute(&pool)
-            .await
-            .context("failed to initialize PostgreSQL store table")?;
-            sqlx::query(
-                "CREATE INDEX IF NOT EXISTS dynamo_key_value_store_expiry
-                 ON dynamo_key_value_store (namespace, expires_at)
-                 WHERE expires_at IS NOT NULL",
-            )
-            .execute(&pool)
-            .await
-            .context("failed to initialize PostgreSQL store expiry index")?;
-        }
+        .context("failed to initialize PostgreSQL store table")?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS dynamo_key_value_store_expiry
+             ON dynamo_key_value_store (namespace, expires_at)
+             WHERE expires_at IS NOT NULL",
+        )
+        .execute(&pool)
+        .await
+        .context("failed to initialize PostgreSQL store expiry index")?;
         Ok(Self {
             pool,
             namespace: namespace.to_string(),

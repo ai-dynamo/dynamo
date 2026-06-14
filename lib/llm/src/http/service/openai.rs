@@ -4,10 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -37,8 +34,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     RouteDoc,
     disconnect::{
-        ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_terminal_error,
+        ConnectionHandle, StreamCompletion, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_completion,
     },
     error::HttpError,
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -2131,21 +2128,19 @@ async fn responses(
         .responses_context_store()
         .prepare_request(&mut request)
         .await
-        .map_err(|e| {
-            let not_found = e
-                .downcast_ref::<super::stateful_responses::PreviousResponseNotFound>()
-                .is_some();
-            let message = e.to_string();
-            tracing::error!(request_id = %request.id(), error = %message, "Failed to prepare stateful Responses request");
-            let err_response = if not_found {
-                ErrorMessage::from_http_error(HttpError {
-                    code: StatusCode::NOT_FOUND.as_u16(),
-                    message,
-                })
-            } else {
-                ErrorMessage::internal_server_error(
+        .map_err(|error| {
+            tracing::error!(request_id = %request.id(), %error, "Failed to prepare stateful Responses request");
+            let err_response = match error {
+                not_found
+                @ super::stateful_responses::PrepareResponseError::PreviousResponseNotFound(_) => {
+                    ErrorMessage::from_http_error(HttpError {
+                        code: StatusCode::NOT_FOUND.as_u16(),
+                        message: not_found.to_string(),
+                    })
+                }
+                _ => ErrorMessage::internal_server_error(
                     "Failed to prepare stateful Responses request",
-                )
+                ),
             };
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
@@ -2168,15 +2163,7 @@ async fn responses(
         service_tier: request.inner.service_tier,
         include: request.inner.include.clone(),
         top_logprobs: request.inner.top_logprobs,
-        completion_token_logprobs: request
-            .nvext
-            .as_ref()
-            .and_then(|nvext| nvext.extra_fields.as_ref())
-            .is_some_and(|fields| {
-                fields
-                    .iter()
-                    .any(|field| field == "completion_token_logprobs")
-            }),
+        completion_token_logprobs: request.completion_token_logprobs_requested(),
         truncation: request.inner.truncation,
         presence_penalty: request.extensions.presence_penalty,
         frequency_penalty: request.extensions.frequency_penalty,
@@ -2279,8 +2266,8 @@ async fn responses(
         let mut http_queue_guard = Some(http_queue_guard);
         let state_for_store = state.clone();
         let expanded_for_store = expanded_response_context.clone();
-        let persist_failed = Arc::new(AtomicBool::new(false));
-        let persist_failed_in_stream = persist_failed.clone();
+        let completion = StreamCompletion::default();
+        let completion_in_stream = completion.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -2322,15 +2309,11 @@ async fn responses(
                 let completed_response = converter.completed_response();
                 if let Err(err) = state_for_store
                     .responses_context_store()
-                    .persist_response(
-                        &expanded_for_store,
-                        &completed_response.id,
-                        &completed_response.output,
-                    )
+                    .persist_response(&expanded_for_store, &completed_response)
                     .await
                 {
                     tracing::error!(%err, "failed to persist streamed stateful Responses context");
-                    persist_failed_in_stream.store(true, Ordering::Release);
+                    completion_in_stream.mark_failed();
                     events.extend(converter.emit_failed_event(
                         completed_response.output,
                         "server_error",
@@ -2348,12 +2331,12 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects_with_terminal_error(
+        let stream = monitor_for_disconnects_with_completion(
             full_stream,
             ctx,
             inflight_guard,
             stream_handle,
-            Some(persist_failed),
+            completion,
         );
 
         let mut sse_stream = Sse::new(stream);
@@ -2412,11 +2395,7 @@ async fn responses(
 
         if let Err(err) = state
             .responses_context_store()
-            .persist_response(
-                &expanded_response_context,
-                &response.inner.id,
-                &response.inner.output,
-            )
+            .persist_response(&expanded_response_context, &response.inner)
             .await
         {
             tracing::error!(%err, "failed to persist stateful Responses context");

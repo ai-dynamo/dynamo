@@ -10,7 +10,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use dynamo_protocols::types::responses::InputParam;
+use dynamo_protocols::types::responses::{InputParam, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -125,22 +125,20 @@ impl ResponseContextStoreConfig {
 }
 
 pub struct ResponseContextStoreManager {
-    config: ResponseContextStoreConfig,
+    config: OnceCell<ResponseContextStoreConfig>,
     store: OnceCell<Arc<dyn KeyValueStore>>,
     sweeper_started: AtomicBool,
     shutdown: CancellationToken,
 }
 
 impl ResponseContextStoreManager {
-    pub fn from_env() -> anyhow::Result<Self> {
-        Self::from_env_with_shutdown(CancellationToken::new())
-    }
-
-    pub fn from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<Self> {
-        Ok(Self::with_shutdown(
-            ResponseContextStoreConfig::from_env()?,
-            shutdown,
-        ))
+    pub fn from_env_with_shutdown(shutdown: CancellationToken) -> Self {
+        Self {
+            config: OnceCell::new(),
+            store: OnceCell::new(),
+            sweeper_started: AtomicBool::new(false),
+            shutdown: shutdown.child_token(),
+        }
     }
 
     pub fn new(config: ResponseContextStoreConfig) -> Self {
@@ -149,7 +147,7 @@ impl ResponseContextStoreManager {
 
     pub fn with_shutdown(config: ResponseContextStoreConfig, shutdown: CancellationToken) -> Self {
         Self {
-            config,
+            config: OnceCell::new_with(Some(config)),
             store: OnceCell::new(),
             sweeper_started: AtomicBool::new(false),
             shutdown: shutdown.child_token(),
@@ -163,28 +161,33 @@ impl ResponseContextStoreManager {
         shutdown: CancellationToken,
     ) -> Self {
         Self {
-            config: ResponseContextStoreConfig {
+            config: OnceCell::new_with(Some(ResponseContextStoreConfig {
                 store_config: KeyValueStoreConfig::Memory,
                 namespace: DEFAULT_STORE_NAMESPACE.to_string(),
                 default_ttl,
                 ttl_sweep_interval,
-            },
+            })),
             store: OnceCell::new_with(Some(store)),
             sweeper_started: AtomicBool::new(false),
             shutdown: shutdown.child_token(),
         }
     }
 
-    pub async fn store(&self) -> anyhow::Result<Arc<dyn KeyValueStore>> {
+    async fn config(&self) -> anyhow::Result<&ResponseContextStoreConfig> {
+        self.config
+            .get_or_try_init(|| async { ResponseContextStoreConfig::from_env() })
+            .await
+    }
+
+    async fn store(&self) -> anyhow::Result<Arc<dyn KeyValueStore>> {
+        let config = self.config().await?;
         let store = self
             .store
-            .get_or_try_init(|| async {
-                self.config.store_config.open(&self.config.namespace).await
-            })
+            .get_or_try_init(|| async { config.store_config.open(&config.namespace).await })
             .await?
             .clone();
 
-        if let Some(interval) = self.config.ttl_sweep_interval
+        if let Some(interval) = config.ttl_sweep_interval
             && self
                 .sweeper_started
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -203,40 +206,52 @@ impl ResponseContextStoreManager {
     pub async fn prepare_request(
         &self,
         request: &mut NvCreateResponse,
-    ) -> anyhow::Result<ExpandedResponseContext> {
+    ) -> Result<PreparedResponseContext, PrepareResponseError> {
         let previous_context = match request.inner.previous_response_id.as_deref() {
             Some(previous_response_id) => {
                 let store = self.store().await?;
                 Some(decode_stored_context(
                     &store.get(previous_response_id).await?.ok_or_else(|| {
-                        PreviousResponseNotFound(previous_response_id.to_string())
+                        PrepareResponseError::PreviousResponseNotFound(
+                            previous_response_id.to_string(),
+                        )
                     })?,
                 )?)
             }
             None => None,
         };
 
-        expand_typed_request(request, previous_context.as_ref())
+        Ok(expand_typed_request(request, previous_context.as_ref())?)
     }
 
-    pub async fn persist_response<T: Serialize>(
+    pub async fn persist_response(
         &self,
-        expanded: &ExpandedResponseContext,
+        prepared: &PreparedResponseContext,
+        response: &Response,
+    ) -> anyhow::Result<()> {
+        self.persist_items(prepared, &response.id, &response.output)
+            .await
+    }
+
+    async fn persist_items<T: Serialize>(
+        &self,
+        prepared: &PreparedResponseContext,
         response_id: &str,
         output_items: &[T],
     ) -> anyhow::Result<()> {
-        if !expanded.should_store {
+        if !prepared.should_store {
             return Ok(());
         }
 
-        let mut input_items = expanded.input_items.clone();
+        let mut input_items = prepared.input_items.clone();
         for item in output_items {
             input_items.push(serde_json::to_value(item)?);
         }
         let context = serde_json::to_vec(&StoredResponseContext { input_items })?;
+        let default_ttl = self.config().await?.default_ttl;
         self.store()
             .await?
-            .put(response_id, &context, self.config.default_ttl)
+            .put(response_id, &context, default_ttl)
             .await?;
         Ok(())
     }
@@ -253,14 +268,20 @@ impl Drop for ResponseContextStoreManager {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ExpandedResponseContext {
+pub struct PreparedResponseContext {
     pub input_items: Vec<Value>,
     pub should_store: bool,
 }
 
 #[derive(Debug, Error)]
-#[error("`previous_response_id` `{0}` was not found")]
-pub struct PreviousResponseNotFound(pub String);
+pub enum PrepareResponseError {
+    #[error("`previous_response_id` `{0}` was not found")]
+    PreviousResponseNotFound(String),
+    #[error(transparent)]
+    Store(#[from] anyhow::Error),
+    #[error(transparent)]
+    InvalidContext(#[from] serde_json::Error),
+}
 
 fn spawn_store_ttl_sweeper(
     store: Arc<dyn KeyValueStore>,
@@ -284,7 +305,7 @@ fn spawn_store_ttl_sweeper(
 fn expand_typed_request(
     request: &mut NvCreateResponse,
     previous_context: Option<&StoredResponseContext>,
-) -> anyhow::Result<ExpandedResponseContext> {
+) -> Result<PreparedResponseContext, serde_json::Error> {
     let current_items = typed_input_as_items(&request.inner.input)?;
     let mut input_items = Vec::new();
     if let Some(context) = previous_context {
@@ -297,7 +318,7 @@ fn expand_typed_request(
     let should_store = request.inner.store.unwrap_or(true);
     request.inner.store = Some(should_store);
 
-    Ok(ExpandedResponseContext {
+    Ok(PreparedResponseContext {
         input_items,
         should_store,
     })
@@ -475,7 +496,7 @@ mod tests {
 
         let expanded = manager.prepare_request(&mut request).await.unwrap();
         manager
-            .persist_response(&expanded, "resp_2", &[] as &[Value])
+            .persist_items(&expanded, "resp_2", &[] as &[Value])
             .await
             .unwrap();
 
@@ -493,7 +514,10 @@ mod tests {
             .unwrap();
         request.inner.previous_response_id = Some("resp_expired".into());
         let err = manager.prepare_request(&mut request).await.unwrap_err();
-        assert!(err.downcast_ref::<PreviousResponseNotFound>().is_some());
+        assert!(matches!(
+            err,
+            PrepareResponseError::PreviousResponseNotFound(_)
+        ));
     }
 
     struct FailingStore;
@@ -529,8 +553,8 @@ mod tests {
 
         assert!(
             manager
-                .persist_response(
-                    &ExpandedResponseContext {
+                .persist_items(
+                    &PreparedResponseContext {
                         input_items: Vec::new(),
                         should_store: true,
                     },
@@ -541,8 +565,8 @@ mod tests {
                 .is_err()
         );
         manager
-            .persist_response(
-                &ExpandedResponseContext {
+            .persist_items(
+                &PreparedResponseContext {
                     input_items: Vec::new(),
                     should_store: false,
                 },

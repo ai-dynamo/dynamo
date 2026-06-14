@@ -97,6 +97,24 @@ pub struct NvCreateResponse {
     pub nvext: Option<NvExt>,
 }
 
+impl NvCreateResponse {
+    pub(crate) fn completion_token_logprobs_requested(&self) -> bool {
+        self.nvext
+            .as_ref()
+            .is_some_and(|nvext| nvext.requests_extra_field("completion_token_logprobs"))
+    }
+
+    fn output_logprobs_requested(&self) -> bool {
+        self.inner.top_logprobs.is_some()
+            || self
+                .inner
+                .include
+                .as_ref()
+                .is_some_and(|include| include.contains(&IncludeEnum::MessageOutputTextLogprobs))
+            || self.completion_token_logprobs_requested()
+    }
+}
+
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
     /// Flattened Response fields (includes upstream + extended spec fields).
@@ -367,21 +385,7 @@ impl OpenAIOutputOptionsProvider for NvCreateResponse {
         if let Some(top_logprobs) = self.inner.top_logprobs {
             return Some(u32::from(top_logprobs));
         }
-        let requested = self
-            .inner
-            .include
-            .as_ref()
-            .is_some_and(|include| include.contains(&IncludeEnum::MessageOutputTextLogprobs))
-            || self
-                .nvext
-                .as_ref()
-                .and_then(|nvext| nvext.extra_fields.as_ref())
-                .is_some_and(|fields| {
-                    fields
-                        .iter()
-                        .any(|field| field == "completion_token_logprobs")
-                });
-        requested.then_some(0)
+        self.output_logprobs_requested().then_some(0)
     }
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
@@ -941,20 +945,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             }
         }
 
-        let return_logprobs =
-            resp.inner.top_logprobs.is_some()
-                || resp.inner.include.as_ref().is_some_and(|include| {
-                    include.contains(&IncludeEnum::MessageOutputTextLogprobs)
-                })
-                || resp
-                    .nvext
-                    .as_ref()
-                    .and_then(|nvext| nvext.extra_fields.as_ref())
-                    .is_some_and(|fields| {
-                        fields
-                            .iter()
-                            .any(|field| field == "completion_token_logprobs")
-                    });
+        let return_logprobs = resp.output_logprobs_requested();
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
         let common = resp.extensions.common.clone();
 
@@ -1139,12 +1130,8 @@ pub struct ResponseParams {
     pub top_logprobs: Option<u8>,
     pub completion_token_logprobs: bool,
     pub truncation: Option<Truncation>,
-    /// OpenResponses spec requires these fields on the response body. Upstream
-    /// `CreateResponse` doesn't model them on the request yet, so for now they
-    /// pass through as `None`; the response serializer defaults to 0.0 (the
-    /// effective sglang default). Wired through `ResponseParams` anyway so
-    /// that when upstream relaxes or we shadow `CreateResponse`, threading a
-    /// real value becomes a one-line change at the request-extraction site.
+    /// Sampling penalties echoed from the originating request. The response
+    /// serializer uses the backend-compatible default of 0.0 when omitted.
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
     /// Pass-through metadata fields. Codex and other clients send these as

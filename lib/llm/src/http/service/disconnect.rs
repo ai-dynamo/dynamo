@@ -186,16 +186,29 @@ async fn connection_monitor(
     }
 }
 
-/// This method will consume a stream of SSE events and monitor for disconnects or context cancellation.
+/// Completion state for streams that can fail after their final data event.
 ///
-/// Uses `tokio::select!` to choose between receiving events from the source stream or detecting when
-/// the context is stopped. If the context is stopped, we break the stream. If the source stream ends
-/// naturally, we mark the request as successful and send the final `[DONE]` event.
+/// This lets a protocol-specific stream emit its own terminal error event while
+/// still reporting the request as failed to the shared metrics layer.
+#[derive(Clone, Default)]
+pub struct StreamCompletion {
+    failed: Arc<AtomicBool>,
+}
+
+impl StreamCompletion {
+    pub fn mark_failed(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+}
+
+/// Consume SSE events while monitoring client disconnects and context cancellation.
 ///
-/// A configurable inactivity timeout (see [`BACKEND_STREAM_TIMEOUT_ENV`]) adds a third arm: if no
-/// SSE event is received from the backend within the timeout window, the engine context is killed and
-/// the inflight guard is dropped, preventing permanent gauge inflation caused by zombie workers that
-/// hold a live TCP connection but produce no output.
+/// A configurable inactivity timeout (see [`BACKEND_STREAM_TIMEOUT_ENV`]) terminates zombie
+/// backend streams that hold a live connection without producing output.
 pub fn monitor_for_disconnects(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
@@ -208,16 +221,16 @@ pub fn monitor_for_disconnects(
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
-        None,
+        StreamCompletion::default(),
     )
 }
 
-pub fn monitor_for_disconnects_with_terminal_error(
+pub fn monitor_for_disconnects_with_completion(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
-    terminal_error: Option<Arc<AtomicBool>>,
+    completion: StreamCompletion,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_options(
         stream,
@@ -225,10 +238,11 @@ pub fn monitor_for_disconnects_with_terminal_error(
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
-        terminal_error,
+        completion,
     )
 }
 
+#[cfg(test)]
 fn monitor_for_disconnects_with_timeout(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
@@ -242,7 +256,7 @@ fn monitor_for_disconnects_with_timeout(
         inflight_guard,
         stream_handle,
         inactivity_timeout,
-        None,
+        StreamCompletion::default(),
     )
 }
 
@@ -252,7 +266,7 @@ fn monitor_for_disconnects_with_options(
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
-    terminal_error: Option<Arc<AtomicBool>>,
+    completion: StreamCompletion,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -298,10 +312,7 @@ fn monitor_for_disconnects_with_options(
                         }
                         None => {
                             // Stream ended normally
-                            if terminal_error
-                                .as_ref()
-                                .is_some_and(|failed| failed.load(Ordering::Acquire))
-                            {
+                            if completion.failed() {
                                 inflight_guard.mark_error(ErrorType::Internal);
                             } else {
                                 inflight_guard.mark_ok();
@@ -437,6 +448,35 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_is_recorded_after_protocol_error_event() {
+        let model = "terminal-failure-model";
+        let (metrics, guard, context, handle) = setup_test(model, "req-terminal-failure");
+        let completion = StreamCompletion::default();
+        completion.mark_failed();
+
+        let monitored = monitor_for_disconnects_with_completion(
+            futures::stream::empty(),
+            context,
+            guard,
+            handle,
+            completion,
+        );
+        tokio::pin!(monitored);
+        while monitored.next().await.is_some() {}
+
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            1,
+        );
     }
 
     /// Zombie backend with hanging stream is terminated by inactivity timeout.

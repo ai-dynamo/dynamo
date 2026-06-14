@@ -18,7 +18,6 @@ pub mod frontend_config;
 pub mod grpc;
 pub mod http;
 pub mod hub;
-// Async key-value storage for frontend-owned state.
 pub mod key_value_store;
 pub mod kv_router;
 pub mod local_model;

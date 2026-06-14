@@ -53,7 +53,7 @@ TTL values are relative durations. Redis and TiKV apply them natively, while Pos
 
 Redis URLs are passed directly to the Redis client, including ACL username, password, database, and the `rediss://` TLS scheme. TLS uses the host's native certificate roots.
 
-PostgreSQL URLs are passed directly to SQLx. Use `sslmode`, `sslrootcert`, `sslcert`, and `sslkey` URL parameters when TLS or mutual TLS is required. The frontend creates the `dynamo_key_value_store` table and expiry index when the table does not exist. The runtime role needs `CREATE` permission for first-time initialization; a preprovisioned table lets a read/write/delete-only runtime role skip DDL.
+PostgreSQL URLs are passed directly to SQLx. Use `sslmode`, `sslrootcert`, `sslcert`, and `sslkey` URL parameters when TLS or mutual TLS is required. The frontend idempotently ensures the `dynamo_key_value_store` table and expiry index exist at startup. The runtime role needs `CREATE` permission unless both objects are preprovisioned.
 
 The current TiKV URL accepts PD endpoints and an optional key prefix. It does not expose TiKV TLS or authentication settings, so use it only on a trusted network until secure client configuration is added. `DELETE` is intended for immutable response IDs; its returned existence flag is advisory if callers concurrently reuse the same key.
 
