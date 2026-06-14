@@ -22,6 +22,7 @@ from .constants import DisaggregationMode, Modality
 
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 CANONICAL_AGGREGATED_MODE = "agg"
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 
 logger = logging.getLogger(__name__)
 
@@ -199,11 +200,13 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=CANONICAL_AGGREGATED_MODE,
             choices=[
                 CANONICAL_AGGREGATED_MODE,
+                PREFILL_DECODE_DISAGGREGATION_MODE,
                 *[mode.value for mode in DisaggregationMode],
             ],
             help=(
                 "Worker disaggregation mode. Use 'agg' for aggregated serving, "
-                "'prefill', 'decode', or 'encode'. The legacy "
+                "'pd' for a combined prefill+decode worker, 'prefill', "
+                "'decode', or 'encode'. The legacy "
                 "'prefill_and_decode' value remains accepted temporarily."
             ),
         )
@@ -513,14 +516,19 @@ class DynamoTrtllmConfig(ConfigBase):
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):
-            if self.disaggregation_mode == CANONICAL_AGGREGATED_MODE:
+            if self.disaggregation_mode in {
+                CANONICAL_AGGREGATED_MODE,
+                PREFILL_DECODE_DISAGGREGATION_MODE,
+            }:
                 self.disaggregation_mode = DisaggregationMode.AGGREGATED
             else:
                 if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
                     _warn_deprecated(
                         "--disaggregation-mode=prefill_and_decode is deprecated; "
-                        "use --disaggregation-mode=agg. This release will map "
-                        "the legacy value to the new argument."
+                        "use --disaggregation-mode=agg for aggregated serving or "
+                        "--disaggregation-mode=pd for a combined prefill+decode "
+                        "worker. This release will map the legacy value to the "
+                        "new argument."
                     )
                 self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
@@ -534,11 +542,6 @@ class DynamoTrtllmConfig(ConfigBase):
                 )
             self.modality = Modality.MULTIMODAL
         elif self.modality == Modality.MULTIMODAL:
-            _warn_deprecated(
-                "--modality multimodal is deprecated for multimodal LLM serving; "
-                "use --enable-multimodal. This release will map the legacy value "
-                "to the new argument."
-            )
             self.enable_multimodal = True
         if not self.served_model_name:
             self.served_model_name = None

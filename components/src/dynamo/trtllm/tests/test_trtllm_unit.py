@@ -5,6 +5,7 @@
 
 import asyncio
 import re
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -168,16 +169,29 @@ def test_enable_multimodal_maps_to_multimodal_modality():
     assert config.modality == Modality.MULTIMODAL
 
 
-def test_modality_multimodal_legacy_flag_warns():
-    with pytest.warns(DeprecationWarning, match="--modality multimodal"):
+def test_modality_multimodal_alias_does_not_warn():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         config = parse_args(["--model", "fake-model", "--modality", "multimodal"])
 
     assert config.enable_multimodal is True
     assert config.modality == Modality.MULTIMODAL
+    assert not [
+        warning
+        for warning in caught
+        if issubclass(warning.category, DeprecationWarning)
+    ]
 
 
 def test_disaggregation_mode_accepts_canonical_agg():
     config = parse_args(["--model", "fake-model", "--disaggregation-mode", "agg"])
+
+    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+    assert config.component == "backend"
+
+
+def test_disaggregation_mode_accepts_pd_alias():
+    config = parse_args(["--model", "fake-model", "--disaggregation-mode", "pd"])
 
     assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
     assert config.component == "backend"

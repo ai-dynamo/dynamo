@@ -18,6 +18,7 @@ from . import __version__
 from .constants import DisaggregationMode, EmbeddingTransferMode
 
 logger = logging.getLogger(__name__)
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 
 
 def _warn_deprecated(message: str) -> None:
@@ -44,8 +45,11 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_DISAGGREGATION_MODE",
             default=None,
             help="Worker disaggregation mode: 'agg' (default, aggregated), "
-            "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
-            choices=[m.value for m in DisaggregationMode],
+            "'pd' (combined prefill+decode worker), 'prefill' "
+            "(prefill-only worker), 'decode' (decode-only worker), "
+            "or 'encode' (multimodal encode worker).",
+            choices=[PREFILL_DECODE_DISAGGREGATION_MODE]
+            + [m.value for m in DisaggregationMode],
         )
 
         add_negatable_bool_argument(
@@ -343,7 +347,10 @@ class DynamoVllmConfig(ConfigBase):
         # Convert string to enum (non-None means explicitly provided)
         explicit_mode = self.disaggregation_mode is not None
         if isinstance(self.disaggregation_mode, str):
-            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+            if self.disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE:
+                self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            else:
+                self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
 
         # Check for legacy boolean flags
         has_legacy = self.is_prefill_worker or self.is_decode_worker
@@ -434,7 +441,7 @@ class DynamoVllmConfig(ConfigBase):
         if self.multimodal_worker:
             _warn_deprecated(
                 "--multimodal-worker is deprecated; use --enable-multimodal "
-                "with --disaggregation-mode=agg or --disaggregation-mode=prefill. "
+                "with --disaggregation-mode=pd or --disaggregation-mode=prefill. "
                 "This release will map the legacy flag to the new arguments.",
             )
             if (

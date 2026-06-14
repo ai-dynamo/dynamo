@@ -342,7 +342,8 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
         ("encode", "null", True, False, DisaggregationMode.AGGREGATED, "encode"),
         ("prefill", "prefill", False, True, DisaggregationMode.PREFILL, "prefill"),
         ("decode", "decode", False, True, DisaggregationMode.DECODE, "backend"),
-        ("agg", "null", False, True, DisaggregationMode.AGGREGATED, "backend"),
+        ("agg", "null", False, False, DisaggregationMode.AGGREGATED, "backend"),
+        ("pd", "null", False, True, DisaggregationMode.AGGREGATED, "backend"),
     ],
 )
 @pytest.mark.asyncio

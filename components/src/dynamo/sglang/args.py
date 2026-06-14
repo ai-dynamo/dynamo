@@ -28,6 +28,7 @@ from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
@@ -162,7 +163,11 @@ def _normalize_multimodal_disaggregation_args(
     if disaggregation_mode is None:
         return unknown
 
-    if disaggregation_mode == DisaggregationMode.AGGREGATED.value:
+    requested_disaggregation_mode = disaggregation_mode
+    if disaggregation_mode in {
+        DisaggregationMode.AGGREGATED.value,
+        PREFILL_DECODE_DISAGGREGATION_MODE,
+    }:
         unknown = _replace_cli_flag_value(unknown, "--disaggregation-mode", "null")
         disaggregation_mode = "null"
 
@@ -181,7 +186,10 @@ def _normalize_multimodal_disaggregation_args(
         dynamo_config.enable_multimodal
         and not dynamo_config.multimodal_encode_worker
         and not dynamo_config.multimodal_worker
-        and disaggregation_mode in {"null", "prefill", "decode"}
+        and (
+            requested_disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE
+            or disaggregation_mode in {"prefill", "decode"}
+        )
     ):
         dynamo_config.multimodal_worker = True
 

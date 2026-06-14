@@ -191,7 +191,7 @@ class DynamoSGLangConfig(ConfigBase):
         if self.multimodal_worker:
             _warn_deprecated(
                 "--multimodal-worker is deprecated; use --enable-multimodal "
-                "with --disaggregation-mode=agg, --disaggregation-mode=prefill, "
+                "with --disaggregation-mode=pd, --disaggregation-mode=prefill, "
                 "or --disaggregation-mode=decode. This release will map the "
                 "legacy flag to the new arguments."
             )
