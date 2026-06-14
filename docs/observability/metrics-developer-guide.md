@@ -14,6 +14,8 @@ All metrics created via the Dynamo metrics API are automatically exposed on the 
 
 You can also add deployment-wide constant Prometheus labels by setting `DYNAMO_CONST_LABELS` to semicolon-delimited `key:value` pairs, for example `namespace:prod;model_version:v2`. The legacy alias `MICHAEL_ADD_LABELS` is also accepted.
 
+Note: `DYNAMO_CONST_LABELS` and `MICHAEL_ADD_LABELS` are cached at startup — you must restart the process for changes to take effect.
+
 Keep these labels stable and low-cardinality. Good values are deployment metadata such as namespace, cluster, model version, or region. Avoid request IDs, user IDs, timestamps, or anything that changes per request.
 
 Example:

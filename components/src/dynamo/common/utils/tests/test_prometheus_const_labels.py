@@ -8,14 +8,15 @@ from prometheus_client import CollectorRegistry, Counter
 
 from dynamo.common.utils.prometheus import (
     _global_const_labels_cached,
-    global_const_labels,
     get_prometheus_expfmt,
+    global_const_labels,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 
 def test_global_const_labels_parses_primary_env_var(monkeypatch):
+    """Primary env var should be parsed into cached global labels."""
     monkeypatch.setenv("DYNAMO_CONST_LABELS", "namespace:prod;model_version:v2")
     monkeypatch.delenv("MICHAEL_ADD_LABELS", raising=False)
     _global_const_labels_cached.cache_clear()
@@ -27,6 +28,7 @@ def test_global_const_labels_parses_primary_env_var(monkeypatch):
 
 
 def test_global_const_labels_supports_legacy_alias(monkeypatch):
+    """Legacy alias should still populate global labels when primary is absent."""
     monkeypatch.delenv("DYNAMO_CONST_LABELS", raising=False)
     monkeypatch.setenv("MICHAEL_ADD_LABELS", "namespace:staging;team:search")
     _global_const_labels_cached.cache_clear()
@@ -38,6 +40,7 @@ def test_global_const_labels_supports_legacy_alias(monkeypatch):
 
 
 def test_get_prometheus_expfmt_adds_global_const_labels(monkeypatch):
+    """Prometheus exposition should include globally configured labels."""
     monkeypatch.setenv("DYNAMO_CONST_LABELS", "namespace:prod;model_version:v2")
     monkeypatch.delenv("MICHAEL_ADD_LABELS", raising=False)
     _global_const_labels_cached.cache_clear()
@@ -48,12 +51,13 @@ def test_get_prometheus_expfmt_adds_global_const_labels(monkeypatch):
 
     output = get_prometheus_expfmt(registry)
 
-    assert 'router_requests_total' in output
+    assert "router_requests_total" in output
     assert 'namespace="prod"' in output
     assert 'model_version="v2"' in output
 
 
 def test_global_const_labels_do_not_override_existing_metric_labels(monkeypatch):
+    """Explicit metric labels should override global labels with the same name."""
     monkeypatch.setenv("DYNAMO_CONST_LABELS", "namespace:prod;model_version:v2")
     monkeypatch.delenv("MICHAEL_ADD_LABELS", raising=False)
     _global_const_labels_cached.cache_clear()
@@ -73,3 +77,16 @@ def test_global_const_labels_do_not_override_existing_metric_labels(monkeypatch)
     assert 'status="200"' in output
     assert 'model_version="v2"' in output
     assert 'namespace="prod"' not in output
+
+
+def test_global_const_labels_preserve_primary_over_legacy_overlap(monkeypatch):
+    """Primary labels should win when primary and legacy env vars overlap."""
+    monkeypatch.setenv("DYNAMO_CONST_LABELS", "namespace:prod;cluster:us-east")
+    monkeypatch.setenv("MICHAEL_ADD_LABELS", "namespace:staging;team:search")
+    _global_const_labels_cached.cache_clear()
+
+    labels = global_const_labels()
+
+    assert labels["namespace"] == "prod"
+    assert labels["cluster"] == "us-east"
+    assert labels["team"] == "search"

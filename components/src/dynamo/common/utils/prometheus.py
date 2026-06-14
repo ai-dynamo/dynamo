@@ -73,9 +73,7 @@ def _parse_const_label_pairs(raw_labels: str, env_var_name: str) -> dict[str, st
             )
 
         if label_name in parsed_labels:
-            raise ValueError(
-                f"{env_var_name} defines '{label_name}' more than once"
-            )
+            raise ValueError(f"{env_var_name} defines '{label_name}' more than once")
 
         parsed_labels[label_name] = label_value
 
@@ -84,6 +82,11 @@ def _parse_const_label_pairs(raw_labels: str, env_var_name: str) -> dict[str, st
 
 @lru_cache(maxsize=1)
 def _global_const_labels_cached() -> tuple[tuple[str, str], ...]:
+    """Return cached global constant labels in precedence order.
+
+    Labels from ``DYNAMO_CONST_LABELS`` take precedence over the legacy
+    ``MICHAEL_ADD_LABELS`` alias when the same label name appears in both.
+    """
     merged_labels: dict[str, str] = {}
 
     for env_var_name in _GLOBAL_CONST_LABEL_ENV_VARS:
@@ -99,7 +102,9 @@ def _global_const_labels_cached() -> tuple[tuple[str, str], ...]:
                 env_var_name,
                 ", ".join(sorted(conflicting_names)),
             )
-        merged_labels.update(parsed_labels)
+        for key, value in parsed_labels.items():
+            if key not in merged_labels:
+                merged_labels[key] = value
 
     return tuple(merged_labels.items())
 
@@ -489,6 +494,7 @@ class LLMBackendMetrics:
         self.component_name = component_name
 
     def set_total_blocks(self, dp_rank: str, value: int) -> None:
+        """Set the total KV cache blocks gauge for a data-parallel rank."""
         self.total_blocks.labels(
             **{
                 labels.MODEL: self.model_name,
@@ -498,6 +504,7 @@ class LLMBackendMetrics:
         ).set(value)
 
     def set_gpu_cache_usage(self, dp_rank: str, value: float) -> None:
+        """Set the GPU cache usage gauge for a data-parallel rank."""
         self.gpu_cache_usage_percent.labels(
             **{
                 labels.MODEL: self.model_name,
@@ -507,6 +514,7 @@ class LLMBackendMetrics:
         ).set(value)
 
     def set_kv_cache_hit_rate(self, dp_rank: str, value: float) -> None:
+        """Set the KV cache hit-rate gauge for a data-parallel rank."""
         self.kv_cache_hit_rate.labels(
             **{
                 labels.MODEL: self.model_name,
@@ -516,6 +524,7 @@ class LLMBackendMetrics:
         ).set(value)
 
     def set_model_load_time(self, value: float) -> None:
+        """Set the model load time gauge for this engine instance."""
         self.model_load_time.labels(
             **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
         ).set(value)
