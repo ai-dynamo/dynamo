@@ -4,7 +4,6 @@
 use pythonize::{depythonize, pythonize};
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
@@ -110,7 +109,7 @@ struct KvIndexerCli {
 
     /// Write access log (JSON lines) to this file
     #[arg(long)]
-    access_log: Option<PathBuf>,
+    access_log: Option<std::path::PathBuf>,
 
     /// HTTP header name to extract trace-id from
     #[arg(long, default_value = "x-trace-id")]
@@ -260,10 +259,7 @@ where
     }
 }
 
-#[cfg(any(
-    feature = "slot-tracker",
-    feature = "select-service"
-))]
+#[cfg(any(feature = "slot-tracker", feature = "select-service"))]
 fn init_standalone_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(

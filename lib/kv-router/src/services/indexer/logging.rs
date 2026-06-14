@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use axum::extract::MatchedPath;
@@ -30,6 +31,8 @@ struct AccessLogEntry {
 // ---------------------------------------------------------------------------
 // AccessLogSink — wraps tracing_appender::non_blocking with reopen support
 // ---------------------------------------------------------------------------
+
+static IO_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 pub struct AccessLogSink {
     path: PathBuf,
@@ -60,7 +63,12 @@ impl AccessLogSink {
 
     fn write_line(&self, line: &str) {
         let mut inner = self.inner.lock();
-        let _ = writeln!(inner.writer, "{}", line);
+        if let Err(e) = writeln!(inner.writer, "{}", line) {
+            let prev = IO_ERRORS.fetch_add(1, Ordering::Relaxed);
+            if prev % 100 == 0 {
+                tracing::warn!(error = %e, total = prev + 1, "access log write failed");
+            }
+        }
     }
 
     pub fn reopen(&self) -> io::Result<()> {
