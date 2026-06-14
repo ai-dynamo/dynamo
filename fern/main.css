@@ -2133,14 +2133,14 @@ svg.card-icon{
     color: var(--pst-color-text-base);
 }
 
-.feature-kv::before {
+.dynamo-feature-symbol.feature-kv::before {
     width: 30px;
     height: 2px;
     background: var(--nv-color-green);
     transform: rotate(-28deg);
 }
 
-.feature-kv::after {
+.dynamo-feature-symbol.feature-kv::after {
     width: 8px;
     height: 8px;
     border-radius: 50%;
@@ -2148,7 +2148,7 @@ svg.card-icon{
     background: var(--nv-color-green);
 }
 
-.feature-pd::before {
+.dynamo-feature-symbol.feature-pd::before {
     width: 28px;
     height: 26px;
     border-left: 2px solid var(--nv-color-green);
@@ -2156,13 +2156,13 @@ svg.card-icon{
     border-radius: 8px;
 }
 
-.feature-pd::after {
+.dynamo-feature-symbol.feature-pd::after {
     width: 30px;
     height: 2px;
     background: var(--nv-color-green);
 }
 
-.feature-ep::before {
+.dynamo-feature-symbol.feature-ep::before {
     width: 7px;
     height: 7px;
     border-radius: 50%;
@@ -2170,14 +2170,14 @@ svg.card-icon{
     background: var(--nv-color-green);
 }
 
-.feature-sp::before {
+.dynamo-feature-symbol.feature-sp::before {
     width: 13px;
     height: 28px;
     background: var(--nv-color-green);
     clip-path: polygon(58% 0, 100% 0, 58% 42%, 100% 42%, 28% 100%, 42% 55%, 0 55%);
 }
 
-.feature-ec::before {
+.dynamo-feature-symbol.feature-ec::before {
     width: 26px;
     height: 18px;
     border: 2px solid var(--nv-color-green);
@@ -2185,7 +2185,7 @@ svg.card-icon{
     box-shadow: 5px 5px 0 color-mix(in srgb, var(--nv-color-green) 45%, transparent);
 }
 
-.feature-of::before {
+.dynamo-feature-symbol.feature-of::before {
     width: 28px;
     height: 16px;
     border: 2px solid var(--nv-color-green);
@@ -2193,28 +2193,28 @@ svg.card-icon{
     border-radius: 0 0 7px 7px;
 }
 
-.feature-of::after {
+.dynamo-feature-symbol.feature-of::after {
     width: 18px;
     height: 2px;
     background: var(--nv-color-green);
     transform: translateY(-11px);
 }
 
-.feature-fd::before {
+.dynamo-feature-symbol.feature-fd::before {
     width: 26px;
     height: 18px;
     border: 2px solid var(--nv-color-green);
     border-radius: 9px;
 }
 
-.feature-fd::after {
+.dynamo-feature-symbol.feature-fd::after {
     width: 20px;
     height: 2px;
     background: var(--nv-color-green);
     box-shadow: 0 -6px 0 var(--nv-color-green), 0 6px 0 var(--nv-color-green);
 }
 
-.feature-mn::before {
+.dynamo-feature-symbol.feature-mn::before {
     width: 26px;
     height: 22px;
     border-top: 2px solid var(--nv-color-green);
@@ -2222,7 +2222,7 @@ svg.card-icon{
     transform: rotate(35deg);
 }
 
-.feature-mn::after {
+.dynamo-feature-symbol.feature-mn::after {
     width: 8px;
     height: 8px;
     border-radius: 50%;

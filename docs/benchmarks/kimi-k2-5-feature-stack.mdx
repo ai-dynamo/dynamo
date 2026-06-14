@@ -23,12 +23,12 @@ Four configurations run Dynamo + TensorRT-LLM on 6x GB200 nodes (24 GPUs, MNNVL)
 
 The disaggregated configuration with KV-aware routing, Eagle3 decoding, and KV offloading achieves the best system throughput and interactivity:
 
-| Configuration | tok/s/user (avg) | tok/s/GPU |
-| --- | ---: | ---: |
-| Disagg + Eagle3 + KV routing + offload | ~130 | ~5,400 |
-| Agg + Eagle3 + KV routing | ~85 | ~4,400 |
-| Agg + Eagle3 + round-robin | ~95 | ~4,000 |
-| Agg + round-robin (no Eagle3) | ~105 | ~1,700 |
+| Configuration | Concurrency | tok/s/user (avg) | tok/s/GPU |
+| --- | ---: | ---: | ---: |
+| Disagg + Eagle3 + KV routing + offload | 32 | ~130 | ~5,400 |
+| Agg + Eagle3 + KV routing | 24 | ~85 | ~4,400 |
+| Agg + Eagle3 + round-robin | 24 | ~95 | ~4,000 |
+| Agg + round-robin (no Eagle3) | 8 | ~105 | ~1,700 |
 
 The full disaggregated stack dominates the throughput-interactivity Pareto frontier in the source plot: roughly **3x the per-GPU throughput** of the plain aggregated baseline with better per-user token speed.
 

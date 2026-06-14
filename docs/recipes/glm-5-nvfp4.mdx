@@ -5,7 +5,7 @@ title: "GLM-5 NVFP4"
 subtitle: "Serve GLM-5 NVFP4 with Dynamo and SGLang, disaggregated across five GB200 nodes."
 ---
 
-This recipe serves `nvidia/GLM-5-NVFP4` with disaggregated prefill/decode and EAGLE MTP speculative decoding across 5 nodes of 4x GB200 (TP4 prefill, TP16/DP16/EP16 decode), sustaining roughly 17-19K output tokens/sec at 512-way concurrency on a 1K ISL / 8K OSL long-output workload. Pick your KV-transfer path; every command on this page updates to match.
+This recipe serves `nvidia/GLM-5-NVFP4` with disaggregated prefill/decode and EAGLE MTP speculative decoding across 5 nodes of 4x GB200 (TP4 prefill, TP16/DP16/EP16 decode), sustaining roughly 16.8K output tokens/sec on the standard UCX path (19K with the AWS EFA variant) at 512-way concurrency on a 1K ISL / 8K OSL long-output workload. Pick your KV-transfer path; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
