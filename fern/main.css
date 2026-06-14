@@ -2915,3 +2915,29 @@ body:has(input[name="recipe-sku"][value="blackwell"]:checked):has(input[name="re
     padding-top: 0;
     border-top: none;
 }
+
+/* Filter empty-state without JS: the message is painted underneath the card
+   grid (z-index 0); any visible card sits above it (z-index 1) and covers it,
+   so it only becomes visible when every card is filtered out. */
+.dynamo-model-grid {
+    position: relative;
+    min-height: 150px;
+}
+
+.dynamo-model-grid::before {
+    content: "No recipes match the selected filters. Clear a filter or reset to see the full catalog.";
+    position: absolute;
+    top: 0;
+    left: 0;
+    max-width: 230px;
+    padding: 12px 2px;
+    font-size: 13.5px;
+    line-height: 1.45;
+    color: var(--grayscale-a9, #777);
+    z-index: 0;
+}
+
+.dynamo-model-grid > [data-recipe-card] {
+    position: relative;
+    z-index: 1;
+}

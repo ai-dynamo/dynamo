@@ -20,7 +20,6 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
 <input className="dynamo-filter-input" type="radio" id="runtime-vllm" name="runtime" />
 <input className="dynamo-filter-input" type="radio" id="runtime-trtllm" name="runtime" />
 <input className="dynamo-filter-input" type="radio" id="runtime-sglang" name="runtime" />
-<input className="dynamo-filter-input" type="radio" id="runtime-dynamo" name="runtime" />
 <input className="dynamo-filter-input" type="radio" id="hardware-all" name="hardware" defaultChecked />
 <input className="dynamo-filter-input" type="radio" id="hardware-h100" name="hardware" />
 <input className="dynamo-filter-input" type="radio" id="hardware-h200" name="hardware" />
@@ -32,12 +31,9 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
 <input className="dynamo-filter-input" type="radio" id="technique-kv-routing" name="technique" />
 <input className="dynamo-filter-input" type="radio" id="technique-expert-parallel" name="technique" />
 <input className="dynamo-filter-input" type="radio" id="technique-spec-decoding" name="technique" />
-<input className="dynamo-filter-input" type="radio" id="technique-embedding-cache" name="technique" />
-<input className="dynamo-filter-input" type="radio" id="technique-frontend-decoding" name="technique" />
 <input className="dynamo-filter-input" type="radio" id="workload-all" name="workload" defaultChecked />
 <input className="dynamo-filter-input" type="radio" id="workload-agentic-coding" name="workload" />
 <input className="dynamo-filter-input" type="radio" id="workload-long-context-reuse" name="workload" />
-<input className="dynamo-filter-input" type="radio" id="workload-multimodal-reuse" name="workload" />
 <input className="dynamo-filter-input" type="radio" id="workload-static-generation" name="workload" />
 <input className="dynamo-filter-input" type="radio" id="workload-long-output" name="workload" />
 
@@ -66,8 +62,7 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Runtime</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="runtime-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-vllm">vLLM</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-trtllm">TensorRT-LLM</label>
-<label className="dynamo-recipe-chip" htmlFor="runtime-sglang">SGLang</label>
-<label className="dynamo-recipe-chip" htmlFor="runtime-dynamo">Dynamo</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="runtime-sglang">SGLang</label></div></div>
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Hardware</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="hardware-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-h100">H100</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-h200">H200</label>
@@ -78,13 +73,10 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
 <label className="dynamo-recipe-chip" htmlFor="technique-disaggregated">Disaggregated</label>
 <label className="dynamo-recipe-chip" htmlFor="technique-kv-routing">KV routing</label>
 <label className="dynamo-recipe-chip" htmlFor="technique-expert-parallel">Expert parallel</label>
-<label className="dynamo-recipe-chip" htmlFor="technique-spec-decoding">Spec decoding</label>
-<label className="dynamo-recipe-chip" htmlFor="technique-embedding-cache">Embedding cache</label>
-<label className="dynamo-recipe-chip" htmlFor="technique-frontend-decoding">Frontend decoding</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="technique-spec-decoding">Spec decoding</label></div></div>
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Workload</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="workload-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="workload-agentic-coding">Agentic coding</label>
 <label className="dynamo-recipe-chip" htmlFor="workload-long-context-reuse">Long-context reuse</label>
-<label className="dynamo-recipe-chip" htmlFor="workload-multimodal-reuse">Multimodal reuse</label>
 <label className="dynamo-recipe-chip" htmlFor="workload-static-generation">Static ISL/OSL</label>
 <label className="dynamo-recipe-chip" htmlFor="workload-long-output">Long output</label></div></div>
 </div>
