@@ -227,6 +227,10 @@ trtllm_configs = {
         ],
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
+            # Disable ANSI so structured tracing fields render as plain
+            # `key=value` (color codes otherwise split `worker_id`/`=`/value and
+            # break the expected_log regex).
+            "DYN_SDK_DISABLE_ANSI_LOGGING": "1",
         },
     ),
     "disaggregated_router": TRTLLMConfig(
