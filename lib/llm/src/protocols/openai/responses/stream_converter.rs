@@ -213,6 +213,30 @@ impl ResponseStreamConverter {
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
         merge_response_nvext(&mut self.nvext, chunk.nvext.clone());
+        if self.params.completion_token_logprobs {
+            let logprobs = chunk
+                .inner
+                .choices
+                .iter()
+                .flat_map(|choice| {
+                    choice
+                        .logprobs
+                        .as_ref()
+                        .and_then(|value| value.content.as_ref())
+                        .into_iter()
+                        .flatten()
+                        .map(|token| f64::from(token.logprob))
+                })
+                .collect::<Vec<_>>();
+            if !logprobs.is_empty() {
+                merge_response_nvext(
+                    &mut self.nvext,
+                    Some(serde_json::json!({
+                        "completion_token_logprobs": logprobs
+                    })),
+                );
+            }
+        }
 
         // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
         if let Some(ref u) = chunk.inner.usage {
@@ -624,10 +648,11 @@ impl ResponseStreamConverter {
         let mut data = self.serialize_event_data(event)?;
         if let Some(nvext) = &self.nvext {
             let mut value: Value = serde_json::from_str(&data)?;
-            if let Value::Object(ref mut obj) = value
-                && let Some(Value::Object(inner)) = obj.get_mut("response")
-            {
-                inner.insert("nvext".to_string(), nvext.clone());
+            if let Value::Object(ref mut obj) = value {
+                obj.insert("nvext".to_string(), nvext.clone());
+                if let Some(Value::Object(inner)) = obj.get_mut("response") {
+                    inner.insert("nvext".to_string(), nvext.clone());
+                }
             }
             data = serde_json::to_string(&value)?;
         }
@@ -928,8 +953,9 @@ mod tests {
     use super::*;
     use crate::protocols::unified::ResponsesContext;
     use dynamo_protocols::types::{
-        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-        ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
+        ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
+        ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+        ChatCompletionTokenLogprob, FunctionCallStream, FunctionType,
     };
 
     fn default_params() -> ResponseParams {
@@ -1229,6 +1255,71 @@ mod tests {
             "Hello world!"
         );
         assert!(failed["response"]["usage"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_streamed_token_metadata_is_cumulative() {
+        let params = ResponseParams {
+            completion_token_logprobs: true,
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let mut first = text_chunk("Hello");
+        first.nvext = Some(serde_json::json!({ "completion_token_ids": [11, 22] }));
+        first.inner.choices[0].logprobs = Some(ChatChoiceLogprobs {
+            content: Some(vec![
+                ChatCompletionTokenLogprob {
+                    token: "token_id:11".into(),
+                    logprob: -0.1,
+                    bytes: Some(vec![11]),
+                    top_logprobs: vec![],
+                },
+                ChatCompletionTokenLogprob {
+                    token: "token_id:22".into(),
+                    logprob: -0.2,
+                    bytes: Some(vec![22]),
+                    top_logprobs: vec![],
+                },
+            ]),
+            refusal: None,
+        });
+        let first_body = collect_sse_body(conv.process_chunk(&first)).await;
+        let first_delta = sse_event_json(&first_body, "response.output_text.delta");
+        assert_eq!(
+            first_delta["nvext"]["completion_token_ids"],
+            serde_json::json!([11, 22])
+        );
+
+        let mut second = text_chunk("!");
+        second.nvext = Some(serde_json::json!({ "completion_token_ids": [33] }));
+        second.inner.choices[0].logprobs = Some(ChatChoiceLogprobs {
+            content: Some(vec![ChatCompletionTokenLogprob {
+                token: "token_id:33".into(),
+                logprob: -0.3,
+                bytes: Some(vec![33]),
+                top_logprobs: vec![],
+            }]),
+            refusal: None,
+        });
+        let second_body = collect_sse_body(conv.process_chunk(&second)).await;
+        let second_delta = sse_event_json(&second_body, "response.output_text.delta");
+        assert_eq!(
+            second_delta["nvext"]["completion_token_ids"],
+            serde_json::json!([11, 22, 33])
+        );
+        let logprobs = second_delta["nvext"]["completion_token_logprobs"]
+            .as_array()
+            .unwrap();
+        let expected = [-0.1_f64, -0.2, -0.3];
+        for (actual, expected) in logprobs.iter().zip(expected) {
+            assert!((actual.as_f64().unwrap() - expected).abs() < 1e-6);
+        }
+
+        let completed_body = collect_sse_body(conv.emit_end_events()).await;
+        let completed = sse_event_json(&completed_body, "response.completed");
+        assert_eq!(completed["nvext"], completed["response"]["nvext"]);
     }
 
     /// Text followed by tool call: both handled correctly.
