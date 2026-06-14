@@ -2816,22 +2816,29 @@ svg.card-icon{
     margin-top: 14px;
     padding-top: 14px;
     border-top: 1px solid var(--border, var(--grayscale-a5));
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 22px;
-    font-size: 13px;
+    /* Stacked label-over-value cells in a responsive grid: each fact reads as
+       its own labeled cell with aligned columns, instead of an inline run-on
+       where adjacent label/value pairs blur together. */
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 14px 28px;
 }
 
 .dynamo-target-picker-summary span {
-    display: inline-flex;
-    gap: 6px;
-    align-items: baseline;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    /* the value (text node after the label) — prominent, dark */
+    font-size: 13.5px;
+    line-height: 1.35;
+    color: var(--pst-color-text-base);
 }
 
 .dynamo-target-picker-summary b {
-    font-size: 10.5px;
+    /* the label — small, uppercase, muted, sits above the value */
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.07em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--grayscale-a9, #777);
 }
