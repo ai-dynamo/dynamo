@@ -620,13 +620,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             Dict with token_ids and optional finish_reason.
         """
         if metadata_uploader is not None:
-            async for out in self._process_token_stream_with_metadata(
+            async for chunk in self._process_token_stream_with_metadata(
                 stream_source,
                 context,
                 metadata_uploader,
                 user_stop_token_ids=user_stop_token_ids,
             ):
-                yield out
+                yield chunk
             return
 
         # Use Future pattern for request ID - will be set when first response arrives
