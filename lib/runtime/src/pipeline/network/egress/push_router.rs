@@ -1489,7 +1489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn least_loaded_select_and_peek_return_none_with_available_worker() {
+    async fn least_loaded_peek_returns_available_worker_select_stays_none() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -1508,8 +1508,13 @@ mod tests {
             .await
             .unwrap();
 
+        // LeastLoaded routes via peek + OccupancyPermit dispatch, so select_next_worker
+        // stays None; peek must resolve the available worker (the disagg-bootstrap fix).
         assert_eq!(router.select_next_worker(), None);
-        assert_eq!(router.peek_next_worker(), None);
+        assert!(
+            router.peek_next_worker().is_some(),
+            "LeastLoaded peek must return the available worker for disagg bootstrap"
+        );
 
         rt.shutdown();
     }
@@ -1712,7 +1717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_aware_weighted_select_and_peek_return_none_with_available_worker() {
+    async fn device_aware_weighted_peek_returns_available_worker_select_stays_none() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -1732,8 +1737,13 @@ mod tests {
                 .await
                 .unwrap();
 
+        // DeviceAwareWeighted degenerates to least-loaded for peek (device-class
+        // partitioning happens at dispatch); select_next_worker stays None.
         assert_eq!(router.select_next_worker(), None);
-        assert_eq!(router.peek_next_worker(), None);
+        assert!(
+            router.peek_next_worker().is_some(),
+            "DeviceAwareWeighted peek must return the available worker for disagg bootstrap"
+        );
 
         rt.shutdown();
     }
