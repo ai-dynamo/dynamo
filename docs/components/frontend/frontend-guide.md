@@ -58,10 +58,12 @@ Tune these values based on your workload. Connection window should accommodate `
 Similar to HTTP frontend, the registered backend will be auto-discovered and added to the frontend list of serving model. To register a backend, the same `register_model()` API will be used. Currently the frontend support serving of the following model type and model input combination:
 
 * `ModelType::Completions` and `ModelInput::Text`: Combination for LLM backend that uses custom preprocessor
-* `ModelType::Completions` and `ModelInput::Token`: Combination for LLM backend that uses Dynamo preprocessor (i.e. Dynamo SGLang / TRTLLM / vLLM backend)
+* `ModelType::Completions` and `ModelInput::Tokens`: Combination for LLM backend that uses Dynamo preprocessor (i.e. Dynamo SGLang / TRTLLM / vLLM backend)
 * `ModelType::TensorBased` and `ModelInput::Tensor`: Combination for backend that is used for generic tensor-based inference
 
-The first two combinations are backed by OpenAI Completions API, see [OpenAI Completions section](#openai-completions) for more detail. Whereas the last combination is most aligned with KServe API and the users can replace existing deployment with Dynamo once their backends implements adaptor for `NvCreateTensorRequest/NvCreateTensorResponse`, see [Tensor section](#tensor) for more detail:
+The completions combinations are backed by the OpenAI Completions API; see [OpenAI Completions](#openai-completions) for more detail. The tensor-based combination is most aligned with KServe API, and users can replace an existing deployment with Dynamo once their backend implements an adapter for `NvCreateTensorRequest/NvCreateTensorResponse`; see [Tensor](#tensor) for more detail.
+
+The OpenAI Realtime path is served by the HTTP frontend WebSocket route, not by the KServe gRPC service. For streaming-input, streaming-output Realtime workers, see [Realtime Bidirectional Python Workers](../../development/realtime-bidirectional-workers.md).
 
 ### OpenAI Completions
 
@@ -162,5 +164,6 @@ Backends auto-register with the frontend when they call `register_model()`. Supp
 | Document | Description |
 |----------|-------------|
 | [Frontend Overview](README.md) | Quick start and feature matrix |
+| [Realtime Bidirectional Python Workers](../../development/realtime-bidirectional-workers.md) | Writing workers for `/v1/realtime` |
 | [NVIDIA Request Extensions (`nvext`)](nvext.md) | Routing, preprocessing, response metadata, and engine priority extensions |
 | [Router Documentation](../router/README.md) | KV-aware routing configuration |
