@@ -366,51 +366,6 @@ impl Runtime {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::environment_names::runtime as env_runtime;
-
-    #[test]
-    fn graceful_shutdown_timeout_defaults_to_15_minutes() {
-        temp_env::with_var(
-            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-            None::<&str>,
-            || {
-                assert_eq!(
-                    graceful_shutdown_timeout(),
-                    Duration::from_secs(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
-                );
-            },
-        );
-    }
-
-    #[test]
-    fn graceful_shutdown_timeout_uses_env_override() {
-        temp_env::with_var(
-            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-            Some("42"),
-            || {
-                assert_eq!(graceful_shutdown_timeout(), Duration::from_secs(42));
-            },
-        );
-    }
-
-    #[test]
-    fn graceful_shutdown_timeout_defaults_for_invalid_env() {
-        temp_env::with_var(
-            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-            Some("not-a-number"),
-            || {
-                assert_eq!(
-                    graceful_shutdown_timeout(),
-                    Duration::from_secs(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
-                );
-            },
-        );
-    }
-}
-
 impl RuntimeType {
     /// Get [`tokio::runtime::Handle`] to runtime
     pub fn handle(&self) -> tokio::runtime::Handle {
@@ -458,5 +413,72 @@ impl Drop for RuntimeType {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::environment_names::runtime as env_runtime;
+
+    #[test]
+    fn graceful_shutdown_timeout_uses_env_override() {
+        temp_env::with_var(
+            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            Some("42"),
+            || {
+                assert_eq!(graceful_shutdown_timeout(), Duration::from_secs(42));
+            },
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_timeout_defaults_for_invalid_env() {
+        temp_env::with_var(
+            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            Some("not-a-number"),
+            || {
+                assert_eq!(
+                    graceful_shutdown_timeout(),
+                    Duration::from_secs(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+                );
+            },
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_main_token_after_graceful_timeout() {
+        temp_env::async_with_vars(
+            [(
+                env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                Some("5"),
+            )],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let tracker = runtime.graceful_shutdown_tracker();
+                let _guard = tracker.register_task();
+                let main_token = runtime.primary_token();
+                let endpoint_token = runtime.child_token();
+
+                runtime.shutdown();
+                tokio::task::yield_now().await;
+
+                assert!(endpoint_token.is_cancelled());
+                assert!(!main_token.is_cancelled());
+                assert_eq!(tracker.get_count(), 1);
+
+                tokio::time::advance(Duration::from_secs(4)).await;
+                tokio::task::yield_now().await;
+
+                assert!(!main_token.is_cancelled());
+
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+
+                assert!(main_token.is_cancelled());
+                assert_eq!(tracker.get_count(), 1);
+            },
+        )
+        .await;
     }
 }
