@@ -160,10 +160,10 @@ pub(crate) fn merge_response_nvext(
 
     match (target.as_mut(), incoming) {
         (Some(serde_json::Value::Object(target_obj)), serde_json::Value::Object(incoming_obj)) => {
-            // Token IDs are chunk deltas, so aggregation concatenates them.
+            // Token-aligned arrays are chunk deltas, so aggregation concatenates them.
             for (key, value) in incoming_obj {
                 match key.as_str() {
-                    "completion_token_ids" => {
+                    "completion_token_ids" | "completion_token_logprobs" => {
                         let entry = target_obj
                             .entry(&key)
                             .or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -1348,24 +1348,31 @@ mod tests {
     }
 
     #[test]
-    fn tito_parity_aggregator_concatenates_completion_token_ids() {
-        // Aggregation concatenates per-chunk completion token IDs.
+    fn tito_parity_aggregator_concatenates_token_metadata() {
+        // Aggregation concatenates per-chunk completion token metadata.
         let mut target: Option<serde_json::Value> = None;
         // Chunk 1: tokens [10, 11, 12]
         merge_response_nvext(
             &mut target,
-            Some(serde_json::json!({ "completion_token_ids": [10, 11, 12] })),
+            Some(serde_json::json!({
+                "completion_token_ids": [10, 11, 12],
+                "completion_token_logprobs": [-0.1, -0.2, -0.3]
+            })),
         );
         // Chunk 2 appends tokens.
         merge_response_nvext(
             &mut target,
-            Some(serde_json::json!({ "completion_token_ids": [13, 14] })),
+            Some(serde_json::json!({
+                "completion_token_ids": [13, 14],
+                "completion_token_logprobs": [-0.4, -0.5]
+            })),
         );
         // Chunk 3 (final): one more token + non-token field that should overwrite.
         merge_response_nvext(
             &mut target,
             Some(serde_json::json!({
                 "completion_token_ids": [15],
+                "completion_token_logprobs": [-0.6],
                 "worker_id": { "decode_worker_id": 7 }
             })),
         );
@@ -1375,6 +1382,11 @@ mod tests {
             aggregated["completion_token_ids"],
             serde_json::json!([10, 11, 12, 13, 14, 15]),
             "completion_token_ids must concatenate across chunks"
+        );
+        assert_eq!(
+            aggregated["completion_token_logprobs"],
+            serde_json::json!([-0.1, -0.2, -0.3, -0.4, -0.5, -0.6]),
+            "completion_token_logprobs must concatenate across chunks"
         );
         assert_eq!(aggregated["worker_id"]["decode_worker_id"], 7);
     }

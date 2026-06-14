@@ -16,13 +16,14 @@ use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
 use super::metrics::register_worker_timing_metrics;
+use super::stateful_responses::ResponseContextStoreManager;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
 use crate::request_template::RequestTemplate;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
@@ -61,6 +62,7 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    responses_context_store: Arc<ResponseContextStoreManager>,
     nvext_enabled: bool,
 }
 
@@ -132,7 +134,7 @@ impl State {
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::new_with_nvext_enabled(manager, discovery_client, cancel_token, true)
     }
 
@@ -141,6 +143,25 @@ impl State {
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
         nvext_enabled: bool,
+    ) -> anyhow::Result<Self> {
+        let responses_context_store = Arc::new(
+            ResponseContextStoreManager::from_env_with_shutdown(cancel_token.child_token())?,
+        );
+        Ok(Self::new_with_responses_context_store(
+            manager,
+            discovery_client,
+            cancel_token,
+            nvext_enabled,
+            responses_context_store,
+        ))
+    }
+
+    pub fn new_with_responses_context_store(
+        manager: Arc<ModelManager>,
+        discovery_client: Arc<dyn Discovery>,
+        cancel_token: CancellationToken,
+        nvext_enabled: bool,
+        responses_context_store: Arc<ResponseContextStoreManager>,
     ) -> Self {
         Self {
             manager,
@@ -159,6 +180,7 @@ impl State {
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            responses_context_store,
         }
     }
 
@@ -194,6 +216,10 @@ impl State {
     /// Get the cancellation token
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
+    }
+
+    pub fn responses_context_store(&self) -> &ResponseContextStoreManager {
+        self.responses_context_store.as_ref()
     }
 
     // TODO
@@ -283,6 +309,9 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     cancel_token: Option<CancellationToken>,
 
+    #[builder(setter(strip_option), default = "None")]
+    responses_context_store: Option<Arc<ResponseContextStoreManager>>,
+
     /// When set, the `/metrics` endpoint will also expose metrics from the
     /// DRT's registry tree (anything created via `metrics().create*()`).
     #[builder(default = "None")]
@@ -350,6 +379,17 @@ impl HttpService {
         self.run_inner(cancel_token, None).await
     }
 
+    async fn warmup(&self) -> Result<()> {
+        if self.state.flags.get(&EndpointType::Responses) {
+            self.state
+                .responses_context_store()
+                .warmup()
+                .await
+                .context("failed to initialize stateful Responses store")?;
+        }
+        Ok(())
+    }
+
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
     /// port-allocation gap for tests that need to know the bound port up front. Not
     /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
@@ -389,6 +429,7 @@ impl HttpService {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
+        self.warmup().await?;
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
@@ -602,11 +643,18 @@ impl HttpServiceConfigBuilder {
         let admin_api_enabled =
             config.enable_admin_api && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
 
-        let state = Arc::new(State::new_with_nvext_enabled(
+        let responses_context_store = match config.responses_context_store {
+            Some(store) => store,
+            None => Arc::new(ResponseContextStoreManager::from_env_with_shutdown(
+                cancel_token.child_token(),
+            )?),
+        };
+        let state = Arc::new(State::new_with_responses_context_store(
             model_manager,
             discovery_client,
             cancel_token,
             nvext_enabled,
+            responses_context_store,
         ));
         state
             .flags
@@ -910,6 +958,61 @@ mod tests {
 
         // Clean up
         handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn custom_responses_store_bypasses_url_initialization() {
+        temp_env::async_with_vars(
+            [(
+                "DYN_STATEFUL_RESPONSES_STORE_URL",
+                Some("unsupported://store"),
+            )],
+            async {
+                let manager = Arc::new(ResponseContextStoreManager::from_store(
+                    Arc::new(crate::key_value_store::MemoryKeyValueStore::new()),
+                    None,
+                    None,
+                    CancellationToken::new(),
+                ));
+                let service = HttpService::builder()
+                    .responses_context_store(manager)
+                    .build()
+                    .unwrap();
+                service.warmup().await.unwrap();
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "key-value-store-redis")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn responses_store_init_failure_fails_startup() {
+        const STORE_URL_ENV: &str = "DYN_STATEFUL_RESPONSES_STORE_URL";
+
+        let store_url = "redis://[".to_string();
+
+        temp_env::async_with_vars([(STORE_URL_ENV, Some(store_url.as_str()))], async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("failed to bind ephemeral port");
+            let service = HttpService::builder()
+                .port(listener.local_addr().unwrap().port())
+                .build()
+                .unwrap();
+
+            let err = service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .expect_err("bad Redis store should fail before serving");
+            assert!(
+                err.to_string()
+                    .contains("failed to initialize stateful Responses store"),
+                "{err:#}"
+            );
+        })
+        .await;
     }
 
     /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
