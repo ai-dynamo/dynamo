@@ -48,12 +48,12 @@ cases:
     - *id002
     expected:
       dynamo:
-        reason: "Dynamo's mistral parser leaves [TOOL_CALLS] in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
-        normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
+        normal_text: ''
       vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"loc'
+        reason: vLLM leaves the truncated post-marker JSON body in content; Dynamo suppresses the unterminated [TOOL_CALLS] call and emits empty content.
       sglang:
         calls: []
         normal_text: ''
@@ -91,14 +91,13 @@ cases:
         - name: get_weather
           arguments:
             location: Boston
-        - name: get_weather
-          arguments:
-            location: New York
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments":
           {"location": "New York'
+        reason: vLLM leaves the raw truncated body in content; Dynamo recovers the complete leading call (Boston) and drops the truncated trailing call without fabricating it.
       sglang:
         calls: []
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: SGLang emits no call and keeps the narration prefix; Dynamo recovers the complete leading call (Boston) and drops the truncated trailing call.

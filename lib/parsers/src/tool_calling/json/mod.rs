@@ -51,7 +51,7 @@ pub fn find_tool_call_end_position_json(
     config: &JsonParserConfig,
 ) -> usize {
     match parser {
-        "hermes" | "nemotron_deci" => {
+        "hermes" | "nemotron_deci" | "qwen25" => {
             let start_token = config.tool_call_start_tokens.first().map(|s| s.as_str());
             if let Some(end_token) = config.tool_call_end_tokens.first() {
                 let Some(first_end) = chunk.find(end_token.as_str()) else {
@@ -189,6 +189,33 @@ mod tests {
             pos_inc, first_end,
             "should stop at end of first complete call when second is incomplete"
         );
+    }
+
+    // qwen25 aliases the hermes config and must share its jail behavior: two
+    // parallel <tool_call> blocks must be captured as one region, otherwise the
+    // second call's opener leaks into normal_text when split across stream
+    // chunks (e.g. `ol_call>...`). Regression for the qwen25 streaming leak.
+    #[test] // TOOLCALLING.stream.2: qwen25 parallel-call end-position
+    fn test_find_tool_call_end_position_parallel_calls_qwen25() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+
+        // Two parallel calls in the qwen2.5 newline-delimited form.
+        let two_calls = concat!(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}\n</tool_call>\n",
+            "<tool_call>\n{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"EST\"}}\n</tool_call>",
+            "trailing"
+        );
+        let pos = find_tool_call_end_position_json(two_calls, "qwen25", &config);
+        assert!(
+            two_calls[..pos].ends_with("</tool_call>"),
+            "qwen25 should end at last </tool_call>, got: {:?}",
+            &two_calls[..pos]
+        );
+        assert_eq!(&two_calls[pos..], "trailing");
     }
 
     // Bare DeepSeek inner calls (no outer <｜tool▁calls▁begin｜> wrapper) arriving

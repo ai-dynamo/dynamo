@@ -33,6 +33,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import (
@@ -41,11 +42,12 @@ from dynamo.common.backend.dp_rank import (
     validate_global_dp_rank,
 )
 from dynamo.common.backend.engine import (
-    TEST_LOGITS_PROCESSOR_ENV,
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     LogitsProcessorSpec,
     is_generation_stage,
     logits_processors_for_request,
@@ -294,7 +296,7 @@ class TrtllmLLMEngine(LLMEngine):
         # explicit user `skip_tokenizer_init=True` can't starve the processor.
         # Gated to generation roles for the same reason as the spec resolution
         # below. The flag is TRT-LLM-shaped; each backend sets its own.
-        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
             _TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode]
         ):
             engine_args["skip_tokenizer_init"] = False
@@ -395,11 +397,13 @@ class TrtllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
-            context_length=self.max_seq_len,
-            kv_cache_block_size=self.kv_block_size,
-            max_num_seqs=self.max_batch_size,
-            max_num_batched_tokens=self.max_num_tokens,
-            data_parallel_size=self._attention_dp_size,
+            llm=LlmRegistration(
+                context_length=self.max_seq_len,
+                kv_cache_block_size=self.kv_block_size,
+                max_num_seqs=self.max_batch_size,
+                max_num_batched_tokens=self.max_num_tokens,
+                data_parallel_size=self._attention_dp_size,
+            ),
         )
 
     # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
@@ -786,6 +790,24 @@ class TrtllmLLMEngine(LLMEngine):
             self._default_sampling_params, request
         )
 
+        # TRT-LLM's `logprobs=0` disables computation entirely. Floor at 1
+        # so a `logprobs=0` request still gets the chosen-token logprob;
+        # the raw requested count gates top_logprobs emission below.
+        (
+            requested_logprobs_count,
+            prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
+        if requested_logprobs_count is not None and hasattr(
+            sampling_params, "logprobs"
+        ):
+            sampling_params.logprobs = max(1, requested_logprobs_count)
+        if prompt_logprobs_count is not None and hasattr(
+            sampling_params, "prompt_logprobs"
+        ):
+            sampling_params.prompt_logprobs = prompt_logprobs_count
+
         # Prefill: context_only handle → packed into the response.
         # Decode: read prefill peer's handle, flip to generation_only.
         disaggregated_params: LlmDisaggregatedParams | None = None
@@ -839,6 +861,8 @@ class TrtllmLLMEngine(LLMEngine):
             elif self.max_seq_len is not None:
                 sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
 
+        # TODO: mirror visible/hidden stop-token handling from the disagg
+        # path (handler_base.py) into a shared helper. See PR #9778.
         ignore_eos = stop_conditions.get("ignore_eos")
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
@@ -900,12 +924,39 @@ class TrtllmLLMEngine(LLMEngine):
                         "index": output_idx,
                     }
 
+                    # output.logprobs is cumulative in lockstep with
+                    # output.token_ids — reuse the same slice offset.
+                    (
+                        log_probs,
+                        top_logprobs,
+                    ) = _shared_logprobs.extract_from_completion_output(
+                        output,
+                        tokens_so_far,
+                        fallback_to_first_on_missing=True,
+                        include_bytes=False,
+                    )
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if (
+                        top_logprobs is not None
+                        and requested_logprobs_count is not None
+                        and requested_logprobs_count > 0
+                    ):
+                        out["top_logprobs"] = top_logprobs
+
                     if output.finish_reason:
                         out["finish_reason"] = str(output.finish_reason)
 
                     if out.get("finish_reason") or res.finished:
                         if not out.get("finish_reason"):
                             out["finish_reason"] = "unknown"
+                        # TRT-LLM shares vLLM's prompt_logprobs shape.
+                        if prompt_logprobs_count is not None:
+                            prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                                res
+                            )
+                            if prompt_payload is not None:
+                                out["engine_data"] = {"prompt_logprobs": prompt_payload}
                         prompt_tokens = len(token_ids)
                         total_completion_tokens = sum(
                             len(o.token_ids) for o in res.outputs

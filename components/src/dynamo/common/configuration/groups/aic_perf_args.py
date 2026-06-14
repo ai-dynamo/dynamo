@@ -34,6 +34,7 @@ class AicPerfConfigBase(ConfigBase):
     aic_attention_dp_size: Optional[int]
     aic_nextn: Optional[int]
     aic_nextn_accept_rates: Optional[str]
+    aic_mtp_seed: int = 42
 
     def aic_perf_kwargs(self) -> dict:
         return {field: getattr(self, field) for field in _AIC_PERF_FIELDS}
@@ -135,7 +136,16 @@ class AicPerfArgGroup(ArgGroup):
             env_var="DYN_AIC_NEXTN_ACCEPT_RATES",
             default=None,
             help=(
-                "[EXPERIMENTAL] Comma-separated per-position accept rates for MTP "
-                "draft tokens (e.g. '0.85,0.3,0,0,0'). Padded to length 5."
+                "[EXPERIMENTAL] Comma-separated conditional accept rates for MTP "
+                "draft tokens. Entry i is P(draft i accepted | all earlier drafts "
+                "were accepted). Values are padded or truncated to --aic-nextn."
             ),
+        )
+        add_argument(
+            g,
+            flag_name="--aic-mtp-seed",
+            env_var="DYN_AIC_MTP_SEED",
+            default=42,
+            help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
+            arg_type=int,
         )

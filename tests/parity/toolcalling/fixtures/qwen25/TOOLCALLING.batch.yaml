@@ -7,9 +7,12 @@ mode: batch
 cases:
   TOOLCALLING.batch.1:
     description: Single tool call (happy path)
-    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "get_weather", "arguments": {"location": "NYC"}}
+      </tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,7 +20,7 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -25,21 +28,19 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+      sglang: *id001
   TOOLCALLING.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &id002
+      dynamo: &id003
         calls: []
         normal_text: Hello, how can I help you today?
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *id002
+      sglang: *id003
   TOOLCALLING.batch.9.a:
     description: Empty model text
     model_text: ''
@@ -81,12 +82,16 @@ cases:
         normal_text: '   '
   TOOLCALLING.batch.10:
     description: Duplicate calls (same name twice)
-    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather",
-      "arguments": {"location": "LA"}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "get_weather", "arguments": {"location": "NYC"}}
+      </tool_call><tool_call>
+      {"name": "get_weather", "arguments": {"location": "LA"}}
+      </tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo:
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -97,22 +102,14 @@ cases:
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name":
-          "get_weather", "arguments": {"location": "LA"}}</tool_call>'
-  TOOLCALLING.batch.30:
-    description: Separator-character case not applicable
-    reason: |-
-      This case is not applicable to qwen25 because it wraps each JSON object in <tool_call>, not a delimiter-separated call body.
-  TOOLCALLING.batch.31:
-    description: Multi-call separator-character case not applicable
-    reason: |-
-      This case is not applicable to qwen25 because it wraps each JSON object in <tool_call>, not a delimiter-separated call body.
+      sglang: *id004
   TOOLCALLING.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
-    model_text: '<tool_call>{"name": "unknown_tool", "arguments": {"location": "NYC"}}</tool_call>'
+    model_text: |-
+      <tool_call>
+      {"name": "unknown_tool", "arguments": {"location": "NYC"}}
+      </tool_call>
     tools:
     - name: get_weather
       parameters:
@@ -121,19 +118,24 @@ cases:
           location:
             type: string
     expected:
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
       dynamo:
         calls:
         - name: unknown_tool
           arguments:
             location: NYC
         normal_text: ''
-      vllm:
-        unavailable: vLLM has no parser for family='qwen25'
       sglang:
+        reason: SGLang drops tool calls whose name is absent from the supplied tools; Dynamo forwards the call regardless.
         calls: []
-        normal_text: '<tool_call>{"name": "unknown_tool", "arguments": {"location": "NYC"}}</tool_call>'
-        reason: SGLang treats the unknown qwen25 tool call as ordinary content rather than forwarding it by default.
+        normal_text: ''
   TOOLCALLING.batch.13.c:
     description: Mixed known and unknown calls not applicable
-    reason: |-
-      This case is not applicable to qwen25 because vLLM has no peer parser and SGLang treats this family as ordinary content.
+    reason: 'n/a: no vLLM peer; SGLang treats unknown calls as content.'
+  TOOLCALLING.batch.30:
+    description: Separator-character case not applicable
+    reason: 'n/a: this family wraps each call in <tool_call>, not a delimiter-separated body.'
+  TOOLCALLING.batch.31:
+    description: Multi-call separator-character case not applicable
+    reason: 'n/a: this family wraps each call in <tool_call>, not a delimiter-separated body.'

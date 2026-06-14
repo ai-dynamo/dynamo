@@ -43,8 +43,8 @@ use axum::{
     response::Response,
     routing::get,
 };
-use dynamo_runtime::engine::{AsyncEngineContextProvider, RequestStream};
-use dynamo_runtime::pipeline::Context;
+use dynamo_runtime::engine::AsyncEngineContextProvider;
+use dynamo_runtime::pipeline::{Context, RequestStream};
 use futures::{SinkExt, StreamExt, stream::SplitSink};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -59,7 +59,7 @@ const REQUEST_CHANNEL_CAPACITY: usize = 64;
 /// half-broken peer from parking the connection indefinitely.
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-use super::{RouteDoc, service_v2};
+use super::{RouteDoc, error::SanitizedError, service_v2};
 use crate::discovery::ModelManagerError;
 use crate::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
@@ -145,7 +145,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
     }
 
     let request_stream = Box::pin(ReceiverStream::new(req_rx));
-    let input = RequestStream::new(request_stream, Context::new(()).context());
+    let input = Context::new(RequestStream::new(request_stream));
 
     let mut response_stream = match engine.generate(input).await {
         Ok(s) => s,
@@ -153,7 +153,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
             tracing::error!(%err, "/v1/realtime engine.generate() failed");
             *close_reason.lock() = Some(close_message(
                 close_code::ERROR,
-                &format!("engine error: {err}"),
+                &SanitizedError::Internal.to_string(),
             ));
             return;
         }
@@ -171,12 +171,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
             let event = if let Some(event) = annotated.data {
                 event
             } else if let Some(err) = annotated.error {
+                tracing::error!("/v1/realtime engine error: {err}");
+                let sanitized = SanitizedError::Internal;
                 RealtimeServerEvent::Error(RealtimeServerEventError {
                     event_id: format!("event_{}", Uuid::new_v4()),
                     error: RealtimeAPIError {
                         r#type: "server_error".to_string(),
                         code: None,
-                        message: err.to_string(),
+                        message: sanitized.to_string(),
                         param: None,
                         event_id: None,
                     },
@@ -469,7 +471,7 @@ where
                 send_error_event(
                     ws_tx,
                     "server_error",
-                    &err.to_string(),
+                    &SanitizedError::Internal.to_string(),
                     Some("session.model"),
                 )
                 .await;

@@ -148,10 +148,16 @@ impl ReasoningParser for BasicReasoningParser {
         let mut normal_parts = Vec::new();
         let mut cursor = 0;
         let mut exited_on_tool_start = false;
-        // Dangling-end case enters the loop already in reasoning so the prefix
-        // before `</think>` is captured (the loop's normal-text branch would
-        // otherwise treat it as plain text and re-leak the closer).
-        let mut currently_reasoning = self._in_reasoning || has_dangling_end;
+        // Initial loop state combines two concerns:
+        //   - dangling-end recovery: enter reasoning at cursor 0 so the prefix
+        //     before `</think>` is captured (otherwise the normal-text branch
+        //     would re-leak the closer).
+        //   - force_reasoning + a literal <think> later in the text: defer to
+        //     the explicit-marker path so the prefix before <think> stays in
+        //     normal_text. Without `&& !has_think_tag`, the implicit-reasoning
+        //     span would absorb the literal <think> token into reasoning_text
+        //     as a markup leak (parser-owned syntax surfacing to consumers).
+        let mut currently_reasoning = (self._in_reasoning && !has_think_tag) || has_dangling_end;
 
         while cursor < text.len() {
             if currently_reasoning {
@@ -687,6 +693,42 @@ mod tests {
         let result = parser.detect_and_parse_reasoning("no think tags here", &[]);
         assert_eq!(result.normal_text, "");
         assert_eq!(result.reasoning_text, "no think tags here");
+    }
+
+    #[test]
+    fn test_force_reasoning_with_literal_think_prefix_does_not_leak() {
+        // Regression: when force_reasoning=true but the model output also
+        // contains a literal <think> later in the text, the explicit tag
+        // must win. The prefix before <think> belongs in normal_text.
+        // Without the `&& !has_think_tag` guard on currently_reasoning,
+        // the implicit-reasoning span would absorb the literal <think>
+        // into reasoning_text as a markup leak.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
+        let result = parser.detect_and_parse_reasoning("before <think>thinking</think> after", &[]);
+        assert_eq!(result.reasoning_text, "thinking");
+        assert_eq!(result.normal_text, "before  after");
+        assert!(
+            !result.reasoning_text.contains("<think>"),
+            "literal <think> must be stripped, not absorbed; got {:?}",
+            result.reasoning_text
+        );
+    }
+
+    #[test]
+    fn test_force_reasoning_with_multiple_literal_spans() {
+        // Pins multi-span behavior for force_reasoning=true callers: the
+        // cursor-based loop extracts every closed <think>...</think> span
+        // and concatenates their bodies, while the surrounding text stays
+        // in normal_text.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
+        let result = parser.detect_and_parse_reasoning(
+            "<think>first</think> middle <think>second</think> done",
+            &[],
+        );
+        assert_eq!(result.reasoning_text, "firstsecond");
+        assert_eq!(result.normal_text, "middle  done");
     }
 
     #[test] // REASONING.batch.6.b — streaming parity for stray close after complete pair

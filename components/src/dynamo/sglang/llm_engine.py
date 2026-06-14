@@ -33,13 +33,20 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
+    LogitsProcessorSpec,
+    is_generation_stage,
+    logits_processors_for_request,
+    resolve_test_logits_processor_spec,
 )
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
@@ -65,6 +72,7 @@ from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import format_zmq_endpoint
 
@@ -103,6 +111,10 @@ def _local_dp_rank_range(server_args) -> tuple[int, int]:
 
 
 class SglangLLMEngine(LLMEngine):
+    # Class-level default so ``__new__``-built instances (tests skipping
+    # ``__init__``) still expose what ``generate()`` reads; ``start()`` sets it.
+    _logits_processor_spec: "LogitsProcessorSpec | None" = None
+
     def __init__(self, server_args, dynamo_args, serving_mode: DisaggregationMode):
         self.server_args = server_args
         self.dynamo_args = dynamo_args
@@ -130,6 +142,7 @@ class SglangLLMEngine(LLMEngine):
         # `dp_rank` against this node's range before forwarding to SGLang.
         self._dp_start: int = 0
         self._dp_size: int = 1
+        self._logits_processor_spec: LogitsProcessorSpec | None = None
         self._pause_controller: SGLangEnginePauseController | None = None
         self._pause_lock = asyncio.Lock()
 
@@ -140,6 +153,15 @@ class SglangLLMEngine(LLMEngine):
         config = await parse_args(argv if argv is not None else sys.argv[1:])
         server_args = config.server_args
         dynamo_args = config.dynamo_args
+
+        # Enable SGLang's custom-processor path and force tokenizer init (to
+        # resolve the forced token IDs at startup). After parse_args so a user
+        # skip_tokenizer_init can't starve the hook.
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
+            config.serving_mode
+        ):
+            server_args.enable_custom_logit_processor = True
+            server_args.skip_tokenizer_init = False
 
         model_input = (
             ModelInput.Text if dynamo_args.use_sglang_tokenizer else ModelInput.Tokens
@@ -167,6 +189,9 @@ class SglangLLMEngine(LLMEngine):
             else None
         )
         self._input_param_manager = InputParamManager(tokenizer)
+
+        # Resolve once the tokenizer is available (see logits_processor_spec()).
+        self._logits_processor_spec = await self.logits_processor_spec()
 
         logger.info(
             "Trace header forwarding: %s",
@@ -201,19 +226,47 @@ class SglangLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
-            context_length=self.server_args.context_length,
-            kv_cache_block_size=page_size,
-            total_kv_blocks=capacity.total_kv_blocks,
-            max_num_seqs=capacity.max_num_seqs,
-            max_num_batched_tokens=capacity.max_num_batched_tokens,
-            # Router needs the rank range to enumerate per-rank load.
-            data_parallel_size=self._dp_size,
-            data_parallel_start_rank=self._dp_start,
-            # Prefill-only — drives PrefillRouter's Bootstrap path.
-            bootstrap_host=self._bootstrap_host,
-            bootstrap_port=self._bootstrap_port,
             runtime_data=_get_runtime_data(self.server_args),
+            llm=LlmRegistration(
+                context_length=self.server_args.context_length,
+                kv_cache_block_size=page_size,
+                total_kv_blocks=capacity.total_kv_blocks,
+                max_num_seqs=capacity.max_num_seqs,
+                max_num_batched_tokens=capacity.max_num_batched_tokens,
+                # Router needs the rank range to enumerate per-rank load.
+                data_parallel_size=self._dp_size,
+                data_parallel_start_rank=self._dp_start,
+                # Prefill-only — drives PrefillRouter's Bootstrap path.
+                bootstrap_host=self._bootstrap_host,
+                bootstrap_port=self._bootstrap_port,
+            ),
         )
+
+    def _logits_tokenizer(self) -> Any:
+        """Tokenizer the smoke hook tokenizes ``"Hello world!"`` with.
+
+        Accessed lazily (only when the env hook is on, inside the resolver),
+        so the skip_tokenizer_init / hook-off path never touches it. from_args
+        forces skip_tokenizer_init=False for the hook, so the tokenizer exists
+        here.
+        """
+        if self.engine is None:
+            raise RuntimeError("Engine not initialized")
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        tokenizer = getattr(tokenizer_manager, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError(
+                "SGLang engine exposes no tokenizer; "
+                f"{DYN_ENABLE_TEST_LOGITS_PROCESSOR} requires tokenizer init"
+            )
+        return tokenizer
+
+    async def logits_processor_spec(self) -> LogitsProcessorSpec | None:
+        # Only generation roles ever attach (PREFILL gates out per request),
+        # so skip spec resolution — and the tokenizer it needs — otherwise.
+        if not is_generation_stage(self.serving_mode):
+            return None
+        return resolve_test_logits_processor_spec(self._logits_tokenizer)
 
     def _kv_routing_enabled(self) -> bool:
         # Matches legacy `DynamoSglangPublisher.init_kv_event_publish` —
@@ -282,6 +335,34 @@ class SglangLLMEngine(LLMEngine):
 
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        # Prefill discards engine output (it only yields bootstrap info) —
+        # asking SGLang to compute logprobs there would be wasted work,
+        # especially with prompt_logprobs which forces a full prompt pass.
+        logprob_kwargs = (
+            {}
+            if self.serving_mode == DisaggregationMode.PREFILL
+            else _shared_logprobs.build_sglang_logprob_kwargs(
+                request.get("output_options", {}) or {},
+                allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
+            )
+        )
+        return_tokens_as_token_ids = bool(
+            (request.get("output_options") or {}).get("return_tokens_as_token_ids")
+        )
+
+        # No-op for PREFILL / hook-off (gating returns []). Resolve the uid
+        # only when there's something to activate.
+        logits_entries = logits_processors_for_request(
+            self._logits_processor_spec,
+            disaggregation_mode=self.serving_mode,
+        )
+        logits_kwargs = (
+            activate_logits_processors(
+                sampling_params, logits_entries, request_uid=context.id()
+            )
+            if logits_entries
+            else {}
+        )
 
         # SGLang disagg keys NIXL transport on a (host, port, room) triple
         # exchanged between prefill and decode peers.
@@ -312,6 +393,8 @@ class SglangLLMEngine(LLMEngine):
                 enabled=self.enable_trace,
             ),
             **bootstrap_kwargs,
+            **logits_kwargs,
+            **logprob_kwargs,
         )
 
         # ORDER MATTERS: async_generate must register the room (the await
@@ -362,6 +445,10 @@ class SglangLLMEngine(LLMEngine):
             task.add_done_callback(self._prefill_consume_tasks.discard)
             return
 
+        # SGLang's logprob arrays are cumulative per choice and `n > 1`
+        # requests interleave choices on the stream, so the offset is
+        # keyed by `output_idx`, not a single scalar.
+        num_logprobs_per_choice: dict[int, int] = {}
         async for res in stream:
             # SGLang sets index when n>1; default to 0 otherwise.
             output_idx = res.get("index") or 0
@@ -370,6 +457,22 @@ class SglangLLMEngine(LLMEngine):
             finish_reason = meta_info["finish_reason"]
 
             output_ids = res.get("output_ids", [])
+            if output_ids or finish_reason:
+                (
+                    log_probs,
+                    top_logprobs,
+                    next_total,
+                ) = _shared_logprobs.extract_from_sglang_meta(
+                    meta_info,
+                    num_logprobs_per_choice.get(output_idx, 0),
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                )
+                num_logprobs_per_choice[output_idx] = next_total
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
             if not output_ids and not finish_reason:
                 if context.is_stopped():
                     prompt_tokens = meta_info.get("prompt_tokens", 0)
@@ -398,20 +501,25 @@ class SglangLLMEngine(LLMEngine):
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
                 }
+                prompt_payload = (
+                    _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
+                )
+                if prompt_payload is not None:
+                    out["engine_data"] = {"prompt_logprobs": prompt_payload}
 
             if context.is_stopped():
+                # Mutate `out` instead of building a fresh dict so any
+                # logprobs we already extracted for this chunk's tokens
+                # ride along with the cancellation terminal.
                 prompt_tokens = meta_info.get("prompt_tokens", 0)
                 completion_tokens = meta_info.get("completion_tokens", 0)
-                yield {
-                    "token_ids": output_ids,
-                    "index": output_idx,
-                    "finish_reason": "cancelled",
-                    "completion_usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
-                    },
+                out["finish_reason"] = "cancelled"
+                out["completion_usage"] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
                 }
+                yield out
                 break
 
             yield out
