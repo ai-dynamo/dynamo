@@ -20,6 +20,10 @@ on:
         description: 'kubectl context to target (e.g. nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02 or azure-ci). Defaults to kubeconfig current-context.'
         required: false
         default: ''
+      vcluster_host_priority_class:
+        description: 'Optional host PriorityClass for pods synced from vCluster. Leave empty for Azure; aws-dev-02 defaults to ci-nightly-high-priority.'
+        required: false
+        default: ''
 
 jobs:
   gpu-job-smoke:
@@ -177,6 +181,7 @@ jobs:
       VCLUSTER_NAMESPACE: dynamo-deploy-test
       VCLUSTER_K8S_VERSION: v1.32.13
       VCLUSTER_PROBE_IMAGE: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dockerhub/busybox:1.37
+      VCLUSTER_HOST_PRIORITY_CLASS: ${{ inputs.vcluster_host_priority_class }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -211,14 +216,30 @@ jobs:
           kubectl create namespace "${VCLUSTER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
           vcluster delete "${VCLUSTER_NAME}" --namespace "${VCLUSTER_NAMESPACE}" 2>&1 || true
 
-          vcluster create "${VCLUSTER_NAME}" \
-            --namespace "${VCLUSTER_NAMESPACE}" \
-            --connect=false \
-            --upgrade \
-            --set controlPlane.distro.k8s.enabled=true \
-            --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}" \
-            --set sync.fromHost.priorityClasses.enabled=true \
-            --set sync.toHost.pods.priorityClassName=ci-nightly-high-priority
+          if [ -z "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
+            case "${KUBE_CONTEXT}" in
+              *aws-dev-02*) VCLUSTER_HOST_PRIORITY_CLASS="ci-nightly-high-priority" ;;
+            esac
+          fi
+
+          vcluster_args=(
+            "${VCLUSTER_NAME}"
+            --namespace "${VCLUSTER_NAMESPACE}"
+            --connect=false
+            --upgrade
+            --set controlPlane.distro.k8s.enabled=true
+            --set "controlPlane.distro.k8s.version=${VCLUSTER_K8S_VERSION}"
+            --set sync.fromHost.priorityClasses.enabled=true
+          )
+
+          if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
+            echo "Using host PriorityClass for synced vCluster pods: ${VCLUSTER_HOST_PRIORITY_CLASS}"
+            vcluster_args+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
+          else
+            echo "No host PriorityClass configured for synced vCluster pods."
+          fi
+
+          vcluster create "${vcluster_args[@]}"
 
           kubectl wait --for=condition=ready pod \
             -l "app=vcluster,release=${VCLUSTER_NAME}" \
@@ -256,8 +277,17 @@ jobs:
 
           echo "::group::Verify vCluster PriorityClass behavior"
           VKUBECONFIG="${RUNNER_TEMP}/kubeconfig-vcluster-smoke"
-          PRIORITY_CLASS="ci-nightly-high-priority"
+          PRIORITY_CLASS="${VCLUSTER_HOST_PRIORITY_CLASS}"
           AUTO_PROBE_NAME="priority-auto-probe"
+
+          if [ -z "${PRIORITY_CLASS}" ]; then
+            echo "Skipping vCluster PriorityClass verification because no host PriorityClass is configured."
+            echo "::endgroup::"
+            echo "### vCluster smoke PASSED" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "- Namespace: \`${VCLUSTER_NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- vCluster: \`${VCLUSTER_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
 
           wait_for_vcluster_pod() {
             local probe_name="$1"

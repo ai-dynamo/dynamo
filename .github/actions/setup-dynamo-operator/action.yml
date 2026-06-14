@@ -46,6 +46,10 @@ inputs:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
     default: 'v1.32.13'
+  vcluster_host_priority_class:
+    description: 'Optional host PriorityClass to set on pods synced from vCluster. Leave empty for clusters without this PriorityClass.'
+    required: false
+    default: ''
   install_grove:
     description: 'Whether to install the Grove operator via Helm (default: true). Set to false on clusters where Grove is not needed to avoid rollout failures.'
     required: false
@@ -133,19 +137,25 @@ runs:
       env:
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_HOST_PRIORITY_CLASS: ${{ inputs.vcluster_host_priority_class }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         set -x
         # The K8s version must be supported by the kr8s Python library used in deploy tests.
         # This is independent of the host cluster version.
-        vcluster create ${VCLUSTER_NAME} \
-          --namespace ${NAMESPACE} \
-          --connect=false \
-          --upgrade \
-          --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
-          --set sync.fromHost.priorityClasses.enabled=true \
-          --set sync.toHost.pods.priorityClassName=ci-nightly-high-priority
+        vcluster_args=(
+          "${VCLUSTER_NAME}"
+          --namespace "${NAMESPACE}"
+          --connect=false
+          --upgrade
+          --set controlPlane.distro.k8s.enabled=true
+          --set "controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }}"
+          --set sync.fromHost.priorityClasses.enabled=true
+        )
+        if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
+          vcluster_args+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
+        fi
+        vcluster create "${vcluster_args[@]}"
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
@@ -172,18 +182,20 @@ runs:
         vcluster_namespace: ${{ steps.resolve-names.outputs.namespace }}
 
     - name: Verify vCluster PriorityClass behavior
+      if: inputs.vcluster_host_priority_class != ''
       shell: bash
       env:
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
         PROBE_IMAGE: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dockerhub/busybox:1.37
+        VCLUSTER_HOST_PRIORITY_CLASS: ${{ inputs.vcluster_host_priority_class }}
       run: |
         echo "::group::Verify vCluster PriorityClass behavior"
         set -euo pipefail
 
         VKUBECONFIG="${{ github.workspace }}/.kubeconfig-vcluster"
         AUTO_PROBE_NAME="priority-auto-probe"
-        PRIORITY_CLASS="ci-nightly-high-priority"
+        PRIORITY_CLASS="${VCLUSTER_HOST_PRIORITY_CLASS}"
 
         cleanup() {
           kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${AUTO_PROBE_NAME}" --ignore-not-found=true --wait=false 2>/dev/null || true

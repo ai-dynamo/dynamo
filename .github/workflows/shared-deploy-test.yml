@@ -36,6 +36,11 @@ on:
         type: string
         required: false
         default: ''
+      vcluster_host_priority_class:
+        description: 'Optional host PriorityClass for pods synced from vCluster. Leave empty for clusters without this PriorityClass.'
+        type: string
+        required: false
+        default: ''
       image_tag:
         description: 'Image tag prefix (e.g. "main" for main-vllm-runtime, or a commit SHA). Defaults to github.sha.'
         type: string
@@ -85,6 +90,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          vcluster_host_priority_class: ${{ inputs.vcluster_host_priority_class || ((inputs.kube_context == '' || contains(inputs.kube_context, 'aws-dev-02')) && 'ci-nightly-high-priority' || '') }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
