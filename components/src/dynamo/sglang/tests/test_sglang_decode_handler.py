@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -468,6 +469,108 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
     assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [201], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.2], [-0.3]]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_uploads_latest_metadata_when_cancelled(tmp_path):
+    handler = _new_decode_handler()
+    uploader = MetadataUploader(url=(tmp_path / "metadata/cancelled").as_uri())
+    stream_blocked = asyncio.Event()
+    never_finish = asyncio.Event()
+    latest_meta_info = {
+        "id": "sglang-cancelled",
+        "finish_reason": None,
+        "output_token_logprobs": [(-0.1, 101, "a")],
+        "routed_experts": b"partial-experts",
+        "weight_version": "policy-v7",
+        "prompt_tokens": 2,
+        "completion_tokens": 1,
+        "cached_tokens": 0,
+    }
+
+    async def cancellable_stream():
+        yield {
+            "index": 0,
+            "output_ids": [101],
+            "meta_info": latest_meta_info,
+        }
+        stream_blocked.set()
+        await never_finish.wait()
+
+    collect_task = asyncio.create_task(
+        _collect(
+            handler._process_token_stream(
+                cancellable_stream(),
+                _Context(),
+                metadata_uploader=uploader,
+            )
+        )
+    )
+    await asyncio.wait_for(stream_blocked.wait(), timeout=1)
+    collect_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await collect_task
+
+    payload = _read_zstd_payload(tmp_path / "metadata/cancelled/choice_0.msgpack.zst")
+    assert payload["metadata"]["finish_reason"] == {"type": "abort"}
+    assert payload["metadata"]["output_token_logprobs"] == [[-0.1, 101, "a"]]
+    assert payload["metadata"]["routed_experts"] == b"partial-experts"
+    assert payload["metadata"]["weight_version"] == "policy-v7"
+    assert payload["metadata"]["completion_tokens"] == 1
+    assert latest_meta_info == {}
+
+
+@pytest.mark.asyncio
+async def test_terminal_upload_cancel_retries_as_aborted_metadata():
+    handler = _new_decode_handler()
+
+    class BlockingUploader:
+        def __init__(self):
+            self.calls = 0
+            self.first_upload_started = asyncio.Event()
+            self.never_finish = asyncio.Event()
+            self.uploaded_metadata = None
+
+        async def upload_choice(self, choice_index, metadata):
+            self.calls += 1
+            if self.calls == 1:
+                self.first_upload_started.set()
+                await self.never_finish.wait()
+            self.uploaded_metadata = dict(metadata)
+
+    uploader = BlockingUploader()
+    collect_task = asyncio.create_task(
+        _collect(
+            handler._process_token_stream(
+                _stream(
+                    [
+                        {
+                            "index": 0,
+                            "output_ids": [101],
+                            "meta_info": {
+                                "id": "sglang-terminal-cancel",
+                                "finish_reason": {"type": "stop"},
+                                "output_token_logprobs": [(-0.1, 101, "a")],
+                                "prompt_tokens": 2,
+                                "completion_tokens": 1,
+                                "cached_tokens": 0,
+                            },
+                        }
+                    ]
+                ),
+                _Context(),
+                metadata_uploader=uploader,
+            )
+        )
+    )
+    await asyncio.wait_for(uploader.first_upload_started.wait(), timeout=1)
+    collect_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await collect_task
+
+    assert uploader.calls == 2
+    assert uploader.uploaded_metadata["finish_reason"] == {"type": "abort"}
+    assert uploader.uploaded_metadata["output_token_logprobs"] == [(-0.1, 101, "a")]
 
 
 @pytest.mark.asyncio
