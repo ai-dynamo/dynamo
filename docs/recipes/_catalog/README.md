@@ -8,8 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 This guide covers the **page side** of the Recipes and Feature Benchmarks
 surfaces — the MDX structure, the target-picker component, and the
 CSS-coupled vocabulary. For the machine-readable catalog contract, see the
-schema header in [`recipes.yaml`](recipes.yaml) and
-[`benchmarks.yaml`](../../benchmarks/_catalog/benchmarks.yaml).
+[split catalog](#the-machine-readable-catalog) section below.
 
 > [!IMPORTANT]
 > The picker is **pure CSS** (no JavaScript). Every allowed dimension value is
@@ -21,9 +20,13 @@ schema header in [`recipes.yaml`](recipes.yaml) and
 
 1. **Write the MDX** at `docs/recipes/<slug>.mdx` (or `docs/benchmarks/<slug>.mdx`),
    following the [page blueprint](#page-blueprint) below.
-2. **Add a catalog entry** to `docs/recipes/_catalog/recipes.yaml` (or
-   `benchmarks.yaml`) per its schema header — every deploy/perf asset path must
-   resolve in the repo.
+2. **Add a catalog entry** — create one per-entry file at
+   `docs/recipes/_catalog/recipes/<id>.yaml` (or
+   `docs/benchmarks/_catalog/benchmarks/<id>.yaml`) and add its `<id>` to the
+   matching `index.yaml`. Each file holds exactly one object that validates
+   against `schema.json`; every deploy/perf asset path must resolve in the repo.
+   See [the machine-readable catalog](#the-machine-readable-catalog) below, then
+   run `python3 docs/recipes/_catalog/validate.py`.
 3. **Wire navigation** in `docs/index.yml` (add the `- page:` under the Recipes
    tab or the Feature Benchmarks section).
 4. **Patch `fern/main.css` only if** the page introduces a picker axis value not
@@ -31,6 +34,68 @@ schema header in [`recipes.yaml`](recipes.yaml) and
 5. Add the landing-page card (`docs/recipes/README.mdx`) and update the model /
    target counts.
 6. Run `fern check` and `fern docs broken-links`; preview with `fern docs dev`.
+
+## The machine-readable catalog
+
+The catalog is the stable, machine-readable contract for what recipes and
+benchmarks exist, how to deploy and benchmark them, how they were validated,
+and what performance to expect. It is consumed by humans, validation
+automation, and agentic harnesses.
+
+It is **split into one file per entry** plus an ordering index (this replaces
+the former monolithic `recipes.yaml` / `benchmarks.yaml`, which reduced merge
+conflicts and gave a cleaner per-entry ownership/validation path):
+
+```
+docs/recipes/_catalog/
+  index.yaml            # ordering + inclusion only (recipes + deferred_recipes)
+  schema.json           # JSON Schema (draft 2020-12) for ONE recipe object
+  recipes/<id>.yaml     # one recipe object per file (active AND deferred)
+  validate.py           # catalog validator (covers BOTH catalogs)
+docs/benchmarks/_catalog/
+  index.yaml            # ordering + inclusion only (benchmarks)
+  schema.json           # JSON Schema for ONE benchmark object
+  benchmarks/<id>.yaml  # one benchmark object per file
+```
+
+- **`index.yaml`** controls sidebar/landing order. The `recipes:` list is the
+  active (customer-visible) recipes in nav order; `deferred_recipes:` lists
+  recipes held back from the rendered surface (no rendered page). Active order
+  matches the Recipes tab in `docs/index.yml`; benchmark order matches the
+  Feature Benchmarks section. Every id must have a matching `<id>.yaml` file and
+  vice-versa.
+- **`<id>.yaml`** holds exactly one entry object as a top-level document, with
+  an SPDX header. The internal `id:` must equal the filename. Deferred recipes
+  carry a `deferred_reason` and omit `page`; active recipes carry `page`.
+- **`schema.json`** is the JSON Schema (draft 2020-12) for a single entry
+  object. It does structural validation (required fields, enums, types) and is
+  intentionally permissive on nested target/arm values.
+
+### Validating the catalog
+
+Run from the repo root:
+
+```bash
+python3 docs/recipes/_catalog/validate.py
+```
+
+(The single script validates **both** catalogs.) It checks: index ↔ file
+correspondence (no orphans, no dangling entries), internal-`id`/filename match,
+no duplicate ids, schema conformance, that every `page:` resolves under `docs/`,
+that every deploy/perf/benchmark asset path resolves in the repo, and
+cross-catalog referential integrity (recipe `related_benchmarks` ↔ benchmark
+ids; benchmark `related_recipes` and `promotion_candidate.deferred_recipe_id` ↔
+recipe ids, including deferred). It exits non-zero on any failure.
+
+The validator uses **stdlib only** and degrades gracefully: it prefers `pyyaml`
++ `jsonschema` if importable, otherwise parses YAML with a built-in minimal
+parser and falls back to a required-keys check. It prints which mode it ran in.
+For full schema validation, `pip install pyyaml jsonschema`.
+
+> [!NOTE]
+> CI does not yet run this validator. **Follow-up:** wire
+> `python3 docs/recipes/_catalog/validate.py` into the docs CI job so catalog
+> changes are gated on it.
 
 ## Page blueprint
 
