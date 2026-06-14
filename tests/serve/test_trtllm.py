@@ -221,7 +221,7 @@ trtllm_configs = {
             router_selection_chat_payload_default(
                 expected_log=[
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker .*worker_id=\d+ worker_type=\w+ dp_rank=\d+ logit=",
                 ]
             ),
         ],
