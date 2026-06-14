@@ -8,22 +8,22 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
-use crate::agents::trace::{
-    AgentReplayMetrics, AgentTraceRequestEndState, SharedFinishReasonMetadata,
-};
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
+use crate::request_trace::{
+    AgentContextTraceState, RequestReplayMetrics, SharedFinishReasonMetadata,
+};
 
 struct RequestTraceRequestEndState {
     request_tracker: Arc<RequestTracker>,
-    replay_metrics: Arc<AgentReplayMetrics>,
+    replay_metrics: Arc<RequestReplayMetrics>,
 }
 
 pub(crate) struct RequestEndTraceState {
-    agent: Option<AgentTraceRequestEndState>,
+    agent: Option<AgentContextTraceState>,
     request: Option<RequestTraceRequestEndState>,
 }
 
@@ -51,14 +51,13 @@ fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'sta
 
 fn shared_replay_metrics(
     request_trace_supported: bool,
-    agent_replay_enabled: bool,
     token_ids: &[crate::protocols::TokenIdType],
     trace_block_size: usize,
-) -> Option<Arc<AgentReplayMetrics>> {
-    if trace_block_size == 0 || (!request_trace_supported && !agent_replay_enabled) {
+) -> Option<Arc<RequestReplayMetrics>> {
+    if trace_block_size == 0 || !request_trace_supported {
         return None;
     }
-    crate::agents::trace::replay_metrics(token_ids, trace_block_size).map(Arc::new)
+    super::replay_metrics(token_ids, trace_block_size).map(Arc::new)
 }
 
 pub(crate) fn build_request_end_trace_state(
@@ -68,10 +67,9 @@ pub(crate) fn build_request_end_trace_state(
     trace_block_size: usize,
 ) -> Option<RequestEndTraceState> {
     let request_trace_enabled = super::is_enabled();
-    let agent_trace_enabled =
-        crate::agents::trace::is_enabled() && common_request.agent_context.is_some();
+    let has_agent_context = common_request.agent_context.is_some();
 
-    if !request_trace_enabled && !agent_trace_enabled {
+    if !request_trace_enabled {
         return None;
     }
 
@@ -109,32 +107,30 @@ pub(crate) fn build_request_end_trace_state(
             true
         };
 
-    let agent_replay_enabled =
-        agent_trace_enabled && crate::agents::trace::policy().replay_hashes_enabled;
-    if agent_replay_enabled && trace_block_size == 0 {
-        tracing::warn!(
-            %request_id,
-            "agent trace replay hashes requested but model KV cache block size is unavailable"
-        );
-    }
-
     let replay_metrics = shared_replay_metrics(
         request_trace_supported,
-        agent_replay_enabled,
         &common_request.token_ids,
         trace_block_size,
     );
 
-    let agent = crate::agents::trace::build_agent_trace_request_end_state(
-        common_request,
-        tracker,
-        context,
-        agent_replay_enabled
-            .then(|| replay_metrics.clone())
-            .flatten(),
-    );
+    let agent = has_agent_context
+        .then(|| {
+            super::build_agent_context_trace_state(
+                common_request,
+                tracker,
+                context,
+                request_trace_supported
+                    .then(|| replay_metrics.clone())
+                    .flatten(),
+            )
+        })
+        .flatten();
+
     let request = request_trace_supported
         .then(|| {
+            if has_agent_context {
+                return None;
+            }
             Some(RequestTraceRequestEndState {
                 request_tracker: tracker.clone()?,
                 replay_metrics: replay_metrics.clone()?,
@@ -174,11 +170,13 @@ where
             super::record::emit_request_end(
                 request_id.clone(),
                 &request_state.request_tracker,
-                crate::agents::trace::into_owned_replay_metrics(request_state.replay_metrics),
+                super::into_owned_replay_metrics(request_state.replay_metrics),
             );
         }
         if let Some(agent_state) = trace_state.agent {
-            crate::agents::trace::emit_agent_trace_request_end(agent_state, request_id);
+            let (agent_context, metrics) =
+                super::request_metrics_from_agent_state(agent_state, request_id.clone());
+            super::record::emit_agent_request_end(agent_context, metrics);
         }
     });
     stream
@@ -194,10 +192,7 @@ pub(crate) fn wrap_chat_request_end_stream(
     };
 
     let stream = stream.map(move |response| {
-        crate::agents::trace::record_chat_finish_reason_metadata(
-            &finish_reason_metadata,
-            &response,
-        );
+        super::record_chat_finish_reason_metadata(&finish_reason_metadata, &response);
         response
     });
     wrap_request_end_stream(Box::pin(stream), trace_state, request_id)
@@ -213,10 +208,7 @@ pub(crate) fn wrap_completion_request_end_stream(
     };
 
     let stream = stream.map(move |response| {
-        crate::agents::trace::record_completion_finish_reason_metadata(
-            &finish_reason_metadata,
-            &response,
-        );
+        super::record_completion_finish_reason_metadata(&finish_reason_metadata, &response);
         response
     });
     wrap_request_end_stream(Box::pin(stream), trace_state, request_id)
@@ -232,8 +224,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::agents::context::AgentContext;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
+    use crate::request_trace::RequestTraceEventSource;
 
     struct TrackerDropStream {
         tracker: Arc<RequestTracker>,
@@ -303,13 +297,10 @@ mod tests {
     }
 
     #[test]
-    fn replay_hashing_is_disabled_when_unused_and_shared_when_both_need_it() {
-        assert!(shared_replay_metrics(false, false, &[1, 2, 3], 2).is_none());
+    fn replay_hashing_is_disabled_when_unused() {
+        assert!(shared_replay_metrics(false, &[1, 2, 3], 2).is_none());
 
-        let replay = shared_replay_metrics(true, true, &[1, 2, 3], 2).unwrap();
-        let request_replay = replay.clone();
-        let agent_replay = replay.clone();
-        assert!(Arc::ptr_eq(&request_replay, &agent_replay));
+        let replay = shared_replay_metrics(true, &[1, 2, 3], 2).unwrap();
         assert_eq!(replay.input_sequence_hashes.len(), 2);
     }
 
@@ -318,25 +309,25 @@ mod tests {
         let token_ids = (0..131_072_u32).collect::<Vec<_>>();
 
         let started = Instant::now();
-        let disabled = shared_replay_metrics(false, false, &token_ids, 64);
+        let disabled = shared_replay_metrics(false, &token_ids, 64);
         let disabled_elapsed = started.elapsed();
 
         let started = Instant::now();
-        let request_only = shared_replay_metrics(true, false, &token_ids, 64).unwrap();
+        let request_only = shared_replay_metrics(true, &token_ids, 64).unwrap();
         let request_elapsed = started.elapsed();
 
         let started = Instant::now();
-        let both = shared_replay_metrics(true, true, &token_ids, 64).unwrap();
-        let both_elapsed = started.elapsed();
+        let repeated = shared_replay_metrics(true, &token_ids, 64).unwrap();
+        let repeated_elapsed = started.elapsed();
 
         eprintln!(
-            "long-ISL replay hashing: disabled={disabled_elapsed:?}, request_only={request_elapsed:?}, both={both_elapsed:?}"
+            "long-ISL replay hashing: disabled={disabled_elapsed:?}, request_only={request_elapsed:?}, repeated={repeated_elapsed:?}"
         );
         assert!(disabled.is_none());
         assert_eq!(request_only.input_sequence_hashes.len(), 2_048);
         assert_eq!(
             request_only.input_sequence_hashes,
-            both.input_sequence_hashes
+            repeated.input_sequence_hashes
         );
     }
 
@@ -350,7 +341,7 @@ mod tests {
             agent: None,
             request: Some(RequestTraceRequestEndState {
                 request_tracker: tracker.clone(),
-                replay_metrics: Arc::new(AgentReplayMetrics {
+                replay_metrics: Arc::new(RequestReplayMetrics {
                     trace_block_size: 2,
                     input_length: 2,
                     input_sequence_hashes: vec![11],
@@ -369,7 +360,66 @@ mod tests {
         let record = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let record = receiver.recv().await.unwrap();
-                if record.request.request_id == "req-drop" {
+                if record
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request.request_id == "req-drop")
+                {
+                    break record;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let request = record.request.as_ref().expect("request payload");
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(request.output_tokens, Some(9));
+    }
+
+    #[tokio::test]
+    async fn agent_context_emits_enriched_request_trace_row() {
+        BUS.init(16);
+        let mut receiver = BUS.subscribe();
+        let tracker = Arc::new(RequestTracker::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let state = RequestEndTraceState {
+            agent: Some(AgentContextTraceState {
+                agent_context: AgentContext {
+                    session_type_id: "ms_agent".to_string(),
+                    session_id: "run-1".to_string(),
+                    trajectory_id: "root".to_string(),
+                    parent_trajectory_id: None,
+                    trajectory_final: None,
+                },
+                request_model: "test-model".to_string(),
+                request_tracker: Some(tracker.clone()),
+                x_request_id: Some("llm-call-1".to_string()),
+                replay_metrics: Some(Arc::new(RequestReplayMetrics {
+                    trace_block_size: 2,
+                    input_length: 2,
+                    input_sequence_hashes: vec![11],
+                })),
+                finish_reason_metadata: SharedFinishReasonMetadata::default(),
+            }),
+            request: None,
+        };
+        let stream = TrackerDropStream {
+            tracker,
+            dropped: dropped.clone(),
+        };
+
+        let wrapped =
+            wrap_request_end_stream(Box::pin(stream), Some(state), "req-agent".to_string());
+        drop(wrapped);
+
+        let record = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let record = receiver.recv().await.unwrap();
+                if record
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request.request_id == "req-agent")
+                {
                     break record;
                 }
             }
@@ -377,6 +427,26 @@ mod tests {
         .await
         .unwrap();
         assert!(dropped.load(Ordering::Acquire));
-        assert_eq!(record.request.output_tokens, 9);
+        assert_eq!(record.event_source, Some(RequestTraceEventSource::Dynamo));
+        assert_eq!(
+            record
+                .agent_context
+                .as_ref()
+                .expect("agent context")
+                .trajectory_id,
+            "root"
+        );
+        let request = record.request.as_ref().expect("request payload");
+        assert_eq!(request.model.as_deref(), Some("test-model"));
+        assert_eq!(request.x_request_id.as_deref(), Some("llm-call-1"));
+        assert_eq!(request.output_tokens, Some(9));
+        assert_eq!(
+            request
+                .replay
+                .as_ref()
+                .expect("replay metrics")
+                .input_length,
+            2
+        );
     }
 }

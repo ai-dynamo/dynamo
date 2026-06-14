@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert Dynamo agent trace JSONL files to Perfetto-compatible JSON.
+"""Convert Dynamo request trace JSONL files to Perfetto-compatible JSON.
 
 The output uses Chrome Trace Event JSON, which can be opened directly in
 Perfetto UI. Inputs can be uncompressed `.jsonl`, compressed `.jsonl.gz`,
@@ -57,13 +57,14 @@ def _iter_records(paths: list[Path]) -> Iterable[dict[str, Any]]:
 
 _TOOL_EVENT_TYPES = {"tool_start", "tool_end", "tool_error"}
 _SYNTHETIC_TOOL_DURATION_US = 1_000
+_SUPPORTED_SCHEMA = "dynamo.request.trace.v1"
 
 
 def _event_from_record(record: dict[str, Any]) -> dict[str, Any] | None:
     event = record.get("event", record)
     if not isinstance(event, dict):
         return None
-    if event.get("schema") != "dynamo.agent.trace.v1":
+    if event.get("schema") != _SUPPORTED_SCHEMA:
         return None
     return event
 
@@ -702,7 +703,7 @@ def convert_records(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert Dynamo agent trace JSONL/JSONL.GZ files to Perfetto JSON.",
+        description="Convert Dynamo request trace JSONL/JSONL.GZ files to Perfetto JSON.",
     )
     parser.add_argument(
         "inputs",

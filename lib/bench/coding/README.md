@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Coding Trace Export
 
-Rust-native exporters for privacy-preserving coding-agent traces.
+Rust-native exporters for privacy-preserving coding-request traces.
 
 ## Claude Exporter
 

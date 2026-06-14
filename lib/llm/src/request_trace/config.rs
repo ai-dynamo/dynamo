@@ -27,6 +27,8 @@ pub struct RequestTracePolicy {
     pub jsonl_flush_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub jsonl_gz_roll_lines: Option<u64>,
+    pub tool_events_zmq_endpoint: Option<String>,
+    pub tool_events_zmq_topic: Option<String>,
 }
 
 static POLICY: OnceLock<RequestTracePolicy> = OnceLock::new();
@@ -72,6 +74,16 @@ fn load_from_env() -> RequestTracePolicy {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0);
+    let tool_events_zmq_endpoint =
+        std::env::var(env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    let tool_events_zmq_topic =
+        std::env::var(env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
     RequestTracePolicy {
         enabled,
@@ -82,6 +94,8 @@ fn load_from_env() -> RequestTracePolicy {
         jsonl_flush_interval_ms,
         jsonl_gz_roll_bytes,
         jsonl_gz_roll_lines,
+        tool_events_zmq_endpoint,
+        tool_events_zmq_topic,
     }
 }
 
@@ -107,6 +121,10 @@ mod tests {
                 (env_request_trace::DYN_REQUEST_TRACE, Some("1")),
                 (env_request_trace::DYN_REQUEST_TRACE_SINKS, None),
                 (env_request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH, None),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+                    None::<&str>,
+                ),
             ],
             || {
                 let policy = load_from_env();
@@ -138,6 +156,10 @@ mod tests {
                     env_request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
                     Some("10"),
                 ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+                    Some("tcp://127.0.0.1:9999"),
+                ),
             ],
             || {
                 let policy = load_from_env();
@@ -150,6 +172,10 @@ mod tests {
                     Some("/tmp/custom-request-trace")
                 );
                 assert_eq!(policy.jsonl_gz_roll_lines, Some(10));
+                assert_eq!(
+                    policy.tool_events_zmq_endpoint.as_deref(),
+                    Some("tcp://127.0.0.1:9999")
+                );
             },
         );
     }
@@ -162,12 +188,17 @@ mod tests {
                 (env_request_trace::DYN_REQUEST_TRACE, None::<&str>),
                 (env_request_trace::DYN_REQUEST_TRACE_SINKS, None),
                 (env_request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH, None),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+                    None,
+                ),
             ],
             || {
                 let policy = load_from_env();
                 assert!(!policy.enabled);
                 assert!(policy.sinks.is_empty());
                 assert!(policy.output_path.is_none());
+                assert!(policy.tool_events_zmq_endpoint.is_none());
             },
         );
     }
