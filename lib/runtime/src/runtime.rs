@@ -24,10 +24,24 @@ use once_cell::sync::OnceCell;
 use std::{
     mem::ManuallyDrop,
     sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
 use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
+
+const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
+
+fn graceful_shutdown_timeout() -> Duration {
+    let timeout_secs = std::env::var(
+        config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    )
+    .ok()
+    .and_then(|s| s.parse::<u64>().ok())
+    .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
+
+    Duration::from_secs(timeout_secs)
+}
 
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone, Debug)]
@@ -330,15 +344,70 @@ impl Runtime {
             tracing::info!("Active graceful endpoints: {count}");
 
             if count != 0 {
-                tracker.wait_for_completion().await;
+                let timeout = graceful_shutdown_timeout();
+                if tokio::time::timeout(timeout, tracker.wait_for_completion())
+                    .await
+                    .is_err()
+                {
+                    let remaining = tracker.get_count();
+                    tracing::error!(
+                        unified_model_logs = true,
+                        timeout_secs = timeout.as_secs(),
+                        remaining_endpoints = remaining,
+                        "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
+                    );
+                }
             }
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
-            tracing::info!(
-                "Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected"
-            );
+            tracing::info!("Phase 3: Connections to backend services will now be disconnected");
             main_token.cancel();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::environment_names::runtime as env_runtime;
+
+    #[test]
+    fn graceful_shutdown_timeout_defaults_to_15_minutes() {
+        temp_env::with_var(
+            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            None::<&str>,
+            || {
+                assert_eq!(
+                    graceful_shutdown_timeout(),
+                    Duration::from_secs(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_timeout_uses_env_override() {
+        temp_env::with_var(
+            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            Some("42"),
+            || {
+                assert_eq!(graceful_shutdown_timeout(), Duration::from_secs(42));
+            },
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_timeout_defaults_for_invalid_env() {
+        temp_env::with_var(
+            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            Some("not-a-number"),
+            || {
+                assert_eq!(
+                    graceful_shutdown_timeout(),
+                    Duration::from_secs(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+                );
+            },
+        );
     }
 }
 
