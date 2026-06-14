@@ -416,7 +416,9 @@ async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
     served_model_name = "Qwen/Qwen3-0.6B"
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(num_gpu_blocks=8),
-        model_config=SimpleNamespace(max_model_len=4096),
+        model_config=SimpleNamespace(
+            max_model_len=4096, get_diff_sampling_param=lambda: {}
+        ),
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
             max_num_batched_tokens=8192,
