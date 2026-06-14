@@ -379,7 +379,7 @@ def test_conformance_vllm_example_pair(name):
     expected = c.load_docs(beta_path.read_text())
 
     assert len(converted) == len(expected)
-    for got, want in zip(converted, expected):
+    for got, want in zip(converted, expected, strict=True):
         got_n = c_test_normalize(got)
         want_n = c_test_normalize(want)
         assert got_n.get("apiVersion") == want_n.get("apiVersion")
