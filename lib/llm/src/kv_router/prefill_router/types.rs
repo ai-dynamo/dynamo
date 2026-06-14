@@ -3,6 +3,7 @@
 
 use dynamo_kv_router::config::RouterConfigOverride;
 use dynamo_kv_router::protocols::RouterBackpressureReason;
+use dynamo_runtime::pipeline::OccupancyPermit;
 
 use crate::protocols::common::preprocessor::{BootstrapInfo, PrefillResult, TraceLink};
 
@@ -50,15 +51,22 @@ pub(super) enum PrefillResolveDecision {
         worker_id: u64,
         dp_rank: Option<u32>,
         bootstrap_info: BootstrapInfo,
+        /// Occupancy booking for LL/P2C/DAW; held across the spawned prefill so
+        /// `direct()` dispatch is reflected in the load counter. `None` for
+        /// KV/RoundRobin/Random.
+        permit: Option<OccupancyPermit>,
     },
     Unavailable,
     NotActivated,
     /// Bootstrap endpoint unavailable after a worker was selected.
-    /// Carries the peeked worker so the synchronous prefill path can commit
+    /// Carries the selected worker so the synchronous prefill path can commit
     /// that selection instead of re-entering router selection.
     NoBootstrapEndpoint {
         worker_id: u64,
         dp_rank: Option<u32>,
+        /// Same occupancy booking as `Resolved`; the synchronous path holds it
+        /// across `execute_prefill` so this branch tracks load too.
+        permit: Option<OccupancyPermit>,
     },
     Backpressure {
         reason: RouterBackpressureReason,
@@ -77,6 +85,10 @@ pub enum PrefillQueryOutcome {
     Routed {
         worker_id: u64,
         dp_rank: Option<u32>,
+        /// Atomic occupancy booking when the SimpleRouter selected via
+        /// `select_and_reserve` (LL/P2C/DAW). `None` for KV (own accounting),
+        /// RoundRobin/Random (peeked, no counter), and pinned workers.
+        permit: Option<OccupancyPermit>,
     },
     Backpressure {
         reason: RouterBackpressureReason,

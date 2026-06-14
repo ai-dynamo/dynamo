@@ -57,14 +57,24 @@ impl PrefillRouter {
             None
         };
 
-        // Worker selection
-        let (worker_id, dp_rank) = if let Some(worker) = sticky_worker {
+        // Worker selection. `permit` books occupancy for LL/P2C/DAW so the
+        // later `direct()` dispatch is counted; held by the returned decision
+        // for the request's lifetime. For an externally-fixed worker (sticky /
+        // preselected) there is no selection race, so a plain track_dispatch
+        // books it; the router-selected path books atomically inside
+        // query_prefill_worker. `None` for KV/RoundRobin/Random.
+        let book = |worker_id: u64| {
+            self.prefill_router
+                .get()
+                .and_then(|r| r.track_dispatch(worker_id))
+        };
+        let (worker_id, dp_rank, permit) = if let Some(worker) = sticky_worker {
             tracing::debug!(
                 worker_id = worker.worker_id,
                 dp_rank = worker.dp_rank,
                 "Using sticky prefill worker for bootstrap"
             );
-            (worker.worker_id, Some(worker.dp_rank))
+            (worker.worker_id, Some(worker.dp_rank), book(worker.worker_id))
         } else if let Some(id) = preselected_worker {
             let dp_rank = req
                 .routing
@@ -75,7 +85,7 @@ impl PrefillRouter {
                 dp_rank = ?dp_rank,
                 "Using pre-selected prefill worker for bootstrap"
             );
-            (id, dp_rank)
+            (id, dp_rank, book(id))
         } else {
             // Use shared worker selection logic (update_states=false for peek behavior)
             // Extract queue and request metadata from routing hints.
@@ -113,7 +123,11 @@ impl PrefillRouter {
                 )
                 .await
             {
-                Ok(PrefillQueryOutcome::Routed { worker_id, dp_rank }) => (worker_id, dp_rank),
+                Ok(PrefillQueryOutcome::Routed {
+                    worker_id,
+                    dp_rank,
+                    permit,
+                }) => (worker_id, dp_rank, permit),
                 Ok(PrefillQueryOutcome::Backpressure {
                     reason,
                     queued_isl_tokens,
@@ -134,13 +148,25 @@ impl PrefillRouter {
             .model_manager
             .get_disaggregated_endpoint(endpoint_id, worker_id)
         else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
+            return PrefillResolveDecision::NoBootstrapEndpoint {
+                worker_id,
+                dp_rank,
+                permit,
+            };
         };
         let Some(host) = endpoint.bootstrap_host else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
+            return PrefillResolveDecision::NoBootstrapEndpoint {
+                worker_id,
+                dp_rank,
+                permit,
+            };
         };
         let Some(port) = endpoint.bootstrap_port else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
+            return PrefillResolveDecision::NoBootstrapEndpoint {
+                worker_id,
+                dp_rank,
+                permit,
+            };
         };
 
         let dp_size: Option<u32> = self
@@ -167,6 +193,7 @@ impl PrefillRouter {
                 bootstrap_port: port,
                 bootstrap_room,
             },
+            permit,
         }
     }
 
@@ -415,9 +442,12 @@ impl PrefillRouter {
                     .await?;
                 match outcome {
                     crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
+                        // KV tracks load via worker-pushed kv_metrics, not the
+                        // occupancy counter, so no permit here.
                         Ok(PrefillQueryOutcome::Routed {
                             worker_id: worker.worker_id,
                             dp_rank: Some(worker.dp_rank),
+                            permit: None,
                         })
                     }
                     crate::kv_router::FindBestMatchOutcome::Backpressure {
@@ -432,15 +462,32 @@ impl PrefillRouter {
                 }
             }
             InnerPrefillRouter::SimpleRouter(r) => {
-                let worker_id = if update_states {
-                    r.select_next_worker()
+                // Peek path (update_states=false) is the bootstrap resolve: for
+                // LL/P2C/DAW, atomically select+book via select_and_reserve so a
+                // concurrent resolve can't pick the same min; RoundRobin/Random
+                // have no occupancy state, so fall back to a plain peek (no
+                // permit). The select path (update_states=true) advances the
+                // RoundRobin/Random cursor and never books occupancy.
+                let (worker_id, permit) = if update_states {
+                    let id = r
+                        .select_next_worker()
+                        .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+                    (id, None)
                 } else {
-                    r.peek_next_worker()
-                }
-                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+                    match r.select_and_reserve().await {
+                        Some((id, permit)) => (id, Some(permit)),
+                        None => {
+                            let id = r.peek_next_worker().ok_or_else(|| {
+                                anyhow::anyhow!("No workers available for prefill")
+                            })?;
+                            (id, None)
+                        }
+                    }
+                };
                 Ok(PrefillQueryOutcome::Routed {
                     worker_id,
                     dp_rank: None,
+                    permit,
                 })
             }
         }

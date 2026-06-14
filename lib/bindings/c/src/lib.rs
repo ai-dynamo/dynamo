@@ -483,7 +483,13 @@ impl RouterHandles {
                 QueryRouterResult::ErrQueryFailed
             })?;
         match outcome {
-            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            // External-dispatch query: the C caller routes/tracks the worker
+            // itself, so we don't retain the occupancy booking (drop the permit).
+            PrefillQueryOutcome::Routed {
+                worker_id,
+                dp_rank,
+                permit: _,
+            } => Ok((worker_id, dp_rank)),
             PrefillQueryOutcome::Backpressure {
                 reason,
                 queued_isl_tokens,
