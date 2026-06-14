@@ -221,7 +221,6 @@ class TrackTable:
         self._session_pids: dict[str, int] = {}
         self._track_tids: dict[tuple[str, str, int, str], int] = {}
         self._active_lanes: dict[tuple[str, str], list[tuple[int, int]]] = {}
-        self._next_lane: dict[tuple[str, str], int] = {}
         self._max_lanes: dict[tuple[str, str], int] = {}
 
     def lane_for(
@@ -244,8 +243,6 @@ class TrackTable:
         lane = 0
         while lane in active_lanes:
             lane += 1
-        if lane >= self._next_lane.get(trajectory_key, 0):
-            self._next_lane[trajectory_key] = lane + 1
         self._max_lanes[trajectory_key] = max(
             self._max_lanes.get(trajectory_key, 0), lane + 1
         )
@@ -715,15 +712,6 @@ def parse_args() -> argparse.Namespace:
         "--output",
         required=True,
         help="Output Chrome Trace JSON path for Perfetto UI.",
-    )
-    parser.add_argument(
-        "--include-stages",
-        action="store_true",
-        default=True,
-        help=(
-            "Emit prefill wait, prefill, and decode stage slices. This is the "
-            "default; kept for compatibility."
-        ),
     )
     parser.add_argument(
         "--no-stages",

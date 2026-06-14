@@ -63,10 +63,8 @@ pub(crate) struct RequestTraceReplayMetrics {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RequestTraceToolEventMetrics {
-    #[serde(default)]
-    pub(crate) tool_call_id: Option<String>,
-    #[serde(default)]
-    pub(crate) tool_class: Option<String>,
+    pub(crate) tool_call_id: String,
+    pub(crate) tool_class: String,
     #[serde(default)]
     pub(crate) started_at_unix_ms: Option<u64>,
     #[serde(default)]
@@ -280,8 +278,8 @@ fn tool_entry(record: RequestTraceRecord, terminal_event: String) -> Option<Tool
         trajectory_id: context.trajectory_id,
         start_ms,
         end_ms,
-        tool_call_id: tool.tool_call_id.unwrap_or_default(),
-        tool_class: tool.tool_class.unwrap_or_default(),
+        tool_call_id: tool.tool_call_id,
+        tool_class: tool.tool_class,
         status,
         duration_ms,
         output_bytes: tool.output_bytes,

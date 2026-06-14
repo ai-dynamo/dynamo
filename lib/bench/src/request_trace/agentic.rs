@@ -375,12 +375,7 @@ pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
             tool.status.clone()
         };
         *summary.by_status.entry(status_key).or_insert(0) += 1;
-        let class_key = if tool.tool_class.is_empty() {
-            "(unlabeled)".to_string()
-        } else {
-            tool.tool_class.clone()
-        };
-        *summary.by_class.entry(class_key).or_insert(0) += 1;
+        *summary.by_class.entry(tool.tool_class.clone()).or_insert(0) += 1;
         summary.total_wall_ms += tool.duration_ms;
         trajectories.insert(tool.trajectory_id.as_str());
     }
