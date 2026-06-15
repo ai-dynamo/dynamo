@@ -238,7 +238,6 @@ pub(crate) struct AgentContextTraceState {
     pub request_model: String,
     pub request_tracker: Option<Arc<RequestTracker>>,
     pub x_request_id: Option<String>,
-    pub replay_metrics: Option<Arc<RequestReplayMetrics>>,
     pub finish_reason_metadata: SharedFinishReasonMetadata,
 }
 
@@ -246,7 +245,6 @@ pub(crate) fn build_agent_context_trace_state(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
-    replay_metrics: Option<Arc<RequestReplayMetrics>>,
 ) -> Option<AgentContextTraceState> {
     let agent_context = common_request.agent_context.clone()?;
     let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
@@ -262,7 +260,6 @@ pub(crate) fn build_agent_context_trace_state(
         request_model: common_request.model.clone(),
         request_tracker: tracker.clone(),
         x_request_id,
-        replay_metrics,
         finish_reason_metadata: SharedFinishReasonMetadata::default(),
     })
 }
@@ -366,7 +363,6 @@ pub(crate) fn request_metrics_from_agent_state(
         request_model,
         request_tracker,
         x_request_id,
-        replay_metrics,
         finish_reason_metadata,
     } = trace_state;
 
@@ -382,7 +378,6 @@ pub(crate) fn request_metrics_from_agent_state(
         request_model,
         request_tracker.as_deref(),
     );
-    metrics.replay = replay_metrics.map(into_owned_replay_metrics);
     metrics.finish_reason_metadata = snapshot_finish_reason_metadata(&finish_reason_metadata);
     (agent_context, metrics)
 }
@@ -646,7 +641,6 @@ mod tests {
             request_model: "test-model".to_string(),
             request_tracker: None,
             x_request_id: Some("llm-call-1".to_string()),
-            replay_metrics: None,
             finish_reason_metadata,
         };
 
@@ -763,7 +757,6 @@ mod tests {
             request_model: "test-model".to_string(),
             request_tracker: None,
             x_request_id: Some("completion-call-1".to_string()),
-            replay_metrics: None,
             finish_reason_metadata,
         };
 
