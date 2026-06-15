@@ -213,8 +213,6 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -244,8 +242,6 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -275,8 +271,6 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -307,8 +301,6 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -324,8 +316,6 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -341,8 +331,6 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -357,8 +345,6 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -377,8 +363,6 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -547,89 +531,72 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # IMAGE COMPLIANCE
+  # IMAGE COMPLIANCE PIPELINES
   # ============================================================================
-  # Compliance extract (unified /legal NOTICES + osrb-deps.csv + osrb.cdx.json)
-  # runs as an inline step INSIDE each shipped framework build job
-  # (inline_compliance: true above) — same job, same warm builder, so it's a
-  # cache hit + small scratch export rather than a cold full-image rebuild.
-  # License-policy enforcement also happens in the licenses Dockerfile stage; a
-  # compliance failure fails the build and (via needs:) preempts dependent tests.
-  #
-  # The *-compliance-audit jobs below are the INDEPENDENT completeness check:
-  # they syft-scan the pushed image and diff it against the build's osrb-deps.csv
-  # to surface anything shipped-but-unattributed. They need:[<fw>-build] and run
-  # in PARALLEL with the test jobs (the slow syft pull+scan stays off the test
-  # critical path). Soft gate: report-only, non-required. EFA-image audits are a
-  # follow-up (same caller pattern).
 
-  vllm-compliance-audit:
-    name: vllm-runtime # grouped in the UI with other vllm jobs
+  vllm-compliance:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: vllm
       target: runtime
-      cuda_version: '13.0'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
-  sglang-compliance-audit:
-    name: sglang-runtime # grouped in the UI with other sglang jobs
+  sglang-compliance:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: sglang
       target: runtime
-      cuda_version: '13.0'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.sglang-build.outputs.baseline_sbom_file }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
-  trtllm-compliance-audit:
-    name: trtllm-runtime # grouped in the UI with other trtllm jobs
+  trtllm-compliance:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '13.1'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
-  planner-compliance-audit:
-    name: planner # grouped in the UI with other planner jobs
+  planner-compliance:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
       target: planner
-      cuda_version: ''
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.planner-build.outputs.baseline_sbom_file }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
-  frontend-compliance-audit:
-    name: frontend # grouped in the UI with other frontend jobs
+  frontend-compliance:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
     needs: [changed-files, frontend-build]
-    if: |
-      needs.changed-files.outputs.frontend == 'true' ||
-      needs.changed-files.outputs.operator == 'true' ||
-      needs.changed-files.outputs.snapshot == 'true' ||
-      needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    if: needs.changed-files.outputs.frontend == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
       target: frontend
-      cuda_version: ''
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   # ============================================================================

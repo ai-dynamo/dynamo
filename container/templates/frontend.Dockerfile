@@ -8,14 +8,6 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
-# NOTE: EPP's Go compliance SBOM (/sbom-go.cdx.json) + harvested license texts are
-# NO LONGER pulled from the EPP image here. compliance.Dockerfile's licenses stage
-# reads them from the build context (.epp-sbom/), populated by the CI EPP-build
-# step's `make sbom-export` while the build cache is warm. This replaced a fragile
-# `COPY --from=epp_sbom` that re-pulled the pushed EPP image (whose runtime layer
-# could miss the files after a BuildKit cache refresh). Only the /epp binary is
-# taken from the EPP image (below).
-
 # Build `crick` as a wheel in an isolated stage so the C toolchain never
 # reaches the final frontend image. aiperf 0.8.0 depends on crick==0.0.8,
 # which publishes no manylinux aarch64 wheel — without this, arm64 builds
@@ -46,7 +38,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         && /tmp/buildenv/bin/pip wheel --no-cache-dir --no-deps crick==0.0.8 -w /wheels; \
     fi
 
-FROM ${FRONTEND_IMAGE} AS pre_frontend
+FROM ${FRONTEND_IMAGE} AS frontend
 
 ARG PYTHON_VERSION
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
@@ -93,8 +85,8 @@ COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: dev /workspace/dev
 COPY --chown=dynamo: components/ /workspace/components/
 COPY --chown=dynamo: recipes/ /workspace/recipes/
-# Copy LICENSE; ATTRIBUTIONS files removed in favor of /legal/ generated at build time.
-COPY --chown=dynamo: LICENSE /workspace/
+# Copy attribution files with correct ownership
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="/opt/dynamo/venv/bin:$PATH"
@@ -163,14 +155,5 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 
 USER dynamo
 
-ENTRYPOINT ["/epp"]
-CMD ["/bin/bash"]
-
-
-{% include "templates/compliance.Dockerfile" %}
-
-
-FROM pre_frontend AS frontend
-COPY --from=licenses /legal /legal
 ENTRYPOINT ["/epp"]
 CMD ["/bin/bash"]
