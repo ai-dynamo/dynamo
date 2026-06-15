@@ -389,7 +389,7 @@ class AudioGenerationHandler:
 
                 self._tts_tokenizer = AutoTokenizer.from_pretrained(
                     self.config.model,
-                    trust_remote_code=True,
+                    trust_remote_code=self.config.engine_args.trust_remote_code,
                     padding_side="left",
                 )
 

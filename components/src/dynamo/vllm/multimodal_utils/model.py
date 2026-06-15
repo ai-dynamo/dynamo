@@ -155,7 +155,9 @@ def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
     return None
 
 
-def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Module:
+def load_vision_model(
+    model_id: str, enforce_eager: bool = False, trust_remote_code: bool = False
+) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
     """
@@ -187,7 +189,10 @@ def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Mo
             vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
         )
     return AutoModel.from_pretrained(
-        model_id, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True
+        model_id,
+        device_map="auto",
+        torch_dtype=torch.float16,
+        trust_remote_code=trust_remote_code,
     )
 
 

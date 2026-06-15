@@ -78,7 +78,10 @@ class TensorRTLLMEngine:
 
                 # Skip MultimodalEncoder for architectures that handle vision
                 # encoding inside the main model (e.g. Llama4).
-                if self._is_unsupported_encoder_arch(model):  # type: ignore
+                if self._is_unsupported_encoder_arch(
+                    model,
+                    trust_remote_code=self.engine_args.get("trust_remote_code", False),
+                ):  # type: ignore
                     return
 
                 max_batch_size = self.engine_args.get("max_batch_size", 1)
@@ -204,11 +207,15 @@ class TensorRTLLMEngine:
         )
 
     @staticmethod
-    def _is_unsupported_encoder_arch(model_path: str) -> bool:
+    def _is_unsupported_encoder_arch(
+        model_path: str, trust_remote_code: bool = False
+    ) -> bool:
         """Return True if *model_path*'s architecture is not supported by
         TRT-LLM's standalone MultimodalEncoder."""
         try:
-            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            config = AutoConfig.from_pretrained(
+                model_path, trust_remote_code=trust_remote_code
+            )
             archs = getattr(config, "architectures", None) or []
             return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
         except Exception:
