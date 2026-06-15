@@ -38,28 +38,23 @@ fn main() -> Result<()> {
 
     let loaded = load_request_trace_records(&input_paths)?;
     let tool_summary = summarize_tools(&loaded.tools);
-    let mut writer = MooncakeJsonlWriter::create(&output_path, None)?;
 
-    let trace_block_size = if args.agentic {
+    let (kind, trace_block_size, stats) = if args.agentic {
         let (trace_block_size, rows) = build_agentic_mooncake_rows(loaded)?;
+        let mut writer = MooncakeJsonlWriter::create(&output_path, None)?;
         for row in &rows {
             writer.write_agentic_row(row)?;
         }
-        trace_block_size
+        ("Agentic Mooncake", trace_block_size, writer.finish()?)
     } else {
         let (trace_block_size, rows) = build_mooncake_rows(loaded.requests)?;
+        let mut writer = MooncakeJsonlWriter::create(&output_path, None)?;
         for row in &rows {
             writer.write_row(row)?;
         }
-        trace_block_size
+        ("Mooncake", trace_block_size, writer.finish()?)
     };
 
-    let stats = writer.finish()?;
-    let kind = if args.agentic {
-        "Agentic Mooncake"
-    } else {
-        "Mooncake"
-    };
     println!(
         "Wrote {} {kind} rows to {}",
         stats.row_count,

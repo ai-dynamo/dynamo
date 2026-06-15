@@ -22,6 +22,6 @@ For changes under `request_trace/`, run:
 
 ```bash
 cargo fmt --check
-cargo check -p dynamo-llm --lib
-cargo test -p dynamo-llm --lib request_trace
+cargo check -p dynamo-llm --lib --no-default-features
+cargo test -p dynamo-llm --lib request_trace --no-default-features
 ```

@@ -5,9 +5,9 @@ title: Agent Tracing
 subtitle: Attach trajectory identity and export Dynamo request and tool-event telemetry
 ---
 
-Agent tracing records **who** called (`nvext.agent_context`) and **what Dynamo measured** on each LLM request (`request_end`). Tool-call understanding is built in: Dynamo **autodetects** tool calls and finish reasons from the response stream and records them as `finish_reason_metadata` on every request — no harness instrumentation. Richer **harness tool spans** (`tool_*`: tool timing, status, output sizes) are an optional add-on. Context is passive—it does not steer routing or caching. Output is best-effort profiling data, not an audit log.
+Agent tracing records **who** called (`nvext.agent_context`) and **what Dynamo measured** on each eligible LLM request (`request_end`). Tool-call understanding is built in: Dynamo **autodetects** tool calls and finish reasons from the response stream and records them as `finish_reason_metadata` on emitted request rows — no harness instrumentation. Richer **harness tool spans** (`tool_*`: tool timing, status, output sizes) are an optional add-on. Context is passive—it does not steer routing or caching. Output is best-effort profiling data, not an audit log.
 
-**Flow:** Harness sends chat completions with `agent_context` → Dynamo emits a `dynamo.request.trace.v1` `request_end` row (with autodetected `finish_reason_metadata`) to request trace sinks. *Optionally*, a harness also publishes its own tool events over ZMQ → same sinks.
+**Flow:** Harness sends chat completions with `agent_context` → Dynamo emits a `dynamo.request.trace.v1` `request_end` row for supported request shapes (with autodetected `finish_reason_metadata`) to request trace sinks. *Optionally*, a harness also publishes its own tool events over ZMQ → same sinks.
 
 ## Adding trace context to each LLM call
 
@@ -142,7 +142,9 @@ metadata is ids and names only — arguments are intentionally not stored.
 `finish_reason_metadata` is optional. `finish_reason` is the final OpenAI-compatible
 reason after parser rewrites (e.g. `tool_calls`); `backend_finish_reason` /
 `stop_reason` come from the backend stop path. Top-level finish fields summarize the
-single-choice case; `choices` keeps per-choice finish fields when `n > 1`. For chat
+emitted single-choice request row. Current request tracing skips unsupported
+multi-choice replay shapes such as `n > 1` and `best_of > 1`, so do not assume
+every trajectory turn is present unless skipped-row warnings are absent. For chat
 streams, finish metadata is recorded after parser/jail rewrites; completion streams
 record the final OpenAI-compatible completion finish reason. See `RequestTraceRecord`
 / `RequestTraceMetrics` in `lib/llm/src/request_trace/types.rs` for the preferred
