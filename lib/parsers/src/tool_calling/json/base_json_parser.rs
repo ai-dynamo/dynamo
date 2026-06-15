@@ -360,8 +360,7 @@ fn parse_calls(
             {
                 calls.push(mk(func_params.name, &func_params.parameters));
             } else if allow_name_only
-                && let Ok(name_only) =
-                    serde_json::from_str::<CalledFunctionNameOnly>(item_str)
+                && let Ok(name_only) = serde_json::from_str::<CalledFunctionNameOnly>(item_str)
             {
                 // No `arguments`/`parameters` key — treat as an empty-arg call.
                 let empty = RawValue::from_string("{}".to_string())?;
@@ -528,7 +527,10 @@ pub fn try_tool_call_parse_basic_json(
     {
         let recovered = recover_leading_complete_objects(json);
         if !recovered.is_empty()
-            && let Some(calls) = parse_calls(&format!("[{}]", recovered.join(",")), config.allow_name_only_call)?
+            && let Some(calls) = parse_calls(
+                &format!("[{}]", recovered.join(",")),
+                config.allow_name_only_call,
+            )?
             && !calls.is_empty()
         {
             return Ok((calls, Some(normal_text)));

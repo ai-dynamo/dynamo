@@ -56,8 +56,9 @@ cases:
         calls: []
         normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
       vllm:
-        reason: Dynamo's jamba parser leaves closing </tool_calls> envelope plus the JSON array in normal_text when opening
-          <tool_calls> marker is missing (impl-defined recovery)
+        reason: 'Truncated mid-arguments with the opening <tool_calls> present but no
+          close: both engines preserve the raw text; eof-recovery cannot complete the
+          call. Impl-defined recovery (batch.5), so parity is not expected.'
         calls: []
         normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
       sglang:
