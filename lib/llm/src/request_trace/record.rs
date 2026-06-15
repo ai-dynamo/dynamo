@@ -133,8 +133,11 @@ pub(crate) fn validate_tool_record(record: &RequestTraceRecord) -> anyhow::Resul
     if record.agent_context.is_none() {
         anyhow::bail!("missing agent_context");
     }
-    if record.tool.is_none() {
+    let Some(tool) = record.tool.as_ref() else {
         anyhow::bail!("missing tool payload");
+    };
+    if tool.duration_ms.is_some_and(|value| !value.is_finite()) {
+        anyhow::bail!("tool duration_ms must be finite");
     }
     if record.request.is_some() {
         anyhow::bail!("tool event must not include request metrics");
@@ -145,7 +148,7 @@ pub(crate) fn validate_tool_record(record: &RequestTraceRecord) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request_trace::BUS;
+    use crate::request_trace::{BUS, RequestTraceToolEvent};
 
     #[tokio::test]
     async fn emits_tracker_timing_lengths_and_hashes() {
@@ -196,5 +199,43 @@ mod tests {
                 .input_length,
             3
         );
+    }
+
+    #[test]
+    fn rejects_non_finite_tool_duration() {
+        let mut record = RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::ToolEnd,
+            event_time_unix_ms: 2_000,
+            event_source: Some(RequestTraceEventSource::Harness),
+            agent_context: Some(AgentContext {
+                session_type_id: "agent_harness".to_string(),
+                session_id: "run-1".to_string(),
+                trajectory_id: "root".to_string(),
+                parent_trajectory_id: None,
+                trajectory_final: None,
+            }),
+            request: None,
+            tool: Some(RequestTraceToolEvent {
+                tool_call_id: "tool-1".to_string(),
+                tool_class: "web_search".to_string(),
+                started_at_unix_ms: None,
+                ended_at_unix_ms: None,
+                duration_ms: Some(f64::NAN),
+                status: None,
+                output_bytes: None,
+                output_tokens: None,
+                tool_name_hash: None,
+                error_type: None,
+            }),
+        };
+
+        let err = validate_tool_record(&record).expect_err("NaN duration should fail validation");
+        assert!(err.to_string().contains("tool duration_ms must be finite"));
+
+        record.tool.as_mut().expect("tool payload").duration_ms = Some(f64::INFINITY);
+        let err =
+            validate_tool_record(&record).expect_err("infinite duration should fail validation");
+        assert!(err.to_string().contains("tool duration_ms must be finite"));
     }
 }

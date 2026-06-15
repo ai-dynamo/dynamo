@@ -5,9 +5,9 @@ title: Request Replay Tracing
 subtitle: Capture live chat and completion traffic for Mooncake replay
 ---
 
-Request replay tracing records one `request_end` row for each Rust OpenAI chat
-or completion request. Without `nvext.agent_context`, the row stays compact and
-contains only replay metadata. With `nvext.agent_context`, the same
+Request replay tracing records one `request_end` row for each eligible Rust OpenAI
+chat or completion request. Without `nvext.agent_context`, the row stays compact
+and contains only replay metadata. With `nvext.agent_context`, the same
 `dynamo.request.trace.v1` stream also includes agent identity, request metrics,
 finish metadata, and optional harness tool events.
 

@@ -25,7 +25,9 @@ pub(crate) use integration::{
 };
 pub(crate) use record::{publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
-pub(crate) use runtime::{BUS, start_tool_event_ingest_from_policy};
+#[cfg(test)]
+pub(crate) use runtime::BUS;
+pub(crate) use runtime::start_tool_event_ingest_from_policy;
 pub use runtime::{init_from_env_with_shutdown, publish, subscribe};
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,
