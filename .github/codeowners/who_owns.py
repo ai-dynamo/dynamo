@@ -77,7 +77,9 @@ def load_advisory(path: Path) -> tuple[list[dict], list[dict]]:
     return data.get("path_rules", []) or [], data.get("filetype_rules", []) or []
 
 
-def advisory_for(filepath: str, path_rules: list[dict], filetype_rules: list[dict]) -> set[str]:
+def advisory_for(
+    filepath: str, path_rules: list[dict], filetype_rules: list[dict]
+) -> set[str]:
     """Non-blocking teams an advisory Action would request for `filepath`."""
     teams: set[str] = set()
     for r in path_rules:
@@ -110,8 +112,12 @@ def changed_files(repo: str, base: str) -> list[str]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Who reviews a path, per a generated CODEOWNERS.")
-    ap.add_argument("--codeowners", required=True, type=Path, help="path to the CODEOWNERS file")
+    ap = argparse.ArgumentParser(
+        description="Who reviews a path, per a generated CODEOWNERS."
+    )
+    ap.add_argument(
+        "--codeowners", required=True, type=Path, help="path to the CODEOWNERS file"
+    )
     ap.add_argument(
         "--advisory",
         type=Path,
@@ -123,9 +129,13 @@ def main() -> int:
         action="store_true",
         help="resolve the repo's changed files instead of explicit paths",
     )
-    ap.add_argument("--base", default="main", help="base ref for --changed (default: main)")
+    ap.add_argument(
+        "--base", default="main", help="base ref for --changed (default: main)"
+    )
     ap.add_argument("--repo", default=".", help="repo root for --changed (default: .)")
-    ap.add_argument("paths", nargs="*", help="paths to resolve (when not using --changed)")
+    ap.add_argument(
+        "paths", nargs="*", help="paths to resolve (when not using --changed)"
+    )
     args = ap.parse_args()
 
     rules = parse_codeowners(args.codeowners.read_text().splitlines())

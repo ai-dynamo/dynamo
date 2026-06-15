@@ -139,10 +139,14 @@ def main() -> int:
     ap.add_argument(
         "--resolved", required=True, help="areas.resolved.yaml from build_codeowners.py"
     )
-    ap.add_argument("--repo", default=".", help="repo whose tree the cover is built against")
+    ap.add_argument(
+        "--repo", default=".", help="repo whose tree the cover is built against"
+    )
     ap.add_argument("--out", default="CODEOWNERS", help="CODEOWNERS output path")
     ap.add_argument(
-        "--advisory-out", default=None, help="advisory config output (default: alongside --out)"
+        "--advisory-out",
+        default=None,
+        help="advisory config output (default: alongside --out)",
     )
     ap.add_argument(
         "--no-group",
@@ -171,7 +175,9 @@ def main() -> int:
     file_team = {f: (owner_of(base_lookup, f) or catch_all) for f in tree}
     base_rules = minimal_cover(file_team, catch_all)
     seen: set[tuple[str, str]] = set()
-    base_rules = [(p, t) for p, t in base_rules if (p, t) not in seen and not seen.add((p, t))]
+    base_rules = [
+        (p, t) for p, t in base_rules if (p, t) not in seen and not seen.add((p, t))
+    ]
 
     shared_t = sorted(
         ((anchor(s["glob"]), owners_str(s["owners"])) for s in shared),
@@ -192,7 +198,9 @@ def main() -> int:
     dir_rules = [(p, t) for p, t in base_rules if p.endswith("/")]
 
     def is_override(path: str, team: str) -> bool:
-        return any(tp != team and path != pp and path.startswith(pp) for pp, tp in dir_rules)
+        return any(
+            tp != team and path != pp and path.startswith(pp) for pp, tp in dir_rules
+        )
 
     groups: dict[str, list[tuple[str, str]]] = {}
     overrides: list[tuple[str, str]] = []
@@ -229,7 +237,10 @@ def main() -> int:
         lines.append(f"#   {a['label']:<{idx_w}}{a['github_team']}{suffix}")
     if catch_all:
         lines.append(f"#   {'*':<{idx_w}}{catch_all}  (catch-all)")
-    lines += ["#", "# Teams referenced (each must exist in the org before this file validates):"]
+    lines += [
+        "#",
+        "# Teams referenced (each must exist in the org before this file validates):",
+    ]
     lines += [f"#   {t}" for t in teams]
 
     if catch_all:
@@ -261,7 +272,10 @@ def main() -> int:
         ]
         lines += [fmt(p, t) for p, t in shared_t]
     if ft_t:
-        lines += ["", "# --- File-type co-ownership: area + type owner (wins via last-match) ---"]
+        lines += [
+            "",
+            "# --- File-type co-ownership: area + type owner (wins via last-match) ---",
+        ]
         lines += [fmt(p, t) for p, t in ft_t]
 
     Path(args.out).write_text("\n".join(lines) + "\n")
@@ -303,7 +317,9 @@ def main() -> int:
             else Path(args.out).parent / "advisory-reviewers.yaml"
         )
         adv_out.write_text(yaml.safe_dump(adv, sort_keys=False, width=120))
-        print(f"wrote {adv_out} ({len(advisory)} path + {len(filetype)} filetype advisory rules)")
+        print(
+            f"wrote {adv_out} ({len(advisory)} path + {len(filetype)} filetype advisory rules)"
+        )
     return 0
 
 

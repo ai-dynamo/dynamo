@@ -50,10 +50,14 @@ def override_globs(tree: list[str], substr: str) -> set[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--areas", required=True, help="path to areas.yaml (source of truth)")
+    ap.add_argument(
+        "--areas", required=True, help="path to areas.yaml (source of truth)"
+    )
     ap.add_argument("--repo", required=True, help="path to the target git repo")
     ap.add_argument(
-        "--out", default=None, help="resolved yaml output (default: <areas>.resolved.yaml)"
+        "--out",
+        default=None,
+        help="resolved yaml output (default: <areas>.resolved.yaml)",
     )
     ap.add_argument(
         "--strict",
@@ -66,7 +70,9 @@ def main() -> int:
     areas = spec["areas"]
     overrides = spec.get("overrides", {})
     classify = spec.get("classify", {})
-    out_path = Path(args.out) if args.out else Path(args.areas).with_suffix(".resolved.yaml")
+    out_path = (
+        Path(args.out) if args.out else Path(args.areas).with_suffix(".resolved.yaml")
+    )
 
     def name(a: dict) -> str:
         return a.get("name", a["label"])
@@ -78,7 +84,9 @@ def main() -> int:
     tree = load_tree(Path(args.repo))
 
     # area label -> set of path globs (start with what each area declares)
-    globs: dict[str, set[str]] = {a["label"]: set(a.get("path_globs", [])) for a in areas}
+    globs: dict[str, set[str]] = {
+        a["label"]: set(a.get("path_globs", [])) for a in areas
+    }
 
     # overrides: substring carve-outs resolved to concrete dir globs (more specific,
     # so they win via last-match in the emitter).
@@ -155,7 +163,9 @@ def main() -> int:
         pat, co = r.get("pattern"), r["coowner"]
         for p in tree:
             base = p.rsplit("/", 1)[-1]
-            if not (fnmatch.fnmatch(base, pat) if pat else r["match"].lower() in p.lower()):
+            if not (
+                fnmatch.fnmatch(base, pat) if pat else r["match"].lower() in p.lower()
+            ):
                 continue
             enc = enclosing(p)
             owners = [enc] if enc and enc != co else []
