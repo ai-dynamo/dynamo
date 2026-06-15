@@ -81,6 +81,7 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+mod sglang_bridge;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
@@ -176,6 +177,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
+    m.add_function(wrap_pyfunction!(sglang_bridge::run_sglang_bridge, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<Endpoint>()?;
