@@ -92,6 +92,24 @@ impl OccupancyPermit {
     fn instance_id(&self) -> u64 {
         self.instance_id
     }
+
+    /// Move the occupancy charge to a different worker.
+    ///
+    /// Transport resolution ([`PushRouter::resolve_transport`]) may fall back to
+    /// a worker other than the one originally selected when the selected
+    /// instance disappears mid-dispatch. Without retargeting, the original
+    /// worker would stay charged while the worker that actually received the
+    /// request goes uncharged, skewing load-aware routing during discovery
+    /// churn. Increments the new worker before decrementing the old so the
+    /// charge is never transiently dropped.
+    fn retarget(&mut self, new_instance_id: u64) {
+        if !self.armed || new_instance_id == self.instance_id {
+            return;
+        }
+        self.state.increment(new_instance_id);
+        self.state.decrement(self.instance_id);
+        self.instance_id = new_instance_id;
+    }
 }
 
 impl Drop for OccupancyPermit {
@@ -519,6 +537,7 @@ where
 
         self.generate_with_fault_detection(instance_id, request)
             .await
+            .map(|(_, stream)| stream)
     }
 
     /// Issue a request to a random endpoint
@@ -536,6 +555,7 @@ where
 
         self.generate_with_fault_detection(instance_id, request)
             .await
+            .map(|(_, stream)| stream)
     }
 
     /// Select a worker for a load-aware routing mode (`PowerOfTwoChoices`,
@@ -548,9 +568,18 @@ where
     /// worker selection. Returns an error (via [`Self::empty_free_pool_error`])
     /// when no free workers exist for the chosen group, so callers surface a
     /// "no instances" / "all busy" message rather than a misleading default.
-    async fn select_load_aware_worker(&self) -> anyhow::Result<(u64, OccupancyPermit)> {
+    ///
+    /// The strategy is passed in explicitly rather than read from
+    /// `self.router_mode`: the public named methods (`power_of_two_choices`,
+    /// `least_loaded`, `device_aware_weighted`) must always apply their named
+    /// strategy regardless of how the router is configured, while the
+    /// bidirectional `generate` path passes `self.router_mode`.
+    async fn select_load_aware_worker(
+        &self,
+        mode: RouterMode,
+    ) -> anyhow::Result<(u64, OccupancyPermit)> {
         let state = self.occupancy_state()?;
-        match self.router_mode {
+        match mode {
             RouterMode::PowerOfTwoChoices => {
                 let instance_id = {
                     let routing_instances = self.client.routing_instances();
@@ -630,13 +659,18 @@ where
     /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
     /// route to the one with fewer in-flight requests.
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let (instance_id, permit) = self.select_load_aware_worker().await?;
+        let (instance_id, mut permit) = self
+            .select_load_aware_worker(RouterMode::PowerOfTwoChoices)
+            .await?;
 
         match self
             .generate_with_fault_detection(instance_id, request)
             .await
         {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Ok((resolved_id, stream)) => {
+                permit.retarget(resolved_id);
+                Ok(permit.into_tracked_stream(stream))
+            }
             Err(err) => Err(err),
         }
     }
@@ -668,6 +702,7 @@ where
 
         self.generate_with_fault_detection(instance_id, request)
             .await
+            .map(|(_, stream)| stream)
     }
 
     /// Issue a request using device-aware weighted routing.
@@ -679,26 +714,36 @@ where
     /// If only one device class exists (all CPU or all non-CPU), this naturally
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let (instance_id, permit) = self.select_load_aware_worker().await?;
+        let (instance_id, mut permit) = self
+            .select_load_aware_worker(RouterMode::DeviceAwareWeighted)
+            .await?;
 
         match self
             .generate_with_fault_detection(instance_id, request)
             .await
         {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Ok((resolved_id, stream)) => {
+                permit.retarget(resolved_id);
+                Ok(permit.into_tracked_stream(stream))
+            }
             Err(err) => Err(err),
         }
     }
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let (instance_id, permit) = self.select_load_aware_worker().await?;
+        let (instance_id, mut permit) = self
+            .select_load_aware_worker(RouterMode::LeastLoaded)
+            .await?;
 
         match self
             .generate_with_fault_detection(instance_id, request)
             .await
         {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Ok((resolved_id, stream)) => {
+                permit.retarget(resolved_id);
+                Ok(permit.into_tracked_stream(stream))
+            }
             Err(err) => Err(err),
         }
     }
@@ -779,6 +824,19 @@ where
         })
     }
 
+    /// Current in-flight occupancy count this router tracks for `instance_id`,
+    /// or `None` for router modes that don't track occupancy.
+    ///
+    /// Exposed for integration tests (in a separate `tests/` binary) that assert
+    /// occupancy is charged on dispatch and released after a load-aware stream
+    /// completes; not part of the routing contract.
+    #[doc(hidden)]
+    pub fn occupancy_load(&self, instance_id: u64) -> Option<u64> {
+        self.occupancy_state
+            .as_ref()
+            .map(|state| state.load(instance_id))
+    }
+
     /*
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let subject = self.client.endpoint.subject();
@@ -789,11 +847,15 @@ where
     }
     */
 
+    /// Returns the resolved worker id alongside the stream. The returned id may
+    /// differ from `instance_id` when [`Self::resolve_transport`] falls back to
+    /// another worker; load-aware callers use it to retarget their occupancy
+    /// permit onto the worker that actually received the request.
     async fn generate_with_fault_detection(
         &self,
         instance_id: u64,
         request: SingleIn<T>,
-    ) -> anyhow::Result<ManyOut<U>> {
+    ) -> anyhow::Result<(u64, ManyOut<U>)> {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
@@ -825,6 +887,7 @@ where
             .instrument(route_span)
             .await;
         self.wrap_with_fault_detection(stream, instance_id)
+            .map(|stream| (instance_id, stream))
     }
 
     /// Reject early if the selected worker is overloaded and fault detection
@@ -1040,11 +1103,15 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     /// Bidirectional sibling of [`Self::generate_with_fault_detection`].
+    ///
+    /// Returns the resolved worker id alongside the stream (see that method)
+    /// so load-aware callers can retarget their occupancy permit when
+    /// [`Self::resolve_transport`] falls back to a different worker.
     async fn bidirectional_dispatch(
         &self,
         instance_id: u64,
         input: ManyIn<T>,
-    ) -> anyhow::Result<ManyOut<U>> {
+    ) -> anyhow::Result<(u64, ManyOut<U>)> {
         let route_start = Instant::now();
         let request_id = input.context().id().to_string();
         let route_span = tracing::info_span!(
@@ -1069,6 +1136,7 @@ where
             .instrument(route_span)
             .await;
         self.wrap_with_fault_detection(stream, instance_id)
+            .map(|stream| (instance_id, stream))
     }
 }
 
@@ -1124,9 +1192,13 @@ where
             RouterMode::PowerOfTwoChoices
             | RouterMode::LeastLoaded
             | RouterMode::DeviceAwareWeighted => {
-                let (instance_id, permit) = self.select_load_aware_worker().await?;
+                let (instance_id, mut permit) =
+                    self.select_load_aware_worker(self.router_mode).await?;
                 return match self.bidirectional_dispatch(instance_id, input).await {
-                    Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+                    Ok((resolved_id, stream)) => {
+                        permit.retarget(resolved_id);
+                        Ok(permit.into_tracked_stream(stream))
+                    }
                     Err(err) => Err(err),
                 };
             }
@@ -1139,7 +1211,9 @@ where
             .select_next_worker()
             .ok_or_else(|| anyhow::anyhow!("no instances available for bidirectional routing"))?;
 
-        self.bidirectional_dispatch(instance_id, input).await
+        self.bidirectional_dispatch(instance_id, input)
+            .await
+            .map(|(_, stream)| stream)
     }
 }
 
@@ -1267,6 +1341,38 @@ mod tests {
         assert_eq!(state.load(42), 1);
         drop(permit);
         assert_eq!(state.load(42), 0);
+    }
+
+    #[test]
+    fn occupancy_permit_retarget_moves_charge_to_resolved_worker() {
+        // When transport resolution falls back to a different worker, the permit
+        // must move its occupancy charge so the worker that actually received
+        // the request is the one charged (and the original is released).
+        let state = Arc::new(RoutingOccupancyState::default());
+        state.increment(1);
+        let mut permit = OccupancyPermit::new(state.clone(), 1);
+        assert_eq!(state.load(1), 1);
+        assert_eq!(state.load(2), 0);
+
+        permit.retarget(2);
+        assert_eq!(
+            state.load(1),
+            0,
+            "original worker must be released on retarget"
+        );
+        assert_eq!(
+            state.load(2),
+            1,
+            "resolved worker must be charged on retarget"
+        );
+        assert_eq!(permit.instance_id(), 2);
+
+        // Retargeting to the worker already held is a no-op.
+        permit.retarget(2);
+        assert_eq!(state.load(2), 1);
+
+        drop(permit);
+        assert_eq!(state.load(2), 0, "drop releases the retargeted worker");
     }
 
     #[test]
@@ -1528,7 +1634,7 @@ mod tests {
                 .unwrap();
 
             let (selected, _permit) = router
-                .select_load_aware_worker()
+                .select_load_aware_worker(mode)
                 .await
                 .unwrap_or_else(|e| panic!("{mode:?} should select the available worker: {e:?}"));
             assert!(
@@ -1537,6 +1643,50 @@ mod tests {
                 client.instance_ids_avail()
             );
         }
+
+        rt.shutdown();
+    }
+
+    /// `select_load_aware_worker` must dispatch on the *passed* strategy, not on
+    /// `self.router_mode`. This guards the contract of the public named methods
+    /// (`power_of_two_choices` / `least_loaded` / `device_aware_weighted`): each
+    /// keeps applying its own named strategy regardless of how the router is
+    /// configured, and only the bidirectional `generate` path passes
+    /// `self.router_mode`. A router configured load-aware (so occupancy state is
+    /// initialized) must still take the "unsupported mode" branch when a
+    /// non-load-aware strategy is passed explicitly.
+    #[tokio::test]
+    async fn select_load_aware_worker_honors_explicit_mode_over_router_mode() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_explicit_mode".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+
+        // `OccupancyPermit` is intentionally not `Debug`, so match instead of
+        // `expect_err` to pull out the error.
+        let err = match router
+            .select_load_aware_worker(RouterMode::RoundRobin)
+            .await
+        {
+            Ok(_) => {
+                panic!("passing a non-load-aware strategy must error, not select via LeastLoaded")
+            }
+            Err(err) => err,
+        };
+        let err_msg = format!("{err:?}");
+        assert!(
+            err_msg.contains("non-load-aware router mode"),
+            "selection must follow the passed mode (RoundRobin), not self.router_mode \
+             (LeastLoaded): got {err_msg}"
+        );
 
         rt.shutdown();
     }
