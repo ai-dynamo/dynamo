@@ -32,7 +32,7 @@ from ..multimodal_utils import (
     load_vision_model,
     vLLMMultimodalRequest,
 )
-from ..multimodal_utils.custom_encoder import FullPromptEncoder, load_encoder_class
+from ..multimodal_utils.custom_encoder import FullPromptEncoder
 from ..multimodal_utils.embedding_cache import EmbeddingCache
 from ..multimodal_utils.model import ModelFamily, resolve_model_family
 
@@ -75,9 +75,12 @@ class EncodeWorkerHandler:
         # passed to FullPromptEncoder.load() (so only one flag is needed).
         self.custom_encoder: Optional[FullPromptEncoder] = None
         if full_prompt_encoder_class:
+            import importlib
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            cls = load_encoder_class(full_prompt_encoder_class)
-            self.custom_encoder = cls()
+            module_path, _, class_name = full_prompt_encoder_class.rpartition(".")
+            module = importlib.import_module(module_path)
+            self.custom_encoder = getattr(module, class_name)()
             # --model is the checkpoint path for the custom encoder.
             self.custom_encoder.load(self.model, device)
             logger.info(

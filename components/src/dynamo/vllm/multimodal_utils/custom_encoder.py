@@ -27,7 +27,6 @@ Usage::
 
 from __future__ import annotations
 
-import importlib
 from abc import ABC, abstractmethod
 from typing import List
 
@@ -78,32 +77,3 @@ class FullPromptEncoder(ABC):
             prompt with image embeddings spliced at the correct positions.
         """
         ...
-
-
-def load_encoder_class(dotted_class_path: str) -> type:
-    """Dynamically import and return a ``FullPromptEncoder`` subclass.
-
-    Args:
-        dotted_class_path: Dotted module.ClassName path, e.g.
-            ``"customer_encoder.MyEncoder"`` or
-            ``"mypackage.encoders.SafeguardEncoder"``.
-
-    Returns:
-        The class object (not an instance).
-
-    Raises:
-        ImportError: If the module cannot be imported.
-        AttributeError: If the class does not exist in the module.
-        TypeError: If the class is not a subclass of ``FullPromptEncoder``.
-    """
-    module_path, _, class_name = dotted_class_path.rpartition(".")
-    if not module_path:
-        raise ImportError(
-            f"Expected 'module.ClassName', got '{dotted_class_path}'. "
-            "Provide the full dotted path including the module."
-        )
-    module = importlib.import_module(module_path)
-    cls = getattr(module, class_name)
-    if not (isinstance(cls, type) and issubclass(cls, FullPromptEncoder)):
-        raise TypeError(f"{dotted_class_path} is not a subclass of FullPromptEncoder")
-    return cls
