@@ -94,10 +94,16 @@ func TestApplyDeviceSpec_PreservesPodTemplateOverride(t *testing.T) {
 	// User-provided podTemplate overrides win over Device defaults for
 	// nodeSelector and individual resource keys.
 	podSpec := &corev1.PodSpec{
-		NodeSelector: map[string]string{"role": "inference"},
+		// "gpu" already has a value here; device.NodeSelector["gpu"]="on"
+		// must NOT clobber it.
+		NodeSelector: map[string]string{"role": "inference", "gpu": "off"},
+		SchedulerName: "user-scheduler",
 		Containers: []corev1.Container{{
 			Name: "main",
 			Resources: corev1.ResourceRequirements{
+				// Pod template only set the limit; device must fill in
+				// the matching request to keep K8s extended-resource
+				// invariants (req == lim for nvidia.com/gpu etc.).
 				Limits: corev1.ResourceList{
 					"amd.com/gpu": resource.MustParse("8"),
 				},
@@ -108,18 +114,77 @@ func TestApplyDeviceSpec_PreservesPodTemplateOverride(t *testing.T) {
 		Resources: corev1.ResourceList{
 			"amd.com/gpu": resource.MustParse("2"),
 		},
-		NodeSelector: map[string]string{"gpu": "on"},
+		NodeSelector:  map[string]string{"gpu": "on", "zone": "az1"},
+		SchedulerName: "hami-scheduler",
 	}
 
 	applyDeviceSpec(podSpec, device)
 
 	main := podSpec.Containers[0]
-	if got := main.Resources.Limits["amd.com/gpu"]; got.Cmp(resource.MustParse("8")) != 0 {
-		t.Errorf("podTemplate override lost: amd.com/gpu = %s, want 8", got.String())
+	if got := main.Resources.Limits["amd.com/gpu"]; got.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("device value lost on limit: amd.com/gpu = %s, want 2", got.String())
 	}
-	// NodeSelector is merged (union), not replaced.
-	if podSpec.NodeSelector["gpu"] != "on" || podSpec.NodeSelector["role"] != "inference" {
-		t.Errorf("nodeSelector merged incorrectly: %+v", podSpec.NodeSelector)
+	if got := main.Resources.Requests["amd.com/gpu"]; got.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("device value lost on request: amd.com/gpu = %s, want 2", got.String())
+	}
+	// podTemplate-set keys keep their original value; only new keys are added.
+	if podSpec.NodeSelector["gpu"] != "off" {
+		t.Errorf("nodeSelector gpu overwritten: got %q want off", podSpec.NodeSelector["gpu"])
+	}
+	if podSpec.NodeSelector["role"] != "inference" {
+		t.Errorf("nodeSelector role lost: got %q want inference", podSpec.NodeSelector["role"])
+	}
+	if podSpec.NodeSelector["zone"] != "az1" {
+		t.Errorf("nodeSelector zone not added: got %q want az1", podSpec.NodeSelector["zone"])
+	}
+	// PodTemplate-set schedulerName wins.
+	if podSpec.SchedulerName != "user-scheduler" {
+		t.Errorf("schedulerName overwritten: got %q want user-scheduler", podSpec.SchedulerName)
+	}
+}
+
+func TestApplyDeviceSpec_DeviceKeyForcesRequestEqualsLimit(t *testing.T) {
+	// K8s requires extended resources to have equal requests and limits. If
+	// pod template only set the request, the device-provided value must
+	// also stamp the limit so req == lim for that key.
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name: "main",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					"amd.com/gpu": resource.MustParse("8"),
+				},
+			},
+		}},
+	}
+	device := &v1beta1.DeviceSpec{
+		Resources: corev1.ResourceList{
+			"amd.com/gpu": resource.MustParse("2"),
+		},
+	}
+
+	applyDeviceSpec(podSpec, device)
+
+	main := podSpec.Containers[0]
+	if got := main.Resources.Limits["amd.com/gpu"]; got.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("amd.com/gpu limit = %s, want 2 (device value must win so req == lim)", got.String())
+	}
+	if got := main.Resources.Requests["amd.com/gpu"]; got.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("amd.com/gpu request = %s, want 2", got.String())
+	}
+}
+
+func TestApplyDeviceSpec_PodTemplateSchedulerNamePreserved(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		SchedulerName: "existing-scheduler",
+		Containers:    []corev1.Container{{Name: "main"}},
+	}
+	device := &v1beta1.DeviceSpec{
+		SchedulerName: "hami-scheduler",
+	}
+	applyDeviceSpec(podSpec, device)
+	if podSpec.SchedulerName != "existing-scheduler" {
+		t.Errorf("schedulerName overwritten: got %q want existing-scheduler", podSpec.SchedulerName)
 	}
 }
 

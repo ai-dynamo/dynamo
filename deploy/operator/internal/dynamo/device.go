@@ -33,14 +33,24 @@ func applyDeviceSpec(podSpec *corev1.PodSpec, device *v1beta1.DeviceSpec) {
 		podSpec.Tolerations = appendTolerations(podSpec.Tolerations, device.Tolerations)
 	}
 
-	if len(device.NodeSelector) > 0 && podSpec.NodeSelector == nil {
-		podSpec.NodeSelector = map[string]string{}
-	}
-	for k, v := range device.NodeSelector {
-		podSpec.NodeSelector[k] = v
+	// NodeSelector is a union: keep podTemplate-set keys, add device-set keys
+	// only when the user has not already supplied a value. This preserves
+	// explicit scheduling intent (e.g. role=inference) from podTemplate.
+	if len(device.NodeSelector) > 0 {
+		if podSpec.NodeSelector == nil {
+			podSpec.NodeSelector = map[string]string{}
+		}
+		for k, v := range device.NodeSelector {
+			if _, exists := podSpec.NodeSelector[k]; !exists {
+				podSpec.NodeSelector[k] = v
+			}
+		}
 	}
 
-	if device.SchedulerName != "" {
+	// SchedulerName is only filled when podTemplate did not already pick one,
+	// so the user's explicit scheduler (e.g. hami-scheduler wired via a hook)
+	// stays authoritative.
+	if device.SchedulerName != "" && podSpec.SchedulerName == "" {
 		podSpec.SchedulerName = device.SchedulerName
 	}
 
@@ -48,6 +58,11 @@ func applyDeviceSpec(podSpec *corev1.PodSpec, device *v1beta1.DeviceSpec) {
 		return
 	}
 
+	// For each device key, force Requests == Limits == device.Resources[name].
+	// K8s requires extended resources (nvidia.com/gpu, amd.com/gpu, ...) to
+	// have equal requests and limits; setting only one side produces an
+	// invalid pod spec. We honor the device value over podTemplate partial
+	// overrides for the same key so the device contract stays intact.
 	container := &podSpec.Containers[0]
 	if container.Resources.Limits == nil {
 		container.Resources.Limits = corev1.ResourceList{}
@@ -56,12 +71,8 @@ func applyDeviceSpec(podSpec *corev1.PodSpec, device *v1beta1.DeviceSpec) {
 		container.Resources.Requests = corev1.ResourceList{}
 	}
 	for name, qty := range device.Resources {
-		if _, ok := container.Resources.Limits[name]; !ok {
-			container.Resources.Limits[name] = qty
-		}
-		if _, ok := container.Resources.Requests[name]; !ok {
-			container.Resources.Requests[name] = qty
-		}
+		container.Resources.Limits[name] = qty
+		container.Resources.Requests[name] = qty
 	}
 }
 
