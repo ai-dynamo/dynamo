@@ -27,6 +27,22 @@ FRAMEWORK_SOURCES: dict[str, dict[str, object]] = {
             r"(?m)^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s*(\S+)\s*$",
         ),
     },
+    "vllm": {
+        "github_repo": "vllm-project/vllm",
+        # cuda13.0 tag format: v0.22.1-ubuntu2404 — capture bare version only.
+        "current_regex": re.compile(
+            r"(?m)^vllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+cuda13\.0:\s*?\n"
+            r"(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s+v([^\s-]+)-ubuntu2404\s*$",
+        ),
+    },
+    "sglang": {
+        "github_repo": "sgl-project/sglang",
+        # cuda13.0 tag format: v0.5.12.post1-cu130-runtime — capture bare version only.
+        "current_regex": re.compile(
+            r"(?m)^sglang:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+cuda13\.0:\s*?\n"
+            r"(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s+v([^\s-]+)-cu130-runtime\s*$",
+        ),
+    },
 }
 
 

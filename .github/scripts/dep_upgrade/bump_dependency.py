@@ -38,8 +38,71 @@ TRTLLM_TARGETS: list[tuple[str, Pattern[str], str]] = [
     ),
 ]
 
+VLLM_TARGETS: list[tuple[str, Pattern[str], str]] = [
+    (
+        "container/context.yaml",
+        # cuda13.0 sub-block: runtime_image_tag: v{ver}-ubuntu2404
+        re.compile(
+            r"(?m)(^vllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+cuda13\.0:\s*?\n"
+            r"(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s+v)[^\s-]+(-ubuntu2404\s*$)",
+        ),
+        r"\g<1>{ver}\g<2>",
+    ),
+    (
+        "container/context.yaml",
+        # cpu sub-block: runtime_image_tag: v{ver}  (no image-tag suffix)
+        re.compile(
+            r"(?m)(^vllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+cpu:\s*?\n"
+            r"(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s+v)\S+(\s*$)",
+        ),
+        r"\g<1>{ver}\g<2>",
+    ),
+    (
+        "pyproject.toml",
+        re.compile(r'"vllm\[flashinfer,runai,otel\]==[^"]+"'),
+        '"vllm[flashinfer,runai,otel]=={ver}"',
+    ),
+    (
+        "docs/reference/support-matrix.md",
+        # ToT row, 3rd backtick column (vLLM), after SGLang and TRT-LLM columns.
+        re.compile(
+            r"^(\| \*\*main \(ToT\)\*\* \| `[^`]+` \| `[^`]+` \| `)[^`]+(`)",
+            re.M,
+        ),
+        r"\g<1>{ver}\g<2>",
+    ),
+]
+
+SGLANG_TARGETS: list[tuple[str, Pattern[str], str]] = [
+    (
+        "container/context.yaml",
+        # cuda13.0 sub-block: runtime_image_tag: v{ver}-cu130-runtime
+        re.compile(
+            r"(?m)(^sglang:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+cuda13\.0:\s*?\n"
+            r"(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s+v)[^\s-]+(-cu130-runtime\s*$)",
+        ),
+        r"\g<1>{ver}\g<2>",
+    ),
+    (
+        "pyproject.toml",
+        re.compile(r'"sglang\[diffusion\]==[^"]+"'),
+        '"sglang[diffusion]=={ver}"',
+    ),
+    (
+        "docs/reference/support-matrix.md",
+        # ToT row, 1st backtick column (SGLang).
+        re.compile(
+            r"^(\| \*\*main \(ToT\)\*\* \| `)[^`]+(`)",
+            re.M,
+        ),
+        r"\g<1>{ver}\g<2>",
+    ),
+]
+
 FRAMEWORK_TARGETS: dict[str, list[tuple[str, Pattern[str], str]]] = {
     "trtllm": TRTLLM_TARGETS,
+    "vllm": VLLM_TARGETS,
+    "sglang": SGLANG_TARGETS,
 }
 
 

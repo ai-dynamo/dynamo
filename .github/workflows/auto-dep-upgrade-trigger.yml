@@ -11,7 +11,7 @@ on:
       framework:
         description: 'Framework to attempt upgrade for'
         type: choice
-        options: [trtllm]
+        options: [trtllm, vllm, sglang]
         default: trtllm
 
 permissions:
@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [trtllm]
+        framework: [trtllm, vllm, sglang]
     steps:
       - name: Checkout main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
