@@ -74,7 +74,11 @@ impl PrefillRouter {
                 dp_rank = worker.dp_rank,
                 "Using sticky prefill worker for bootstrap"
             );
-            (worker.worker_id, Some(worker.dp_rank), book(worker.worker_id))
+            (
+                worker.worker_id,
+                Some(worker.dp_rank),
+                book(worker.worker_id),
+            )
         } else if let Some(id) = preselected_worker {
             let dp_rank = req
                 .routing
