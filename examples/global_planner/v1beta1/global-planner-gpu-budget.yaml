@@ -105,7 +105,7 @@ spec:
         containers:
         - args:
           - --config
-          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"itl_ms":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_A}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
+          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","optimization_target":"sla","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"itl_ms":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_A}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
           command:
           - python3
           - -m
@@ -206,7 +206,7 @@ spec:
         containers:
         - args:
           - --config
-          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"itl_ms":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_B}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
+          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","optimization_target":"sla","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"itl_ms":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_B}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
           command:
           - python3
           - -m

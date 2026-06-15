@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,9 +12,11 @@ use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as _};
 
+use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::model_card::ModelDeploymentCard;
+use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
@@ -37,13 +40,17 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
-    match std::env::var(ENV_SELF_HOST_METADATA) {
-        Ok(v) => matches!(
-            v.trim().to_lowercase().as_str(),
+    let value = std::env::var(ENV_SELF_HOST_METADATA).ok();
+    self_host_metadata_default(value.as_deref())
+}
+
+fn self_host_metadata_default(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
+        )
+    })
 }
 
 pub struct LocalModelBuilder {
@@ -51,7 +58,6 @@ pub struct LocalModelBuilder {
     source_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
@@ -87,7 +93,6 @@ impl Default for LocalModelBuilder {
             source_path: Default::default(),
             model_name: Default::default(),
             endpoint_id: Default::default(),
-            context_length: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
@@ -128,11 +133,6 @@ impl LocalModelBuilder {
 
     pub fn endpoint_id(&mut self, endpoint_id: Option<EndpointId>) -> &mut Self {
         self.endpoint_id = endpoint_id;
-        self
-    }
-
-    pub fn context_length(&mut self, context_length: Option<u32>) -> &mut Self {
-        self.context_length = context_length;
         self
     }
 
@@ -260,6 +260,10 @@ impl LocalModelBuilder {
         // already supplied one or the env var is unset. Published in etcd so routing
         // layers can keep cache assignments stable across worker restarts.
         self.runtime_config.populate_stable_routing_id_from_env();
+        self.runtime_config
+            .validate_config()
+            .map_err(anyhow::Error::msg)?;
+        self.runtime_config.add_topology_taints();
 
         let template = self
             .template_file
@@ -324,11 +328,6 @@ impl LocalModelBuilder {
         card.set_name(self.model_name.as_deref().unwrap_or(&alt));
 
         card.kv_cache_block_size = self.kv_cache_block_size;
-
-        // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
-        if let Some(context_length) = self.context_length {
-            card.context_length = context_length;
-        }
 
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
@@ -475,15 +474,23 @@ impl LocalModel {
     ///
     /// For base models, pass `lora_name = None`.
     /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
+    ///
+    /// `worker_type` and `needs` carry the model-serving-readiness fields.
+    /// Cards without a declared `worker_type` are treated as misconfigured
+    /// and do not count toward readiness.
     pub async fn attach(
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
         lora_info: Option<crate::model_card::LoraInfo>,
+        worker_type: Option<crate::worker_type::WorkerType>,
+        needs: Vec<Vec<crate::worker_type::WorkerType>>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
+        self.card.worker_type = worker_type;
+        self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
         // Compute model_suffix from lora_name if present
@@ -563,6 +570,29 @@ impl LocalModel {
         let model_slug = self.card.slug().to_string();
         let suffix = model_suffix.unwrap_or(dynamo_runtime::metadata_registry::BASE_SUFFIX);
         let registry = drt.metadata_artifacts();
+
+        // Advertise non-typed siblings (preprocessor_config.json,
+        // special_tokens_map.json, …) so external preprocessors that load
+        // via `from_pretrained(slug_dir)` see a complete model dir.
+        let typed_filenames: HashSet<String> = self
+            .card
+            .iter_metadata_files()
+            .iter()
+            .filter_map(|(cf, _)| {
+                cf.path()
+                    .and_then(Path::file_name)
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        let harvested =
+            harvest_extra_files(&self.full_path, &typed_filenames).with_context(|| {
+                format!(
+                    "harvesting extra metadata files from {}",
+                    self.full_path.display()
+                )
+            })?;
+        self.card.extra_files.extend(harvested);
 
         let mut rewritten = 0usize;
         for (cf, _) in self.card.iter_metadata_files_mut() {
@@ -686,27 +716,127 @@ pub(crate) fn self_host_base_url(
     Ok(Some(format!("http://{host}:{}", info.port())))
 }
 
+/// Scan `model_dir` for files to advertise alongside the typed MDC slots.
+/// Skips weights, dotfiles / README (`is_ignored`), already-typed
+/// filenames, and anything that isn't a regular file. Non-recursive.
+/// Returns an empty vec when `model_dir` doesn't exist (e.g. name-only
+/// `LocalModel` placeholders).
+fn harvest_extra_files(
+    model_dir: &Path,
+    typed_filenames: &HashSet<String>,
+) -> anyhow::Result<Vec<CheckedFile>> {
+    if !model_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in
+        fs::read_dir(model_dir).with_context(|| format!("read_dir {}", model_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        // `Path::is_file` uses `fs::metadata` which follows symlinks.
+        // `entry.file_type()` / `entry.metadata()` use lstat on Unix —
+        // they would skip the HF blob symlinks we need to harvest.
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if typed_filenames.contains(name)
+            || is_weight_file(&path)
+            || HuggingFaceProvider::is_ignored(name)
+        {
+            continue;
+        }
+        out.push(CheckedFile::from_disk(&path)?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod env_self_host_metadata_tests {
     use super::*;
 
-    #[serial_test::serial]
     #[test]
     fn env_default_parsing() {
-        // SAFETY: all env mutations are serialized via serial_test.
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
-        assert!(!env_self_host_metadata_default(), "unset → default OFF");
+        assert!(!self_host_metadata_default(None), "unset → default OFF");
 
         for v in [
             "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
         ] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(!env_self_host_metadata_default(), "expected OFF for {v:?}");
+            assert!(
+                !self_host_metadata_default(Some(v)),
+                "expected OFF for {v:?}"
+            );
         }
         for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(env_self_host_metadata_default(), "expected ON for {v:?}");
+            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
         }
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
+    }
+}
+
+#[cfg(test)]
+mod harvest_extra_files_tests {
+    use super::*;
+
+    #[test]
+    fn filters_weights_typed_and_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let touch = |name: &str| {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        };
+        // typed slot (excluded by name)
+        touch("config.json");
+        // weights — covers the mx-narrow case (safetensors) and the
+        // ecosystem-wide case (.pt) which mx alone wouldn't catch.
+        touch("model.safetensors");
+        touch("pytorch_lora_weights.pt");
+        // dotfile / README (excluded by is_ignored)
+        touch(".gitattributes");
+        touch("README.md");
+        // genuine extras (kept)
+        touch("preprocessor_config.json");
+        touch("special_tokens_map.json");
+        // subdir (skipped — not a file)
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        // symlink to a real file (must be followed — HF snapshot dirs
+        // are full of these pointing into blobs/)
+        let target = dir.path().join("target_for_symlink");
+        std::fs::write(&target, b"x").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("added_tokens.json")).unwrap();
+
+        let typed: HashSet<String> = ["config.json".to_string()].into_iter().collect();
+        let mut names: Vec<String> = harvest_extra_files(dir.path(), &typed)
+            .unwrap()
+            .iter()
+            .map(|cf| {
+                cf.path()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "added_tokens.json",
+                "preprocessor_config.json",
+                "special_tokens_map.json",
+                "target_for_symlink",
+            ]
+        );
+    }
+
+    #[test]
+    fn returns_empty_for_missing_dir() {
+        let typed: HashSet<String> = HashSet::new();
+        // bogus path: doesn't exist on disk; must not error
+        let result = harvest_extra_files(Path::new("/nonexistent/dynamo/test/path"), &typed);
+        assert!(result.unwrap().is_empty());
     }
 }

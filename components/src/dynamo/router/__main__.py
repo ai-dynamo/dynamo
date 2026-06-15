@@ -134,6 +134,10 @@ class StandaloneRouterHandler:
                 "disaggregated_params": worker_output.get("disaggregated_params"),  # type: ignore[attr-defined]
                 "extra_args": worker_output.get("extra_args"),  # type: ignore[attr-defined]
                 "completion_usage": worker_output.get("completion_usage"),  # type: ignore[attr-defined]
+                # engine_data carries routed_experts/prompt_logprobs; routing_data carries
+                # worker_id/token_ids/timing. Forward both so they survive this router.
+                "engine_data": worker_output.get("engine_data"),  # type: ignore[attr-defined]
+                "routing_data": worker_output.get("routing_data"),  # type: ignore[attr-defined]
             }
             yield llm_engine_output
 
@@ -193,6 +197,7 @@ async def worker(runtime: DistributedRuntime):
     logger.debug(
         f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
         f"overlap_score_credit={config.overlap_score_credit}, "
+        f"overlap_score_credit_decay={config.overlap_score_credit_decay}, "
         f"prefill_load_scale={config.prefill_load_scale}, "
         f"router_temperature={config.router_temperature}, "
         f"use_kv_events={config.use_kv_events}, "

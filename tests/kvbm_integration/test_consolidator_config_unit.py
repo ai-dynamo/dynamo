@@ -54,6 +54,7 @@ class TestShouldEnableConsolidatorDict:
 @pytest.mark.kvbm
 @pytest.mark.trtllm
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(0)
 class TestShouldEnableConsolidatorTyped:
     """Tests that need trtllm (requires GPU for import)."""
 

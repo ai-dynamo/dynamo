@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_nano
+model_label: Nemotron Nano v3
+mode: stream
+cases:
+  TOOLCALLING.stream.4.a:
+    description: Truncated stream terminates after a complete in-flight tool-call body
+    ref: derived from TOOLCALLING.batch.5.a
+    chunks:
+    - delta_text: |-
+        <tool_call>
+        <function=get_weather>
+        <parameter=location>
+        NYC
+        </parameter>
+        </function>
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+  TOOLCALLING.stream.4.b:
+    description: Stream terminates mid-call body before the in-flight argument payload is complete
+    ref: derived from TOOLCALLING.batch.5.c
+    chunks:
+    - delta_text: |-
+        <tool_call>
+        <function=get_wea
+    - delta_text: |-
+        ther>
+        <parameter=location>
+        NY
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+  TOOLCALLING.stream.4.c:
+    description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
+      repeated close markers
+    ref: derived from nemotron-ultra-preview-tool-call-leak-repro/repro_tool_call_leak.py
+    chunks:
+    - delta_text: |-
+        <function=get_weather>
+        <parameter=location>
+        NYC
+        </parameter>
+        </function>
+        </function>
+        </function>
+    - delta_text: ''
+      finish_reason: length
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
