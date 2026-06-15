@@ -376,10 +376,10 @@ impl SlotTrackerRegistry {
             if !matches_filters(key, model_name, tenant_id) {
                 continue;
             }
-            let (decode_blocks, prefill_tokens) = entry
+            let (decode_blocks, prefill_tokens, _) = entry
                 .value()
                 .tracker
-                .potential_blocks_and_tokens(None, &PrefillTokenDeltas::none());
+                .potential_blocks_and_tokens::<false>(None, &PrefillTokenDeltas::none());
             let mut workers: FxHashSet<_> = decode_blocks.keys().copied().collect();
             workers.extend(prefill_tokens.keys().copied());
             for worker in workers {
@@ -411,19 +411,20 @@ impl SlotTrackerRegistry {
         new_isl_tokens: usize,
     ) -> Result<Vec<PotentialLoad>, RegistryError> {
         let entry = self.entry(key)?;
-        let (decode_blocks, prefill_tokens) = entry.tracker.potential_blocks_and_tokens(
-            Some(sequence_hashes),
-            &PrefillTokenDeltas::uniform(new_isl_tokens),
-        );
-        let mut workers: FxHashSet<_> = decode_blocks.keys().copied().collect();
-        workers.extend(prefill_tokens.keys().copied());
-        Ok(workers
+        let (decode_blocks, prefill_tokens, active_requests) =
+            entry.tracker.potential_blocks_and_tokens::<true>(
+                Some(sequence_hashes),
+                &PrefillTokenDeltas::uniform(new_isl_tokens),
+            );
+        let active_requests = active_requests.expect("active request projection should be present");
+        Ok(decode_blocks
             .into_iter()
-            .map(|worker| PotentialLoad {
+            .map(|(worker, potential_decode_blocks)| PotentialLoad {
                 worker_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
                 potential_prefill_tokens: prefill_tokens.get(&worker).copied().unwrap_or(0),
-                potential_decode_blocks: decode_blocks.get(&worker).copied().unwrap_or(0),
+                potential_decode_blocks,
+                active_requests: active_requests.get(&worker).copied().unwrap_or(0),
             })
             .collect())
     }
@@ -864,6 +865,7 @@ mod tests {
         assert_eq!(loads[0].dp_rank, 0);
         assert_eq!(loads[0].potential_prefill_tokens, 13);
         assert_eq!(loads[0].potential_decode_blocks, 4);
+        assert_eq!(loads[0].active_requests, 1);
     }
 
     #[tokio::test(start_paused = true)]

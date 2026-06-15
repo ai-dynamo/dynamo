@@ -258,6 +258,19 @@ impl RoutingInstances {
         )
     }
 
+    /// Add a single instance to the overloaded set (immediate
+    /// backpressure mark). Short-lived: the next metric-driven
+    /// `set_overloaded` recompute overwrites the whole set.
+    fn mark_overloaded(&self, instance_id: u64) -> Self {
+        let mut overloaded_ids = self.overloaded_ids.clone();
+        overloaded_ids.insert(instance_id);
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            overloaded_ids,
+        )
+    }
+
     fn clear_overloaded_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
         let mut overloaded_ids = self.overloaded_ids.clone();
         overloaded_ids.retain(|id| !removed_ids.contains(id));
@@ -366,6 +379,15 @@ impl RoutingInstancesState {
         let next = Arc::new(current.set_overloaded(overloaded_ids));
         self.snapshot.store(next);
         true
+    }
+
+    fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.update(
+            move |current| current.mark_overloaded(instance_id),
+            // Routable set is unchanged — only the derived free set shrinks —
+            // so there's no need to republish routable_ids.
+            false,
+        );
     }
 
     fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -526,6 +548,19 @@ impl Client {
     pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
         self.routing_instances
             .set_overloaded_instances(overloaded_instance_ids)
+    }
+
+    /// Mark an instance overloaded immediately. A worker returning
+    /// `ResourceExhausted` is busy ("queue full, retry later"), not faulted, so
+    /// this is the overload path, NOT `report_instance_down`. Short-lived: the
+    /// next `set_overloaded_instances` recompute overwrites the overloaded set.
+    pub fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.routing_instances
+            .mark_overloaded_immediate(instance_id);
+        tracing::debug!(
+            instance_id,
+            "marking instance overloaded (backpressure); next metric event will re-evaluate"
+        );
     }
 
     pub fn clear_overloaded_instances_for_removed(&self, removed_instance_ids: &[u64]) {

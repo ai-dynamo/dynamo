@@ -220,9 +220,9 @@ impl ErrorMessage {
         )
     }
 
-    /// Service Unavailable with a structured message body. Used by topology
-    /// readiness to distinguish "model registered but topology incomplete"
-    /// from generic "service not ready".
+    /// Service Unavailable with a structured message body. Used by readiness
+    /// reporting to distinguish "model registered but not ready" from generic
+    /// "service not ready".
     pub fn service_unavailable_with_body(message: String) -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
         let error_type = map_error_code_to_error_type(code);
@@ -534,6 +534,31 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
 }
 
+/// Warn (once per request) when nvext data is dropped because the extension is
+/// disabled. Only called from the disabled branch, so the default path is free.
+fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
+    use crate::protocols::openai::nvext::{
+        HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID,
+    };
+    let header_present = [
+        HEADER_WORKER_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID,
+        HEADER_DP_RANK,
+        HEADER_DP_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK,
+    ]
+    .iter()
+    .any(|h| headers.contains_key(*h));
+
+    if nvext_present || header_present {
+        tracing::warn!(
+            endpoint,
+            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+        );
+    }
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -547,11 +572,16 @@ async fn handler_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("completions", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -971,11 +1001,16 @@ async fn completions_batch(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateEmbeddingRequest>,
+    Json(mut request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("embeddings", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -1142,7 +1177,12 @@ async fn handler_chat_completions(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("chat_completions", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -1879,7 +1919,7 @@ async fn handler_responses(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready.
+    // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
     // don't bypass the gate.
     check_ready(&state)?;
@@ -1891,7 +1931,12 @@ async fn handler_responses(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("responses", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -2290,7 +2335,7 @@ pub(crate) fn check_model_serving_ready(
     }
     Err(ErrorMessage::service_unavailable_with_body(format!(
         "Model `{model_name}` is registered but no namespace has a complete worker set. \
-         At least one prefill/decode/encode role required by a registered worker is missing. \
+         At least one prefill/decode/encode worker type required by a registered worker is missing. \
          Check worker startup logs for the affected namespace."
     )))
 }
@@ -2435,13 +2480,23 @@ pub fn list_models_router(
     let retrieve_path = format!("{}/{{*model_id}}", openai_path);
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
     let doc_for_retrieve = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    // Doc-only: the readiness sub-resource is served by `get_model_openai` via
+    // the catch-all retrieve route above (a wildcard must be the terminal
+    // segment, so it can't be its own axum route). Advertised for discovery.
+    let doc_for_readiness = RouteDoc::new(
+        axum::http::Method::GET,
+        format!("{}/{{model_id}}/ready", openai_path),
+    );
 
     let router = Router::new()
         .route(&openai_path, get(list_models_openai))
         .route(&retrieve_path, get(get_model_openai))
         .with_state(state);
 
-    (vec![doc_for_openai, doc_for_retrieve], router)
+    (
+        vec![doc_for_openai, doc_for_retrieve, doc_for_readiness],
+        router,
+    )
 }
 
 /// Retrieve a single model by ID (OpenAI format).
@@ -2456,14 +2511,41 @@ async fn get_model_openai(
 
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
 
-    let models: HashSet<String> = state.manager().model_display_names();
-    if !models.contains(model_id) {
-        return Err(ErrorMessage::model_not_found());
+    // The retrieve route (`/v1/models/{*model_id}`) is a catch-all, so model
+    // IDs can contain '/' — and may even end in '/ready'. We therefore
+    // dispatch by precedence: an *exact* model match always wins, and only when
+    // there is no such model do we treat a trailing `/ready` as the
+    // per-model readiness sub-resource (Mechanism 4). This means a model
+    // literally named `foo/ready` is still retrievable and never shadowed.
+    //
+    // Exact match is resolved against ALL registered models (`get_model`), not
+    // just the displayable ones, so a registered-but-not-yet-ready `foo/ready`
+    // still wins over the readiness sub-resource of a sibling `foo`.
+    // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
+    if state.manager().get_model(model_id).is_some() {
+        return get_model_retrieve(&state, model_id);
     }
 
-    // GET /v1/models/{model} reports the model only if it is ready to
-    // serve. Mirrors the filter applied in list_models_openai.
-    check_model_serving_ready(&state, model_id)?;
+    // Readiness sub-resource. Resolves against all registered models (above
+    // exact check failed, so `model_id` is not itself a registered model);
+    // the whole point of this endpoint is to diagnose models that are
+    // registered but not yet ready, so it must find them too.
+    if let Some(base) = model_id.strip_suffix("/ready")
+        && state.manager().get_model(base).is_some()
+    {
+        return get_model_readiness(&state, base);
+    }
+
+    Err(ErrorMessage::model_not_found())
+}
+
+/// `GET /v1/models/{model}` — the OpenAI retrieve-model object. Reports the
+/// model only if it is ready to serve (mirrors the `list_models_openai` filter).
+fn get_model_retrieve(
+    state: &Arc<service_v2::State>,
+    model_id: &str,
+) -> Result<Response, ErrorResponse> {
+    check_model_serving_ready(state, model_id)?;
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2494,6 +2576,21 @@ async fn get_model_openai(
     .into_response())
 }
 
+/// `GET /v1/models/{model}/ready` — structured per-namespace worker readiness
+/// detail (Mechanism 4). Deliberately *not* readiness-gated: it exists to
+/// diagnose models that are not yet ready, so it returns 200 with the full
+/// breakdown regardless of whether the model would be served.
+fn get_model_readiness(
+    state: &Arc<service_v2::State>,
+    model_id: &str,
+) -> Result<Response, ErrorResponse> {
+    let model = state
+        .manager()
+        .get_model(model_id)
+        .ok_or_else(ErrorMessage::model_not_found)?;
+    Ok(Json(model.namespace_readiness()).into_response())
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
 /// If not path is provided, the default path is `/v1/responses`
 pub fn responses_router(
@@ -2517,7 +2614,7 @@ async fn images(
     Json(request): Json<NvCreateImageRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model topology check is deferred until after we resolve the
+    // (per-model readiness check is deferred until after we resolve the
     // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
@@ -2654,7 +2751,7 @@ async fn videos(
     headers: HeaderMap,
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
@@ -2944,7 +3041,7 @@ async fn audio_speech(
     Json(request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model topology check is deferred until after we resolve the
+    // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)
     check_ready(&state)?;
 

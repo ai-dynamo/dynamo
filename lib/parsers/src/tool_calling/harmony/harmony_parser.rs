@@ -9,6 +9,7 @@ use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, load_harmony_encoding
 use regex::{Captures, Regex};
 use serde_json::Value;
 use std::sync::OnceLock;
+use uuid::Uuid;
 
 static COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -290,9 +291,8 @@ fn extract_calls_via_regex(text: &str) -> (Vec<ToolCallResponse>, String) {
             continue;
         }
         let args_json = serialize_harmony_arguments(raw_args);
-        let call_idx = out.len() + 1;
         out.push(ToolCallResponse {
-            id: format!("call-{call_idx}"),
+            id: format!("call-{}", Uuid::new_v4()),
             tp: ToolCallType::Function,
             function: CalledFunction {
                 name: name.to_string(),
@@ -381,7 +381,6 @@ pub async fn parse_tool_calls_harmony_complete(
     };
 
     let mut res = Vec::with_capacity(messages.len());
-    let mut call_idx = 0; // Index of the tool call
     let mut normal_text = String::new();
     let has_tool_call_stop = text.contains("<|call|>");
     let has_recipientless_commentary_call = contains_recipientless_commentary_call(text);
@@ -420,9 +419,8 @@ pub async fn parse_tool_calls_harmony_complete(
                 continue;
             };
 
-            call_idx += 1;
             res.push(ToolCallResponse {
-                id: format!("call-{}", call_idx),
+                id: format!("call-{}", Uuid::new_v4()),
                 tp: ToolCallType::Function,
                 function: CalledFunction {
                     name: fname.to_string(),
@@ -916,6 +914,39 @@ mod tests {
         assert_eq!(name1, "get_weather");
         assert_eq!(args0["city"], "NYC");
         assert_eq!(args1["city"], "LA");
+    }
+
+    /// Regression test: the harmony parser must produce ids that are unique
+    /// not just within a single invocation but also across multiple invocations.
+    /// `jail.rs` slices the raw stream at each `<|call|>` boundary and invokes
+    /// the parser once per section. With index-based ids ("call-1", "call-2", ...)
+    /// each per-section invocation would restart from "call-1", and the
+    /// downstream OpenAI Chat Completions response would carry duplicate ids,
+    /// which clients (and Dynamo's own E2E harness) reject as
+    /// `duplicate_tool_ids`. Using `Uuid::new_v4()` at construction guarantees
+    /// uniqueness independent of how many times the parser is invoked.
+    #[tokio::test]
+    async fn test_parse_tool_calls_harmony_unique_ids_across_invocations() {
+        // Two independent invocations, each on a single tool-call section —
+        // matches the jail's per-<|call|> emission pattern.
+        let chunk_a = r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>"#;
+        let chunk_b = r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"NY"}<|call|>"#;
+
+        let (calls_a, _) = parse_tool_calls_harmony_complete(chunk_a, &Default::default(), None)
+            .await
+            .unwrap();
+        let (calls_b, _) = parse_tool_calls_harmony_complete(chunk_b, &Default::default(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(calls_a.len(), 1, "first chunk should produce 1 call");
+        assert_eq!(calls_b.len(), 1, "second chunk should produce 1 call");
+        assert_ne!(
+            calls_a[0].id, calls_b[0].id,
+            "Tool call ids must be unique across separate parser invocations \
+             (jail invokes the parser once per <|call|> boundary; identical ids \
+             would surface as duplicate_tool_ids in the OpenAI response)",
+        );
     }
 }
 

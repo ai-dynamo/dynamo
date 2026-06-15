@@ -215,10 +215,54 @@ pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
     Some(repaired)
 }
 
+/// Recover the complete leading tool-call objects from an unterminated mistral
+/// JSON array body (e.g. `[{...complete...}, {...truncated`). Parses top-level
+/// `{...}` objects left-to-right with a streaming deserializer and stops at the
+/// first incomplete one, keeping every complete leading call and dropping the
+/// truncated tail. Unlike `try_repair_truncated_json`, it performs no
+/// brace-balancing fabrication, so a half-emitted trailing call is discarded
+/// rather than invented. Returns the verbatim byte spans of the complete
+/// objects (empty when none completed).
+fn recover_leading_complete_objects(json: &str) -> Vec<String> {
+    let trimmed = json.trim();
+    let body = trimmed.strip_prefix('[').unwrap_or(trimmed);
+    let mut out: Vec<String> = Vec::new();
+    let mut remaining = body.trim_start();
+    while !remaining.is_empty() {
+        let mut stream = serde_json::Deserializer::from_str(remaining).into_iter::<Box<RawValue>>();
+        match stream.next() {
+            Some(Ok(rv)) => {
+                let raw = rv.get();
+                if raw.is_empty() || !raw.trim_start().starts_with('{') {
+                    break;
+                }
+                out.push(raw.to_string());
+                remaining = remaining[raw.len()..].trim_start();
+                match remaining.strip_prefix(',') {
+                    Some(rest) => remaining = rest.trim_start(),
+                    None => break,
+                }
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
 fn try_parse_normal_text(input: &str, start_token: &str) -> String {
     // If input contains start token, just take the part before it
     if let Some(idx) = input.find(start_token) {
-        return input[..idx].trim().to_string();
+        let prefix = &input[..idx];
+        // The mistral family ([TOOL_CALLS]) keeps the boundary space before the
+        // marker to match vLLM; every other JSON family trims it. Keyed on the
+        // family's distinctive start token rather than a config field so the
+        // exported `JsonParserConfig` gains no new public member (downstream
+        // struct-literal constructors stay source-compatible).
+        return if start_token == "[TOOL_CALLS]" {
+            prefix.to_string()
+        } else {
+            prefix.trim().to_string()
+        };
     }
 
     // No start token found, return empty string
@@ -436,6 +480,33 @@ pub fn try_tool_call_parse_basic_json(
     // through to truncation recovery.
     if let Some(calls) = parse_calls(json)? {
         return Ok((calls, Some(normal_text)));
+    }
+
+    // mistral optional-close form: an unterminated call (a `[TOOL_CALLS]`
+    // opener with no `[/TOOL_CALLS]` close) whose JSON array did not parse
+    // cleanly above. Recover only the complete leading objects, dropping the
+    // truncated tail with no brace-balancing fabrication; if nothing complete
+    // remains, suppress entirely so the raw `[TOOL_CALLS]...` markup never
+    // leaks into normal_text (consistent incomplete-call handling, matching
+    // hermes). Gated on `allow_eof_recovery` so it only runs at finalize /
+    // batch, never mid-stream, and scoped to mistral via its start token so
+    // other JSON families keep their existing recovery.
+    if config.allow_eof_recovery
+        && config
+            .tool_call_start_tokens
+            .iter()
+            .any(|t| t == "[TOOL_CALLS]")
+        && trimmed.contains("[TOOL_CALLS]")
+        && !trimmed.contains("[/TOOL_CALLS]")
+    {
+        let recovered = recover_leading_complete_objects(json);
+        if !recovered.is_empty()
+            && let Some(calls) = parse_calls(&format!("[{}]", recovered.join(",")))?
+            && !calls.is_empty()
+        {
+            return Ok((calls, Some(normal_text)));
+        }
+        return Ok((vec![], Some(normal_text)));
     }
 
     // Truncation recovery: balance unclosed strings/braces (common

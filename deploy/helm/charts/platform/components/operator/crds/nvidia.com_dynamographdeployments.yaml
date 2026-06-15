@@ -232,6 +232,13 @@ spec:
                         KvTransferPolicy configures topology-aware routing for KV-cache
                         transfers between prefill and decode workers.
                       properties:
+                        clusterTopologyName:
+                          description: |-
+                            ClusterTopologyName references a Grove ClusterTopology CR. The operator
+                            reads the CR's topology levels and projects them through Dynamo-owned pod
+                            labels for worker topology metadata.
+                          minLength: 1
+                          type: string
                         domain:
                           description: |-
                             Domain is the logical name for the topology level to enforce
@@ -280,8 +287,8 @@ spec:
                         - domain
                       type: object
                       x-kubernetes-validations:
-                        - message: labelKey is required until alternate topology sources are supported
-                          rule: has(self.labelKey)
+                        - message: exactly one of labelKey or clusterTopologyName is required
+                          rule: (has(self.labelKey) && !has(self.clusterTopologyName)) || (!has(self.labelKey) && has(self.clusterTopologyName))
                         - message: preferredWeight is required when enforcement is preferred
                           rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
                         - message: preferredWeight may only be set when enforcement is preferred
@@ -20871,6 +20878,13 @@ spec:
                         kvTransferPolicy configures topology-aware routing for KV-cache
                         transfers between prefill and decode workers.
                       properties:
+                        clusterTopologyName:
+                          description: |-
+                            clusterTopologyName references a Grove ClusterTopology CR. The operator
+                            reads the CR's topology levels and projects them through Dynamo-owned pod
+                            labels for worker topology metadata.
+                          minLength: 1
+                          type: string
                         domain:
                           description: |-
                             domain is the logical name for the topology level to enforce
@@ -20919,8 +20933,8 @@ spec:
                         - domain
                       type: object
                       x-kubernetes-validations:
-                        - message: labelKey is required until alternate topology sources are supported
-                          rule: has(self.labelKey)
+                        - message: exactly one of labelKey or clusterTopologyName is required
+                          rule: (has(self.labelKey) && !has(self.clusterTopologyName)) || (!has(self.labelKey) && has(self.clusterTopologyName))
                         - message: preferredWeight is required when enforcement is preferred
                           rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
                         - message: preferredWeight may only be set when enforcement is preferred

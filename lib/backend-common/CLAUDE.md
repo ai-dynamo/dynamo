@@ -29,7 +29,7 @@ parse args,    start engine,    wire Prometheus    serve requests pre-cleanup sh
 return engine  return metadata  (optional)         (concurrent)   drain       release
 ```
 
-The trait has six methods. `from_args` is NOT on the trait — each
+The trait has twelve methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -87,6 +87,38 @@ opt-out and lets `run.rs` stay non-generic.
   successful first returns `Ok(())` without re-entering teardown. The
   conformance kit pins both — `CleanupWithoutStartFailed` and
   `SecondCleanupFailed`.
+- `health_check_payload(&self) -> Result<Option<Value>, DynamoError>` —
+  optional, default `Ok(None)`. Canary payload the runtime sends through
+  `generate` to actively probe an idle endpoint; `None` disables active
+  probing. Operator overrides (`DYN_HEALTH_CHECK_PAYLOAD` / `WorkerConfig`)
+  take precedence.
+- `supported_controls(&self) -> Result<Vec<String>, DynamoError>` —
+  optional, default empty. Semantic engine-control keys this engine
+  advertises (e.g. `start_profile`, `sleep`, `wake_up`). The Worker maps
+  each onto a `/engine/control/{key}` route via `register_engine_controls`.
+- `engine_control(&self, control: String, body: Value) -> Result<Value, DynamoError>` —
+  optional, default returns a `status:"error"` body. Dispatches one
+  advertised control. Returning a `status:"error"` body is HTTP 200 at the
+  `/engine/*` layer (it 5xx's only when this *raises*).
+- `supported_updates(&self) -> Result<Vec<String>, DynamoError>` —
+  optional, default empty. A sibling surface to `supported_controls` for
+  ops that mutate engine-managed assets rather than the serving lifecycle
+  (e.g. vLLM dynamic LoRA `load_lora` / `unload_lora` / `list_loras`). Kept
+  separate so LoRA doesn't inflate the control surface. The Worker maps
+  each onto a `/engine/update/{key}` route via `register_engine_updates`
+  (no quiesce/resume policy — updates never toggle discovery).
+- `engine_update(&self, update: String, body: Value) -> Result<Value, DynamoError>` —
+  optional, default returns a `status:"error"` body. Dispatches one
+  advertised update; same HTTP-200-on-`status:"error"` semantics as
+  `engine_control`.
+- `on_endpoint_ready(&self, endpoint: Endpoint) -> Result<(), DynamoError>` —
+  optional, default no-op. The Worker hands the engine its serving
+  `Endpoint` exactly once, after it exists and **before**
+  `register_engine_controls` / `register_engine_updates` (so `/engine/*`
+  can't fire before the engine has the endpoint). A failure is **fatal to
+  startup**. Engines that publish their own discovery records stash it
+  (e.g. vLLM dynamic LoRA via `register_model` / `unregister_model`).
+  Mirrors the `on_publisher_ready` handoff idiom.
 
 ## Contract for `generate`
 

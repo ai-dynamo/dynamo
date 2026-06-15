@@ -855,15 +855,18 @@ impl AggRuntime {
 #[cfg(test)]
 mod tests {
     use super::super::entrypoints::{
+        run_agentic_trace_multi_collect_with_stats, run_agentic_trace_single_collect,
         run_concurrency_multi_collect_with_stats, run_concurrency_single_collect,
-        run_concurrency_workload_multi_collect_with_stats, run_trace_multi_collect_with_stats,
-        run_trace_single_collect, run_trace_workload_multi_collect_with_stats,
+        run_concurrency_workload_multi_collect_with_stats, run_concurrency_workload_single_collect,
+        run_trace_multi_collect_with_stats, run_trace_single_collect,
+        run_trace_workload_multi_collect_with_stats, run_trace_workload_single_collect,
     };
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs};
-    use crate::loadgen::{SessionTrace, Trace, TurnTrace};
-    use crate::replay::normalize_trace_requests;
+    use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+    use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
     use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
+    use rstest::rstest;
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
         MockEngineArgs::builder()
@@ -876,6 +879,155 @@ mod tests {
             .speedup_ratio(0.0)
             .build()
             .unwrap()
+    }
+
+    fn parity_args(engine_type: EngineType) -> MockEngineArgs {
+        let mut builder = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(128)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0);
+        if engine_type == EngineType::Sglang {
+            builder = builder.sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }));
+        }
+        builder.build().unwrap()
+    }
+
+    fn parity_requests() -> Vec<DirectRequest> {
+        vec![
+            DirectRequest {
+                tokens: vec![1; 4],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![2; 8],
+                max_output_tokens: 4,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(101.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![3; 12],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(500.0),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn parity_workload() -> Trace {
+        Trace {
+            block_size: 4,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "session-a".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 4,
+                            max_output_tokens: 2,
+                            hash_ids: vec![11],
+                            delay_after_previous_ms: 0.0,
+                            ..Default::default()
+                        },
+                        TurnTrace {
+                            input_length: 12,
+                            max_output_tokens: 2,
+                            hash_ids: vec![21, 22, 23],
+                            delay_after_previous_ms: 5.0,
+                            ..Default::default()
+                        },
+                    ],
+                },
+                SessionTrace {
+                    session_id: "session-b".to_string(),
+                    first_arrival_timestamp_ms: Some(1.0),
+                    turns: vec![TurnTrace {
+                        input_length: 8,
+                        max_output_tokens: 2,
+                        hash_ids: vec![31, 32],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    }],
+                },
+            ],
+        }
+    }
+
+    fn parity_agentic_trace() -> AgenticTrace {
+        AgenticTrace {
+            block_size: 4,
+            turns: vec![
+                AgenticTurnTrace {
+                    request_id: "root".to_string(),
+                    session_id: "root".to_string(),
+                    input_length: 4,
+                    max_output_tokens: 2,
+                    hash_ids: vec![1],
+                    first_ready_timestamp_ms: Some(0.0),
+                    delay_after_dependencies_ms: 0.0,
+                    wait_for: Vec::new(),
+                    prefix_reset: true,
+                    ..Default::default()
+                },
+                AgenticTurnTrace {
+                    request_id: "dependent".to_string(),
+                    session_id: "dependent".to_string(),
+                    input_length: 8,
+                    max_output_tokens: 2,
+                    hash_ids: vec![1, 2],
+                    first_ready_timestamp_ms: Some(100.0),
+                    delay_after_dependencies_ms: 5.0,
+                    wait_for: vec!["root".to_string()],
+                    prefix_reset: true,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
+
+    fn sorted_snapshots(collector: &TraceCollector) -> Vec<TraceRequestStatsSnapshot> {
+        let mut snapshots = collector.snapshots();
+        snapshots.sort_by_key(|snapshot| snapshot.input_length);
+        snapshots
+    }
+
+    fn assert_collectors_match(single: TraceCollector, multi: TraceCollector) {
+        assert_eq!(sorted_snapshots(&single), sorted_snapshots(&multi));
+
+        let single_report = single.finish();
+        let multi_report = multi.finish();
+        assert_eq!(
+            single_report.request_counts.num_requests,
+            multi_report.request_counts.num_requests
+        );
+        assert_eq!(
+            single_report.request_counts.completed_requests,
+            multi_report.request_counts.completed_requests
+        );
+        assert_eq!(
+            single_report.request_counts.total_input_tokens,
+            multi_report.request_counts.total_input_tokens
+        );
+        assert_eq!(
+            single_report.request_counts.total_output_tokens,
+            multi_report.request_counts.total_output_tokens
+        );
     }
 
     fn fast_router_args() -> MockEngineArgs {
@@ -998,6 +1150,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
         }
     }
 
@@ -1045,12 +1198,14 @@ mod tests {
                             max_output_tokens: 2,
                             hash_ids: vec![11],
                             delay_after_previous_ms: 0.0,
+                            ..Default::default()
                         },
                         TurnTrace {
                             input_length: 192,
                             max_output_tokens: 2,
                             hash_ids: vec![21, 22, 23],
                             delay_after_previous_ms: 10.0,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -1062,6 +1217,7 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![31, 32],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -1208,6 +1364,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(111)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: [vec![11; 64], vec![22; 32]].concat(),
@@ -1215,6 +1372,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(222)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(500.0),
+                ..Default::default()
             },
         ];
         let workload = Trace {
@@ -1228,6 +1386,7 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![11, 21],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
                 SessionTrace {
@@ -1238,6 +1397,7 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![11, 22],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -1302,6 +1462,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(11)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
                     },
                     DirectRequest {
                         tokens: vec![22; 64],
@@ -1309,6 +1470,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(22)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
                     },
                     DirectRequest {
                         tokens: vec![11; 64],
@@ -1316,6 +1478,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(33)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.1),
+                        ..Default::default()
                     },
                 ],
                 1.0,
@@ -1393,6 +1556,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(1)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
                     },
                     DirectRequest {
                         tokens: vec![22; 64],
@@ -1400,6 +1564,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(2)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
                     },
                 ],
                 1.0,
@@ -1443,6 +1608,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(11)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(100.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6],
@@ -1450,6 +1616,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(22)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(100.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
@@ -1457,6 +1624,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(33)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(101.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![7, 7, 7, 7, 8, 8, 8, 8],
@@ -1464,6 +1632,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(44)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(101.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1502,6 +1671,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(1)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 8],
@@ -1509,6 +1679,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(2)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3; 8],
@@ -1516,6 +1687,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(3)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![4; 8],
@@ -1523,6 +1695,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(4)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![5; 8],
@@ -1530,6 +1703,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(5)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
             ],
             4,
@@ -1551,6 +1725,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(901)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1558,6 +1733,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(902)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(5.0),
+                    ..Default::default()
                 },
             ],
             1,
@@ -1582,6 +1758,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(911)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![7; 64],
@@ -1589,6 +1766,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(912)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(500.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1612,6 +1790,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(11)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(900.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
@@ -1619,6 +1798,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(22)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(1000.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
@@ -1626,6 +1806,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(33)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(100.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1661,6 +1842,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(11)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![22; 64],
@@ -1668,6 +1850,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(22)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![11; 64],
@@ -1675,6 +1858,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(33)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(2.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![22; 64],
@@ -1682,6 +1866,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(44)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(2.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1710,6 +1895,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(9)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![8; 64],
@@ -1717,6 +1903,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(8)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1739,6 +1926,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(1)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1746,6 +1934,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(2)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3; 64],
@@ -1753,6 +1942,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(3)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.1),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1782,6 +1972,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(10)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![20; 64],
@@ -1789,6 +1980,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(20)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![30; 64],
@@ -1796,6 +1988,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(30)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.1),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![40; 64],
@@ -1803,6 +1996,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(40)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.2),
+                ..Default::default()
             },
         ];
 
@@ -1844,6 +2038,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(10)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![20; 128],
@@ -1851,6 +2046,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(20)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![30; 64],
@@ -1858,6 +2054,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(30)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.1),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![40; 64],
@@ -1865,6 +2062,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(40)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.2),
+                ..Default::default()
             },
         ];
 
@@ -1906,6 +2104,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(1)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1913,6 +2112,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(2)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![1; 64],
@@ -1920,6 +2120,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(3)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1927,6 +2128,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(4)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
             ],
             3,
@@ -1949,6 +2151,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(11)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1956,6 +2159,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(22)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3; 64],
@@ -1963,6 +2167,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(33)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
             ],
             2,
@@ -1982,46 +2187,21 @@ mod tests {
         assert_eq!(stats.max_in_flight_seen, 2);
     }
 
-    #[test]
-    fn test_multi_worker_trace_single_worker_round_robin_matches_single_runtime() {
-        let args = replay_args(true, true);
-        let requests = vec![
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(11)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(100.0),
-            },
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(22)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(101.0),
-            },
-            DirectRequest {
-                tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(33)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(500.0),
-            },
-        ];
-
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_multi_worker_trace_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let requests = parity_requests();
         let single = run_trace_single_collect(args.clone(), requests.clone(), 1.0);
         let (multi, stats) =
             run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::RoundRobin);
 
         assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
-        for uuid in [11_u128, 22, 33] {
-            assert_eq!(
-                multi.snapshot(Uuid::from_u128(uuid)),
-                single.snapshot(Uuid::from_u128(uuid))
-            );
-        }
-        assert_eq!(multi.finish().request_counts.completed_requests, 3);
-        assert_eq!(single.finish().request_counts.completed_requests, 3);
+        assert_collectors_match(single, multi);
     }
 
     #[test]
@@ -2034,6 +2214,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
@@ -2041,6 +2222,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(101.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
@@ -2048,6 +2230,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(500.0),
+                ..Default::default()
             },
         ];
 
@@ -2067,33 +2250,15 @@ mod tests {
         assert_eq!(single.finish().request_counts.completed_requests, 3);
     }
 
-    #[test]
-    fn test_multi_worker_concurrency_single_worker_round_robin_matches_single_runtime() {
-        let args = replay_args(true, true);
-        let requests = vec![
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(11)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(900.0),
-            },
-            DirectRequest {
-                tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
-                max_output_tokens: 4,
-                uuid: Some(Uuid::from_u128(22)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(1000.0),
-            },
-            DirectRequest {
-                tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(33)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(100.0),
-            },
-        ];
-
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_multi_worker_concurrency_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let requests = parity_requests();
         let single = run_concurrency_single_collect(args.clone(), requests.clone(), 2);
         let (multi, stats) = run_concurrency_multi_collect_with_stats(
             &args,
@@ -2104,12 +2269,68 @@ mod tests {
         );
 
         assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
-        for uuid in [11_u128, 22, 33] {
-            assert_eq!(
-                multi.snapshot(Uuid::from_u128(uuid)),
-                single.snapshot(Uuid::from_u128(uuid))
-            );
-        }
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_trace_workload_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_trace_workload_single_collect(args.clone(), parity_workload());
+        let (multi, stats) = run_trace_workload_multi_collect_with_stats(
+            &args,
+            parity_workload(),
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_concurrency_workload_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_concurrency_workload_single_collect(args.clone(), parity_workload(), 1);
+        let (multi, stats) = run_concurrency_workload_multi_collect_with_stats(
+            &args,
+            parity_workload(),
+            1,
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_agentic_trace_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_agentic_trace_single_collect(args.clone(), parity_agentic_trace());
+        let (multi, stats) = run_agentic_trace_multi_collect_with_stats(
+            &args,
+            parity_agentic_trace(),
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0]);
+        assert_collectors_match(single, multi);
     }
 
     #[test]
@@ -2122,6 +2343,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(900.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
@@ -2129,6 +2351,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(1000.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
@@ -2136,6 +2359,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
         ];
 
@@ -2182,6 +2406,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(i as u128 + 1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(i as f64 * arrival_interval_ms),
+                ..Default::default()
             })
             .collect()
     }
@@ -2235,6 +2460,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(1000.0),
+            ..Default::default()
         }]);
         let mut rt = AggRuntime::new(
             &args,
@@ -2344,6 +2570,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(arrival_ms),
+            ..Default::default()
         }
     }
 

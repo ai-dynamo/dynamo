@@ -167,7 +167,13 @@ galil-seiferas = { version = "0.1" }
 
 # preprocessor
 bs62 = { version = "0.1" }
-minijinja = { version = "2.20.0", features = ["loader", "loop_controls"] }
+# "preserve_order" backs minijinja's object values with IndexMap instead of
+# BTreeMap, so JSON object keys survive template rendering in client order.
+# Without it, tool schemas and tool-call arguments render with keys sorted
+# alphabetically, diverging from Python frontends (vLLM/SGLang) which preserve
+# dict insertion order. serde_json already has its preserve_order enabled
+# (see above / lib/renderer); minijinja's map is the remaining sort point.
+minijinja = { version = "2.20.0", features = ["loader", "loop_controls", "preserve_order"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor
