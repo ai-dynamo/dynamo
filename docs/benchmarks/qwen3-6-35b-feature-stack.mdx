@@ -5,6 +5,10 @@ title: "Qwen3.6 Frontend and Cache Benchmark"
 subtitle: "How do Dynamo frontend-decoding and the embedding cache change a single-GPU multimodal sliding-window benchmark versus vanilla vLLM serve?"
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Three configurations run on the same single-GPU node (H100 or GB200, selected at deploy time), so the only thing that varies is the Dynamo feature set. Each turn shares 4-of-5 images with the previous turn of the same user, so repeated images dominate — exactly the shape the embedding cache is designed for. The full Dynamo stack delivers roughly **+30% RPS and large TTFT reductions** versus vanilla `vllm serve` (H100: +29.8% RPS / −66.4% TTFT avg; GB200: +31.5% / −43.3%).
 
 <div className="dynamo-target-picker static">

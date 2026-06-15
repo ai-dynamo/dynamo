@@ -5,6 +5,10 @@ title: "DeepSeek V3.2 WideEP Routing A/B"
 subtitle: "Does disaggregated KV-aware routing with WideEP improve latency and goodput against an aggregated round-robin GB200 control?"
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Both configurations run Dynamo + TensorRT-LLM on **32x GB200 GPUs across 8 nodes**: the baseline uses 4x DEP8 aggregated workers with round-robin routing; the comparison splits into 2 prefill + 2 decode workers with WideEP (DEP8) and KV-aware routing. The trace is heavily reuse-biased — roughly 44% KV cache hit rate and 57% of input tokens from shared context prefixes — so KV-aware routing can avoid large amounts of redundant long-context prefill.
 
 <div className="dynamo-target-picker static">

@@ -5,6 +5,10 @@ title: "Nemotron-3-Super"
 subtitle: "Serve NVIDIA-Nemotron-3-Super-120B-A12B with Dynamo and vLLM, tuned per GPU and workload."
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Each target below is a validated aggregated vLLM deployment of Nemotron-3-Super — NVIDIA's ~120B hybrid Mamba/Attention/MoE model (~12B active) — with MTP speculative decoding (DL=3) and KV-aware routing; the B200 agentic target measured 1388.4 system output tok/s per GPU on its trace. B200 serves the NVFP4 checkpoint, H200 the FP8 checkpoint. Pick your GPU and workload; every command on this page updates to match.
 
 <div className="dynamo-target-picker">

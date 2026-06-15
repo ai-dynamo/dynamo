@@ -5,6 +5,10 @@ title: "Qwen3-32B"
 subtitle: "Serve Qwen3-32B with Dynamo and vLLM — disaggregated serving with KV-aware routing for multi-turn conversational traffic."
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 This recipe deploys `Qwen/Qwen3-32B` on 16x H200 with prefill/decode disaggregation and KV-aware routing — the winning configuration from the [KV routing A/B benchmark](../benchmarks/qwen3-32b-kv-routing.mdx), validated against a real Mooncake conversation trace (12,031 requests, 12K average input length, 36.64% cache efficiency). It fits multi-turn conversational workloads where requests share long prefixes that KV-aware routing can exploit.
 
 <div className="dynamo-target-picker static">

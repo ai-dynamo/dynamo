@@ -5,6 +5,10 @@ title: "Qwen3-32B FP8"
 subtitle: "Serve Qwen/Qwen3-32B-FP8 with Dynamo on TensorRT-LLM or vLLM, aggregated or disaggregated."
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Each target below is a validated FP8 deployment of Qwen3-32B — from a 2-GPU TensorRT-LLM aggregate to 8-GPU disaggregated prefill/decode setups on TensorRT-LLM or vLLM — each with a checked-in AIPerf benchmark Job. The targets use different traffic shapes and GPU counts, so this page is not a backend benchmark. Pick your target; every command on this page updates to match.
 
 <div className="dynamo-target-picker">

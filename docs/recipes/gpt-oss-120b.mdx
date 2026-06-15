@@ -5,6 +5,10 @@ title: "GPT-OSS-120B"
 subtitle: "Serve openai/gpt-oss-120b with Dynamo and TensorRT-LLM on Blackwell."
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Two validated TensorRT-LLM targets cover the two traffic shapes this model is most deployed for: aggregated WideEP serving for short-prompt, high-concurrency traffic, and a prefill/decode split for long-context generation. They are deployment targets for different workloads, not an agg-vs-disagg comparison. Pick your target; every command on this page updates to match.
 
 <div className="dynamo-target-picker">

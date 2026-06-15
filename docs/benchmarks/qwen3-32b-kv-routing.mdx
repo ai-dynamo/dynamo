@@ -5,6 +5,10 @@ title: "Qwen3-32B KV Routing A/B"
 subtitle: "Does disaggregated KV-aware routing reduce TTFT and ITL on multi-turn prefix-reuse traffic compared with aggregated round-robin routing?"
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Both configurations run on **16x H200 GPUs across 2 nodes**: the baseline uses 8x TP2 aggregated workers with round-robin routing; the comparison splits the same GPUs into 6 prefill + 2 decode TP2 workers with KV-aware routing. The trace's 36.64% cache efficiency means KV-aware routing can send requests to workers that already hold the relevant KV blocks, cutting redundant prefill, while the prefill/decode split keeps long-context prefills (avg 12K input tokens) from injecting ITL spikes into ongoing decodes.
 
 <div className="dynamo-target-picker static">

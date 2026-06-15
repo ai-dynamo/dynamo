@@ -5,6 +5,10 @@ title: "Llama-3.3-70B Topology Benchmark"
 subtitle: "How do aggregated, single-node disaggregated, and multi-node disaggregated vLLM topologies compare when normalized by GPU?"
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Three vLLM topologies — aggregated, single-node disaggregated, and multi-node disaggregated — intentionally use different GPU counts (4, 8, and 16x H100/H200), so concurrency is scaled at 16 per GPU and results should be read as total throughput **and** TPS/GPU together. All three topologies are also deployable recipe targets, so this benchmark doubles as a sizing guide.
 
 <div className="dynamo-target-picker static">

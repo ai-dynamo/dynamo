@@ -5,6 +5,10 @@ title: "Llama-3.3-70B FP8"
 subtitle: "Serve Llama-3.3-70B FP8 with Dynamo and vLLM, sized from one node to two."
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Three validated vLLM topologies for `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` — aggregated TP4, single-node prefill/decode split, and two-node prefill/decode — all benchmarked with the same 8K ISL / 1K OSL traffic at 16 concurrency per GPU so you can compare normalized TPS/GPU across footprints. Pick your topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">

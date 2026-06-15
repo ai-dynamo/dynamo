@@ -5,6 +5,10 @@ title: "Qwen3-235B-A22B FP8"
 subtitle: "Serve Qwen/Qwen3-235B-A22B-FP8 with Dynamo and TensorRT-LLM on 16 Hopper or Blackwell GPUs."
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 — a 235B-parameter Mixture-of-Experts model with ~22B active parameters per token — on 16 GPUs with KV-aware routing, benchmarked at 4K ISL / 200 OSL. Hopper and Blackwell need different MoE backends, and you can serve aggregated or with prefill/decode disaggregation. Pick your GPU architecture and serving topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">

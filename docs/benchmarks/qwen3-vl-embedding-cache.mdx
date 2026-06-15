@@ -5,6 +5,10 @@ title: "Qwen3-VL Embedding Cache A/B"
 subtitle: "How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?"
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Two configurations run the same `deploy.yaml` on a single aggregated GB200 worker — the only delta is the `DYN_MULTIMODAL_EMBEDDING_CACHE_GB` environment variable (10 GB for cache ON, 0 for cache OFF). With an image pool of 200 across 1,000 requests, the first 200 requests see unique images and the remaining 800 hit images the engine has already encoded, so a cache hit skips the vision encoder on the prefill path. Enabling the cache delivers **+16.4% output throughput and −27.7% average TTFT**.
 
 <div className="dynamo-target-picker static">

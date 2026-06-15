@@ -5,6 +5,10 @@ title: "Nemotron-3-Ultra"
 subtitle: "Serve nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 with Dynamo and vLLM, tuned per GPU and workload."
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 Each target below is a validated aggregated vLLM deployment of Nemotron-3-Ultra — NVIDIA's ~550B hybrid Mamba/Attention/MoE model (~55B active) — with MTP speculative decoding (1 token) and KV-aware routing; the B200 agentic target measured 310.8 system output tok/s per GPU on its trace. Pick your GPU and workload; every command on this page updates to match.
 
 <div className="dynamo-target-picker">

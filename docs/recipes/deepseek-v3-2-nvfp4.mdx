@@ -5,6 +5,10 @@ title: "DeepSeek V3.2 NVFP4"
 subtitle: "Serve nvidia/DeepSeek-V3.2-NVFP4 with Dynamo and TensorRT-LLM, disaggregated with KV routing and WideEP on GB200 NVL72."
 ---
 
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
 This recipe deploys DeepSeek V3.2 NVFP4 disaggregated across 32 GB200 GPUs — 2x prefill + 2x decode workers (DEP8) with KV-aware routing and WideEP — for long-context coding traces with heavy prefix reuse (~39.2K avg ISL, 44% KV block hit rate). The aggregated round-robin configuration is the benchmark control and lives on the related Feature Benchmark page.
 
 <div className="dynamo-target-picker static">
