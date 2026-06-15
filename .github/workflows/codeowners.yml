@@ -1,0 +1,50 @@
+name: codeowners
+
+# Keeps CODEOWNERS in sync with the declarative source (.github/codeowners/areas.yaml)
+# and gates PRs that would leave a path unowned. Ownership STRUCTURE only -- team
+# membership (who is on each team) is managed separately.
+
+on:
+  pull_request:
+    paths:
+      - "**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/codeowners/**"
+      - "CODEOWNERS"
+
+jobs:
+  codeowners:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      # Coverage gate: fail if any tracked file falls through to the catch-all.
+      # New directories must be covered by an area glob or a classify rule.
+      - name: Validate 100% coverage (strict)
+        run: |
+          python .github/codeowners/build_codeowners.py \
+            --areas .github/codeowners/areas.yaml \
+            --repo . \
+            --out /tmp/areas.resolved.yaml \
+            --strict
+
+      # Regenerate, then fail if the committed CODEOWNERS / advisory config drifted
+      # from what areas.yaml produces (i.e. someone hand-edited the output, or
+      # changed areas.yaml without regenerating).
+      - name: Regenerate and check for drift
+        run: |
+          python .github/codeowners/emit_codeowners.py \
+            --resolved /tmp/areas.resolved.yaml \
+            --repo . \
+            --out CODEOWNERS \
+            --advisory-out .github/codeowners/advisory-reviewers.yaml
+          git diff --exit-code CODEOWNERS .github/codeowners/advisory-reviewers.yaml \
+            || { echo "::error::CODEOWNERS is out of date. Regenerate from areas.yaml and commit."; exit 1; }

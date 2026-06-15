@@ -1,0 +1,190 @@
+_comment: Non-blocking auto-request reviewers. Consumed by a review-request Action, NOT by CODEOWNERS. path_rules match path
+  globs; filetype_rules match by extension/name across the whole tree.
+path_rules:
+- path: .agents/contributor-skills/dynamo-clone-hotpath-audit/
+  request_review_from:
+  - '@ai-dynamo/dynamo-process-codeowners'
+  - '@ai-dynamo/dynamo-performance-codeowners'
+- path: .agents/contributor-skills/dynamo-frontend-benchmark/
+  request_review_from:
+  - '@ai-dynamo/dynamo-process-codeowners'
+  - '@ai-dynamo/dynamo-performance-codeowners'
+- path: .agents/contributor-skills/tool-parser-generator/
+  request_review_from:
+  - '@ai-dynamo/dynamo-process-codeowners'
+  - '@ai-dynamo/dynamo-frontend-codeowners'
+- path: docs/api/nixl-connect/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-kv-memory-codeowners'
+- path: docs/components/kvbm/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-kv-memory-codeowners'
+- path: docs/components/planner/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-planner-codeowners'
+- path: docs/components/profiler/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-planner-codeowners'
+- path: docs/components/router/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-router-codeowners'
+- path: docs/design-docs/discovery-plane.md
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-runtime-codeowners'
+- path: docs/design-docs/distributed-runtime.md
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-runtime-codeowners'
+- path: docs/design-docs/event-plane.md
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-runtime-codeowners'
+- path: docs/design-docs/kvbm-design.md
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-kv-memory-codeowners'
+- path: docs/design-docs/planner-design.md
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-planner-codeowners'
+- path: docs/design-docs/request-plane.md
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-runtime-codeowners'
+- path: docs/design-docs/router-design.md
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-router-codeowners'
+- path: docs/digest/flash-indexer/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-router-codeowners'
+- path: docs/features/diffusion/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-diffusion-codeowners'
+- path: docs/features/multimodal/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-multimodal-codeowners'
+- path: docs/integrations/kv-events-custom-engines.md
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-router-codeowners'
+- path: docs/kubernetes/observability/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-observability-codeowners'
+- path: docs/observability/
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+  - '@ai-dynamo/dynamo-observability-codeowners'
+- path: examples/backends/sglang/launch/diffusion_llada.sh
+  request_review_from:
+  - '@ai-dynamo/dynamo-sglang-codeowners'
+  - '@ai-dynamo/dynamo-diffusion-codeowners'
+- path: examples/backends/sglang/launch/image_diffusion.sh
+  request_review_from:
+  - '@ai-dynamo/dynamo-sglang-codeowners'
+  - '@ai-dynamo/dynamo-diffusion-codeowners'
+- path: examples/backends/sglang/launch/text-to-video-diffusion.sh
+  request_review_from:
+  - '@ai-dynamo/dynamo-sglang-codeowners'
+  - '@ai-dynamo/dynamo-diffusion-codeowners'
+- path: examples/backends/trtllm/deploy/disagg_planner.yaml
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-planner-codeowners'
+- path: examples/backends/trtllm/deploy/v1beta1/disagg_planner.yaml
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-planner-codeowners'
+- path: examples/backends/trtllm/engine_configs/llama4/multimodal/
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-multimodal-codeowners'
+- path: examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-multimodal-codeowners'
+- path: examples/backends/trtllm/engine_configs/qwen2-vl-7b-instruct/
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-multimodal-codeowners'
+- path: examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-multimodal-codeowners'
+- path: examples/backends/trtllm/launch/agg_image_diffusion.sh
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-diffusion-codeowners'
+- path: examples/backends/trtllm/launch/agg_video_diffusion.sh
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-diffusion-codeowners'
+- path: examples/backends/trtllm/mm_router_worker/
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-multimodal-codeowners'
+- path: examples/backends/trtllm/templates/llava_multimodal.jinja
+  request_review_from:
+  - '@ai-dynamo/dynamo-trtllm-codeowners'
+  - '@ai-dynamo/dynamo-multimodal-codeowners'
+- path: examples/backends/vllm/deploy/agg_tracing.yaml
+  request_review_from:
+  - '@ai-dynamo/dynamo-vllm-codeowners'
+  - '@ai-dynamo/dynamo-observability-codeowners'
+- path: examples/backends/vllm/deploy/disagg_planner.yaml
+  request_review_from:
+  - '@ai-dynamo/dynamo-vllm-codeowners'
+  - '@ai-dynamo/dynamo-planner-codeowners'
+- path: examples/backends/vllm/deploy/disagg_tracing.yaml
+  request_review_from:
+  - '@ai-dynamo/dynamo-vllm-codeowners'
+  - '@ai-dynamo/dynamo-observability-codeowners'
+- path: examples/backends/vllm/deploy/v1beta1/disagg_planner.yaml
+  request_review_from:
+  - '@ai-dynamo/dynamo-vllm-codeowners'
+  - '@ai-dynamo/dynamo-planner-codeowners'
+- path: examples/backends/vllm/launch/agg_tracing.sh
+  request_review_from:
+  - '@ai-dynamo/dynamo-vllm-codeowners'
+  - '@ai-dynamo/dynamo-observability-codeowners'
+- path: examples/backends/vllm/launch/disagg_tracing.sh
+  request_review_from:
+  - '@ai-dynamo/dynamo-vllm-codeowners'
+  - '@ai-dynamo/dynamo-observability-codeowners'
+- path: examples/diffusers/deploy/
+  request_review_from:
+  - '@ai-dynamo/dynamo-diffusion-codeowners'
+  - '@ai-dynamo/dynamo-operator-codeowners'
+- path: skills/dynamo-interconnect-check/
+  request_review_from:
+  - '@ai-dynamo/dynamo-process-codeowners'
+  - '@ai-dynamo/dynamo-runtime-codeowners'
+- path: skills/dynamo-recipe-runner/
+  request_review_from:
+  - '@ai-dynamo/dynamo-process-codeowners'
+  - '@ai-dynamo/dynamo-operator-codeowners'
+- path: skills/dynamo-router-starter/
+  request_review_from:
+  - '@ai-dynamo/dynamo-process-codeowners'
+  - '@ai-dynamo/dynamo-router-codeowners'
+- path: skills/dynamo-troubleshoot/
+  request_review_from:
+  - '@ai-dynamo/dynamo-process-codeowners'
+  - '@ai-dynamo/dynamo-operator-codeowners'
+filetype_rules:
+- match: '*.md'
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
+- match: '*.mdx'
+  request_review_from:
+  - '@ai-dynamo/dynamo-docs-codeowners'
