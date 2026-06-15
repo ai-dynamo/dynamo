@@ -345,6 +345,8 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         model="Qwen/Qwen3-0.6B",
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
         component="backend",
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
     )
     worker_config = object()
 
