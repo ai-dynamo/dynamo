@@ -441,6 +441,11 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["[TOOL_CALLS]".to_string()],
                 tool_call_end_tokens: vec!["[/TOOL_CALLS]".to_string(), "".to_string()],
+                // On failed-parse recovery, strip the markers instead of leaking
+                // them into normal_text (malformed body, or orphan close with no
+                // opener). Same flag nemotron_deci uses; base_json_parser.rs has
+                // the streaming-path detail.
+                strip_markup_on_recovery: true,
                 ..Default::default()
             }),
             structural_tag_builder: None,

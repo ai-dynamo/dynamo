@@ -27,6 +27,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: "SGLang's MistralDetector requires '[TOOL_CALLS] [' with a space before the JSON array; the canonical mistral_common wire format emits '[TOOL_CALLS][' with no space, so it falls to its compact path, finds no [ARGS], and returns no call. Dynamo recovers the call via the empty end-token. Real SGLang divergence on the genuine Mistral format."
   TOOLCALLING.batch.5.b:
     description: Closing [/TOOL_CALLS] without matching [TOOL_CALLS] open
     ref: dynamo
@@ -34,12 +35,20 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id003
-        reason: "Dynamo's mistral parser leaves [/TOOL_CALLS] in normal_text on missing/orphan end marker (impl-defined recovery)"
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
-      vllm: *id003
-      sglang: *id003
+        reason: "vLLM requires the [TOOL_CALLS] opener; with only an orphan [/TOOL_CALLS] close it treats the whole string as content and emits no call. Dynamo strips the orphan close marker and recovers the complete call body without leaking markup (TOOLCALLING.batch.5 impl-defined recovery)."
+      sglang:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
+        reason: "SGLang's MistralDetector matches no [TOOL_CALLS opener (an orphan [/TOOL_CALLS] close does not match) and returns the text unchanged with no call. Dynamo strips the orphan close marker and recovers the complete call body without leaking markup (TOOLCALLING.batch.5 impl-defined recovery)."
   TOOLCALLING.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -78,6 +87,7 @@ cases:
       sglang:
         calls: []
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: "SGLang's MistralDetector requires '[TOOL_CALLS] [' with a space before the JSON array; the canonical mistral_common format emits '[TOOL_CALLS][' with no space, so it returns no call and keeps the narration prefix. Dynamo recovers both complete calls. Real SGLang divergence on the genuine Mistral format."
   TOOLCALLING.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo

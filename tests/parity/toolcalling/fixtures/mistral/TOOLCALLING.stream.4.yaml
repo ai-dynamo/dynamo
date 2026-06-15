@@ -29,6 +29,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: "SGLang's streaming MistralDetector requires '[TOOL_CALLS] [' with a space; the canonical mistral_common format emits '[TOOL_CALLS][' with no space, so it never enters the JSON-array path and emits no call. Dynamo recovers the call at stream finalize. Real SGLang divergence on the genuine Mistral format."
       vllm: *id001
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
@@ -74,11 +75,17 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id002
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS][/TOOL_CALLS][/TOOL_CALLS]'
-      vllm: *id002
+        reason: "vLLM streaming sees no [TOOL_CALLS] opener in the chunk, so it emits the whole string as content with no call, leaking the orphan [/TOOL_CALLS] markers verbatim. Dynamo strips the orphan close markers at the confirmed end token and recovers the complete call body without leaking markup."
       sglang:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}[/TOOL_CALLS[/TOOL_CALLS[/TOOL_CALLS'
-        reason: SGLang strips the trailing ] from each orphan [/TOOL_CALLS] close marker (leaving bracket fragments); Dynamo and vLLM keep the bare body and markers verbatim when the [TOOL_CALLS] opener is absent.
+        reason: "SGLang's streaming MistralDetector matches no [TOOL_CALLS marker and flushes the buffer as normal text, stripping every ']' char via its eot_token replace (leaving bracket fragments). Dynamo strips the orphan close markers at the confirmed end token and recovers the complete call body without leaking markup."

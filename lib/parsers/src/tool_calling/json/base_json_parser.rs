@@ -528,19 +528,29 @@ pub fn try_tool_call_parse_basic_json(
     }
 
     // Strict recovery (opt-in via `strip_markup_on_recovery`, e.g. nemotron_deci):
-    // every parse above failed, so the fall-through below would return the raw
-    // text verbatim — which leaks the wrapper markers (`<TOOLCALL>` /
-    // `</TOOLCALL>`) into `normal_text`. Instead, strip all configured markers
-    // and retry a strict parse of the remaining payload: recover any well-formed
-    // call (this is what salvages orphan-close framing like
-    // `[{...}]</TOOLCALL>`), otherwise drop the content. Markers never reach the
-    // user either way; `tracing::warn!` records what was recovered or dropped.
-    // Gated on `allow_eof_recovery` so this only runs on finalize / non-streaming
-    // aggregate paths — never on a mid-stream chunk. Firing mid-stream would
-    // claim a "complete" call before the end token arrives (same hazard as
-    // `allow_eof_recovery` itself), which strands the trailing `</TOOLCALL>` as
-    // leaked normal_text on the next chunk.
-    if config.strip_markup_on_recovery && config.allow_eof_recovery {
+    // every parse above failed, so the fall-through below would leak the wrapper
+    // markers verbatim into `normal_text`. Instead, strip the configured markers
+    // and retry a strict parse: recover a well-formed call (salvages orphan-close
+    // framing like `[{...}]</TOOLCALL>`) or drop the content. `tracing::warn!`
+    // records which happened.
+    //
+    // Gated on `allow_eof_recovery` (finalize / batch) so it can't fire on an
+    // incomplete mid-stream chunk and claim a call before the end token arrives.
+    // Mistral also runs it once a complete `[/TOOL_CALLS]` end token is present:
+    // the streaming jail unjails on that marker with `allow_eof_recovery=false`,
+    // and stripping at a *confirmed* end token is safe (a complete region, not a
+    // truncated claim) — without it, orphan-close / malformed-body chunks leak
+    // (TOOLCALLING.stream.4.c). Scoped to mistral via its `[TOOL_CALLS]` start
+    // token so other strip-markup families stay byte-identical.
+    let mistral_end_token_present = config
+        .tool_call_start_tokens
+        .iter()
+        .any(|t| t == "[TOOL_CALLS]")
+        && config
+            .tool_call_end_tokens
+            .iter()
+            .any(|token| !token.is_empty() && trimmed.contains(token.as_str()));
+    if config.strip_markup_on_recovery && (config.allow_eof_recovery || mistral_end_token_present) {
         // Only intervene when a wrapper marker is actually present. Plain text
         // with no tool-call marker is a normal (non-tool) response and MUST
         // pass through unchanged — it must never be dropped or treated as a

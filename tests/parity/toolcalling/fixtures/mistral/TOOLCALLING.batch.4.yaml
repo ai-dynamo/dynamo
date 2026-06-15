@@ -17,16 +17,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        reason: "Dynamo's mistral parser leaves [TOOL_CALLS], [/TOOL_CALLS] in normal_text on malformed input (impl-defined recovery)"
+      dynamo: &d_4_a
         calls: []
-        normal_text: '[TOOL_CALLS]not a json array[/TOOL_CALLS]'
+        normal_text: ''
       vllm:
         calls: []
         normal_text: not a json array[/TOOL_CALLS]
-      sglang:
-        calls: []
-        normal_text: ''
+        reason: "vLLM's mistral parser splits only on the [TOOL_CALLS] opener and has no [/TOOL_CALLS] concept; on a malformed body its pre-v11 path returns the raw post-opener text as content, leaking the [/TOOL_CALLS] close marker. Dynamo strips the wrapper markers on malformed recovery so nothing leaks (TOOLCALLING.batch.4 impl-defined recovery)."
+      sglang: *d_4_a
   TOOLCALLING.batch.4.b:
     description: Missing close brace in JSON
     ref: dynamo
@@ -34,16 +32,14 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        reason: "Dynamo's mistral parser leaves [TOOL_CALLS], [/TOOL_CALLS] in normal_text on malformed input (impl-defined recovery)"
+      dynamo: &d_4_b
         calls: []
-        normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]'
+        normal_text: ''
       vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]'
-      sglang:
-        calls: []
-        normal_text: ''
+        reason: "vLLM splits on the [TOOL_CALLS] opener and, when the JSON body fails both raw_decode and the array-regex fallback, returns the raw post-opener text as content, leaking the body and the [/TOOL_CALLS] close marker. Dynamo strips the wrapper markers on malformed recovery so nothing leaks (TOOLCALLING.batch.4 impl-defined recovery)."
+      sglang: *d_4_b
   TOOLCALLING.batch.4.c:
     description: Missing name key
     ref: dynamo

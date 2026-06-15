@@ -29,9 +29,11 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: "SGLang's streaming MistralDetector requires '[TOOL_CALLS] [' with a space; the canonical mistral_common format emits '[TOOL_CALLS][' with no space, so it never enters the JSON-array path and emits no call. Dynamo buffers the payload and recovers the call. Real SGLang divergence on the genuine Mistral format."
       vllm:
         calls: []
         normal_text: ''
+        reason: "vLLM's streaming Mistral parser (pre-v11 ijson path) emits no call when the entire [TOOL_CALLS] payload arrives in one chunk via the parity harness (no incremental delta_token_ids to drive its coroutine); Dynamo buffers and recovers the call."
   TOOLCALLING.stream.1.b:
     description: Complete tool call split across parser-significant boundaries
     ref: derived from TOOLCALLING.batch.1
