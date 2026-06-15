@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Experimental Dynamo Snapshot restore recipe for Qwen3-0.6B with TensorRT-LLM.
+# Experimental Dynamo Snapshot restore example for Qwen3-0.6B with TensorRT-LLM.
 #
-# This recipe uses DynamoCheckpoint Auto mode: the operator starts a checkpoint
+# This example uses DynamoCheckpoint Auto mode: the operator starts a checkpoint
 # job for TRTLLMWorker, waits for it to become Ready, and then restores the DGD
 # worker from that checkpoint. Use a snapshot placeholder image for the worker
 # and the matching runtime/frontend image for the frontend. The image tags below
@@ -132,18 +132,27 @@ spec:
                 # mode so CRIU does not capture a listening socket bound to the
                 # checkpoint pod IP, which changes after restore.
                 - name: UCX_TLS
+                  # Restrict UCX to TCP plus in-process/self transports; avoid
+                  # RDMA/IB transports whose kernel/device state is not restored.
                   value: tcp,self
                 - name: OMPI_MCA_oob_tcp_if_include
+                  # Bind OpenMPI out-of-band control sockets only to loopback.
                   value: lo
                 - name: OMPI_MCA_pml
+                  # Use the ob1 point-to-point layer so BTL selection below is honored.
                   value: ob1
                 - name: OMPI_MCA_btl
+                  # Limit OpenMPI data movement to self and shared-memory vader;
+                  # do not enable the tcp BTL, which opens a PodIP listener.
                   value: self,vader
                 - name: OMPI_MCA_btl_tcp_if_include
+                  # If tcp BTL is re-enabled during debugging, keep it on loopback.
                   value: lo
                 - name: PMIX_MCA_ptl_tcp_if_include
+                  # Keep PMIx process-tool TCP channels on loopback as well.
                   value: lo
                 - name: PRTE_MCA_oob_tcp_if_include
+                  # Keep PRRTE/OpenMPI runtime control sockets off the Pod IP.
                   value: lo
               resources:
                 requests:
