@@ -58,7 +58,12 @@ cases:
         normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
-      vllm: *id001
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location":"NY'
+        normal_text: ''
+        reason: "vLLM (MiniMax-M3 image) now surfaces the partial in-flight argument payload as a tool call with truncated JSON arguments instead of suppressing the incomplete call"
   TOOLCALLING.stream.4.c:
     description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
       repeated close markers
@@ -87,16 +92,13 @@ cases:
             location: NYC
         normal_text: ''
       vllm:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
+        calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
           </｜DSML｜invoke>
           </｜DSML｜invoke>
           </｜DSML｜invoke>
-        reason: "vLLM accepts a bare <｜DSML｜invoke> body without the outer <｜DSML｜tool_calls> wrapper and leaks the markup into normal_text on the recovery path"
+        reason: "vLLM (MiniMax-M3 image) no longer recovers a bare <｜DSML｜invoke> body without the outer <｜DSML｜tool_calls> wrapper; it leaks the full markup into normal_text and emits no tool call"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
