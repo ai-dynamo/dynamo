@@ -17,6 +17,8 @@ from dynamo.common.snapshot.restore_context import (
     refresh_snapshot_restore_config,
 )
 
+pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+
 
 @pytest.fixture(autouse=True)
 def clean_restore_env(monkeypatch):

@@ -3,10 +3,10 @@
 
 """Restore-time context capture and reload helpers for Dynamo snapshot."""
 
-from inspect import isawaitable
 import json
 import logging
 import os
+from inspect import isawaitable
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, TypeVar
 
