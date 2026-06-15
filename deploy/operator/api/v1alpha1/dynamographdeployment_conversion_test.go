@@ -2104,12 +2104,17 @@ func TestDGD_DeviceSpec_RoundTrip(t *testing.T) {
 					ComponentName: "worker",
 					ComponentType: v1beta1.ComponentTypeWorker,
 					Device: &v1beta1.DeviceSpec{
+						// Mix NVIDIA + non-NVIDIA keys to guard the vendor-agnostic
+						// contract: any extended resource key round-trips.
 						Resources: corev1.ResourceList{
 							"nvidia.com/gpu":    resource.MustParse("1"),
 							"nvidia.com/gpumem": resource.MustParse("3000"),
+							"amd.com/gpu":       resource.MustParse("2"),
+							"gpu.intel.com/xe":  resource.MustParse("1"),
 						},
 						Tolerations: []corev1.Toleration{
 							{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists},
+							{Key: "amd.com/gpu", Operator: corev1.TolerationOpExists},
 						},
 						NodeSelector:  map[string]string{"gpu": "on"},
 						SchedulerName: "hami-scheduler",
