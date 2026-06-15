@@ -36,3 +36,5 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --gpu-memory-utilization
+            - "0.7"
