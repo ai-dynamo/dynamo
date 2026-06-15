@@ -38,6 +38,14 @@ pub(crate) struct SglangCore {
     /// so `active_kv_blocks()` stays elevated (the cascade). Released via
     /// [`SglangCore::release_pinned`].
     pinned: std::collections::HashMap<Uuid, SglangRequest>,
+    /// Sum of the token footprints (kv_indices) of the currently pinned
+    /// (stranded) prefills. Pinned KV must still occupy the pool for the
+    /// cascade (counted in `active_kv_blocks()` used by the admission path),
+    /// but it must NOT inflate the *router-facing* load metric
+    /// (`active_decode_blocks`): a stranded prefill is awaiting handoff, not
+    /// actively decoding, so it should not divert overlap/load routing of
+    /// unrelated requests. The router-facing metric discounts this amount.
+    pinned_token_footprint: usize,
     /// Replay: release pins on a modeled virtual-time deadline instead
     /// of a live decode event. See the vLLM core for the rationale.
     time_based_pin_release: bool,
@@ -105,6 +113,7 @@ impl SglangCore {
             speculative_sampler,
             kv_event_buffer,
             pinned: std::collections::HashMap::new(),
+            pinned_token_footprint: 0,
             time_based_pin_release: false,
             pinned_release_at: std::collections::HashMap::new(),
         }
@@ -162,6 +171,9 @@ impl SglangCore {
         let Some(mut req) = self.pinned.remove(&uuid) else {
             return false;
         };
+        self.pinned_token_footprint = self
+            .pinned_token_footprint
+            .saturating_sub(req.kv_indices.len());
         if !req.kv_indices.is_empty() {
             self.kv_manager.free_indices(&req.kv_indices);
         }
@@ -175,6 +187,14 @@ impl SglangCore {
     #[cfg(test)]
     pub(crate) fn num_pinned(&self) -> usize {
         self.pinned.len()
+    }
+
+    /// True pool occupancy in blocks (capacity / admission view, INCLUDING
+    /// pinned/stranded KV). Distinct from the router-facing
+    /// `MockerMetrics::active_decode_blocks`, which discounts pinned KV.
+    #[cfg(test)]
+    pub(crate) fn pool_active_blocks(&self) -> u64 {
+        self.active_kv_blocks()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -294,6 +314,7 @@ impl SglangCore {
                 self.pinned_release_at
                     .insert(req.uuid, decode.end_ms + handoff);
             }
+            self.pinned_token_footprint += req.kv_indices.len();
             self.pinned.insert(req.uuid, req);
         }
 
@@ -335,7 +356,14 @@ impl SglangCore {
         let (accept_length_output_tokens, accept_length_decode_forwards) =
             accept_length_sample(&decode.output_signals);
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
-        let active_decode_blocks = self.active_kv_blocks();
+        // Router-facing load discounts stranded-prefill KV: the pinned tokens
+        // still occupy the pool (cascade) via the KV manager's reservation that
+        // the admission path reads, but an awaiting-handoff prefill is not
+        // active load and must not divert overlap/load routing of unrelated
+        // requests.
+        let pinned_blocks =
+            (self.pinned_token_footprint as u64).div_ceil(self.config.block_size as u64);
+        let active_decode_blocks = self.active_kv_blocks().saturating_sub(pinned_blocks);
         EnginePassResult {
             end_ms: decode.end_ms,
             completed_requests: decode

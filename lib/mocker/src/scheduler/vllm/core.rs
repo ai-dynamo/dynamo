@@ -102,6 +102,15 @@ pub(crate) struct SchedulerState {
     /// cascade). Released via [`VllmCore::release_pinned`] (live: decode-ready
     /// or abort; replay: modeled time-based release).
     pub(crate) pinned: FxHashMap<Uuid, VllmRequestState>,
+    /// Sum of the block footprints of the currently pinned (stranded) prefills.
+    /// Pinned KV must still occupy the pool for the cascade (so it stays in
+    /// `KvManager::num_active_blocks()` and the admission path rejects new
+    /// prefills), but it must NOT inflate the *router-facing* load metric
+    /// (`active_decode_blocks`): a stranded prefill is awaiting handoff, not
+    /// actively decoding, so it should not divert overlap/load routing of
+    /// unrelated requests to other workers. The router-facing metric discounts
+    /// this amount; the capacity path does not. Maintained on pin/release.
+    pinned_block_footprint: usize,
 }
 
 pub(super) struct PreemptedRequest {
@@ -229,8 +238,25 @@ impl SchedulerState {
         self.running_members.remove(uuid);
         self.pinned_candidates.remove(uuid);
         if let Some(state) = self.requests.remove(uuid) {
+            self.pinned_block_footprint += state.sequence.current_known_blocks();
             self.pinned.insert(*uuid, state);
         }
+    }
+
+    /// Block footprint of all currently pinned (stranded) prefills, to be
+    /// discounted from the router-facing load metric (not from pool capacity).
+    pub(crate) fn pinned_block_footprint(&self) -> usize {
+        self.pinned_block_footprint
+    }
+
+    /// Remove a pinned request, decrementing the discount accumulator. Returns
+    /// the request state so the caller can run its deferred free signals.
+    pub(crate) fn take_pinned(&mut self, uuid: &Uuid) -> Option<VllmRequestState> {
+        let state = self.pinned.remove(uuid)?;
+        self.pinned_block_footprint = self
+            .pinned_block_footprint
+            .saturating_sub(state.sequence.current_known_blocks());
+        Some(state)
     }
 
     pub(crate) fn running_sequence_mut(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
@@ -576,7 +602,7 @@ impl VllmCore {
     /// `true` if a pin was held for `uuid`. Idempotent / safe on unknown uuids.
     pub(crate) fn release_pinned(&mut self, uuid: Uuid) -> bool {
         self.state.pinned_candidates.remove(&uuid);
-        let Some(request) = self.state.pinned.remove(&uuid) else {
+        let Some(request) = self.state.take_pinned(&uuid) else {
             return false;
         };
         for signal in request.sequence.free_signal() {
@@ -619,9 +645,15 @@ impl VllmCore {
     }
 
     pub(super) fn mocker_metrics(&self) -> MockerMetrics {
+        // Discount stranded-prefill KV from the router-facing load. The pinned
+        // blocks still occupy the pool (cascade) via `num_active_blocks()` in
+        // the admission path, but a prefill awaiting handoff is not active load
+        // and must not divert overlap/load routing of unrelated requests.
+        let router_facing_active_blocks = (self.kv_manager.num_active_blocks() as u64)
+            .saturating_sub(self.state.pinned_block_footprint() as u64);
         let mut metrics = MockerMetrics::from_parts(
             self.dp_rank,
-            self.kv_manager.num_active_blocks() as u64,
+            router_facing_active_blocks,
             self.args.num_gpu_blocks as u64,
             self.state.running_members.len() as u64,
             self.state.waiting_members.len() as u64,

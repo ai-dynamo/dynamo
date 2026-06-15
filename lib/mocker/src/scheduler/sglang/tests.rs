@@ -576,39 +576,52 @@ mod core_behavior {
             ..Default::default()
         });
 
-        // Run the prefill to completion.
+        // Run the prefill to completion. Pool occupancy is the capacity-path
+        // view (`pool_active_blocks`), which INCLUDES pinned KV — this is what
+        // drives the cascade. The router-facing `active_decode_blocks` metric
+        // intentionally discounts pinned KV so stranding does not divert
+        // overlap/load routing of unrelated requests, so it is not the
+        // observable for the cascade.
         let mut occupancy = 0;
         for _ in 0..4 {
             let pass = core.execute_pass_internal(None, 0.0);
-            occupancy = pass.mocker_metrics.active_decode_blocks;
+            occupancy = core.pool_active_blocks();
             if pass.completed_requests > 0 {
                 break;
             }
         }
-        // STRAND: KV pinned, occupancy held.
+        // STRAND: KV pinned, pool occupancy held.
         assert_eq!(
             core.num_pinned(),
             1,
             "prefill KV must be pinned after completion"
         );
-        assert!(occupancy > 0, "stranded KV keeps blocks occupied");
+        assert!(occupancy > 0, "stranded KV keeps pool blocks occupied");
+        // The router-facing load discounts the stranded KV (here the only
+        // resident request IS the strand, so the reported load is 0).
+        let reported = core.execute_pass_internal(None, 0.0);
+        assert_eq!(
+            reported.mocker_metrics.active_decode_blocks, 0,
+            "stranded prefill KV is discounted from the router-facing load"
+        );
 
-        // The strand persists: occupancy stays up across passes.
+        // The strand persists: pool occupancy stays up across passes.
         for _ in 0..3 {
-            let pass = core.execute_pass_internal(None, 0.0);
+            core.execute_pass_internal(None, 0.0);
             assert_eq!(core.num_pinned(), 1);
             assert!(
-                pass.mocker_metrics.active_decode_blocks >= occupancy,
-                "strand must hold KV across passes"
+                core.pool_active_blocks() >= occupancy,
+                "strand must hold pool KV across passes"
             );
         }
 
         // RELEASE: decode arrived (or aborted). Free the strand.
         assert!(core.release_pinned(strand_uuid), "release frees the pin");
         assert_eq!(core.num_pinned(), 0);
-        let pass = core.execute_pass_internal(None, 0.0);
+        core.execute_pass_internal(None, 0.0);
         assert_eq!(
-            pass.mocker_metrics.active_decode_blocks, 0,
+            core.pool_active_blocks(),
+            0,
             "pool drains once the strand releases"
         );
     }
