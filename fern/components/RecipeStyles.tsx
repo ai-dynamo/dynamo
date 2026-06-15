@@ -767,6 +767,17 @@ const RECIPE_CSS = `
     border-style: dashed;
 }
 
+.dynamo-variant-table td em.winner {
+    border-color: color-mix(in srgb, var(--nv-color-green) 80%, var(--border, var(--grayscale-a5)));
+    color: var(--pst-color-text-base);
+    font-weight: 600;
+}
+
+.dynamo-variant-table td em.treatment {
+    border-color: color-mix(in srgb, #5b8def 55%, var(--border, var(--grayscale-a5)));
+    color: var(--pst-color-text-base);
+}
+
 .dynamo-variant-table td mark {
     padding: 2px 6px;
     border-radius: var(--rounded);

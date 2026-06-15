@@ -68,7 +68,8 @@ kubectl wait --for=condition=ready pod \
 Send a test request to verify the deployment serves traffic:
 
 ```bash
-kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 -n ${NAMESPACE} &
+sleep 3
 
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \

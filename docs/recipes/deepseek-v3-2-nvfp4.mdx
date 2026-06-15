@@ -26,7 +26,7 @@ This recipe deploys DeepSeek V3.2 NVFP4 disaggregated across 32 GB200 GPUs — 2
 
 - A Kubernetes cluster with the Dynamo platform (operator) installed and **32x GB200 across 8 nodes (NVL72, MNNVL-connected)** available.
 - A Hugging Face token with access to `nvidia/DeepSeek-V3.2-NVFP4`.
-- The `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0` image (already pinned in `deploy.yaml`).
+- The `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1` image (already pinned in `deploy.yaml`).
 
 Create the namespace and token secret:
 
@@ -110,9 +110,8 @@ aiperf profile -m nvidia/DeepSeek-V3.2-NVFP4 --tokenizer nvidia/DeepSeek-V3.2-NV
 ```bash
 kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
 
-# The benchmark runs inside a tmux session for monitoring:
-kubectl get pods -n ${NAMESPACE} | grep benchmark
-kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- tmux a -t benchmark
+# Follow the benchmark Job's logs:
+kubectl logs -f -l job-name=disagg-kv-dsv32-nvfp4-bench -n ${NAMESPACE}
 ```
 
 Results land under `/model-cache/perf/<epoch>_<job-name>/` on the `model-cache` PVC; copy them out with `kubectl cp`.

@@ -25,7 +25,7 @@ Two configurations run the same `deploy.yaml` on a single aggregated GB200 worke
 
 ## Results
 
-Enabling the embedding cache on a single aggregated GB200 replica with the vLLM backend delivers an average improvement of **+16% throughput, -28% TTFT, and -13% request latency**:
+Enabling the embedding cache on a single aggregated GB200 replica with the vLLM backend delivers **+16% throughput, -28% TTFT, and -13% request latency** (single representative run, reproduced from the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-vl-30b/README.md)):
 
 | Metric | Cache ON | Cache OFF | Delta |
 | --- | ---: | ---: | ---: |
@@ -89,7 +89,7 @@ kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml -n ${NA
 # CACHE_MODE=cache_off in perf.yaml, then re-apply both.
 ```
 
-The helper script `recipes/qwen3-vl-30b/vllm/agg-embedding-cache/run-benchmark.sh` automates the cache-on/cache-off runs. AIPerf artifacts land under `/perf-cache/artifacts/qwen3_vl_30b_embedding_cache/agg/<cache_mode>`.
+The helper script `recipes/qwen3-vl-30b/vllm/agg-embedding-cache/run-benchmark.sh` automates each run — pass `on` or `off` to run one cache mode per invocation. AIPerf artifacts land under `/perf-cache/artifacts/qwen3_vl_30b_embedding_cache/agg/<cache_mode>`.
 
 ## Notes
 

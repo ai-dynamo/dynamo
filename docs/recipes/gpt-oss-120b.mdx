@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Two validated TensorRT-LLM targets cover the two traffic shapes this model is most deployed for: aggregated WideEP serving for short-prompt, high-concurrency traffic, and a prefill/decode split for long-context generation. They are deployment targets for different workloads, not an agg-vs-disagg comparison. Pick your target; every command on this page updates to match.
+Two validated TensorRT-LLM targets cover the two traffic shapes this model is most deployed for: aggregated expert-parallel (EP4, attention-DP) serving for short-prompt, high-concurrency traffic, and a prefill/decode split for long-context generation. They are deployment targets for different workloads, not an agg-vs-disagg comparison. Pick your target; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -22,16 +22,16 @@ Two validated TensorRT-LLM targets cover the two traffic shapes this model is mo
 </div>
 <div className="dynamo-target-picker-summary" data-variant="agg">
 <span><b>Checkpoint</b> openai/gpt-oss-120b</span>
-<span><b>GPUs</b> 4x GB200 (ARM64), WideEP TP4</span>
+<span><b>GPUs</b> 4x GB200 (ARM64), TP4, EP4 + attention-DP</span>
 <span><b>Workload</b> Short prompts, long outputs, high concurrency (128 ISL / 1000 OSL)</span>
-<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.0)</span>
+<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.1)</span>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="disagg">
 <span><b>Checkpoint</b> openai/gpt-oss-120b</span>
 <span><b>GPUs</b> 5x GB200/B200 (TP1 prefill + TP4 decode)</span>
 <span><b>Workload</b> Long-context generation (8K ISL / 1K OSL)</span>
 <span><b>Quantization</b> W4A8_MXFP4_MXFP8</span>
-<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.0)</span>
+<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.1)</span>
 </div>
 </div>
 
@@ -90,7 +90,7 @@ Model loading takes roughly 15-30 minutes depending on storage speed:
 
 ```bash
 kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml -n ${NAMESPACE}
-kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/part-of=gpt-oss-disagg -w
+kubectl get pods -n ${NAMESPACE} -l nvidia.com/dynamo-graph-deployment-name=gpt-oss-disagg -w
 ```
 
 </div>
@@ -172,7 +172,7 @@ kubectl logs -f -l job-name=gpt-oss-120b-disagg-bench -n ${NAMESPACE}
 | | Aggregated | Disaggregated P/D |
 |---|---|---|
 | **GPUs** | 4x GB200 (ARM64 required) | 5x GB200/B200 |
-| **Topology** | WideEP TP4 | TP1 prefill + TP4 decode |
+| **Topology** | TP4, EP4 + attention-DP | TP1 prefill + TP4 decode |
 | **Workload** | 128 ISL / 1000 OSL, 3,600 concurrency | 8K ISL / 1K OSL, 1,536 concurrency |
 | **Quantization** | Checkpoint default | W4A8_MXFP4_MXFP8 |
 | **KV transfer** | — | UCX cache transceiver |

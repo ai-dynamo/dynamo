@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Three vLLM topologies — aggregated, single-node disaggregated, and multi-node disaggregated — intentionally use different GPU counts (4, 8, and 16x H100/H200), so concurrency is scaled at 16 per GPU and results should be read as total throughput **and** TPS/GPU together. All three topologies are also deployable recipe targets, so this benchmark doubles as a sizing guide.
+Three vLLM topologies — aggregated, single-node disaggregated, and multi-node disaggregated — intentionally use different GPU counts (4, 8, and 16x H100/H200), so concurrency is scaled at 16 per GPU and results should be read as total throughput **and** TPS/GPU together — more GPUs trivially raise total throughput, so TPS/GPU is the apples-to-apples lens. All three topologies are also deployable recipe targets, so this benchmark doubles as a sizing guide.
 
 <div className="dynamo-target-picker static">
 <p className="dynamo-target-picker-title">Benchmark setup</p>
@@ -49,7 +49,7 @@ Three vLLM topologies — aggregated, single-node disaggregated, and multi-node 
 
 ## Reproduce
 
-Each configuration's `perf.yaml` computes total concurrency as 16 x GPU count and wraps this AIPerf command:
+Each configuration's `perf.yaml` computes total concurrency as 16 x GPU count and wraps an AIPerf run like the following — the checked-in `perf.yaml` is authoritative (it also sets `--random-seed`, `ignore_eos`, the tokenizer, and dataset-entry flags):
 
 ```bash
 aiperf profile --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic \

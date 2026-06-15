@@ -25,7 +25,7 @@ Four configurations run Dynamo + TensorRT-LLM on 6x GB200 nodes (24 GPUs, MNNVL)
 
 ## Results
 
-The disaggregated configuration with KV-aware routing, Eagle3 decoding, and KV offloading achieves the best system throughput and interactivity:
+The disaggregated configuration with KV-aware routing, Eagle3 decoding, and KV offloading achieves the best system throughput and interactivity. Each row is that configuration's chosen operating point on the source Pareto plot — concurrency differs by row and the values are approximate plot readings, so read them as per-configuration operating points rather than an equal-load sweep:
 
 | Configuration | Concurrency | tok/s/user (avg) | tok/s/GPU |
 | --- | ---: | ---: | ---: |
@@ -101,7 +101,7 @@ kubectl apply -f recipes/kimi-k2.5/trtllm/<configuration>/perf.yaml -n ${NAMESPA
 
 ## Notes
 
-- The manifests ship with a placeholder image tag (`nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`) — set a Dynamo TRT-LLM runtime image (v1.1.1~) that supports Kimi-K2.5 + Eagle3 in each `deploy.yaml` before applying.
+- The manifests ship with a placeholder image tag (`nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>`) — set a Dynamo TRT-LLM runtime image (v1.1.1~) that supports Kimi-K2.5 + Eagle3 in each `deploy.yaml` before applying.
 - Your HuggingFace token needs access to both `nvidia/Kimi-K2.5-NVFP4` and the `nvidia/Kimi-K2.5-Thinking-Eagle3` speculative-decoding head.
 - If you rename the ComputeDomain CR, mirror the change in every `deploy.yaml` under `extraPodSpec.resourceClaims` and `resources.claims`.
 - Source: [recipes/kimi-k2.5](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5)

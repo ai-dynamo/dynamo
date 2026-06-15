@@ -88,7 +88,7 @@ kubectl apply -f recipes/deepseek-v32-fp4/trtllm/<configuration>/deploy.yaml -n 
 kubectl apply -f recipes/deepseek-v32-fp4/trtllm/<configuration>/perf.yaml -n ${NAMESPACE}
 ```
 
-The benchmark runs inside a tmux session on the benchmark pod, and artifacts land on the `perf-cache` PVC under `/perf-cache/artifacts/`.
+The benchmark runs as a Kubernetes Job; tail it with `kubectl logs -f -l job-name=<bench-job-name> -n ${NAMESPACE}` (each config's `perf.yaml` defines its Job name). Results land under `/model-cache/perf/<epoch>_<job-name>/` on the `model-cache` PVC; copy them out with `kubectl cp`.
 
 ## Notes
 
