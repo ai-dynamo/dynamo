@@ -163,10 +163,9 @@ Context-free replay rows must represent one Mooncake request, so tracing skips:
 - Multimodal inputs
 - Requests without a tracker or usable KV cache block size
 
-Skipped context-free requests produce a structured warning and no partial replay
-row. When `nvext.agent_context` is present, request tracing still emits the
-agent telemetry row even if the request cannot be represented as one replay row;
-the `replay` block is omitted in that case.
+Skipped requests produce a structured warning and no partial replay row.
+`nvext.agent_context` enriches supported request trace rows; it does not bypass
+these shape checks or create an agent-only fallback row.
 
 ## Convert And Replay
 
