@@ -57,11 +57,6 @@ pub struct SglangBridge {
 }
 
 impl SglangBridge {
-    /// Parse from process args (the binary entry point).
-    pub fn from_env() -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::build(<Args as clap::Parser>::try_parse())
-    }
-
     /// Parse from an explicit argv (the PyO3 entry point).
     pub fn from_argv(argv: Vec<String>) -> Result<(Self, WorkerConfig), DynamoError> {
         Self::build(<Args as clap::Parser>::try_parse_from(argv))
