@@ -110,14 +110,15 @@ spec:
                   # RDMA/IB transports whose kernel/device state is not restored.
                   value: tcp,self
                 - name: OMPI_MCA_oob_tcp_if_include
-                  # Bind OpenMPI out-of-band control sockets only to loopback.
+                  # Open MPI 4.x: bind out-of-band control sockets only to loopback.
                   value: lo
                 - name: OMPI_MCA_pml
                   # Use the ob1 point-to-point layer so BTL selection below is honored.
                   value: ob1
                 - name: OMPI_MCA_btl
-                  # Limit OpenMPI data movement to self and shared-memory vader;
-                  # do not enable the tcp BTL, which opens a PodIP listener.
+                  # Limit Open MPI data movement to self and the Open MPI 4.x
+                  # shared-memory vader BTL; do not enable the tcp BTL, which
+                  # opens a PodIP listener. Open MPI 5+ renames vader to sm.
                   value: self,vader
                 - name: OMPI_MCA_btl_tcp_if_include
                   # If tcp BTL is re-enabled during debugging, keep it on loopback.
@@ -125,8 +126,8 @@ spec:
                 - name: PMIX_MCA_ptl_tcp_if_include
                   # Keep PMIx process-tool TCP channels on loopback as well.
                   value: lo
-                - name: PRTE_MCA_oob_tcp_if_include
-                  # Keep PRRTE/OpenMPI runtime control sockets off the Pod IP.
+                - name: PRTE_MCA_prte_if_include
+                  # PRRTE: keep runtime control sockets off the Pod IP.
                   value: lo
               resources:
                 requests:
