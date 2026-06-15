@@ -188,8 +188,8 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
 # This image is a superset of the runtime image: same default execution contract
 # (entrypoint/cmd/user), plus CRIU/cuda-checkpoint tooling for external restore.
-# Dynamo backend entrypoints run a restore-placeholder path when the operator
-# injects DYN_SNAPSHOT_RESTORE_PLACEHOLDER=1, then sleep while the
+# Dynamo backend entrypoints run a restore standby path when the operator
+# injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the
 # snapshot-agent restores into the container.
 # =============================================================================
 FROM ${BASE_IMAGE} AS placeholder

@@ -8,12 +8,12 @@ if "PYTHONHASHSEED" not in os.environ:
 
 if __name__ == "__main__":
     from dynamo.common.snapshot.restore_context import (
-        maybe_run_restore_placeholder_mode,
+        maybe_run_restore_standby_mode,
     )
 
-    # Check before importing dynamo.sglang.main: the restore placeholder must
+    # Check before importing dynamo.sglang.main: restore standby mode must
     # capture env and hold without importing SGLang or constructing backend state.
-    maybe_run_restore_placeholder_mode()
+    maybe_run_restore_standby_mode()
 
     from dynamo.sglang.main import main
 

@@ -9,7 +9,10 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.snapshot.restore_context import apply_snapshot_restore_config
+from dynamo.common.snapshot.restore_context import (
+    parse_snapshot_restore_runtime_config,
+    refresh_snapshot_restore_config,
+)
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
@@ -32,8 +35,10 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def worker():
-    config = await parse_args(sys.argv[1:])
+async def worker(argv: list[str] | None = None):
+    if argv is None:
+        argv = sys.argv[1:]
+    config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
     if config.server_args.load_format == "gms":
@@ -48,7 +53,10 @@ async def worker():
     snapshot_engine = None
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
-        apply_snapshot_restore_config(dynamo_args)
+        dynamo_args = await refresh_snapshot_restore_config(
+            dynamo_args,
+            lambda: parse_snapshot_restore_runtime_config(argv),
+        )
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []

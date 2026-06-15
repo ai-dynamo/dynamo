@@ -348,9 +348,9 @@ generation.
 
 Treat a restored pod template as a compatibility template for the same workload:
 once the checkpoint is ready, restore admission replaces the target container's
-command and args with the restore placeholder, and the restored process resumes
-from the checkpointed state rather than newly supplied command-line or
-environment settings.
+restore standby environment while preserving command and args. The restored
+process resumes from the checkpointed state rather than newly supplied
+command-line or environment settings.
 
 With `startupPolicy: Immediate`, existing Pods are not mutated or restarted just
 because the checkpoint became ready. Scale or roll the worker to create restored

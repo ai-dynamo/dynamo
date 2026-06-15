@@ -51,7 +51,7 @@ func testIdentity() nvidiacomv1alpha1.DynamoCheckpointIdentity {
 	}
 }
 
-func assertRestorePlaceholderMode(
+func assertRestoreStandbyMode(
 	t *testing.T,
 	container *corev1.Container,
 	command []string,
@@ -63,12 +63,12 @@ func assertRestorePlaceholderMode(
 
 	found := false
 	for _, env := range container.Env {
-		if env.Name == snapshotprotocol.RestorePlaceholderModeEnv {
+		if env.Name == snapshotprotocol.RestoreStandbyModeEnv {
 			found = true
 			assert.Equal(t, "1", env.Value)
 		}
 	}
-	assert.True(t, found, "restore placeholder mode env should be injected")
+	assert.True(t, found, "restore standby mode env should be injected")
 }
 
 func testPodSpec() *corev1.PodSpec {
@@ -582,12 +582,12 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}
 	})
 
-	t.Run("ready checkpoint enables restore placeholder mode", func(t *testing.T) {
+	t.Run("ready checkpoint enables restore standby mode", func(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		assertRestorePlaceholderMode(t, &podSpec.Containers[0], []string{"python3"}, []string{"-m", "dynamo.vllm"})
+		assertRestoreStandbyMode(t, &podSpec.Containers[0], []string{"python3"}, []string{"-m", "dynamo.vllm"})
 
 	})
 
@@ -602,7 +602,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		assertRestorePlaceholderMode(t, &podSpec.Containers[0], []string{"python3"}, []string{"-m", "dynamo.vllm"})
+		assertRestoreStandbyMode(t, &podSpec.Containers[0], []string{"python3"}, []string{"-m", "dynamo.vllm"})
 		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[1].Command)
 		assert.Equal(t, []string{"run"}, podSpec.Containers[1].Args)
 	})
@@ -627,7 +627,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		for _, name := range []string{"engine-0", "engine-1"} {
 			c := findContainer(podSpec, name)
 			require.NotNil(t, c, "container %q not found", name)
-			assertRestorePlaceholderMode(t, c, []string{"python3"}, []string{"-m", "dynamo.vllm"})
+			assertRestoreStandbyMode(t, c, []string{"python3"}, []string{"-m", "dynamo.vllm"})
 			gotSubPath := ""
 			for _, m := range c.VolumeMounts {
 				if m.Name == snapshotprotocol.SnapshotControlVolumeName {

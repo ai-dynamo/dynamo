@@ -97,7 +97,7 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		envPatch, ok := patchesByPath["/spec/containers/0/env"].([]any)
 		require.True(t, ok, "expected env patch, got %#v", patchesByPath)
 		assert.Contains(t, envPatch, map[string]any{
-			"name":  "DYN_SNAPSHOT_RESTORE_PLACEHOLDER",
+			"name":  "DYN_SNAPSHOT_RESTORE_STANDBY",
 			"value": "1",
 		})
 	})

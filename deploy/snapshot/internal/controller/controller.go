@@ -477,7 +477,7 @@ func (w *NodeController) startRestoreForContainer(
 	if strings.TrimSpace(w.config.Storage.AccessMode) == types.StorageAccessModePodMount {
 		resolvedPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 		if err != nil {
-			w.log.Error(err, "Failed to resolve restore placeholder container", "pod", podKey, "container", containerName)
+			w.log.Error(err, "Failed to resolve restore standby container", "pod", podKey, "container", containerName)
 			return
 		}
 		placeholderPID = resolvedPID
@@ -894,7 +894,7 @@ func (w *NodeController) refreshRestoreCheckpointLocation(ctx context.Context, p
 
 	currentHostPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
-		return checkpointLocations{}, fmt.Errorf("re-resolve restore placeholder container %s before podMount storage access: %w", containerID, err)
+		return checkpointLocations{}, fmt.Errorf("re-resolve restore standby container %s before podMount storage access: %w", containerID, err)
 	}
 	refreshedLocation, err := w.checkpointLocationsFromPod(pod, checkpointID, currentHostPID)
 	if err != nil {

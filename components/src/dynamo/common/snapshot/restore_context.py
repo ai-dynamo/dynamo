@@ -3,11 +3,12 @@
 
 """Restore-time context capture and reload helpers for Dynamo snapshot."""
 
+from inspect import isawaitable
 import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Awaitable, Callable, Mapping, TypeVar
 
 from dynamo.common.snapshot.constants import (
     KUBERNETES_OPTIONAL_ENV_NAMES,
@@ -16,10 +17,18 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_CONTROL_DIR,
     SNAPSHOT_CONTROL_DIR_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
-    SNAPSHOT_RESTORE_PLACEHOLDER_ENV,
+    SNAPSHOT_RESTORE_STANDBY_ENV,
 )
 
 logger = logging.getLogger(__name__)
+ConfigT = TypeVar("ConfigT")
+
+_RESTORE_RUNTIME_CONFIG_FIELDS = (
+    "namespace",
+    "discovery_backend",
+    "request_plane",
+    "event_plane",
+)
 
 _SUPPORTED_RESTORE_ENV_NAMES = {
     *KUBERNETES_REQUIRED_ENV_NAMES,
@@ -28,20 +37,88 @@ _SUPPORTED_RESTORE_ENV_NAMES = {
 }
 
 
-def apply_snapshot_restore_config(config: Any) -> None:
-    """Apply restore-time env to ``os.environ`` and a backend config object.
+async def refresh_snapshot_restore_config(
+    config: ConfigT,
+    parse_config: Callable[[], object | Awaitable[object]],
+    runtime_config: Callable[[object], object] | None = None,
+) -> ConfigT:
+    """Apply restore env, then rebuild backend config through normal parsing.
 
-    CRIU restores the checkpoint-time process environment. The restore
-    placeholder captures the restore pod's non-secret environment into the
-    snapshot-control volume before snapshot-agent restores the process. Apply
-    that environment before constructing ``DistributedRuntime`` so restored
-    workers do not use stale checkpoint-job env such as ``NATS_SERVER=localhost``
-    or a missing ``DYN_SYSTEM_PORT``.
+    The restore-context file is created by the restore standby process in the
+    new Pod before CRIU resumes the checkpointed process. Once resumed, apply
+    that env first and then re-run the runtime parser so fields derived from env
+    (namespace, discovery backend, request plane, event plane, etc.) follow the
+    same CLI/env precedence as a cold start. This avoids brittle ad hoc patches
+    to an already-parsed config object.
+
+    Args:
+        parse_config: Zero-argument callable that returns a config object after
+            reparsing runtime arguments against the updated environment.
+        runtime_config: Selector for the Dynamo runtime config object. Backends
+            that embed runtime config under a field (for example SGLang's
+            ``config.dynamo_args``) can provide a selector while preserving the
+            existing backend config and pre-created engine arguments.
+
+    Returns:
+        The original config object with runtime fields refreshed.
     """
 
-    # Load the restore-context JSON captured by the placeholder. It contains
-    # the target container's actual restore-time env after Kubernetes resolved
-    # literals, Downward API values, ConfigMaps, and Secrets.
+    apply_snapshot_restore_env()
+    parsed = parse_config()
+    if isawaitable(parsed):
+        parsed_config = await parsed
+    else:
+        parsed_config = parsed
+
+    target_runtime_config = runtime_config(config) if runtime_config else config
+    parsed_runtime_config = (
+        runtime_config(parsed_config) if runtime_config else parsed_config
+    )
+    _copy_restore_runtime_config(target_runtime_config, parsed_runtime_config)
+    _validate_kubernetes_restore_env_for_config(target_runtime_config)
+    logger.info(
+        "Refreshed snapshot restore runtime config",
+        extra={
+            "dynamo_namespace": getattr(target_runtime_config, "namespace", None),
+            "discovery_backend": getattr(
+                target_runtime_config, "discovery_backend", None
+            ),
+            "request_plane": getattr(target_runtime_config, "request_plane", None),
+            "event_plane": getattr(target_runtime_config, "event_plane", None),
+        },
+    )
+    return config
+
+
+def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
+    """Parse Dynamo runtime args after restore env has been applied.
+
+    This uses the same ``DynamoRuntimeArgGroup`` env/CLI handling as normal
+    backend startup, but avoids reparsing backend engine args or redoing
+    backend-specific side effects such as model fetching.
+    """
+
+    import argparse
+
+    from dynamo.common.configuration.groups.runtime_args import (
+        DynamoRuntimeArgGroup,
+        DynamoRuntimeConfig,
+    )
+
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    DynamoRuntimeArgGroup().add_arguments(parser)
+    args, _ = parser.parse_known_args(argv)
+    config = DynamoRuntimeConfig.from_cli_args(args)
+    config.validate()
+    return config
+
+
+def apply_snapshot_restore_env() -> dict[str, str | None]:
+    """Load restore-context JSON and apply its runtime env to ``os.environ``."""
+
+    # Load the restore-context JSON captured by the restore standby process. It
+    # contains the target container's actual restore-time env after Kubernetes
+    # resolved literals, Downward API values, ConfigMaps, and Secrets.
     control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
     if not context_path.is_file():
@@ -60,50 +137,13 @@ def apply_snapshot_restore_config(config: Any) -> None:
     env_config = restore_context.get("env")
     if not isinstance(env_config, dict):
         raise RuntimeError("snapshot restore context requires an object env field")
-    restore_env = _apply_restore_env(env_config, source=source)
-
-    # Refresh the parsed config fields that were originally derived from env.
-    # Null entries in restore-context mean "unset in the restore pod", so keep
-    # the already-parsed CLI/config fallback for these fields.
-    refreshed_discovery_backend = _restore_env_value(
-        restore_env,
-        env_name="DYN_DISCOVERY_BACKEND",
-        fallback=config.discovery_backend,
-    )
-    if refreshed_discovery_backend != "kubernetes":
-        logger.info(
-            "Snapshot restore reusing configured discovery backend",
-            extra={
-                "dynamo_namespace": config.namespace,
-                "discovery_backend": refreshed_discovery_backend,
-            },
-        )
-        config.discovery_backend = refreshed_discovery_backend
-        _apply_restore_planes(config, restore_env)
-        return
-
-    # Kubernetes discovery depends on env that is read during registration, so
-    # make sure os.environ is updated before create_runtime() is called.
-    os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
-    for env_name in KUBERNETES_REQUIRED_ENV_NAMES:
-        if not os.environ.get(env_name):
-            raise RuntimeError(
-                "snapshot restore context requires a non-empty "
-                f"{env_name} for kubernetes discovery"
-            )
-    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    suffix = os.environ.get("DYN_NAMESPACE_WORKER_SUFFIX")
-    if suffix:
-        namespace = f"{namespace}-{suffix}"
-    config.namespace = namespace
-    config.discovery_backend = "kubernetes"
-    _apply_restore_planes(config, restore_env)
+    return _apply_restore_env(env_config, source=source)
 
 
 def write_snapshot_restore_context(control_dir: str | None = None) -> None:
     """Capture restore-time environment into the snapshot-control volume.
 
-    The restore placeholder runs in the new Pod before CRIU restores the old
+    The restore standby process runs in the new Pod before CRIU restores the old
     process image. Capturing here lets Kubernetes resolve all env sources
     (literal env, Downward API, ConfigMap, and Secret refs) without teaching the
     operator how to copy runtime env values.
@@ -123,7 +163,7 @@ def write_snapshot_restore_context(control_dir: str | None = None) -> None:
     }
 
     # Write atomically into the shared snapshot-control volume before exec'ing
-    # the inert placeholder process that snapshot-agent restores into.
+    # the inert standby process that snapshot-agent restores into.
     control_path = Path(
         control_dir or os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     )
@@ -138,32 +178,24 @@ def write_snapshot_restore_context(control_dir: str | None = None) -> None:
     logger.info("Captured snapshot restore context at %s", context_file)
 
 
-def _apply_restore_planes(config: Any, restore_env: dict[str, str | None]) -> None:
-    request_plane = _restore_env_value(
-        restore_env,
-        env_name="DYN_REQUEST_PLANE",
-        fallback=config.request_plane,
-    )
-    if request_plane is not None:
-        config.request_plane = request_plane
-    config.event_plane = _restore_env_value(
-        restore_env,
-        env_name="DYN_EVENT_PLANE",
-        fallback=config.event_plane,
-    )
+def _validate_kubernetes_restore_env_for_config(config: object) -> None:
+    if getattr(config, "discovery_backend", None) == "kubernetes":
+        _validate_kubernetes_restore_env()
 
 
-def _restore_env_value(
-    restore_env: dict[str, str | None],
-    env_name: str,
-    fallback: str | None,
-) -> str | None:
-    if env_name in restore_env:
-        value = restore_env[env_name]
-        if value is None:
-            return fallback
-        return value
-    return os.environ.get(env_name, fallback)
+def _copy_restore_runtime_config(target: object, source: object) -> None:
+    for name in _RESTORE_RUNTIME_CONFIG_FIELDS:
+        if hasattr(source, name):
+            setattr(target, name, getattr(source, name))
+
+
+def _validate_kubernetes_restore_env() -> None:
+    for env_name in KUBERNETES_REQUIRED_ENV_NAMES:
+        if not os.environ.get(env_name):
+            raise RuntimeError(
+                "snapshot restore context requires a non-empty "
+                f"{env_name} for kubernetes discovery"
+            )
 
 
 def _apply_restore_env(
@@ -201,10 +233,10 @@ def _apply_restore_env(
     return restored_env
 
 
-def maybe_run_restore_placeholder_mode() -> None:
-    """Capture restore env and sleep when restore-placeholder mode is enabled."""
+def maybe_run_restore_standby_mode() -> None:
+    """Capture restore env and sleep when restore standby mode is enabled."""
 
-    if os.environ.get(SNAPSHOT_RESTORE_PLACEHOLDER_ENV) != "1":
+    if os.environ.get(SNAPSHOT_RESTORE_STANDBY_ENV) != "1":
         return
 
     write_snapshot_restore_context()

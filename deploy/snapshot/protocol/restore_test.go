@@ -118,23 +118,23 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected %s mount, got %#v", SnapshotControlVolumeName, main.VolumeMounts)
 	}
 	foundEnv := false
-	foundPlaceholderEnv := false
+	foundStandbyEnv := false
 	for _, e := range main.Env {
 		if e.Name == SnapshotControlDirEnv {
 			foundEnv = true
 		}
-		if e.Name == RestorePlaceholderModeEnv {
-			foundPlaceholderEnv = true
+		if e.Name == RestoreStandbyModeEnv {
+			foundStandbyEnv = true
 			if e.Value != "1" {
-				t.Fatalf("expected %s=1, got %#v", RestorePlaceholderModeEnv, e)
+				t.Fatalf("expected %s=1, got %#v", RestoreStandbyModeEnv, e)
 			}
 		}
 	}
 	if !foundEnv {
 		t.Fatalf("expected %s env, got %#v", SnapshotControlDirEnv, main.Env)
 	}
-	if !foundPlaceholderEnv {
-		t.Fatalf("expected %s env, got %#v", RestorePlaceholderModeEnv, main.Env)
+	if !foundStandbyEnv {
+		t.Fatalf("expected %s env, got %#v", RestoreStandbyModeEnv, main.Env)
 	}
 }
 
@@ -175,17 +175,17 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 			t.Fatalf("expected args to be preserved on %s, got %#v", name, c.Args)
 		}
 		assertRestoreStartupGate(t, c.StartupProbe)
-		foundPlaceholderEnv := false
+		foundStandbyEnv := false
 		for _, e := range c.Env {
-			if e.Name == RestorePlaceholderModeEnv {
-				foundPlaceholderEnv = true
+			if e.Name == RestoreStandbyModeEnv {
+				foundStandbyEnv = true
 				if e.Value != "1" {
-					t.Fatalf("expected %s=1 on %s, got %#v", RestorePlaceholderModeEnv, name, e)
+					t.Fatalf("expected %s=1 on %s, got %#v", RestoreStandbyModeEnv, name, e)
 				}
 			}
 		}
-		if !foundPlaceholderEnv {
-			t.Fatalf("expected %s env on %s, got %#v", RestorePlaceholderModeEnv, name, c.Env)
+		if !foundStandbyEnv {
+			t.Fatalf("expected %s env on %s, got %#v", RestoreStandbyModeEnv, name, c.Env)
 		}
 		found := false
 		for _, m := range c.VolumeMounts {
@@ -211,7 +211,7 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		}
 	}
 	for _, e := range sidecar.Env {
-		if e.Name == SnapshotControlDirEnv || e.Name == RestorePlaceholderModeEnv {
+		if e.Name == SnapshotControlDirEnv || e.Name == RestoreStandbyModeEnv {
 			t.Fatalf("sidecar must not get a restore env: %#v", sidecar.Env)
 		}
 	}
@@ -312,23 +312,23 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected single %s mount after repeated calls, got %#v", SnapshotControlVolumeName, container.VolumeMounts)
 	}
 	envCount := 0
-	placeholderEnvCount := 0
+	standbyEnvCount := 0
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			envCount++
 		}
-		if e.Name == RestorePlaceholderModeEnv {
-			placeholderEnvCount++
+		if e.Name == RestoreStandbyModeEnv {
+			standbyEnvCount++
 			if e.Value != "1" {
-				t.Fatalf("expected %s=1, got %#v", RestorePlaceholderModeEnv, e)
+				t.Fatalf("expected %s=1, got %#v", RestoreStandbyModeEnv, e)
 			}
 		}
 	}
 	if envCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", SnapshotControlDirEnv, container.Env)
 	}
-	if placeholderEnvCount != 1 {
-		t.Fatalf("expected single %s env after repeated calls, got %#v", RestorePlaceholderModeEnv, container.Env)
+	if standbyEnvCount != 1 {
+		t.Fatalf("expected single %s env after repeated calls, got %#v", RestoreStandbyModeEnv, container.Env)
 	}
 	if got, want := container.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("expected command %#v, got %#v", want, got)

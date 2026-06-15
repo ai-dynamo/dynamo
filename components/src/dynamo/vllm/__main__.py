@@ -8,12 +8,12 @@ if "PYTHONHASHSEED" not in os.environ:
 
 if __name__ == "__main__":
     from dynamo.common.snapshot.restore_context import (
-        maybe_run_restore_placeholder_mode,
+        maybe_run_restore_standby_mode,
     )
 
-    # Check before importing dynamo.vllm.main: the restore placeholder must capture
+    # Check before importing dynamo.vllm.main: restore standby mode must capture
     # env and hold without importing vLLM or constructing backend/runtime state.
-    maybe_run_restore_placeholder_mode()
+    maybe_run_restore_standby_mode()
 
     from dynamo.vllm.main import main
 
