@@ -46,11 +46,7 @@ if [ -z "${STAGE_CONFIG:-}" ]; then
 fi
 
 # Namespace must match on both nodes for discovery
-if [ -z "${DYN_NAMESPACE:-}" ]; then
-    export DYN_NAMESPACE="dynamo-omni-glm-xpu-cuda-$(date +%s)"
-    echo "NOTE: Auto-generated DYN_NAMESPACE=${DYN_NAMESPACE}"
-    echo "      Set this explicitly on BOTH nodes before starting."
-fi
+DYN_NAMESPACE="${DYN_NAMESPACE:-dynamo-omni-glm-nixl-shared}"
 
 AR_TP="${AR_TP:-1}"
 DIT_TP="${DIT_TP:-1}"
