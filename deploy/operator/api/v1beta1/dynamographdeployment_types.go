@@ -35,6 +35,11 @@ type DynamoGraphDeploymentSpec struct {
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
+	// priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+	// Requires the Grove pathway.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// components are the components deployed as part of this graph. Each entry
 	// carries its own stable logical `name`, and names must be unique within
 	// the list. Component types are generally repeatable, except `type: epp`
@@ -68,6 +73,22 @@ type DynamoGraphDeploymentSpec struct {
 	// Components without their own `topologyConstraint` inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// experimental groups graph-level preview features whose API shape and
+	// behavior may change in breaking ways between v1beta1 releases.
+	// +optional
+	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+// features whose API shape and behavior may change in breaking ways between
+// v1beta1 releases. Component-level experimental features live under
+// `spec.components[*].experimental`.
+type DynamoGraphDeploymentExperimentalSpec struct {
+	// kvTransferPolicy configures topology-aware routing for KV-cache
+	// transfers between prefill and decode workers.
+	// +optional
+	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.

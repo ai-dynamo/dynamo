@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import random
-from typing import TYPE_CHECKING, Any, Optional
+import threading
+import time
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
 import nats
@@ -55,6 +57,63 @@ def min_initial_workers_env(min_initial_workers: int):
             os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
         else:
             os.environ[MIN_INITIAL_WORKERS_ENV] = previous
+
+
+def _create_kv_router_with_timeout(
+    router_factory: Callable[[], KvRouter],
+    num_workers: int,
+    engine_workers,
+    timeout: int = 120,
+) -> KvRouter:
+    """Create KvRouter in a daemon thread with worker liveness polling.
+
+    KvRouter() is a blocking Rust FFI call that waits for min_initial_workers
+    to register.  If a worker crashes (e.g. port conflict, OOM) the call
+    blocks forever because pytest signal-based timeout cannot interrupt
+    Rust FFI.  This helper runs the call in a daemon thread and polls
+    worker liveness every 2 seconds, raising immediately if a worker dies.
+    """
+    kv_router = None
+    kv_router_error = None
+
+    def _create():
+        nonlocal kv_router, kv_router_error
+        try:
+            kv_router = router_factory()
+        except Exception as exc:
+            kv_router_error = exc
+
+    # NOTE: On timeout or worker death we raise while the daemon thread may
+    # still be blocked inside the uninterruptible KvRouter() FFI call.  This is
+    # intentional — daemon threads don't block process exit, and the next test
+    # reinitializes etcd/NATS state so residual ZMQ handles are harmless.
+    with min_initial_workers_env(num_workers):
+        router_thread = threading.Thread(target=_create, daemon=True)
+        router_thread.start()
+
+        _router_start = time.monotonic()
+
+        while router_thread.is_alive():
+            router_thread.join(timeout=2)
+            elapsed = time.monotonic() - _router_start
+            if elapsed > timeout:
+                raise RuntimeError(
+                    f"KvRouter initialization timed out after {elapsed:.0f}s "
+                    f"waiting for {num_workers} workers to register."
+                )
+            if hasattr(engine_workers, "worker_processes"):
+                for idx, wp in enumerate(engine_workers.worker_processes):
+                    if wp.proc and wp.proc.poll() is not None:
+                        raise RuntimeError(
+                            f"Worker {idx} exited with code {wp.proc.returncode} "
+                            f"while waiting for KvRouter to find "
+                            f"{num_workers} workers."
+                        )
+
+    if kv_router_error is not None:
+        raise kv_router_error
+
+    return kv_router
 
 
 async def _assert_overlap_scores(
@@ -738,13 +797,15 @@ def _test_python_router_bindings(
     # Create KvRouterConfig with default settings
     kv_router_config = KvRouterConfig()
 
-    # Create KvRouter Python object
-    with min_initial_workers_env(num_workers):
-        kv_router = KvRouter(
+    kv_router = _create_kv_router_with_timeout(
+        router_factory=lambda: KvRouter(
             endpoint=endpoint,
             block_size=block_size,
             kv_router_config=kv_router_config,
-        )
+        ),
+        num_workers=num_workers,
+        engine_workers=engine_workers,
+    )
 
     logger.info("Created KvRouter Python object")
 
@@ -1549,11 +1610,14 @@ def _test_router_indexers_sync(
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
         )
+        event_plane = "nats" if durable_kv_events else None
 
         # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
         if standalone_indexer_url:
-            tmp_runtime = get_runtime(store_backend, request_plane)
+            tmp_runtime = get_runtime(
+                store_backend, request_plane, event_plane=event_plane
+            )
             tmp_endpoint = tmp_runtime.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
             )
@@ -1649,17 +1713,20 @@ def _test_router_indexers_sync(
 
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
-        runtime1 = get_runtime(store_backend, request_plane)
+        runtime1 = get_runtime(store_backend, request_plane, event_plane=event_plane)
         endpoint1 = runtime1.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        with min_initial_workers_env(num_workers):
-            kv_router1 = KvRouter(
+        kv_router1 = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
                 endpoint=endpoint1,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
-            )
+            ),
+            num_workers=num_workers,
+            engine_workers=engine_workers,
+        )
 
         # Wait for workers to be ready
         await wait_for_workers_ready(endpoint1, kv_router1, num_workers, model_name)
@@ -1758,17 +1825,20 @@ def _test_router_indexers_sync(
 
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
-        runtime2 = get_runtime(store_backend, request_plane)
+        runtime2 = get_runtime(store_backend, request_plane, event_plane=event_plane)
         endpoint2 = runtime2.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        with min_initial_workers_env(num_workers):
-            kv_router2 = KvRouter(
+        kv_router2 = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
                 endpoint=endpoint2,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
-            )
+            ),
+            num_workers=num_workers,
+            engine_workers=engine_workers,
+        )
 
         # Launch Indexer B alongside Router 2. Workers are passed via --workers
         # so ZMQ sockets connect before recovery, avoiding the slow-joiner problem.
@@ -2178,6 +2248,328 @@ def _test_router_decisions_disagg(
         )
 
 
+def _test_disagg_background_prefill_sticky_routing(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    model_name: str,
+    store_backend: str = "file",
+    request_plane: str = "tcp",
+    event_plane: str = "zmq",
+    frontend_already_running: bool = False,
+):
+    """Verify sticky prefill routing overrides normal KV choice in bootstrap disagg."""
+
+    frontend_context = contextlib.nullcontext()
+    if not frontend_already_running:
+        frontend_context = FrontendRouterProcess(
+            request,
+            block_size,
+            frontend_port,
+            decode_workers.namespace,
+            store_backend,
+            enforce_disagg=True,
+            request_plane=request_plane,
+            event_plane=event_plane,
+            durable_kv_events=False,
+            min_initial_workers=decode_workers.num_workers,
+        )
+
+    with frontend_context:
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        async def send_chat(
+            session: aiohttp.ClientSession,
+            content: str,
+            *,
+            session_control: Optional[dict[str, Any]] = None,
+        ) -> tuple[int, int]:
+            payload: dict[str, Any] = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": content}],
+                "stream": True,
+                "max_tokens": 2,
+                "nvext": {"extra_fields": ["worker_id", "timing"]},
+            }
+            if session_control is not None:
+                payload["nvext"]["session_control"] = session_control
+
+            async with session.post(chat_url, json=payload) as response:
+                body = []
+                assert response.status == 200, (
+                    f"Request failed with status {response.status}: "
+                    f"{await response.text()}"
+                )
+
+                prefill_worker_id = None
+                prefill_dp_rank = None
+                async for line in response.content:
+                    line_str = line.decode("utf-8", errors="replace").strip()
+                    body.append(line_str)
+                    if not line_str.startswith("data:"):
+                        continue
+                    data_str = line_str[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    worker_id = data.get("nvext", {}).get("worker_id", {})
+                    prefill_worker_id = worker_id.get(
+                        "prefill_worker_id", prefill_worker_id
+                    )
+                    prefill_dp_rank = worker_id.get("prefill_dp_rank", prefill_dp_rank)
+
+                assert (
+                    prefill_worker_id is not None
+                ), "Missing prefill_worker_id in response body: " + "\n".join(body)
+                assert (
+                    prefill_dp_rank is not None
+                ), "Missing prefill_dp_rank in response body: " + "\n".join(body)
+                return int(prefill_worker_id), int(prefill_dp_rank)
+
+        async def test_sync():
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+            )
+
+            runtime = get_runtime(
+                store_backend=store_backend, request_plane=request_plane
+            )
+            prefill_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.generate"
+            )
+            prefill_session_control_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.session_control"
+            )
+            await poll_for_worker_instances(
+                prefill_endpoint,
+                prefill_workers.num_workers,
+                max_wait_time=120,
+            )
+            await poll_for_worker_instances(
+                prefill_session_control_endpoint,
+                prefill_workers.num_workers,
+                max_wait_time=120,
+            )
+
+            suffix = random.randint(100_000, 999_999)
+            session_a = f"sticky-a-{suffix}"
+            session_b = f"sticky-b-{suffix}"
+            prompt_a = (
+                f"session alpha {suffix}: "
+                "redwood vectors amber matrix northbound lantern " * 20
+            )
+
+            async with aiohttp.ClientSession() as session:
+                session_a_pair = await send_chat(
+                    session,
+                    prompt_a,
+                    session_control={
+                        "session_id": session_a,
+                        "action": "open",
+                        "timeout": 300,
+                    },
+                )
+
+                competing_pair = None
+                competing_prompt = None
+                for attempt in range(6):
+                    candidate = (
+                        f"session beta {suffix} attempt {attempt}: "
+                        "cerulean ledger quartz valley transit cacheline " * 20
+                    )
+                    pair = await send_chat(
+                        session,
+                        candidate,
+                        session_control={
+                            "session_id": f"{session_b}-{attempt}",
+                            "action": "open",
+                            "timeout": 300,
+                        },
+                    )
+                    if pair != session_a_pair:
+                        competing_pair = pair
+                        competing_prompt = candidate
+                        break
+
+                assert competing_pair is not None, (
+                    "Could not warm a competing prefill worker/rank different from "
+                    f"session A pair {session_a_pair}"
+                )
+
+                control_pair = None
+                for _ in range(10):
+                    control_pair = await send_chat(
+                        session,
+                        competing_prompt
+                        + " control continuation proving normal kv routing",
+                    )
+                    if control_pair == competing_pair:
+                        break
+                    await asyncio.sleep(0.5)
+
+                assert control_pair == competing_pair, (
+                    "No-sticky control did not follow normal KV overlap routing: "
+                    f"expected {competing_pair}, got {control_pair}"
+                )
+
+                followups = [
+                    competing_prompt + f" sticky continuation {idx} {suffix}"
+                    for idx in range(3)
+                ]
+                results = await asyncio.gather(
+                    *[
+                        send_chat(
+                            session,
+                            content,
+                            session_control={"session_id": session_a},
+                        )
+                        for content in followups
+                    ]
+                )
+
+            assert results == [session_a_pair] * len(results), (
+                "Sticky follow-ups should stay pinned to session A prefill pair "
+                f"{session_a_pair}, but got {results}; competing pair was "
+                f"{competing_pair}"
+            )
+
+        asyncio.run(test_sync())
+
+
+def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    prefill_zone_a_id: int,
+    prefill_zone_b_id: int,
+    shared_namespace: str,
+    request_plane: str = "tcp",
+):
+    """Validate required topology constraints derived from pinned prefill workers."""
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        namespace=decode_workers.namespace,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        min_initial_workers=decode_workers.num_workers,
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        async def run_requests() -> None:
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+            )
+
+            runtime = get_runtime(request_plane=request_plane)
+            decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
+            prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
+
+            await poll_for_worker_instances(decode_endpoint, decode_workers.num_workers)
+            await poll_for_worker_instances(
+                prefill_endpoint, decode_workers.num_workers
+            )
+
+            async def post_expect_status(
+                session: aiohttp.ClientSession,
+                payload: dict,
+                expected_status: int,
+                message: str,
+                retry_statuses: set[int] | None = None,
+                timeout_s: float = 30.0,
+            ) -> str:
+                retry_statuses = retry_statuses or set()
+                deadline = asyncio.get_running_loop().time() + timeout_s
+                attempt = 0
+                last_status = None
+                last_body = ""
+
+                while True:
+                    attempt += 1
+                    async with session.post(chat_url, json=payload) as response:
+                        response_body = await response.text()
+                        if response.status == expected_status:
+                            return response_body
+
+                        last_status = response.status
+                        last_body = response_body
+
+                    if (
+                        last_status not in retry_statuses
+                        or asyncio.get_running_loop().time() >= deadline
+                    ):
+                        raise AssertionError(
+                            f"{message}, got status={last_status} body={last_body}"
+                        )
+
+                    logger.info(
+                        "%s not ready yet: status=%s attempt=%s; retrying...",
+                        message,
+                        last_status,
+                        attempt,
+                    )
+                    await asyncio.sleep(1.0)
+
+            zone_a_payload = {
+                **test_payload,
+                "nvext": {
+                    "prefill_worker_id": prefill_zone_a_id,
+                },
+            }
+            topology_ready_payload = {
+                **zone_a_payload,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            logger.info("Waiting for topology-valid frontend readiness...")
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+                test_payload=topology_ready_payload,
+            )
+
+            async with aiohttp.ClientSession() as session:
+                await post_expect_status(
+                    session,
+                    zone_a_payload,
+                    200,
+                    "Expected required KV-transfer topology match to succeed",
+                    retry_statuses={404},
+                )
+
+            zone_b_payload = {
+                **test_payload,
+                "nvext": {
+                    "prefill_worker_id": prefill_zone_b_id,
+                },
+            }
+            async with aiohttp.ClientSession() as session:
+                await post_expect_status(
+                    session,
+                    zone_b_payload,
+                    500,
+                    "Expected required KV-transfer topology mismatch to fail",
+                )
+
+        asyncio.run(run_requests())
+
+
 def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
     prefill_workers,
     decode_workers,
@@ -2223,8 +2615,8 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                 f"{prefill_workers.namespace}.prefill.generate"
             )
 
-            with min_initial_workers_env(prefill_workers.num_workers):
-                observer_router = KvRouter(
+            observer_router = _create_kv_router_with_timeout(
+                router_factory=lambda: KvRouter(
                     endpoint=prefill_endpoint,
                     block_size=block_size,
                     kv_router_config=KvRouterConfig(
@@ -2235,7 +2627,10 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                         router_track_prefill_tokens=True,
                         router_prefill_load_model="none",
                     ),
-                )
+                ),
+                num_workers=prefill_workers.num_workers,
+                engine_workers=prefill_workers,
+            )
 
             client = await prefill_endpoint.client()
             worker_ids: list[int] = []
@@ -2328,8 +2723,10 @@ def _test_router_decisions(
     durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
+    standalone_selector_url: Optional[str] = None,
     router_aic_config: Optional[dict[str, Any]] = None,
     router_predicted_ttl_secs: Optional[float] = None,
+    initial_wait: float = 0.25,
 ):
     """Validate cross-worker routing decisions based on longest prefix match.
 
@@ -2387,13 +2784,17 @@ def _test_router_decisions(
             if router_aic_config is not None
             else None
         )
-        with min_initial_workers_env(expected_num_instances):
-            kv_router = KvRouter(
+
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
                 endpoint=endpoint,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
                 aic_perf_config=aic_perf_config,
-            )
+            ),
+            num_workers=expected_num_instances,
+            engine_workers=engine_workers,
+        )
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
@@ -2490,6 +2891,9 @@ def _test_router_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
+                # XPU workers have longer startup latency; pass as parameter
+                # to avoid affecting CUDA tests.
+                initial_wait=initial_wait,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
@@ -2642,6 +3046,49 @@ def _test_router_decisions(
                     )
 
         asyncio.run(_verify_scores())
+
+    # Verify standalone selection service scores via HTTP POST /overlap_scores.
+    if standalone_selector_url:
+        _dp_a = dp_rank_a if dp_rank_a is not None else 0
+        _dp_b = dp_rank_b if dp_rank_b is not None else 0
+
+        async def _verify_selection_service_scores():
+            # The sidecar readiness gate confirms registration; allow KV events to settle.
+            await asyncio.sleep(3)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{standalone_selector_url}/overlap_scores",
+                    json={"token_ids": req4_tokens, "model_name": model_name},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"POST /overlap_scores failed: {resp.status} {await resp.text()}"
+                    body = await resp.json()
+
+                    scores = {
+                        (worker["worker_id"], worker["dp_rank"]): worker
+                        for worker in body["workers"]
+                    }
+                    score_a = scores[(worker_a_id, _dp_a)]["device_blocks"]
+                    score_b = scores[(worker_b_id, _dp_b)]["device_blocks"]
+
+                    logger.info(
+                        "Standalone selection /overlap_scores: %s[%s]=%s, %s[%s]=%s",
+                        worker_a_id,
+                        _dp_a,
+                        score_a,
+                        worker_b_id,
+                        _dp_b,
+                        score_b,
+                    )
+                    assert score_a > score_b, (
+                        f"Expected selection service worker {worker_a_id} dp_rank {_dp_a} "
+                        f"score {score_a} > worker {worker_b_id} dp_rank {_dp_b} "
+                        f"score {score_b} for req4 tokens"
+                    )
+
+        asyncio.run(_verify_selection_service_scores())
 
 
 def _test_busy_threshold_endpoint(

@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 
@@ -34,15 +34,14 @@ async def init_video_diffusion_worker(
         shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
     # Check tensorrt_llm visual_gen availability early with a clear error message.
-    # visual_gen is part of TensorRT-LLM (tensorrt_llm._torch.visual_gen).
     # Without this check, users would get a cryptic ImportError deep inside
     # DiffusionEngine.initialize().
     try:
-        import tensorrt_llm._torch.visual_gen  # noqa: F401
+        import tensorrt_llm.visual_gen  # noqa: F401
     except ImportError:
         raise ImportError(
             "Video diffusion requires TensorRT-LLM with visual_gen support.\n"
-            "The visual_gen module is at tensorrt_llm._torch.visual_gen.\n"
+            "The visual_gen module is at tensorrt_llm.visual_gen.\n"
             "Install TensorRT-LLM with AIGV support:\n"
             "  pip install tensorrt_llm\n"
             "See: https://github.com/NVIDIA/TensorRT-LLM"
@@ -54,18 +53,11 @@ async def init_video_diffusion_worker(
 
     logging.info(f"Initializing video diffusion worker with config: {config}")
 
-    # Parse skip_components from comma-separated string to list
-    skip_components = (
-        [c.strip() for c in config.skip_components.split(",") if c.strip()]
-        if config.skip_components
-        else []
-    )
-
     if not config.endpoint:
         raise ValueError("endpoint must be configured for video diffusion worker")
 
     # Build DiffusionConfig from the main Config
-    diffusion_config = DiffusionConfig.from_config(config, skip_components)
+    diffusion_config = DiffusionConfig.from_config(config)
 
     # Get the endpoint from the runtime
     endpoint = runtime.endpoint(
@@ -96,13 +88,17 @@ async def init_video_diffusion_worker(
 
     logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
 
-    # register_model is Dynamo's generic model registration function
+    # Diffusion has no prefill/decode split: a single worker owns the
+    # whole pipeline, so it advertises as Aggregated with no peer
+    # dependencies.
     await register_model(
         ModelInput.Text,
         model_type,
         endpoint,
         config.model,
         model_name,
+        worker_type=WorkerType.Aggregated,
+        needs=[],
     )
 
     logging.info(f"Model registered, serving endpoint: {config.endpoint}")

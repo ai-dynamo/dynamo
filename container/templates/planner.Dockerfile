@@ -13,17 +13,32 @@
 FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
 
 ARG PYTHON_VERSION
+ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
 # dependencies in the builder stage. git/git-lfs are only needed because
 # aiconfigurator is currently installed from a Git URL with LFS-backed assets.
+# On arm64, gcc + libc6-dev are added so aiperf's `crick` dep can compile
+# from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
+# the prebuilt wheel from PyPI is used and the toolchain is skipped
+# entirely. Python headers come from the base image's
+# /usr/local/include/python${PYTHON_VERSION} (python:3.X-slim bundles them
+# directly — no apt python*-dev needed, and python${PYTHON_VERSION}-dev is
+# not available in this base's apt index anyway). libc6-dev is required
+# explicitly because on Debian it's a Recommends of gcc, not a Depends, so
+# --no-install-recommends would otherwise skip it and the build fails with
+# "fatal error: stdlib.h: No such file or directory". The toolchain stays
+# in this builder stage and never reaches the final image.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y && \
+    EXTRA_PKGS=""; \
+    if [ "$TARGETARCH" = "arm64" ]; then EXTRA_PKGS="gcc libc6-dev"; fi; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         git \
         git-lfs \
-        libgomp1 && \
+        libgomp1 \
+        $EXTRA_PKGS && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

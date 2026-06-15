@@ -26,7 +26,6 @@ keywords.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-dynamo-protocols = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true }
@@ -34,7 +33,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 regex = "1"
-openai-harmony = "0.0.3"
+openai-harmony = "0.0.8"
 rustpython-parser = "0.4.0"
 num-traits = "0.2"
 

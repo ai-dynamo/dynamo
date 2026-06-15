@@ -7,6 +7,29 @@ import sys
 from tests.utils.managed_process import ManagedProcess
 
 
+class SlotTrackerProcess(ManagedProcess):
+    """Manages a standalone dynamo.slot_tracker process."""
+
+    def __init__(self, request, port: int):
+        super().__init__(
+            command=[
+                sys.executable,
+                "-m",
+                "dynamo.slot_tracker",
+                "--port",
+                str(port),
+            ],
+            timeout=10,
+            display_output=False,
+            health_check_ports=[port],
+            health_check_urls=[f"http://localhost:{port}/health"],
+            log_dir=request.node.name,
+            terminate_all_matching_process_names=False,
+            display_name="dynamo-slot-tracker",
+        )
+        self.port = port
+
+
 class FrontendRouterProcess(ManagedProcess):
     """Manages a dynamo.frontend process with configurable --router-mode.
 
@@ -34,6 +57,7 @@ class FrontendRouterProcess(ManagedProcess):
         router_aic_config: dict[str, str | int] | None = None,
         serve_indexer: bool = False,
         use_remote_indexer: bool = False,
+        event_plane: str | None = None,
     ):
         command = [
             sys.executable,
@@ -104,6 +128,10 @@ class FrontendRouterProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
+        if event_plane is not None:
+            env["DYN_EVENT_PLANE"] = event_plane
+        if event_plane == "zmq" and request_plane != "nats":
+            env.pop("NATS_SERVER", None)
         if min_initial_workers is not None:
             env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(min_initial_workers)
 

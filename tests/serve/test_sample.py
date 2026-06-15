@@ -14,7 +14,11 @@ from tests.serve.common import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.payload_builder import chat_payload_default, completion_payload_default
+from tests.utils.payload_builder import (
+    chat_payload_default,
+    completion_payload_default,
+    metric_payload_default,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,14 @@ sample_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            # /metrics validation: asserts dynamo_component_* surface
+            # (including the framework-owned cleanup_time/drain_time
+            # Rust gauges and the engine-side model_load_time/
+            # kv_cache_hit_rate Python gauges). Runs after the chat +
+            # completion payloads so requests_total >= 2. Sample
+            # backend is unified-only, so opt into the lifecycle-gauge
+            # assertions.
+            metric_payload_default(min_num_requests=2, check_lifecycle_gauges=True),
         ],
     ),
 }

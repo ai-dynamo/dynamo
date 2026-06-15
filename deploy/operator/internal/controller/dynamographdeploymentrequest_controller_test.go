@@ -1290,7 +1290,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
 
 			// Create profiling job with properly initialized DGDR
-			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			_, err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify job was created
@@ -1355,7 +1355,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
 
 			// Create profiling job with properly initialized DGDR
-			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			_, err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify job was created
@@ -1419,7 +1419,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
 
 			// Create profiling job with properly initialized DGDR
-			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			_, err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify job was created

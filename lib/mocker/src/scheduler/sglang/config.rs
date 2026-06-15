@@ -39,6 +39,7 @@ pub(super) struct SglangConfig {
     pub(super) total_kv_tokens: usize,
     pub(super) kv_bytes_per_token: Option<usize>,
     pub(super) kv_transfer_bandwidth: Option<f64>,
+    pub(super) speculative_max_tokens: Option<usize>,
 }
 
 impl SglangConfig {
@@ -87,6 +88,7 @@ impl SglangConfig {
             total_kv_tokens: args.num_gpu_blocks * args.block_size,
             kv_bytes_per_token: args.kv_bytes_per_token,
             kv_transfer_bandwidth: args.kv_transfer_bandwidth,
+            speculative_max_tokens: args.aic_nextn.map(|nextn| nextn + 1),
         }
     }
 }

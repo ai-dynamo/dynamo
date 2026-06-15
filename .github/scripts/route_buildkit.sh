@@ -11,9 +11,9 @@
 # Routing is optimized for Docker layer caching, linear scaling, and
 # 100% pod utilization across any number of BuildKit pods.
 #
-# CACHE GROUPS (3 distinct groups to maximize layer reuse):
-#   - Group 0 (cuda-dl-base-13):    vLLM & SGLang (CUDA 13.x)
-#   - Group 1 (cuda-dl-base-12):    vLLM & SGLang (CUDA 12.x)
+# CACHE GROUPS (3 distinct groups, one cache domain per framework):
+#   - Group 0 (vllm):                 vLLM
+#   - Group 1 (sglang):               SGLang
 #   - Group 2 (general-trt-combined): TRT-LLM & General Builds
 #
 # ALGORITHM:
@@ -30,7 +30,7 @@
 #
 # LOAD DISTRIBUTION (cksum-based, all pods utilized):
 # +------+------+-------------------+-------------------+---------------------+
-# | Pods | Pool | G0: vLLM/SGL C13  | G1: vLLM/SGL C12  | G2: TRT-LLM/General |
+# | Pods | Pool | G0: vLLM          | G1: SGLang        | G2: TRT-LLM/General |
 # +------+------+-------------------+-------------------+---------------------+
 # |  1   |  1   | {0}               | {0}               | {0}                 |
 # |  2   |  1   | {0}               | {1}               | {1}                 |
@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <12.9|13.0>]."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <13.0|13.1>]."
       exit 1
       ;;
   esac
@@ -84,11 +84,19 @@ if [ -z "$FLAVOR_INPUT" ]; then
   exit 1
 fi
 
-# CUDA version is required for all flavors except "general"
-if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
-  echo "❌ Error: Must specify --cuda <12.9|13.0> for flavor '$FLAVOR_INPUT'."
-  exit 1
-fi
+# CUDA version no longer affects pod routing: cache groups are keyed by
+# framework (see GROUP_KEYS / flavor_to_group), so --cuda is still accepted for
+# backward compatibility but is neither required nor validated here.
+# To re-enable per-CUDA-version routing in the future: (1) uncomment the
+# requirement block below and the validation block further down, (2) add the
+# CUDA major back into GROUP_KEYS, and (3) take the cuda_version into account in
+# flavor_to_group.
+#
+# # CUDA version is required for all flavors except "general"
+# if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
+#   echo "❌ Error: Must specify --cuda <13.0|13.1> for flavor '$FLAVOR_INPUT'."
+#   exit 1
+# fi
 
 # Validate arch input
 case $ARCH_INPUT in
@@ -108,16 +116,18 @@ case $FLAVOR_INPUT in
     ;;
 esac
 
-# Validate CUDA version input (allow empty for general flavor)
-if [ -n "$CUDA_VERSION" ]; then
-  case $CUDA_VERSION in
-    12.9|13.0|13.1) ;;
-    *)
-      echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 12.9, 13.0, or 13.1."
-      exit 1
-      ;;
-  esac
-fi
+# Validate CUDA version input (allow empty for general flavor) — disabled; see
+# the note above the requirement block. Re-enable alongside it if per-CUDA-version
+# routing is reintroduced.
+# if [ -n "$CUDA_VERSION" ]; then
+#   case $CUDA_VERSION in
+#     13.0|13.1) ;;
+#     *)
+#       echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 13.0 or 13.1."
+#       exit 1
+#       ;;
+#   esac
+# fi
 
 # Determine architectures to process
 if [ "$ARCH_INPUT" = "all" ]; then
@@ -174,19 +184,16 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("cuda-dl-base-13" "cuda-dl-base-12" "general-trt-combined")
+GROUP_KEYS=("vllm" "sglang" "general-trt-combined")
 
-# Map a flavor + CUDA version to a group index (0, 1, or 2)
+# Map a flavor to a group index (0, 1, or 2). One cache domain per framework:
+# vLLM and SGLang each get a dedicated group; TRT-LLM and general builds share
+# the third.
 flavor_to_group() {
   local flavor=$1
-  local cuda_major=${2%%.*}
   case "$flavor" in
-    vllm|sglang)
-      case "$cuda_major" in
-        13) echo 0 ;;
-        *)  echo 1 ;;
-      esac
-      ;;
+    vllm)  echo 0 ;;
+    sglang) echo 1 ;;
     trtllm|general|*) echo 2 ;;
   esac
 }

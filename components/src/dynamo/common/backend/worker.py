@@ -29,7 +29,8 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .engine import LLMEngine
+from .engine import BaseEngine, RawEngine
+from .health_check import parse_health_check_payload_cli
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +97,17 @@ class WorkerConfig:
     enable_kv_routing: bool = True
     metrics_labels: list[tuple[str, str]] = field(default_factory=list)
     # Disaggregation role; default AGGREGATED keeps existing callers unchanged.
-    # The Rust Worker reads this for registration (Prefill→ModelType::Prefill,
-    # Decode→disable local indexer); engines read it from their own runtime
-    # config to switch per-mode protocol behavior in `generate()`.
+    # The Rust Worker reads this for registration (Prefill → ModelType.Prefill
+    # legacy marker bit + WorkerType.Prefill, Decode → disable local indexer);
+    # engines read it from their own runtime config to switch per-mode protocol
+    # behavior in `generate()`.
     disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
+    # Operator override; when set, the Rust Worker uses this instead of
+    # `engine.health_check_payload()`. Populated by `from_runtime_config`.
+    health_check_payload: Optional[dict] = None
+    structural_tag_mode: str = "off"
+    structural_tag_scope: str = "auto"
+    structural_tag_schema: str = "auto"
 
     @classmethod
     def from_runtime_config(
@@ -138,6 +146,17 @@ class WorkerConfig:
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
             "enable_kv_routing": getattr(runtime_cfg, "enable_kv_routing", True),
+            "structural_tag_mode": (
+                "on"
+                if getattr(runtime_cfg, "dyn_enable_structural_tag", False)
+                else "off"
+            ),
+            "structural_tag_scope": getattr(
+                runtime_cfg, "dyn_structural_tag_scope", "auto"
+            ),
+            "structural_tag_schema": getattr(
+                runtime_cfg, "dyn_structural_tag_schema", "auto"
+            ),
         }
         # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
         # `serving_mode`. Skip the probe when an override is supplied so
@@ -152,14 +171,22 @@ class WorkerConfig:
             )
         if model_input is not None:
             kwargs["model_input"] = model_input
+        kwargs["health_check_payload"] = parse_health_check_payload_cli(
+            getattr(runtime_cfg, "health_check_payload", None)
+        )
         kwargs.update(overrides)
         return cls(**kwargs)
 
 
 class Worker:
-    """Drive the Rust ``Worker`` for a single ``LLMEngine`` instance."""
+    """Drive the Rust ``Worker`` for a single engine instance.
 
-    def __init__(self, engine: LLMEngine, config: WorkerConfig):
+    Accepts any :class:`BaseEngine` — an :class:`LLMEngine` (token pipeline)
+    or a :class:`DiffusionEngine` (raw media pipeline). The request adapter is
+    selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
+    ``WorkerConfig.model_input`` is validated against that kind."""
+
+    def __init__(self, engine: BaseEngine, config: WorkerConfig):
         self.engine = engine
         self.config = config
 
@@ -204,9 +231,17 @@ class Worker:
             disaggregation_mode=_to_rust_disaggregation_mode(
                 self.config.disaggregation_mode
             ),
+            health_check_payload=self.config.health_check_payload,
+            structural_tag_mode=self.config.structural_tag_mode,
+            structural_tag_scope=self.config.structural_tag_scope,
+            structural_tag_schema=self.config.structural_tag_schema,
             runtime=runtime_cfg,
         )
 
         loop = asyncio.get_running_loop()
-        worker = _backend.Worker(self.engine, worker_cfg, loop)
+        # A RawEngine (e.g. DiffusionEngine) drives the raw media pipeline
+        # (JSON request adapter); everything else is a token-pipeline
+        # LLMEngine. The Rust Worker validates model_input against the kind.
+        is_raw = isinstance(self.engine, RawEngine)
+        worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
         await worker.run()
