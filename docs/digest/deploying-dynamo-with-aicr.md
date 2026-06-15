@@ -203,9 +203,13 @@ cache-aware placement.
 
 ## Recipe Flow
 
-The AICR flow has four phases: snapshot, recipe, validate, and bundle.
+The AICR flow separates runtime bring-up from workload testing. First, capture the cluster, select a
+recipe, validate it, render and deploy the runtime bundle, and validate the installed runtime. Only
+then install a `DynamoGraphDeployment` and run end-to-end API checks against that workload.
 
-First, capture the current cluster state:
+### 1. Snapshot the Cluster
+
+Capture the current cluster state:
 
 ```bash
 aicr snapshot \
@@ -216,9 +220,11 @@ aicr snapshot \
   --output snapshot.yaml
 ```
 
-Then let AICR select the Dynamo inference recipe from the snapshot. The snapshot supplies the
-cluster facts, such as the Kubernetes service, GPU accelerator, GPU count, and node OS. You provide
-the workload intent and platform you want to install:
+### 2. Select the Dynamo Recipe
+
+Let AICR select the Dynamo inference recipe from the snapshot. The snapshot supplies the cluster
+facts, such as the Kubernetes service, GPU accelerator, GPU count, and node OS. You provide the
+workload intent and platform you want to install:
 
 ```bash
 aicr recipe \
@@ -227,6 +233,8 @@ aicr recipe \
   --platform dynamo \
   --output recipe.yaml
 ```
+
+### 3. Validate Before Deployment
 
 Because that recipe was selected from `snapshot.yaml`, validating the same recipe against the same
 snapshot is not the interesting check: recipe selection already used those facts. Offline validation
@@ -242,8 +250,7 @@ aicr validate \
   --output dry-run.json
 ```
 
-The full live validation happens after deployment, when AICR can also check that the runtime was
-installed as expected.
+### 4. Render the Runtime Bundle
 
 Render the deployment bundle with the node placement rules for system and GPU workloads. The
 selectors and tolerations are cluster-specific: use the labels and taints from your Kubernetes
@@ -263,6 +270,8 @@ aicr bundle \
   --output bundle
 ```
 
+### 5. Deploy the Runtime
+
 Deploy the rendered bundle with the deployer that fits your environment:
 
 ```bash
@@ -271,7 +280,10 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-After the runtime is installed, run validation against the live cluster:
+### 6. Validate the Installed Runtime
+
+After the runtime is installed, run validation against the live cluster before installing a Dynamo
+workload:
 
 ```bash
 aicr validate \
@@ -282,8 +294,33 @@ aicr validate \
   --output report.json
 ```
 
-At this point, the bundle has installed the validated runtime under Dynamo. The remaining step is to
-apply a Dynamo workload, such as the vLLM aggregation example in the
+The full live validation happens after deployment, when AICR can also check that the runtime was
+installed as expected.
+
+## What Does Validate Check?
+
+AICR validation gives the Dynamo deployment a concrete runtime contract. A Dynamo inference recipe can
+check that the cluster has:
+
+- The expected Kubernetes service, accelerator, operating system, and workload intent.
+- GPU Operator health and accelerator metrics.
+- DRA support for GPU allocation.
+- Secure accelerator access.
+- Gang and accelerator-aware scheduling.
+- Prometheus reachability for AI service metrics.
+- Dynamo platform health, including operator readiness.
+- NATS reachability for the Kubernetes KV event plane.
+- Gateway API and agentgateway prerequisites when validating the Kubernetes-native ingress path.
+- Autoscaling prerequisites where the selected recipe requires them.
+
+This validation is the main reason to use AICR instead of starting from raw
+[Helm](https://helm.sh/) commands. It turns "install the charts" into "install this versioned runtime
+and prove the cluster satisfies the recipe."
+
+## Deploying a Model with Dynamo
+
+At this point, the bundle has installed and validated the runtime under Dynamo. Now apply a Dynamo
+workload, such as the vLLM aggregation example in the
 [AICR repository](https://github.com/NVIDIA/aicr/tree/main/demos/workloads/inference), and watch the
 `DynamoGraphDeployment` converge.
 
@@ -297,6 +334,13 @@ kubectl apply -f https://raw.githubusercontent.com/NVIDIA/aicr/refs/heads/main/d
 kubectl get dynamographdeployments -n dynamo-workload
 kubectl get pods -n dynamo-workload -o wide -w
 ```
+
+## Testing the OpenAI API
+
+The following checks are end-to-end workload smoke tests. They prove that the deployed
+`DynamoGraphDeployment` is serving OpenAI-compatible requests through the chosen routing path.
+
+### Direct Dynamo Frontend
 
 For the default Dynamo-router path, call the OpenAI-compatible API through the Dynamo frontend
 service:
@@ -316,6 +360,8 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello from AICR Dynamo"}],"max_tokens":30,"stream":false}'
 ```
 
+### Gateway / EPP
+
 AICR inference recipes also install [agentgateway](https://github.com/agentgateway/agentgateway) and
 an `inference-gateway` Gateway in the `agentgateway-system` namespace. `agentgateway` is the
 Gateway API data plane, not the Dynamo EPP. The Dynamo EPP comes from a `DynamoGraphDeployment`
@@ -323,7 +369,11 @@ component of type `epp`; the Dynamo operator generates the matching `InferencePo
 path uses an `HTTPRoute` that references that pool, as described in the
 [Gateway API Inference Extension guide](../kubernetes/inference-gateway.md). That is native Dynamo
 integration with GAIE: Gateway stays Kubernetes-native at ingress, while Dynamo owns the cache-aware
-endpoint selection. The `vllm-agg` example above uses the direct frontend path. For a Gateway / EPP
+endpoint selection.
+
+The `vllm-agg` example above uses the direct frontend path. To exercise the Gateway / EPP path, use
+an EPP-enabled `DynamoGraphDeployment` and `HTTPRoute`, such as the GAIE examples linked from the
+[Inference Gateway deploy guide](../kubernetes/inference-gateway.md#5-deploy). For a Gateway / EPP
 workload, send the same OpenAI-compatible requests through the Gateway address:
 
 ```bash
@@ -346,26 +396,6 @@ curl "http://${GATEWAY_HOST}/v1/chat/completions" \
 ```
 
 For the Gateway / EPP path, also verify the EPP pod and worker frontend sidecars.
-
-## What Validation Covers
-
-AICR validation gives the Dynamo deployment a concrete runtime contract. A Dynamo inference recipe can
-check that the cluster has:
-
-- The expected Kubernetes service, accelerator, operating system, and workload intent.
-- GPU Operator health and accelerator metrics.
-- DRA support for GPU allocation.
-- Secure accelerator access.
-- Gang and accelerator-aware scheduling.
-- Prometheus reachability for AI service metrics.
-- Dynamo platform health, including operator readiness.
-- NATS reachability for the Kubernetes KV event plane.
-- Gateway / EPP resources when validating the Kubernetes-native ingress path.
-- Autoscaling prerequisites where the selected recipe requires them.
-
-This validation is the main reason to use AICR instead of starting from raw
-[Helm](https://helm.sh/) commands. It turns "install the charts" into "install this versioned runtime
-and prove the cluster satisfies the recipe."
 
 ## Where This Fits
 
