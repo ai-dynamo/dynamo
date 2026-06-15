@@ -200,12 +200,26 @@ aicr recipe \
   --output recipe.yaml
 ```
 
-Validate the recipe against the snapshot before installing anything:
+Because that recipe was selected from `snapshot.yaml`, validating the same recipe against the same
+snapshot is not the interesting check: recipe selection already used those facts. Pre-install
+validation is useful when the recipe came from elsewhere, when it was generated from explicit
+criteria, or when you want to prove it against the live cluster. To check the recipe against the
+current cluster before installing the bundle, omit `--snapshot` and `--no-cluster`:
 
 ```bash
 aicr validate \
   --recipe recipe.yaml \
-  --snapshot snapshot.yaml \
+  --phase deployment \
+  --output preflight.json
+```
+
+To compare the recipe against a different captured cluster without touching that cluster, validate
+against a different snapshot in `--no-cluster` mode:
+
+```bash
+aicr validate \
+  --recipe recipe.yaml \
+  --snapshot candidate-snapshot.yaml \
   --no-cluster \
   --phase deployment \
   --output dry-run.json
