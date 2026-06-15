@@ -982,6 +982,7 @@ jobs:
           # (see ops-support). Add one substring per line to silence additional jobs.
           IGNORED_JOBS: |
             build-xpu
+            test-xpu
         run: |
           JOBS_JSON=$(mktemp)
           curl -sSL \
