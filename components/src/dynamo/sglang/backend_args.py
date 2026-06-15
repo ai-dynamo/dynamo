@@ -67,7 +67,7 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help=(
                 "DEPRECATED: use --enable-multimodal with "
-                "--disaggregation-mode=agg/prefill/decode."
+                "--disaggregation-mode=pd/prefill/decode."
             ),
         )
         add_negatable_bool_argument(
@@ -181,6 +181,8 @@ class DynamoSGLangConfig(ConfigBase):
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
             )
 
+        self.validate_multimodal_topology()
+
         if self.multimodal_encode_worker:
             _warn_deprecated(
                 "--multimodal-encode-worker is deprecated; use "
@@ -196,8 +198,6 @@ class DynamoSGLangConfig(ConfigBase):
                 "legacy flag to the new arguments."
             )
             self.enable_multimodal = True
-
-        self.validate_multimodal_topology()
 
     def validate_multimodal_topology(self) -> None:
         if self.frontend_decoding and (

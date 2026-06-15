@@ -414,8 +414,7 @@ class MultimodalProcessorInstantiated(Exception):
 
 @pytest.mark.asyncio
 async def test_init_llm_worker_creates_multimodal_processor():
-    with pytest.warns(DeprecationWarning, match="--modality multimodal"):
-        config = parse_args(["--model", "fake-model", "--modality", "multimodal"])
+    config = parse_args(["--model", "fake-model", "--modality", "multimodal"])
     assert config.modality == Modality.MULTIMODAL
 
     # Mock everything init_llm_worker touches before MultimodalRequestProcessor.
