@@ -1546,6 +1546,15 @@ func GenerateBasePodSpec(
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
 
+	// Apply vendor-agnostic DeviceSpec when the user opted into it. When
+	// component.Device != nil the operator passes the user's resources,
+	// tolerations, nodeSelector, and schedulerName through directly and skips
+	// the NVIDIA defaults below (DRA claim replacement, auto nvidia.com/gpu
+	// toleration).
+	if component.Device != nil {
+		applyDeviceSpec(&podSpec, component.Device)
+	}
+
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
 	if !shouldDisableImagePullSecret && secretsRetriever != nil {
 		imagePullSecrets := []corev1.LocalObjectReference{}
@@ -1566,7 +1575,12 @@ func GenerateBasePodSpec(
 	// generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying the
 	// claim and injecting a sidecar here would produce a double-wired engine
 	// pod (stray GMS sidecar, conflicting claim).
-	if GetGPUMemoryService(component) != nil && !component.IsInterPodGMSEnabled() {
+	//
+	// When component.Device is set the user is asking for a non-NVIDIA or
+	// HAMi-sliced layout. GMS is wired to the NVIDIA DRA driver and is not
+	// applicable; the GPU resources already live on the main container via
+	// applyDeviceSpec above.
+	if GetGPUMemoryService(component) != nil && !component.IsInterPodGMSEnabled() && component.Device == nil {
 		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)

@@ -543,8 +543,8 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	}
 
 	resources := dynamo.GetMainContainerResources(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
-	if gpu, ok := resources.Limits[corev1.ResourceName("nvidia.com/gpu")]; !ok || gpu.IsZero() {
-		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for LWS worker pod")
+	if !dynamo.HasAnyGPUResource(resources) {
+		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: no GPU resource limit is set for LWS worker pod")
 	}
 
 	return workerPodTemplateSpec, nil
