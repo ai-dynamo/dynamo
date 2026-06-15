@@ -329,7 +329,14 @@ workload, send the same OpenAI-compatible requests through the Gateway address:
 ```bash
 kubectl get gateway inference-gateway -n agentgateway-system
 kubectl get inferencepool,httproute -n dynamo-workload
+```
 
+Only continue with the Gateway call when the workload has an `InferencePool` and `HTTPRoute`. If the
+second command returns `No resources found`, the direct frontend path is working as expected for the
+`vllm-agg` example, but the Gateway has no route for that workload and will return `404 route not
+found`.
+
+```bash
 GATEWAY_HOST=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
 curl "http://${GATEWAY_HOST}/v1/models"
 
