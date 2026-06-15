@@ -974,11 +974,11 @@ jobs:
           namespace: ${{ vars.EFA_DEPLOY_NAMESPACE }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          # EFA vllm-runtime image to test; the action appends it as --image.
+          image: ${{ vars.EFA_DEPLOY_IMAGE }}
           test_name: efa
           test_file: tests/deploy/test_deploy_efa.py
-          extra_pytest_args: >-
-            -m framework_with_efa
-            --image=${{ vars.EFA_DEPLOY_IMAGE }}
+          extra_pytest_args: -m framework_with_efa
 
   deploy-status-check:
     runs-on: ubuntu-latest
