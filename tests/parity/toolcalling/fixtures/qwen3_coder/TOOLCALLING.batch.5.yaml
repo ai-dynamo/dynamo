@@ -84,13 +84,15 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id003
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm: &id003
         calls:
         - name: get_weather
           arguments:
             location: NY
         normal_text: ''
-      vllm: *id003
       sglang: *id003
   TOOLCALLING.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)
@@ -160,24 +162,24 @@ cases:
         - name: get_weather
           arguments:
             location: Boston
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
         - name: get_weather
           arguments:
             location: New York
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
-      vllm: *id005
-      sglang:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Boston
-        normal_text: |
-          I'll start by fetching the weather for both Boston and New York at the same time!
         reason: |-
-          Same root cause as 5.d: SGLang's `<tool_call>(.*?)</tool_call>` regex
-          requires the closing sentinel, so the trailing call truncated mid-arg
-          value is dropped. Dynamo/vLLM recover the partial value
-          (location='New York') and emit the call.
+          vLLM recovers the partial value (location='New York') from the call
+          truncated mid-arg-value before its closing sentinel. Dynamo (the
+          truncation guard) and SGLang require the value to be terminated, so
+          they drop the truncated call.
+      sglang: *id005
   TOOLCALLING.batch.5.f:
     description: Bare valid function before a complete wrapped call
     ref: dynamo

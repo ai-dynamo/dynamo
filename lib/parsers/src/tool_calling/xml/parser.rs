@@ -363,6 +363,30 @@ fn parse_tool_call_block(
             continue;
         }
 
+        // Truncation guard: when a function block is recovered without its
+        // `</function>` close (EOF / max_tokens cut) and its trailing
+        // `<parameter=...>` value runs to raw end-of-input with no following
+        // close marker, the value was cut off mid-stream. The lenient recovery
+        // regex would capture the partial value via its `$` fallback, but an
+        // unterminated value can't be trusted (e.g. "New York" may be a truncated
+        // "New York City"), so drop the whole call rather than emit a guessed
+        // argument. A value bounded by *any* close marker — `</parameter>`,
+        // `</function>` (function terminated), or `</tool_call>` — is complete and
+        // still recovered.
+        let function_terminated = func_cap
+            .get(0)
+            .is_some_and(|m| m.as_str().contains(config.function_end_token.as_str()));
+        if !function_terminated {
+            if let Some(open_idx) = function_body.rfind(config.parameter_start_token.as_str()) {
+                let after_value = &function_body[open_idx..];
+                let value_bounded = after_value.contains(config.parameter_end_token.as_str())
+                    || after_value.contains(config.tool_call_end_token.as_str());
+                if !value_bounded {
+                    continue;
+                }
+            }
+        }
+
         // Get parameter config for this function
         let param_config = get_arguments_config(function_name, tools);
 
@@ -1210,10 +1234,27 @@ NYC
     }
 
     #[test]
-    fn test_parse_qwen3_bare_function_partial_with_recovery_recovers() {
-        // Finalize path: recovery ON allows truncated function block to
-        // surface a (potentially incomplete) call rather than being dropped.
+    fn test_parse_qwen3_bare_function_truncated_value_dropped() {
+        // Finalize path with recovery ON: a parameter value that runs to raw
+        // end-of-input with NO close marker (`</parameter>` / `</tool_call>`) was
+        // cut off mid-stream ("NY" might be a truncated "NYC"/"NY..."), so the
+        // call is dropped rather than emitting a guessed argument.
         let input = "<function=get_weather>\n<parameter=city>\nNY";
+        let config = XmlParserConfig {
+            backoff_when_no_wrapper: true,
+            allow_eof_recovery: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_qwen3_bare_function_complete_value_recovers() {
+        // Counterpart to the truncation guard: the value IS terminated
+        // (`</parameter>` present); only the `</function>` wrapper is missing.
+        // The value is complete, so the call is still recovered.
+        let input = "<function=get_weather>\n<parameter=city>\nNY</parameter>";
         let config = XmlParserConfig {
             backoff_when_no_wrapper: true,
             allow_eof_recovery: true,
@@ -1222,6 +1263,8 @@ NYC
         let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NY");
     }
 
     // Qwen3-Coder-style XML treats text after the first parsed tool call as
