@@ -2,22 +2,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# POC: Separate VLM encoder + text-only PD worker.
+# POC: Separate VLM encoder + text-only PD worker (EXTERNAL_PROMPT_EMBEDS path).
 #
 # Architecture:
-#   Encoder: runs the ViT of a VLM (e.g. Qwen2.5-VL-3B-Instruct), extracts
-#            image embeddings, transfers them to the PD via LOCAL or NIXL.
+#   Encoder: runs the VLM's ViT + LM embed_tokens.  For each request it:
+#              1. encodes the image through the ViT → image embeddings
+#              2. embeds all text tokens via embed_tokens → text embeddings
+#              3. splices image embeddings at the <|image_pad|> placeholder
+#              4. transfers the full [N_total, hidden] tensor to the PD via NIXL
 #   PD:      aggregated vLLM worker running a text-only LLM (e.g. Qwen2.5-1.5B).
-#            Receives encoder embeddings, projects them to the LLM hidden size
-#            (random projection — output is semantically incorrect but the
-#            system does not crash).
+#            Receives the spliced tensor, serialises it as base64 into
+#            request["prompt_embeds"], and submits to vLLM as EmbedsPrompt.
 #   Frontend: standard dynamo.frontend OpenAI-compatible HTTP gateway.
 #
-# Requires dynamo built from the qiwa/textonly-pd-with-encoder branch.
-# The key change: handlers.py detects resolve_model_family(pd_model) is None
-# (text-only), extracts the image embedding tensor from multi_modal_data, and
-# uses EmbedsPrompt instead of TokensPrompt so vLLM never calls HfRenderer's
-# multimodal processor.
+# Key env var: DYN_EXTERNAL_PROMPT_EMBEDS=1 activates the spliced-embedding path.
 #
 # Usage:
 #   ./enc_textonly_pd.sh [--encoder-model <hf_id>] [--pd-model <hf_id>]
@@ -90,13 +88,14 @@ EOF
 done
 
 echo "=================================================================="
-echo "  POC: VLM Encoder + Text-only PD"
+echo "  EXTERNAL_PROMPT_EMBEDS: VLM Encoder + Text-only PD"
 echo "  Encoder model : $ENCODER_MODEL (GPU $DYN_ENCODE_WORKER_GPU)"
-echo "  PD model      : $PD_MODEL       (GPU $DYN_PD_WORKER_GPU)"
+echo "  PD model      : $PD_MODEL (GPU $DYN_PD_WORKER_GPU)"
 echo "  Transfer mode : $TRANSFER_MODE"
 echo "  HTTP port     : $HTTP_PORT"
-echo "  NOTE: output text is semantically incorrect (different models);"
-echo "        the system should not crash."
+echo "  NOTE: encoder splices text+image embeddings; random projection"
+echo "        bridges encoder hidden_dim → PD hidden_dim, so output text"
+echo "        is semantically approximate but the pipeline structure is correct."
 echo "=================================================================="
 
 # Use TCP so large base64 images do not hit NATS 1 MB limit.
@@ -104,6 +103,22 @@ export DYN_REQUEST_PLANE=tcp
 # Increase limits for multimodal payloads.
 export DYN_TCP_MAX_MESSAGE_SIZE=209715200
 export DYN_HTTP_BODY_LIMIT_MB=200
+# Activate spliced-embedding path (encoder produces full text+image tensor).
+export DYN_EXTERNAL_PROMPT_EMBEDS=1
+
+# ── Extract VLM chat template ─────────────────────────────────────────────────
+# The PD must use the VLM's chat template so prompt_token_ids includes
+# <|image_pad|> (token 151655) at the image placeholder position.
+# The encoder will splice image embeddings at that position.
+VLM_TEMPLATE_FILE="$(mktemp /tmp/vlm_chat_template_XXXXXX.jinja)"
+python3 - <<PYEOF
+from transformers import AutoTokenizer
+import sys
+tok = AutoTokenizer.from_pretrained("$ENCODER_MODEL", trust_remote_code=True)
+with open("$VLM_TEMPLATE_FILE", "w") as f:
+    f.write(tok.chat_template or "")
+print(f"Saved VLM chat template from $ENCODER_MODEL → $VLM_TEMPLATE_FILE", file=sys.stderr)
+PYEOF
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 echo "[1/3] Starting frontend (port $HTTP_PORT)..."
@@ -111,18 +126,16 @@ python -m dynamo.frontend &
 
 # ── Encoder worker ────────────────────────────────────────────────────────────
 # --multimodal-encode-worker sets --disaggregation-mode=encode.
-# The encoder loads the ViT of ENCODER_MODEL (Qwen2.5-VL) and transfers
-# embeddings to the PD via the specified transfer mode.
+# For EXTERNAL_PROMPT_EMBEDS the encoder also loads the LM embed_tokens and
+# produces a fully-spliced [N_total, hidden] tensor instead of raw image embeddings.
 #
 # --served-model-name $PD_MODEL is REQUIRED: the PD declares needs=[Encode] in
-# the Dynamo model registry when --route-to-encoder is set.  The frontend's
-# "complete worker set" check verifies that an Encode worker exists for the
-# SAME served model name as the PD.  Without this flag the encoder registers
-# under its own model name (ENCODER_MODEL) and the check fails → 503.
+# the Dynamo model registry when --route-to-encoder is set.
 echo "[2/3] Starting encoder worker (model=$ENCODER_MODEL → serves as $PD_MODEL, GPU=$DYN_ENCODE_WORKER_GPU)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097} \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
+DYN_EXTERNAL_PROMPT_EMBEDS=1 \
 python -m dynamo.vllm \
     --multimodal-encode-worker \
     --enable-multimodal \
@@ -134,19 +147,23 @@ python -m dynamo.vllm \
 
 # ── Text-only PD worker ───────────────────────────────────────────────────────
 # --route-to-encoder: send images to the encoder worker for embedding extraction.
-# --enable-multimodal: required so _extract_multimodal_data enters the routing
-#                      path and calls embedding_loader.load_multimodal_embeddings.
+# --enable-multimodal: required so _extract_multimodal_data enters the EXTERNAL
+#                      routing path.
 # --enable-prompt-embeds: tells vLLM to accept raw embedding tensors (EmbedsPrompt).
+# --custom-jinja-template: VLM template ensures prompt_token_ids has <|image_pad|>
+#                          so the encoder can splice at the right position.
 # No --disaggregation-mode: defaults to aggregated (both prefill+decode in one process).
 echo "[3/3] Starting text-only PD worker (model=$PD_MODEL, GPU=$DYN_PD_WORKER_GPU)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=${VLLM_NIXL_SIDE_CHANNEL_PORT_PD:-20098} \
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
+DYN_EXTERNAL_PROMPT_EMBEDS=1 \
 python -m dynamo.vllm \
     --route-to-encoder \
     --enable-multimodal \
     --enable-prompt-embeds \
     --model "$PD_MODEL" \
+    --custom-jinja-template "$VLM_TEMPLATE_FILE" \
     --gpu-memory-utilization 0.7 \
     --embedding-transfer-mode "$TRANSFER_MODE" \
     $EXTRA_PD_ARGS &

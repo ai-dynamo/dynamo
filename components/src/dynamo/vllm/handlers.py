@@ -4,6 +4,7 @@
 import asyncio
 import base64
 import inspect
+import io
 import logging
 import math
 import os
@@ -107,7 +108,10 @@ from .multimodal_utils.models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
 )
-from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
+from .multimodal_utils.prefill_worker_utils import (
+    MultiModalEmbeddingLoader,
+    _fetch_embeddings,
+)
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -2679,6 +2683,104 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         mm_map = request["multi_modal_data"]
 
         vllm_mm_data = {}
+
+        # External-encoder + text-only-LM family: the encode worker ships a
+        # SPLICED prompt embedding tensor (text + image, with placeholders
+        # pre-filled by the encoder), not raw image embeddings. We route
+        # it into request["prompt_embeds"] so _build_prompt_from_request
+        # wraps it as EmbedsPrompt — bypasses vLLM's multimodal renderer
+        # which doesn't support text-only LMs (HfRenderer doesn't init
+        # _mm_req_counter, see vllm/renderers/base.py:126-146).
+        if (
+            self.embedding_loader is not None
+            and resolve_model_family(self.config.model)
+            is ModelFamily.EXTERNAL_PROMPT_EMBEDS
+        ):
+            image_urls = [
+                item["Url"]
+                for item in mm_map.get(IMAGE_URL_KEY, [])
+                if isinstance(item, dict) and "Url" in item
+            ]
+            if image_urls:
+                groups, pending = await _fetch_embeddings(
+                    self.embedding_loader._encode_worker_client,
+                    image_urls,
+                    request_id,
+                    self.embedding_loader._receiver,
+                    cache=self.embedding_loader._embedding_cache_manager,
+                    context=context,
+                )
+                # Single-image-per-request is the contract for this family.
+                if len(groups) != 1:
+                    raise RuntimeError(
+                        f"External-encoder family expects 1 image group; got {len(groups)}"
+                    )
+                spliced = groups[0].loaded_embedding  # (1, L, hidden) or (L, hidden)
+                if spliced is None:
+                    raise RuntimeError(
+                        "External encode worker returned None for loaded_embedding"
+                    )
+                if spliced.dim() == 3 and spliced.shape[0] == 1:
+                    spliced = spliced.squeeze(0)
+                # Clone before releasing the NIXL buffer (single-image case
+                # is a view into the receiver-side buffer).
+                spliced = spliced.detach().clone()
+                if pending is not None:
+                    pending.release_all()
+
+                # Project enc_hidden → pd_hidden if there is a mismatch.
+                # The encoder's embed_tokens may come from a larger VLM than the PD.
+                if self.model_config is not None:
+                    pd_hidden: int = self.model_config.hf_config.hidden_size  # type: ignore[union-attr]
+                    enc_hidden = spliced.shape[-1]
+                    if enc_hidden != pd_hidden:
+                        cache_key = (
+                            enc_hidden,
+                            pd_hidden,
+                            spliced.dtype,
+                            spliced.device,
+                        )
+                        if cache_key not in self._enc_proj_cache:
+                            rng = torch.Generator(device=spliced.device)
+                            rng.manual_seed(42)
+                            proj = torch.randn(
+                                enc_hidden,
+                                pd_hidden,
+                                dtype=spliced.dtype,
+                                device=spliced.device,
+                                generator=rng,
+                            ) / (enc_hidden**0.5)
+                            self._enc_proj_cache[cache_key] = proj
+                        spliced = spliced @ self._enc_proj_cache[cache_key]
+                        logger.debug(
+                            "External-encoder: projected spliced %d→%d, final shape=%s",
+                            enc_hidden,
+                            pd_hidden,
+                            tuple(spliced.shape),
+                        )
+
+                spliced = spliced.to("cpu")
+
+                # Serialize for the prompt_embeds wire format that
+                # _create_prompt_from_embeddings expects (handlers.py
+                # → safe_load_prompt_embeds): torch.save → BytesIO → base64.
+                buf = io.BytesIO()
+                torch.save(spliced, buf)
+                request["prompt_embeds"] = base64.b64encode(buf.getvalue()).decode(
+                    "ascii"
+                )
+                # Strip multi_modal_data so the caller doesn't try to attach
+                # it as multimodal — we want _build_prompt_from_request to
+                # take the prompt_embeds branch instead.
+                request["multi_modal_data"] = None
+                logger.debug(
+                    "External-encoder: routed spliced tensor "
+                    "(shape=%s, dtype=%s) into request['prompt_embeds']",
+                    tuple(spliced.shape),
+                    spliced.dtype,
+                )
+                _nvtx.end_range(rng)
+                return None
 
         # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
         # Still continue below so mixed image+video requests can attach `video`.
