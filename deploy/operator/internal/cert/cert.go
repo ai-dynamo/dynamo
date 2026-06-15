@@ -35,6 +35,7 @@ const (
 	dgdCRDName                       = "dynamographdeployments.nvidia.com"
 	dcdCRDName                       = "dynamocomponentdeployments.nvidia.com"
 	dgdsaCRDName                     = "dynamographdeploymentscalingadapters.nvidia.com"
+	conversionWebhookPath            = "/convert"
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
@@ -378,7 +379,7 @@ func (i *CABundleInjector) patchConversion(ctx context.Context, crdName string, 
 	}
 
 	original := crd.DeepCopy()
-	path := "/convert"
+	path := conversionWebhookPath
 	crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
 		Strategy: apiextensionsv1.WebhookConverter,
 		Webhook: &apiextensionsv1.WebhookConversion{
