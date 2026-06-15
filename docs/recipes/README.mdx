@@ -10,7 +10,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Start with the model, runtime, hardware, and workload you need to run. Model cards are sorted newest to oldest by release date. Use [Feature Benchmarks](../benchmarks/README.mdx) when you want evidence that a Dynamo feature or topology helps under controlled traffic.
+Start with the model, runtime, and hardware you need to run. Model cards are sorted newest to oldest by release date. Use [Feature Benchmarks](../benchmarks/README.mdx) when you want evidence that a Dynamo feature or topology helps under controlled traffic.
 
 <form className="dynamo-recipe-catalog-shell">
 <input className="dynamo-filter-input" type="radio" id="provider-all" name="provider" defaultChecked />
@@ -30,24 +30,13 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
 <input className="dynamo-filter-input" type="radio" id="hardware-h200" name="hardware" />
 <input className="dynamo-filter-input" type="radio" id="hardware-gb200" name="hardware" />
 <input className="dynamo-filter-input" type="radio" id="hardware-b200" name="hardware" />
-<input className="dynamo-filter-input" type="radio" id="technique-all" name="technique" defaultChecked />
-<input className="dynamo-filter-input" type="radio" id="technique-aggregated" name="technique" />
-<input className="dynamo-filter-input" type="radio" id="technique-disaggregated" name="technique" />
-<input className="dynamo-filter-input" type="radio" id="technique-kv-routing" name="technique" />
-<input className="dynamo-filter-input" type="radio" id="technique-expert-parallel" name="technique" />
-<input className="dynamo-filter-input" type="radio" id="technique-spec-decoding" name="technique" />
-<input className="dynamo-filter-input" type="radio" id="workload-all" name="workload" defaultChecked />
-<input className="dynamo-filter-input" type="radio" id="workload-agentic-coding" name="workload" />
-<input className="dynamo-filter-input" type="radio" id="workload-long-context-reuse" name="workload" />
-<input className="dynamo-filter-input" type="radio" id="workload-static-generation" name="workload" />
-<input className="dynamo-filter-input" type="radio" id="workload-long-output" name="workload" />
 
 <div className="dynamo-recipe-browser" aria-label="Dynamo model recipe browser">
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
       <h3>10 model families</h3>
-      <p>Filter by provider, runtime, hardware, serving technique, and workload shape.</p>
+      <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
       <strong>29</strong>
@@ -73,17 +62,6 @@ Start with the model, runtime, hardware, and workload you need to run. Model car
 <label className="dynamo-recipe-chip" htmlFor="hardware-h200">H200</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-gb200">GB200</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-b200">B200</label></div></div>
-<div className="dynamo-filter-row"><span className="dynamo-recipe-label">Technique</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="technique-all">All</label>
-<label className="dynamo-recipe-chip" htmlFor="technique-aggregated">Aggregated</label>
-<label className="dynamo-recipe-chip" htmlFor="technique-disaggregated">Disaggregated</label>
-<label className="dynamo-recipe-chip" htmlFor="technique-kv-routing">KV routing</label>
-<label className="dynamo-recipe-chip" htmlFor="technique-expert-parallel">Expert parallel</label>
-<label className="dynamo-recipe-chip" htmlFor="technique-spec-decoding">Spec decoding</label></div></div>
-<div className="dynamo-filter-row"><span className="dynamo-recipe-label">Workload</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="workload-all">All</label>
-<label className="dynamo-recipe-chip" htmlFor="workload-agentic-coding">Agentic coding</label>
-<label className="dynamo-recipe-chip" htmlFor="workload-long-context-reuse">Long-context reuse</label>
-<label className="dynamo-recipe-chip" htmlFor="workload-static-generation">Static ISL/OSL</label>
-<label className="dynamo-recipe-chip" htmlFor="workload-long-output">Long output</label></div></div>
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
