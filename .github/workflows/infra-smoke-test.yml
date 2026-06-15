@@ -8,12 +8,19 @@
 name: Infra Smoke Test
 
 on:
+  push:
+    branches:
+      - deploy_test_static_ns
   workflow_dispatch:
     inputs:
       operator_tag:
         description: 'Operator image tag (default: main-operator)'
         required: false
         default: 'main-operator'
+
+concurrency:
+  group: azure-static-deploy-test-dynamo-deploy-test
+  cancel-in-progress: false
 
 jobs:
   infra-smoke:

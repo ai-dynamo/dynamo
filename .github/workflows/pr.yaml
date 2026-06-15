@@ -7,11 +7,14 @@ on:
   push:
     branches:
       - "pull-request/[0-9]+"
+      - deploy_test_static_ns
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
-  group: docker-build-test-${{ github.ref_name }}
-  cancel-in-progress: true
+  # The deploy_test_static_ns branch also runs infra-smoke-test.yml against the
+  # same static Azure namespace, so serialize those workflow runs.
+  group: ${{ github.ref_name == 'deploy_test_static_ns' && 'azure-static-deploy-test-dynamo-deploy-test' || format('docker-build-test-{0}', github.ref_name) }}
+  cancel-in-progress: ${{ github.ref_name != 'deploy_test_static_ns' }}
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}

@@ -17,8 +17,7 @@ on:
       image_suffix:
         description: 'Image suffix (e.g. vllm-runtime-cuda13-amd64)'
         type: string
-        required: false
-        default: ''
+        required: true
       namespace:
         description: 'Host namespace where the vCluster lives'
         type: string
@@ -31,26 +30,6 @@ on:
         description: 'Operator image tag'
         type: string
         required: true
-      kube_context:
-        description: 'kubectl context to target (e.g. nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02 or azure-ci). Defaults to kubeconfig current-context.'
-        type: string
-        required: false
-        default: ''
-      vcluster_host_priority_class:
-        description: 'Optional host PriorityClass for pods synced from vCluster. Leave empty for clusters without this PriorityClass.'
-        type: string
-        required: false
-        default: ''
-      image_tag:
-        description: 'Image tag prefix (e.g. "main" for main-vllm-runtime, or a commit SHA). Defaults to github.sha.'
-        type: string
-        required: false
-        default: ''
-      image_full:
-        description: 'Full image reference override (e.g. nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest). When set, skips Azure ACR image construction.'
-        type: string
-        required: false
-        default: ''
 
 jobs:
   deploy-test:
@@ -67,12 +46,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Set kubectl context
-        shell: bash
-        run: |
-          cp /teleport/kubeconfig.yaml /tmp/kubeconfig.yaml
-          kubectl --kubeconfig=/tmp/kubeconfig.yaml config use-context "${{ inputs.kube_context || 'nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02' }}"
-          echo "KUBECONFIG=/tmp/kubeconfig.yaml" >> $GITHUB_ENV
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
@@ -90,7 +63,6 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          vcluster_host_priority_class: ${{ inputs.vcluster_host_priority_class || ((inputs.kube_context == '' || contains(inputs.kube_context, 'aws-dev-02')) && 'ci-nightly-high-priority' || '') }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -108,6 +80,6 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ inputs.framework }}
           profile: ${{ matrix.profile }}
-          image: ${{ inputs.image_full || format('{0}/ai-dynamo/dynamo:{1}-{2}', secrets.AZURE_ACR_HOSTNAME, inputs.image_tag || github.sha, inputs.image_suffix) }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only

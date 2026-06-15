@@ -25,6 +25,10 @@ on:
         required: false
         default: ''
 
+concurrency:
+  group: aws-dev-02-deploy-test-smoke-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   gpu-job-smoke:
     name: GPU Job Smoke Test
@@ -48,6 +52,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if [[ "${KUBE_CONTEXT}" != *aws-dev-02* ]]; then
+            echo "Skipping AWS H100 GPU smoke because KUBE_CONTEXT=${KUBE_CONTEXT} is not aws-dev-02."
+            echo "### GPU smoke SKIPPED" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "- Context: \`${KUBE_CONTEXT}\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
 
           JOB_NAME="gpu-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           POD_NAME=""
