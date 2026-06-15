@@ -32,6 +32,7 @@ from tests.utils.payload_builder import (
     chat_payload_with_logprobs,
     completion_payload_default,
     completion_payload_with_logprobs,
+    elastic_ep_scale_payload,
     embedding_payload,
     embedding_payload_default,
     kv_events_metrics_payload,
@@ -175,6 +176,38 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+        ],
+    ),
+    "elastic_ep_unified": VLLMConfig(
+        name="elastic_ep_unified",
+        directory=vllm_dir,
+        script_name="elastic_ep.sh",
+        # Start at DP=2 on a 4-GPU node so scale-up to 4 has headroom; the Ray
+        # DP backend places the new DP-worker actors on the free GPUs.
+        script_args=["--dp-size", "2"],
+        marks=[
+            pytest.mark.vllm,
+            pytest.mark.gpu_4,
+            pytest.mark.elastic_ep,
+            pytest.mark.unified,
+            pytest.mark.nightly,
+            # MoE weights + two live reconfigures (scale up then down); generous
+            # ceiling over model download + engine-core respawn.
+            pytest.mark.timeout(1800),
+            pytest.mark.model("Qwen/Qwen3-30B-A3B"),
+        ],
+        # Small MoE that exercises expert parallelism; must match elastic_ep.sh's
+        # default so payload model-name injection resolves to the served model.
+        model="Qwen/Qwen3-30B-A3B",
+        request_payloads=[
+            # Serving works at the initial DP size...
+            chat_payload_default(repeat_count=1),
+            # ...scale up to 4 DP ranks and confirm generation survives.
+            # Scale-DOWN (4->2) is intentionally omitted: validated on 4xH100,
+            # scale-UP returns status:ok and keeps serving, but scale-DOWN never
+            # returns (hangs in vLLM 0.22.1's ray DP `_scale_down_elastic_ep`).
+            # Re-add a downscale payload once that's fixed upstream.
+            elastic_ep_scale_payload(new_data_parallel_size=4),
         ],
     ),
     "aggregated_logprobs": VLLMConfig(

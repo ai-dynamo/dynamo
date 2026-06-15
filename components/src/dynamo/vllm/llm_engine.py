@@ -237,6 +237,17 @@ class VllmLLMEngine(LLMEngine):
                 "use `python -m dynamo.vllm` for multimodal encode workers"
             )
 
+        # Headless is handled by unified_main before engine construction; a
+        # headless config reaching here means run() was driven directly,
+        # bypassing the entry point. Fail loud rather than booting a full
+        # backend on what should be a vLLM-workers-only secondary node.
+        if config.headless:
+            raise NotImplementedError(
+                "--headless must be launched via `python -m dynamo.vllm.unified_main` "
+                "(or the legacy `python -m dynamo.vllm`); it is not supported when "
+                "driving the unified Worker directly"
+            )
+
         if not config.served_model_name:
             config.served_model_name = (
                 config.engine_args.served_model_name
