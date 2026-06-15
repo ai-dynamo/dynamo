@@ -35,9 +35,28 @@ class ConversionError(Exception):
     """Raised when the conversion webhook reports failure or returns junk."""
 
 
+_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
+
+
+class _NoDatesSafeLoader(yaml.SafeLoader):
+    """SafeLoader that keeps date/timestamp-like scalars as plain strings.
+
+    PyYAML's default implicit resolver turns values like ``2026-06-15`` or
+    ``2026-06-15T00:00:00Z`` into ``datetime``/``date`` objects, which are not
+    JSON-serializable and would break the webhook request. Disabling the
+    timestamp resolver preserves them as strings.
+    """
+
+
+_NoDatesSafeLoader.yaml_implicit_resolvers = {
+    ch: [(tag, regexp) for tag, regexp in resolvers if tag != _TIMESTAMP_TAG]
+    for ch, resolvers in _NoDatesSafeLoader.yaml_implicit_resolvers.items()
+}
+
+
 def load_docs(text: str) -> list:
     """Parse a multi-document YAML string into a list of non-empty dicts."""
-    return [d for d in yaml.safe_load_all(text) if d is not None]
+    return [d for d in yaml.load_all(text, Loader=_NoDatesSafeLoader) if d is not None]
 
 
 def is_convertible(doc: dict) -> bool:
@@ -64,7 +83,15 @@ def build_conversion_review(objects: list, desired_api_version: str, uid: str) -
 def parse_conversion_response(review_response: dict, expected_uid: str) -> list:
     """Validate a ConversionReview response and return its convertedObjects."""
     resp = review_response.get("response") or {}
+    if not isinstance(resp, dict):
+        raise ConversionError(
+            f"conversion response 'response' is not an object: {type(resp).__name__}"
+        )
     result = resp.get("result") or {}
+    if not isinstance(result, dict):
+        raise ConversionError(
+            f"conversion response 'result' is not an object: {type(result).__name__}"
+        )
     if result.get("status") != "Success":
         raise ConversionError(
             f"conversion webhook failed: {result.get('message', 'unknown error')}"
@@ -74,7 +101,13 @@ def parse_conversion_response(review_response: dict, expected_uid: str) -> list:
             f"conversion response uid mismatch: "
             f"expected {expected_uid!r}, got {resp.get('uid')!r}"
         )
-    return resp.get("convertedObjects") or []
+    converted = resp.get("convertedObjects") or []
+    if not isinstance(converted, list):
+        raise ConversionError(
+            f"conversion response 'convertedObjects' is not a list: "
+            f"{type(converted).__name__}"
+        )
+    return converted
 
 
 SERVER_METADATA_FIELDS = (

@@ -15,6 +15,7 @@
 
 """Tests for the apiVersion conversion utility (convert_api_version)."""
 
+import json
 import shutil
 import subprocess as _sp
 from pathlib import Path as _Path
@@ -60,6 +61,28 @@ metadata:
     assert len(docs) == 2
     assert docs[0]["metadata"]["name"] == "a"
     assert docs[1]["kind"] == "ConfigMap"
+
+
+def test_load_docs_keeps_date_like_scalars_as_strings():
+    """Date-like scalars stay strings so the doc remains JSON-serializable.
+
+    Regression: PyYAML's default resolver turns these into datetime/date
+    objects, which json.dump then rejects when building the webhook request.
+    """
+    text = """\
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: a
+  creationTimestamp: 2026-06-15T00:00:00Z
+spec:
+  someDate: 2026-06-15
+"""
+    doc = c.load_docs(text)[0]
+    assert doc["metadata"]["creationTimestamp"] == "2026-06-15T00:00:00Z"
+    assert doc["spec"]["someDate"] == "2026-06-15"
+    # the whole doc must stay JSON-serializable (build_conversion_review + json.dump)
+    json.dumps(c.build_conversion_review([doc], "nvidia.com/v1beta1", "uid"))
 
 
 def test_is_convertible_only_true_for_nvidia_group():
@@ -355,7 +378,7 @@ def _cluster_available() -> bool:
             timeout=5,
         )
         return True
-    except Exception:
+    except (_sp.CalledProcessError, _sp.TimeoutExpired):
         return False
 
 
