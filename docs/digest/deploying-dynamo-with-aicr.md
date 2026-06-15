@@ -297,7 +297,7 @@ aicr validate \
 The full live validation happens after deployment, when AICR can also check that the runtime was
 installed as expected.
 
-## What Does Validate Check?
+#### What Does Validate Check?
 
 AICR validation gives the Dynamo deployment a concrete runtime contract. A Dynamo inference recipe can
 check that the cluster has:
@@ -371,10 +371,18 @@ path uses an `HTTPRoute` that references that pool, as described in the
 integration with GAIE: Gateway stays Kubernetes-native at ingress, while Dynamo owns the cache-aware
 endpoint selection.
 
-The `vllm-agg` example above uses the direct frontend path. To exercise the Gateway / EPP path, use
-an EPP-enabled `DynamoGraphDeployment` and `HTTPRoute`, such as the GAIE examples linked from the
-[Inference Gateway deploy guide](../kubernetes/inference-gateway.md#5-deploy). For a Gateway / EPP
-workload, send the same OpenAI-compatible requests through the Gateway address:
+The `vllm-agg` example above uses the direct frontend path. To exercise the Gateway / EPP path, apply
+the companion [vLLM aggregation EPP manifest](deploying-dynamo-with-aicr-vllm-agg-epp.yaml). It
+creates an EPP-enabled `DynamoGraphDeployment` and an `HTTPRoute` that points at the operator-created
+`InferencePool`:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/refs/heads/main/docs/digest/deploying-dynamo-with-aicr-vllm-agg-epp.yaml
+kubectl get dynamographdeployments -n dynamo-workload
+kubectl get pods -n dynamo-workload -o wide -w
+```
+
+Then send the same OpenAI-compatible requests through the Gateway address:
 
 ```bash
 kubectl get gateway inference-gateway -n agentgateway-system

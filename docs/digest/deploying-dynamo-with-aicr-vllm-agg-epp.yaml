@@ -1,0 +1,228 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Prerequisites:
+#   - KAI Scheduler installed (provides default-parent-queue)
+#   - Dynamo platform deployed (dynamo-crds + dynamo-platform)
+#   - agentgateway and inference-gateway installed by the AICR inference recipe
+
+---
+# KAI Scheduler queue for Dynamo workloads
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  name: dynamo
+spec:
+  parentQueue: default-parent-queue
+  resources:
+    gpu:
+      limit: -1
+      overQuotaWeight: 1
+      quota: 0
+    cpu:
+      limit: -1
+      overQuotaWeight: 1
+      quota: 0
+    memory:
+      limit: -1
+      overQuotaWeight: 1
+      quota: 0
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dynamo-workload
+
+---
+# DRA ResourceClaim for GPU allocation (required on DRA-only clusters).
+# The kai.scheduler/queue label is required for KAI scheduler to manage the claim.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: vllm-epp-gpu-claim
+  namespace: dynamo-workload
+  labels:
+    kai.scheduler/queue: dynamo
+spec:
+  devices:
+    requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: 1
+
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-epp
+  namespace: dynamo-workload
+spec:
+  backendFramework: vllm
+  components:
+    - name: Epp
+      type: epp
+      replicas: 1
+      podTemplate:
+        spec:
+          nodeSelector:
+            nodeGroup: cpu-worker
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: worker-workload
+              effect: NoSchedule
+            - key: dedicated
+              operator: Equal
+              value: worker-workload
+              effect: NoExecute
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/epp-image:1.2.0
+              env:
+                - name: DYN_KV_CACHE_BLOCK_SIZE
+                  value: "128"
+                - name: DYN_MODEL_NAME
+                  value: Qwen/Qwen3-0.6B
+                - name: DYN_ENFORCE_DISAGG
+                  value: "false"
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: aicr-hf-token
+                      key: token
+                      optional: true
+                - name: HUGGING_FACE_HUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: aicr-hf-token
+                      key: token
+                      optional: true
+      eppConfig:
+        config:
+          plugins:
+            - type: disagg-profile-handler
+            - name: decode-filter
+              type: label-filter
+              parameters:
+                label: nvidia.com/dynamo-component-type
+                validValues:
+                  - decode
+                allowsNoLabel: true
+            - name: picker
+              type: max-score-picker
+            - name: dyn-decode
+              type: dyn-decode-scorer
+          schedulingProfiles:
+            - name: decode
+              plugins:
+                - pluginRef: decode-filter
+                  weight: 1
+                - pluginRef: dyn-decode
+                  weight: 1
+                - pluginRef: picker
+                  weight: 1
+    - name: VllmDecodeWorker
+      type: decode
+      replicas: 1
+      sharedMemorySize: 2Gi
+      frontendSidecar: sidecar-frontend
+      podTemplate:
+        spec:
+          nodeSelector:
+            nodeGroup: gpu-worker
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: worker-workload
+              effect: NoSchedule
+            - key: dedicated
+              operator: Equal
+              value: worker-workload
+              effect: NoExecute
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          resourceClaims:
+            - name: gpu
+              resourceClaimName: vllm-epp-gpu-claim
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+              workingDir: /workspace/examples/backends/vllm
+              command: ["python3", "-m", "dynamo.vllm"]
+              args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --enable-prefix-caching
+                - --block-size
+                - "128"
+                - --kv-events-config
+                - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557"}'
+              env:
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: aicr-hf-token
+                      key: token
+                      optional: true
+                - name: HUGGING_FACE_HUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: aicr-hf-token
+                      key: token
+                      optional: true
+              resources:
+                claims:
+                  - name: gpu
+            - name: sidecar-frontend
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - direct
+              env:
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: aicr-hf-token
+                      key: token
+                      optional: true
+                - name: HUGGING_FACE_HUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: aicr-hf-token
+                      key: token
+                      optional: true
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vllm-agg-epp
+  namespace: dynamo-workload
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+      namespace: agentgateway-system
+  rules:
+    - backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: vllm-agg-epp-pool
+          namespace: dynamo-workload
+          port: 8000
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 300s
