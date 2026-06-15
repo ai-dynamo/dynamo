@@ -105,6 +105,10 @@ pub struct MockEngine {
     senders_ready: Notify,
     engine_args: MockEngineArgs,
     unset_dp_rank_counter: AtomicU32,
+    /// Monotonic source of vLLM disagg `transfer_id`s (the channel/pin key).
+    /// Process-local and collision-free — the channel registry is long-lived,
+    /// so a random id could collide and silently mis-release/leak a pinned KV.
+    transfer_id_counter: std::sync::atomic::AtomicU64,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     native_metrics: Arc<NativeMockerMetrics>,
@@ -166,6 +170,7 @@ impl MockEngine {
             senders_ready: Notify::new(),
             engine_args,
             unset_dp_rank_counter: AtomicU32::new(0),
+            transfer_id_counter: std::sync::atomic::AtomicU64::new(1),
             bootstrap_server: Arc::new(OnceCell::new()),
             native_metrics,
             _schedulers: OnceCell::new(),
@@ -710,16 +715,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 // vLLM disaggregated_params path: generate a transfer id
                 // post-compute and announce it in the output. Release is driven
                 // by the channel server, not by holding the prefill stream.
-                let transfer_id: u64 = rand::rng().random();
-                let params = VllmDisaggParams {
-                    transfer_id,
+                let transfer_id = self
+                    .transfer_id_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // VllmDisaggParams is three primitives; json! is infallible (no expect).
+                let value = serde_json::json!({
+                    "transfer_id": transfer_id,
                     // The mocker prefill/decode run as local processes; the
                     // bootstrap server binds 0.0.0.0, so loopback is the
                     // reachable pull address for the modeled transfer.
-                    prefill_host: "127.0.0.1".to_string(),
-                    prefill_port: server.port(),
-                };
-                let value = serde_json::to_value(&params).expect("VllmDisaggParams serializes");
+                    "prefill_host": "127.0.0.1",
+                    "prefill_port": server.port(),
+                });
                 (Some(transfer_id), Some(value), true)
             } else {
                 (None, None, false)
