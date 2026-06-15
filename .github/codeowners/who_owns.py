@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """who_owns.py -- "who reviews this?" from a generated CODEOWNERS (+ advisory).
 
-The CODEOWNERS file is a machine input: GitHub auto-requests the owning team when
-a PR opens. This tool answers the human question on demand, so nobody has to read
-300 rules to find a reviewer.
+The CODEOWNERS file is a machine input: GitHub auto-requests the owning team
+when a PR opens. This tool answers the human question on demand, so nobody
+has to read 300 rules to find a reviewer.
 
   # owners of specific paths (last-match-wins, exactly as GitHub resolves)
   python who_owns.py --codeowners CODEOWNERS lib/llm/foo.rs components/.../snapshot.py
@@ -11,64 +11,32 @@ a PR opens. This tool answers the human question on demand, so nobody has to rea
   # the teams that will be auto-requested on your PR (union over changed files)
   python who_owns.py --codeowners CODEOWNERS --changed --base main
 
-Owners listed on a single line are co-owners (any one's approval satisfies the
-gate). Advisory teams are auto-requested too, but never block the merge.
+Owners listed on a single line are co-owners (any one's approval satisfies
+the gate). Advisory teams are auto-requested too, but never block the merge.
 
-Self-contained: standard library + PyYAML (only if an advisory file is present).
+The CODEOWNERS parser and matcher live in ``codeowners_match`` so this tool
+resolves a path exactly the same way ``emit_codeowners.py`` routes it -- there
+is no second implementation that could drift.
 """
 
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import subprocess
 import sys
 from pathlib import Path
 
-
-def match(pattern: str, filepath: str) -> bool:
-    """True if `filepath` matches `pattern` per GitHub CODEOWNERS rules."""
-    if pattern == "*":
-        return True
-    if pattern.startswith("/"):
-        body = pattern[1:]
-        if body.endswith("/"):
-            return filepath.startswith(body)
-        if any(c in body for c in "*?["):
-            return fnmatch.fnmatch(filepath, body)
-        return filepath == body
-    if pattern.endswith("/"):
-        return ("/" + pattern) in ("/" + filepath) or filepath.startswith(pattern)
-    if "/" not in pattern:
-        base = filepath.rsplit("/", 1)[-1]
-        return fnmatch.fnmatch(base, pattern) or fnmatch.fnmatch(filepath, pattern)
-    return fnmatch.fnmatch(filepath, pattern)
-
-
-def parse_codeowners(lines: list[str]) -> list[tuple[str, list[str]]]:
-    """Parse CODEOWNERS into ordered `(pattern, [owner, ...])` rules."""
-    rules: list[tuple[str, list[str]]] = []
-    for line in lines:
-        stripped = line.split("#", 1)[0].strip()
-        if not stripped:
-            continue
-        pattern, *owners = stripped.split()
-        if owners:
-            rules.append((pattern, owners))
-    return rules
-
-
-def owners_for_path(rules: list[tuple[str, list[str]]], filepath: str) -> list[str]:
-    """Owners of `filepath` (the LAST matching rule wins). [] if unrouted."""
-    owners: list[str] = []
-    for pattern, rule_owners in rules:
-        if match(pattern, filepath):
-            owners = rule_owners
-    return owners
+sys.path.insert(0, str(Path(__file__).parent))
+from codeowners_match import (  # noqa: E402
+    anchor,
+    match,
+    parse_codeowners,
+    resolve_owners,
+)
 
 
 def load_advisory(path: Path) -> tuple[list[dict], list[dict]]:
-    """Return (path_rules, filetype_rules) from an advisory-reviewers.yaml, or ([], [])."""
+    """Return (path_rules, filetype_rules) from an advisory-reviewers.yaml."""
     if not path.exists():
         return [], []
     import yaml
@@ -80,22 +48,21 @@ def load_advisory(path: Path) -> tuple[list[dict], list[dict]]:
 def advisory_for(
     filepath: str, path_rules: list[dict], filetype_rules: list[dict]
 ) -> set[str]:
-    """Non-blocking teams an advisory Action would request for `filepath`."""
+    """Non-blocking teams an advisory Action would request for ``filepath``."""
     teams: set[str] = set()
     for r in path_rules:
         pat = r.get("path", "")
-        if match(pat if pat.startswith("/") else "/" + pat, filepath):
+        if pat and match(anchor(pat), filepath):
             teams.update(r.get("request_review_from", []))
-    base = filepath.rsplit("/", 1)[-1]
     for r in filetype_rules:
-        m = r.get("match", "")
-        if m and (m.lower() in filepath.lower() or fnmatch.fnmatch(base, m)):
+        pat = r.get("pattern", "")
+        if pat and match(pat, filepath):
             teams.update(r.get("request_review_from", []))
     return teams
 
 
 def changed_files(repo: str, base: str) -> list[str]:
-    """Files changed vs `base` (merge-base diff), falling back to a plain diff."""
+    """Files changed vs ``base`` (merge-base diff), falling back to plain diff."""
     for args in ([f"{base}...HEAD"], [base], []):
         try:
             out = subprocess.check_output(
@@ -116,7 +83,10 @@ def main() -> int:
         description="Who reviews a path, per a generated CODEOWNERS."
     )
     ap.add_argument(
-        "--codeowners", required=True, type=Path, help="path to the CODEOWNERS file"
+        "--codeowners",
+        required=True,
+        type=Path,
+        help="path to the CODEOWNERS file",
     )
     ap.add_argument(
         "--advisory",
@@ -138,7 +108,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    rules = parse_codeowners(args.codeowners.read_text().splitlines())
+    rules = parse_codeowners(args.codeowners.read_text())
     adv_path = args.advisory or args.codeowners.parent / "advisory-reviewers.yaml"
     path_rules, filetype_rules = load_advisory(adv_path)
 
@@ -155,7 +125,7 @@ def main() -> int:
     union_owners: set[str] = set()
     union_advisory: set[str] = set()
     for f in files:
-        owners = owners_for_path(rules, f)
+        owners = resolve_owners(rules, f)
         adv = advisory_for(f, path_rules, filetype_rules) - set(owners)
         union_owners.update(owners)
         union_advisory.update(adv)

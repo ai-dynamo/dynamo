@@ -26,24 +26,25 @@ adding required approvals.
 | File | What it is |
 |------|------------|
 | `areas.yaml` | The single source of truth: path globs to GitHub team, by subsystem. **Edit this.** |
-| `build_codeowners.py` | Resolves `areas.yaml` against the tree and validates 100% coverage. |
+| `codeowners_match.py` | Shared matcher + resolution pipeline. Build, emit, and who_owns all call into this -- one matcher, one resolver, no drift. |
+| `build_codeowners.py` | Resolves `areas.yaml` against the tree and validates 100% coverage (CI gate). |
 | `emit_codeowners.py` | Generates the root `CODEOWNERS` (a minimal, per-area-grouped last-match cover) and `advisory-reviewers.yaml`. |
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
+| `test_codeowners.py` | Unit tests for the canonical matcher and the min-cost cover. |
 | `advisory-reviewers.yaml` | Non-blocking reviewers (e.g. docs on any markdown), consumed by a review-request Action, not by `CODEOWNERS`. |
 
 ## Change ownership
 
 1. Edit `areas.yaml`: add a glob to an area, add a new area, or adjust the
-   `overrides` (carve a nested subtree to another area) or `shared` (co-own a
-   path by two teams) blocks.
+   `shared` (co-own a path by two teams) block.
 2. Regenerate from the repo root:
 
    ```bash
    pip install pyyaml
    python .github/codeowners/build_codeowners.py \
-     --areas .github/codeowners/areas.yaml --repo . --out /tmp/areas.resolved.yaml --strict
+     --areas .github/codeowners/areas.yaml --repo . --strict
    python .github/codeowners/emit_codeowners.py \
-     --resolved /tmp/areas.resolved.yaml --repo . \
+     --areas .github/codeowners/areas.yaml --repo . \
      --out CODEOWNERS --advisory-out .github/codeowners/advisory-reviewers.yaml
    ```
 

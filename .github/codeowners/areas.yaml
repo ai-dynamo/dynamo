@@ -1285,15 +1285,12 @@ classify:
   - match: docs/
     area: docs
   filetype_rules:
-  - match: '*.md'
-    pattern: '*.md'
+  - pattern: '*.md'
     coowner: docs
     advisory: true
-  - match: '*.mdx'
-    pattern: '*.mdx'
+  - pattern: '*.mdx'
     coowner: docs
     advisory: true
-  - match: Dockerfile
-    pattern: '*Dockerfile*'
+  - pattern: '*Dockerfile*'
     coowner: ops
     advisory: false

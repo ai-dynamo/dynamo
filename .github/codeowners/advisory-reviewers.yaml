@@ -1,5 +1,5 @@
 _comment: Non-blocking auto-request reviewers. Consumed by a review-request Action, NOT by CODEOWNERS. path_rules match path
-  globs; filetype_rules match by extension/name across the whole tree.
+  globs; filetype_rules match file globs by basename across the whole tree.
 path_rules:
 - path: .agents/contributor-skills/dynamo-clone-hotpath-audit/
   request_review_from:
@@ -182,9 +182,9 @@ path_rules:
   - '@ai-dynamo/dynamo-process-codeowners'
   - '@ai-dynamo/dynamo-operator-codeowners'
 filetype_rules:
-- match: '*.md'
+- pattern: '*.md'
   request_review_from:
   - '@ai-dynamo/dynamo-docs-codeowners'
-- match: '*.mdx'
+- pattern: '*.mdx'
   request_review_from:
   - '@ai-dynamo/dynamo-docs-codeowners'

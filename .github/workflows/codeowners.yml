@@ -24,16 +24,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pyyaml
+      - run: pip install pyyaml pytest
+
+      # Unit tests for the canonical matcher + min-cost cover. These are the
+      # only piece the gates below trust -- if they fail, nothing else means
+      # anything.
+      - name: Unit tests (matcher + minimal_cover)
+        run: |
+          python -m pytest .github/codeowners/test_codeowners.py -v \
+            -p no:cacheprovider \
+            --override-ini="addopts=" \
+            --override-ini="filterwarnings="
 
       # Coverage gate: fail if any tracked file falls through to the catch-all.
       # New directories must be covered by an area glob or a classify rule.
+      # Uses the same shared matcher the generator below routes by, so the gate
+      # and the artifact cannot disagree.
       - name: Validate 100% coverage (strict)
         run: |
           python .github/codeowners/build_codeowners.py \
             --areas .github/codeowners/areas.yaml \
             --repo . \
-            --out /tmp/areas.resolved.yaml \
             --strict
 
       # Regenerate, then fail if the committed CODEOWNERS / advisory config drifted
@@ -42,7 +53,7 @@ jobs:
       - name: Regenerate and check for drift
         run: |
           python .github/codeowners/emit_codeowners.py \
-            --resolved /tmp/areas.resolved.yaml \
+            --areas .github/codeowners/areas.yaml \
             --repo . \
             --out CODEOWNERS \
             --advisory-out .github/codeowners/advisory-reviewers.yaml
