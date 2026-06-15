@@ -132,6 +132,12 @@ where
                 .chain(args.into_iter().map(Into::into)),
         )?;
 
+        let trace_id_header =
+            dynamo_kv_router::services::indexer::logging::parse_header_name(
+                &cli.trace_id_header,
+            )
+            .map_err(|e| anyhow::anyhow!("invalid --trace-id-header '{}': {e}", cli.trace_id_header))?;
+
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(indexer::run_server(IndexerConfig {
             block_size: cli.block_size,
@@ -142,7 +148,7 @@ where
             tenant_id: cli.tenant_id,
             peers: cli.peers,
             access_log: cli.access_log,
-            trace_id_header: cli.trace_id_header,
+            trace_id_header,
             access_log_local_time: cli.access_log_local_time,
         }))
     }

@@ -350,10 +350,7 @@ async fn run_tiered_query(
     }
 }
 
-async fn query(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<QueryRequest>,
-) -> Response {
+async fn query(State(state): State<Arc<AppState>>, Json(req): Json<QueryRequest>) -> Response {
     let model = req.model_name.clone();
     let key = IndexerKey {
         model_name: req.model_name,
@@ -989,5 +986,74 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn access_log_middleware_records_fields_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let sink = Arc::new(
+            super::super::logging::AccessLogSink::new(
+                &log_path,
+                axum::http::header::HeaderName::from_static("x-trace-id"),
+                false,
+            )
+            .unwrap(),
+        );
+
+        let registry = Arc::new(WorkerRegistry::new(1));
+        registry.signal_ready();
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:5557".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let state = Arc::new(AppState {
+            registry,
+            access_log_sink: Some(sink),
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        });
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-trace-id", "test-trace-123")
+                    .body(Body::from(
+                        r#"{"token_ids":[1,2,3,4],"model_name":"test-model"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1, "expected exactly one access log entry");
+
+        let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(entry["trace_id"], "test-trace-123");
+        assert_eq!(entry["method"], "POST");
+        assert_eq!(entry["path"], "/query");
+        assert_eq!(entry["model"], "test-model");
+        assert_eq!(entry["status"], 200);
+        assert!(entry["ts"].as_str().unwrap().contains("Z"));
+        assert!(entry["duration_ms"].as_f64().unwrap() >= 0.0);
     }
 }

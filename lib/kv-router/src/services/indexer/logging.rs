@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use axum::extract::MatchedPath;
 use axum::http::Request;
+use axum::http::header::HeaderName;
 use axum::middleware::Next;
 use axum::response::Response;
 use serde::Serialize;
@@ -37,8 +38,8 @@ static IO_ERRORS: AtomicU64 = AtomicU64::new(0);
 pub struct AccessLogSink {
     path: PathBuf,
     inner: parking_lot::Mutex<SinkInner>,
-    pub trace_id_header: String,
-    pub use_local_time: bool,
+    trace_id_header: HeaderName,
+    use_local_time: bool,
 }
 
 struct SinkInner {
@@ -47,7 +48,11 @@ struct SinkInner {
 }
 
 impl AccessLogSink {
-    pub fn new(path: &Path, trace_id_header: String, use_local_time: bool) -> io::Result<Self> {
+    pub fn new(
+        path: &Path,
+        trace_id_header: HeaderName,
+        use_local_time: bool,
+    ) -> io::Result<Self> {
         let file = File::options().create(true).append(true).open(path)?;
         let (writer, guard) = tracing_appender::non_blocking(file);
         Ok(Self {
@@ -62,8 +67,10 @@ impl AccessLogSink {
     }
 
     fn write_line(&self, line: &str) {
+        let mut record = line.to_owned();
+        record.push('\n');
         let mut inner = self.inner.lock();
-        if let Err(e) = writeln!(inner.writer, "{}", line) {
+        if let Err(e) = inner.writer.write_all(record.as_bytes()) {
             let prev = IO_ERRORS.fetch_add(1, Ordering::Relaxed);
             if prev % 100 == 0 {
                 tracing::warn!(error = %e, total = prev + 1, "access log write failed");
@@ -74,11 +81,17 @@ impl AccessLogSink {
     pub fn reopen(&self) -> io::Result<()> {
         let new_file = File::options().create(true).append(true).open(&self.path)?;
         let (new_writer, new_guard) = tracing_appender::non_blocking(new_file);
-        let mut inner = self.inner.lock();
-        *inner = SinkInner {
-            writer: new_writer,
-            _guard: new_guard,
+        let old = {
+            let mut inner = self.inner.lock();
+            std::mem::replace(
+                &mut *inner,
+                SinkInner {
+                    writer: new_writer,
+                    _guard: new_guard,
+                },
+            )
         };
+        drop(old);
         Ok(())
     }
 
@@ -106,7 +119,7 @@ pub async fn access_log_middleware(
 
     let trace_id = req
         .headers()
-        .get(sink.trace_id_header.as_str())
+        .get(&sink.trace_id_header)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-")
         .to_owned();
@@ -146,6 +159,12 @@ pub async fn access_log_middleware(
     response
 }
 
+/// Parse and validate an HTTP header name at startup.
+pub fn parse_header_name(name: &str) -> Result<HeaderName, axum::http::Error> {
+    HeaderName::from_bytes(name.as_bytes())
+        .map_err(|e| axum::http::Error::from(e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,7 +173,12 @@ mod tests {
     fn access_log_sink_write_and_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("access.log");
-        let sink = AccessLogSink::new(&path, "x-trace-id".into(), false).unwrap();
+        let sink = AccessLogSink::new(
+            &path,
+            HeaderName::from_static("x-trace-id"),
+            false,
+        )
+        .unwrap();
 
         sink.write_line(r#"{"ts":"t1","trace_id":"-","method":"GET","path":"/health","model":"-","status":200,"duration_ms":0.1}"#);
         drop(sink.inner.lock());
@@ -181,7 +205,12 @@ mod tests {
     fn access_log_sink_drop_flushes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("access.log");
-        let sink = AccessLogSink::new(&path, "x-trace-id".into(), false).unwrap();
+        let sink = AccessLogSink::new(
+            &path,
+            HeaderName::from_static("x-trace-id"),
+            false,
+        )
+        .unwrap();
 
         for i in 0..5 {
             sink.write_line(&format!(r#"{{"n":{i}}}"#));
@@ -195,5 +224,12 @@ mod tests {
         assert_eq!(lines.len(), 5);
         assert!(content.contains(r#"{"n":0}"#));
         assert!(content.contains(r#"{"n":4}"#));
+    }
+
+    #[test]
+    fn parse_header_name_validates() {
+        assert!(parse_header_name("x-trace-id").is_ok());
+        assert!(parse_header_name("x-request-id").is_ok());
+        assert!(parse_header_name("invalid header\n").is_err());
     }
 }

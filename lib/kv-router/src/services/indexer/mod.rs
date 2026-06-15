@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::min_initial_workers_from_env;
 use crate::services::zmq::validate_endpoint as validate_zmq_endpoint;
+use axum::http::header::HeaderName;
 use logging::AccessLogSink;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
@@ -53,7 +54,7 @@ pub struct IndexerConfig {
     pub tenant_id: String,
     pub peers: Option<String>,
     pub access_log: Option<PathBuf>,
-    pub trace_id_header: String,
+    pub trace_id_header: HeaderName,
     pub access_log_local_time: bool,
 }
 
@@ -170,6 +171,19 @@ async fn run_common(
     registry: &Arc<WorkerRegistry>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let access_log_sink = match config.access_log {
+        Some(ref path) => {
+            let s = AccessLogSink::new(
+                path,
+                config.trace_id_header.clone(),
+                config.access_log_local_time,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to open access log {}: {e}", path.display()))?;
+            Some(Arc::new(s))
+        }
+        None => None,
+    };
+
     if let Some(ref workers_str) = config.workers {
         let block_size = config.block_size.ok_or_else(|| {
             anyhow::anyhow!("--block-size is required when --workers is specified")
@@ -214,19 +228,6 @@ async fn run_common(
 
     wait_for_min_initial_workers(registry, &cancel_token).await?;
     registry.signal_ready();
-
-    let access_log_sink = match config.access_log {
-        Some(ref path) => {
-            let s = AccessLogSink::new(
-                path,
-                config.trace_id_header.clone(),
-                config.access_log_local_time,
-            )
-            .map_err(|e| anyhow::anyhow!("failed to open access log {}: {e}", path.display()))?;
-            Some(Arc::new(s))
-        }
-        None => None,
-    };
 
     #[cfg(feature = "metrics")]
     let prom_registry = {
