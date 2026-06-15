@@ -52,6 +52,7 @@ pub fn build_mooncake_rows(mut requests: Vec<RequestEntry>) -> Result<(usize, Ve
             hash_ids: Some(hash_ids),
             timestamp: Some((request.start_ms - global_start_ms) as f64),
             delay: None,
+            ..Default::default()
         });
     }
 

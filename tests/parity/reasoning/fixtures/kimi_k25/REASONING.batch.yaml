@@ -180,3 +180,15 @@ cases:
       sglang:
         reasoning_text: 'preamble'
         normal_text: 'body</think>answer'
+  REASONING.batch.3.c:
+    description: Recipientless Harmony commentary is not applicable to Kimi K2.5
+    reason: Kimi K2.5 uses Kimi tool-section markers, not Harmony commentary channels; visible text and downstream tool handoff use Kimi-specific markers.
+  REASONING.batch.3.d:
+    description: Directed Harmony commentary tool calls are not applicable to Kimi K2.5
+    reason: Kimi K2.5 does not use Harmony `commentary to=functions.*` envelopes; downstream tool calls use Kimi tool-section markers.
+  REASONING.batch.3.e:
+    description: Directed Harmony analysis tool calls are not applicable to Kimi K2.5
+    reason: Kimi K2.5 does not use Harmony `analysis to=functions.*` envelopes; reasoning is represented by think tags.
+  REASONING.batch.3.f:
+    description: Harmony analysis/commentary/final channel sequencing is not applicable to Kimi K2.5
+    reason: Kimi K2.5 has no Harmony channel protocol, so mixed analysis, commentary tool call, and final-channel sequencing is outside its grammar.

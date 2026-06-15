@@ -420,6 +420,7 @@ impl LLMEngine for MockerBackend {
             uuid: Some(uuid),
             dp_rank: DP_RANK,
             arrival_timestamp_ms: request.request_timestamp_ms,
+            ..Default::default()
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel::<OutputSignal>();

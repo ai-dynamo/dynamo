@@ -218,6 +218,7 @@ class VllmLLMEngine(LLMEngine):
         return engine, worker_config
 
     async def start(self, worker_id: int) -> EngineConfig:
+        """Start vLLM and return normalized metadata for runtime registration."""
         del worker_id  # vLLM's NixlConnector handles its own per-worker IDs
         os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -270,7 +271,7 @@ class VllmLLMEngine(LLMEngine):
 
         return EngineConfig(
             model=self.engine_args.model,
-            served_model_name=self.engine_args.served_model_name,
+            served_model_name=self._served_model_name,
             llm=LlmRegistration(
                 context_length=self._model_max_len,
                 kv_cache_block_size=block_size,

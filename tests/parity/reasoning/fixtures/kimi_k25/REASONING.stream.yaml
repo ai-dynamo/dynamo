@@ -138,3 +138,15 @@ cases:
       sglang:
         reasoning_text: 'preamble'
         normal_text: 'body</think>answer'
+  REASONING.stream.4.a:
+    description: Downstream streaming boundary is not applicable to Kimi K2.5
+    reason: Kimi K2.5 uses Kimi tool-section markers, not Harmony commentary channels; Harmony stream boundary cases are GPT-OSS specific.
+  REASONING.stream.4.b:
+    description: Split downstream streaming boundary is not applicable to Kimi K2.5
+    reason: Kimi K2.5 does not use Harmony `commentary to=functions.*` envelopes, so there is no Harmony stream boundary to split across chunks.
+  REASONING.stream.4.c:
+    description: Partial downstream boundary recovery is not applicable to Kimi K2.5
+    reason: Kimi K2.5 has no Harmony commentary protocol, so partial commentary-boundary recovery is outside its grammar.
+  REASONING.stream.4.d:
+    description: Directed Harmony analysis tool calls are not applicable to Kimi K2.5
+    reason: This parser family does not use Harmony `analysis to=functions.*` envelopes, so split analysis-channel tool-call handoff is outside its grammar.
