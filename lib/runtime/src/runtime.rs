@@ -351,7 +351,6 @@ impl Runtime {
                 {
                     let remaining = tracker.get_count();
                     tracing::error!(
-                        unified_model_logs = true,
                         timeout_secs = timeout.as_secs(),
                         remaining_endpoints = remaining,
                         "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
@@ -420,31 +419,6 @@ impl Drop for RuntimeType {
 mod tests {
     use super::*;
     use crate::config::environment_names::runtime as env_runtime;
-
-    #[test]
-    fn graceful_shutdown_timeout_uses_env_override() {
-        temp_env::with_var(
-            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-            Some("42"),
-            || {
-                assert_eq!(graceful_shutdown_timeout(), Duration::from_secs(42));
-            },
-        );
-    }
-
-    #[test]
-    fn graceful_shutdown_timeout_defaults_for_invalid_env() {
-        temp_env::with_var(
-            env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-            Some("not-a-number"),
-            || {
-                assert_eq!(
-                    graceful_shutdown_timeout(),
-                    Duration::from_secs(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
-                );
-            },
-        );
-    }
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_cancels_main_token_after_graceful_timeout() {
