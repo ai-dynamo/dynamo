@@ -48,11 +48,7 @@ struct SinkInner {
 }
 
 impl AccessLogSink {
-    pub fn new(
-        path: &Path,
-        trace_id_header: HeaderName,
-        use_local_time: bool,
-    ) -> io::Result<Self> {
+    pub fn new(path: &Path, trace_id_header: HeaderName, use_local_time: bool) -> io::Result<Self> {
         let file = File::options().create(true).append(true).open(path)?;
         let (writer, guard) = tracing_appender::non_blocking(file);
         Ok(Self {
@@ -161,8 +157,7 @@ pub async fn access_log_middleware(
 
 /// Parse and validate an HTTP header name at startup.
 pub fn parse_header_name(name: &str) -> Result<HeaderName, axum::http::Error> {
-    HeaderName::from_bytes(name.as_bytes())
-        .map_err(|e| axum::http::Error::from(e))
+    HeaderName::from_bytes(name.as_bytes()).map_err(|e| axum::http::Error::from(e))
 }
 
 #[cfg(test)]
@@ -173,12 +168,7 @@ mod tests {
     fn access_log_sink_write_and_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("access.log");
-        let sink = AccessLogSink::new(
-            &path,
-            HeaderName::from_static("x-trace-id"),
-            false,
-        )
-        .unwrap();
+        let sink = AccessLogSink::new(&path, HeaderName::from_static("x-trace-id"), false).unwrap();
 
         sink.write_line(r#"{"ts":"t1","trace_id":"-","method":"GET","path":"/health","model":"-","status":200,"duration_ms":0.1}"#);
         drop(sink.inner.lock());
@@ -205,12 +195,7 @@ mod tests {
     fn access_log_sink_drop_flushes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("access.log");
-        let sink = AccessLogSink::new(
-            &path,
-            HeaderName::from_static("x-trace-id"),
-            false,
-        )
-        .unwrap();
+        let sink = AccessLogSink::new(&path, HeaderName::from_static("x-trace-id"), false).unwrap();
 
         for i in 0..5 {
             sink.write_line(&format!(r#"{{"n":{i}}}"#));

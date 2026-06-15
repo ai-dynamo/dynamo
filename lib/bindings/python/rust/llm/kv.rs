@@ -133,10 +133,10 @@ where
         )?;
 
         let trace_id_header =
-            dynamo_kv_router::services::indexer::logging::parse_header_name(
-                &cli.trace_id_header,
-            )
-            .map_err(|e| anyhow::anyhow!("invalid --trace-id-header '{}': {e}", cli.trace_id_header))?;
+            dynamo_kv_router::services::indexer::logging::parse_header_name(&cli.trace_id_header)
+                .map_err(|e| {
+                anyhow::anyhow!("invalid --trace-id-header '{}': {e}", cli.trace_id_header)
+            })?;
 
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(indexer::run_server(IndexerConfig {
