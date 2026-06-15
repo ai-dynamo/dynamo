@@ -153,6 +153,9 @@ def main() -> int:
     ap.add_argument("--root", default=".", help="repo root")
     ap.add_argument("--expect-version", default=os.environ.get("EXPECT_VERSION", ""),
                     help="fail fast if any publishable crate's version differs from this")
+    ap.add_argument("--only", default=os.environ.get("CRATE_SUBSET", ""),
+                    help="csv of crate names to publish (strict: must be dependency-closed); "
+                         "empty/'all' = every publishable crate")
     args = ap.parse_args()
 
     # Reuse the wheel-upload token; keep the registry location out of the workflow
@@ -172,6 +175,28 @@ def main() -> int:
     pkgs = publishable(cargo_metadata(root))
     order = topo_order(pkgs)
     print("Publish order:", " ".join(order))
+
+    # Narrow to an explicit subset (strict: no silent auto-expansion). Every
+    # intra-workspace dependency of a selected crate must also be selected, or a
+    # dependent would fail to resolve its dep from the registry.
+    only = args.only.strip()
+    if only and only != "all":
+        selected = {c.strip() for c in only.split(",") if c.strip()}
+        unknown = selected - set(pkgs)
+        if unknown:
+            print(f"::error::unknown crate(s) {sorted(unknown)}; publishable: {sorted(pkgs)}", file=sys.stderr)
+            return 1
+        gaps = {n: sorted({d["name"] for d in pkgs[n]["dependencies"]
+                           if d["name"] in pkgs and d["name"] != n and d.get("kind") != "dev"} - selected)
+                for n in selected}
+        gaps = {n: g for n, g in gaps.items() if g}
+        if gaps:
+            for n, g in gaps.items():
+                print(f"::error::crate {n} depends on un-selected workspace crate(s) {g}", file=sys.stderr)
+            print("::error::crate subset is not dependency-closed; add the missing crate(s) or use 'all'", file=sys.stderr)
+            return 1
+        order = [n for n in order if n in selected]
+        print("Selected crates (dependency-closed):", " ".join(order))
 
     # Fail fast BEFORE any build/publish if a crate carries an unexpected version
     # (e.g. a hardcoded version the bump missed) — never silently publish wrong tags.

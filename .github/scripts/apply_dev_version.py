@@ -51,19 +51,40 @@ SUBCRATE_CARGO_TARGETS = [
 ]
 
 # Helm charts carry the unified version in version / appVersion / dependency
-# version. Only touched in --set-version (release) mode; nightly never bumps charts.
+# version. Each entry is (helm_subset_token, Chart.yaml path); a chart is bumped
+# only when its token is in the --helm subset. operator is a subchart of platform,
+# so it rides the "platform" token. Only touched in --set-version (release) mode;
+# nightly never bumps charts.
 HELM_CHART_TARGETS = [
-    "deploy/helm/charts/platform/Chart.yaml",
-    "deploy/helm/charts/platform/components/operator/Chart.yaml",
-    "deploy/helm/charts/snapshot/Chart.yaml",
+    ("platform", "deploy/helm/charts/platform/Chart.yaml"),
+    ("platform", "deploy/helm/charts/platform/components/operator/Chart.yaml"),
+    ("snapshot", "deploy/helm/charts/snapshot/Chart.yaml"),
 ]
 
-# Dynamo first-party image `tag:` fields in values.yaml that pin a published image
-# and must track the release tag. (operator uses tag: "" -> inherits appVersion, so
-# it's intentionally omitted; 3rd-party tags like etcd/nats are left alone.)
-HELM_VALUES_IMAGE_TAGS = [
-    ("deploy/helm/charts/snapshot/values.yaml", "nvcr.io/nvidia/ai-dynamo/snapshot-agent"),
+# First-party image `tag:` sites in values.yaml. Each entry is
+# (container_token, helm_token, values.yaml path, image repository). The tag is set
+# to the release version only if the chart is published (helm_token in --helm) AND
+# its image is published (container_token in --containers). If the chart is
+# published but the image is excluded, the tag is PINNED to the last-published value
+# so the chart never references a missing image; if the chart is not published the
+# site is left untouched. The operator tag is written explicitly here, decoupling it
+# from its `tag: "" -> .Chart.AppVersion` inheritance. 3rd-party tags (etcd/nats) are
+# never matched (different repositories).
+HELM_IMAGE_TAG_SITES = [
+    ("operator", "platform", "deploy/helm/charts/platform/values.yaml",
+     "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"),
+    ("operator", "platform", "deploy/helm/charts/platform/components/operator/values.yaml",
+     "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"),
+    ("snapshot", "snapshot", "deploy/helm/charts/snapshot/values.yaml",
+     "nvcr.io/nvidia/ai-dynamo/snapshot-agent"),
 ]
+
+# Normalized subset universes for --containers / --helm token validation.
+CONTAINER_TOKENS = {
+    "vllm-runtime", "vllm-efa", "sglang-runtime", "sglang-efa",
+    "trtllm-runtime", "trtllm-efa", "frontend", "operator", "planner", "snapshot",
+}
+HELM_TOKENS = {"platform", "snapshot"}
 
 # X.Y.Z.postN -> X.Y.Z+postN so SemVer ecosystems (Cargo, Helm) stay valid.
 SET_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(post\d+))?$")
@@ -229,7 +250,7 @@ def set_helm_values_tag(path: Path, repo: str, new: str) -> None:
     # Set the `tag:` that follows the image `repository: <repo>` line to `new`,
     # regardless of its current value (the published image tag is the release tag).
     pat = re.compile(
-        r'(repository:\s*' + re.escape(repo) + r'\s*\n(?:[^\n]*\n)*?\s*tag:\s*)"?[^"\n]*"?',
+        r'(repository:\s*"?' + re.escape(repo) + r'"?\s*\n(?:[^\n]*\n)*?\s*tag:\s*)"?[^"\n]*"?',
         re.MULTILINE,
     )
     text, n = pat.subn(lambda m: f"{m.group(1)}{new}", path.read_text(), count=1)
@@ -238,20 +259,54 @@ def set_helm_values_tag(path: Path, repo: str, new: str) -> None:
     path.write_text(text)
 
 
-def set_release_version(root: Path, new_version: str) -> None:
+def _current_image_tag(path: Path, repo: str, fallback: str) -> str:
+    # The tag currently set for `repo` in values.yaml. An empty tag ('' inherits the
+    # chart appVersion) resolves to the pre-bump workspace version `fallback`.
+    m = re.search(
+        r'repository:\s*"?' + re.escape(repo) + r'"?\s*\n(?:[^\n]*\n)*?\s*tag:\s*"?([^"\n]*)"?',
+        path.read_text(),
+    )
+    cur = m.group(1).strip() if m else ""
+    return cur or fallback
+
+
+def _parse_subset(spec: str, universe: set[str]) -> set[str]:
+    spec = (spec or "all").strip()
+    if spec == "all":
+        return set(universe)
+    if spec in ("", "none"):
+        return set()
+    sel = {t.strip() for t in spec.split(",") if t.strip()}
+    unknown = sel - universe
+    if unknown:
+        raise RuntimeError(f"unknown subset token(s) {sorted(unknown)}; valid: {sorted(universe)}")
+    return sel
+
+
+def set_release_version(root: Path, new_version: str, containers: set[str], helm: set[str]) -> None:
     old = _workspace_version(root)
     semver = _semver_form(new_version)
+    # Package identity -- always bumped (the version wheels/crates/images carry).
     for rel in PYPROJECT_TARGETS:
         set_pyproject(root / rel, old, new_version, is_root=(rel == "pyproject.toml"))
     set_cargo(root / "Cargo.toml", old, semver)
     for rel in SUBCRATE_CARGO_TARGETS:
         set_cargo(root / rel, old, semver)
-    for rel in HELM_CHART_TARGETS:
-        set_helm(root / rel, old, semver)
-    # Image tags use the published NGC tag form (== new_version), not SemVer.
-    for rel, repo in HELM_VALUES_IMAGE_TAGS:
-        set_helm_values_tag(root / rel, repo, new_version)
-    print(f"set_release_version: {old} -> py={new_version} semver={semver}", file=sys.stderr)
+    # Chart identity -- only for charts in the --helm subset.
+    for token, rel in HELM_CHART_TARGETS:
+        if token in helm:
+            set_helm(root / rel, old, semver)
+    # First-party image reference tags: published image -> new version (NGC tag
+    # form == new_version, not SemVer); chart published but image excluded -> pin to
+    # last-published; chart not published -> untouched.
+    for ctoken, htoken, rel, repo in HELM_IMAGE_TAG_SITES:
+        if htoken not in helm:
+            continue
+        path = root / rel
+        tag = new_version if ctoken in containers else _current_image_tag(path, repo, old)
+        set_helm_values_tag(path, repo, tag)
+    print(f"set_release_version: {old} -> py={new_version} semver={semver} "
+          f"containers={sorted(containers)} helm={sorted(helm)}", file=sys.stderr)
 
 
 def main() -> int:
@@ -260,12 +315,18 @@ def main() -> int:
     ap.add_argument("root", nargs="?", default=".", help="repo root")
     ap.add_argument("--set-version", dest="set_version", default="",
                     help="set an absolute release version X.Y.Z[.postN] instead of appending a suffix")
+    ap.add_argument("--containers", default="all",
+                    help="normalized container subset (all|none|csv) gating image-tag bumps")
+    ap.add_argument("--helm", default="all",
+                    help="helm chart subset (all|none|csv of platform,snapshot) gating chart bumps")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
 
     if args.set_version:
-        set_release_version(root, args.set_version)
+        containers = _parse_subset(args.containers, CONTAINER_TOKENS)
+        helm = _parse_subset(args.helm, HELM_TOKENS)
+        set_release_version(root, args.set_version, containers, helm)
         return 0
 
     if not args.suffix:

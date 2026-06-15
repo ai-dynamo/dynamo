@@ -44,6 +44,26 @@ on:
         required: false
         type: string
         default: ''
+      containers:
+        description: 'On-demand normalized container subset (all|none|csv of vllm-runtime,vllm-efa,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner,snapshot).'
+        required: false
+        type: string
+        default: all
+      wheels:
+        description: 'On-demand wheel subset (all|none|csv of ai-dynamo,ai-dynamo-runtime,kvbm).'
+        required: false
+        type: string
+        default: all
+      crates:
+        description: 'On-demand crate subset (all|none|csv of crate names, dependency-closed).'
+        required: false
+        type: string
+        default: all
+      helm:
+        description: 'On-demand helm chart subset (all|none|csv of platform,snapshot).'
+        required: false
+        type: string
+        default: all
   workflow_call:
     inputs:
       commit_sha:
@@ -76,6 +96,22 @@ on:
         required: false
         type: string
         default: ''
+      containers:
+        required: false
+        type: string
+        default: all
+      wheels:
+        required: false
+        type: string
+        default: all
+      crates:
+        required: false
+        type: string
+        default: all
+      helm:
+        required: false
+        type: string
+        default: all
 
 # Note: workflow_dispatch can only be triggered from release/* branches (or main when nightly=true)
 # This is enforced in the prepare-release job via branch validation. workflow_call paths
@@ -264,13 +300,18 @@ jobs:
   release-publish:
     name: Publish to NGC
     needs: [prepare-release]
-    if: needs.prepare-release.result == 'success'
+    # Skip only when an on-demand run selects neither containers nor helm; nightly/rc
+    # always run (their subset inputs default to 'all' and on_demand is false).
+    if: ${{ needs.prepare-release.result == 'success' && !(needs.prepare-release.outputs.on_demand == 'true' && inputs.containers == 'none' && inputs.helm == 'none') }}
     runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
     environment: automated-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
       NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
+      ON_DEMAND: ${{ needs.prepare-release.outputs.on_demand }}
+      CONTAINER_SUBSET: ${{ inputs.containers }}
+      HELM_SUBSET: ${{ inputs.helm }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
@@ -360,11 +401,23 @@ jobs:
             NGC_NAME_SUFFIX="-nightly"
           fi
 
+          # On-demand runs copy only the selected container subset; nightly/rc keep
+          # the full set (SUBSET=all). Tokens: <fw>-runtime (bare + -cuda13 alias),
+          # <fw>-efa, frontend, operator, planner, snapshot.
+          SUBSET="all"
+          if [ "${ON_DEMAND}" = "true" ]; then SUBSET="${CONTAINER_SUBSET:-all}"; fi
+          want() {
+            [ "${SUBSET}" = "all" ] && return 0
+            case ",${SUBSET}," in *,"$1",*) return 0 ;; esac
+            return 1
+          }
+
           # ---- CUDA 13 runtime images (vllm, sglang, trtllm) — DEFAULT ----
           echo ""
           echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) — default ==="
           CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm")
           for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
+            want "${FRAMEWORK}-runtime" || { echo "skip ${FRAMEWORK}-runtime (not selected)"; continue; }
             if [ "${FRAMEWORK}" = "trtllm" ]; then
               NGC_NAME="tensorrtllm-runtime${NGC_NAME_SUFFIX}"
               STABLE_NAME="tensorrtllm-runtime"
@@ -408,47 +461,61 @@ jobs:
             echo "=== EFA Runtime Images ==="
 
             # vllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
-            copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+            if want vllm-efa; then
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
+              copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+            fi
 
             # sglang EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
-            copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
+            if want sglang-efa; then
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
+              copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
+            fi
 
             # trtllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
-            copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+            if want trtllm-efa; then
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+              copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+            fi
 
             # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
-            echo ""
-            echo "=== Frontend Image ==="
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
-            copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
+            if want frontend; then
+              echo ""
+              echo "=== Frontend Image ==="
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
+              copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
+            fi
 
             # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
-            echo ""
-            echo "=== Operator Image ==="
-            OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
-            OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
-            copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
+            if want operator; then
+              echo ""
+              echo "=== Operator Image ==="
+              OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
+              OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
+              copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
+            fi
 
             # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
-            echo ""
-            echo "=== Planner Image ==="
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
-            copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
+            if want planner; then
+              echo ""
+              echo "=== Planner Image ==="
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
+              copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
+            fi
 
             # ---- Snapshot image ----
-            echo ""
-            echo "=== Snapshot Image ==="
-            SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
-            SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
-            copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
+            if want snapshot; then
+              echo ""
+              echo "=== Snapshot Image ==="
+              SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
+              SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
+              copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
+            fi
           else
             echo ""
             echo "=== Skipping EFA / frontend / operator / planner / snapshot (not built by nightly) ==="
@@ -467,10 +534,54 @@ jobs:
           echo "  Failed: ${#FAILED_COPIES[@]}"
           echo "========================================"
 
-          if [ ${#SUCCESSFUL_COPIES[@]} -eq 0 ]; then
+          if [ "${SUBSET}" = "none" ]; then
+            echo "Container subset is 'none'; no images copied (helm-only or wheel/crate-only release)."
+          elif [ ${#SUCCESSFUL_COPIES[@]} -eq 0 ]; then
             echo "ERROR: No images were successfully copied to NGC!"
             exit 1
           fi
+
+      - name: Validate chart/image coherence (on-demand)
+        if: ${{ env.NIGHTLY != 'true' && env.ON_DEMAND == 'true' && env.HELM_SUBSET != 'none' }}
+        env:
+          NGC_REGISTRY: nvcr.io
+          NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
+          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
+        run: |
+          set -euo pipefail
+          # A published chart must reference only first-party images that are being
+          # published now (in CONTAINER_SUBSET) or already exist in NGC. The bump
+          # pinned excluded images to their last-published tag; here we prove that
+          # tag actually resolves, so we never ship a chart with a dangling image.
+          HELM="${HELM_SUBSET:-all}"
+          CSET="${CONTAINER_SUBSET:-all}"
+          want_helm() { [ "${HELM}" = "all" ] && return 0; case ",${HELM}," in *,"$1",*) return 0 ;; esac; return 1; }
+          want_ctr()  { [ "${CSET}" = "all" ] && return 0; case ",${CSET}," in *,"$1",*) return 0 ;; esac; return 1; }
+          fail=0
+          # Each site: chart_token|container_token|values.yaml|NGC repo
+          SITES=(
+            "platform|operator|deploy/helm/charts/platform/components/operator/values.yaml|nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
+            "snapshot|snapshot|deploy/helm/charts/snapshot/values.yaml|nvcr.io/nvidia/ai-dynamo/snapshot-agent"
+          )
+          for SITE in "${SITES[@]}"; do
+            IFS='|' read -r CHART CTOK VALUES REPO <<<"${SITE}"
+            want_helm "${CHART}" || { echo "chart ${CHART} not published; skip coherence check"; continue; }
+            want_ctr "${CTOK}" && { echo "ok: ${CHART} image ${CTOK} published this release"; continue; }
+            # Image excluded: read the pinned tag the bump wrote and prove it in NGC.
+            TAG=$(awk -v r="${REPO}" '
+              $0 ~ "repository:[[:space:]]*"r {f=1; next}
+              f && /tag:/ { gsub(/[",]/,""); print $2; exit }' "${VALUES}")
+            if [ -z "${TAG}" ]; then
+              echo "::error::could not read pinned tag for ${REPO} in ${VALUES}"; fail=1; continue
+            fi
+            if crane manifest "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/$(basename "${REPO}"):${TAG}" >/dev/null 2>&1; then
+              echo "ok: ${CHART} references ${REPO}:${TAG} (already in NGC)"
+            else
+              echo "::error::chart ${CHART} references ${REPO}:${TAG}, which is NOT in this release (${CTOK} excluded) and NOT in NGC"
+              fail=1
+            fi
+          done
+          [ "${fail}" -eq 0 ] || { echo "::error::chart/image coherence check failed"; exit 1; }
 
       - name: Package and push Helm charts to NGC
         if: env.NIGHTLY != 'true'
@@ -498,7 +609,13 @@ jobs:
           echo "### Helm Charts" >> $GITHUB_STEP_SUMMARY
 
           # snapshot + dynamo-platform, mirroring the rcs/dynamo helm runbook.
+          # On-demand runs push only the selected charts (token = chart dir name);
+          # nightly/rc keep both (HELM_SUBSET defaults to 'all').
           for CHART_DIR in deploy/helm/charts/platform deploy/helm/charts/snapshot; do
+            TOKEN="$(basename "${CHART_DIR}")"
+            if [ "${ON_DEMAND}" = "true" ] && [ "${HELM_SUBSET:-all}" != "all" ]; then
+              case ",${HELM_SUBSET}," in *,"${TOKEN}",*) ;; *) echo "skip ${TOKEN} chart (not selected)"; continue ;; esac
+            fi
             CHART_NAME=$(awk '/^name:/ {print $2; exit}' "${CHART_DIR}/Chart.yaml")
             ( cd "${CHART_DIR}" && helm dep build . )
             echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
@@ -587,7 +704,8 @@ jobs:
   stage-wheels-artifactory:
     name: Stage Wheels to Artifactory
     needs: [prepare-release]
-    if: needs.prepare-release.result == 'success'
+    # Skip only when an on-demand run selects no wheels; nightly/rc always run.
+    if: ${{ needs.prepare-release.result == 'success' && !(needs.prepare-release.outputs.on_demand == 'true' && inputs.wheels == 'none') }}
     runs-on: prod-tester-amd-v1
     environment: automated-release
     env:
@@ -596,6 +714,7 @@ jobs:
       ON_DEMAND: ${{ needs.prepare-release.outputs.on_demand }}
       VERSION: ${{ needs.prepare-release.outputs.version }}
       RC_NUMBER: ${{ needs.prepare-release.outputs.rc_number }}
+      WHEEL_SUBSET: ${{ inputs.wheels }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
@@ -756,6 +875,16 @@ jobs:
 
           for WHEEL in "${WHEELS[@]}"; do
             WHEEL_FILENAME=$(basename "${WHEEL}")
+            # On-demand wheel subset filter (nightly/rc keep all: WHEEL_SUBSET=all).
+            if [ "${ON_DEMAND}" = "true" ] && [ "${WHEEL_SUBSET:-all}" != "all" ]; then
+              case "${WHEEL_FILENAME}" in
+                ai_dynamo_runtime-*) WTOK=ai-dynamo-runtime ;;
+                ai_dynamo-*)         WTOK=ai-dynamo ;;
+                kvbm-*)              WTOK=kvbm ;;
+                *)                   WTOK="" ;;
+              esac
+              case ",${WHEEL_SUBSET}," in *,"${WTOK}",*) ;; *) echo "skip ${WHEEL_FILENAME} (not selected)"; continue ;; esac
+            fi
             TARGET_URL="${BASE_URL}/${WHEEL_FILENAME}"
             BODY_FILE=$(mktemp)
             HTTP_CODE=$(curl -sSL -o "${BODY_FILE}" -w "%{http_code}" \
@@ -784,7 +913,7 @@ jobs:
   stage-crates-artifactory:
     name: Stage Crates to Artifactory
     needs: [prepare-release]
-    if: ${{ needs.prepare-release.result == 'success' && needs.prepare-release.outputs.on_demand == 'true' && contains(inputs.artifacts, 'crate') }}
+    if: ${{ needs.prepare-release.result == 'success' && needs.prepare-release.outputs.on_demand == 'true' && inputs.crates != 'none' && inputs.crates != '' }}
     runs-on: prod-tester-amd-v2
     environment: automated-release
     container:
@@ -820,9 +949,10 @@ jobs:
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_CARGO_INDEX: ${{ secrets.ARTIFACTORY_CARGO_INDEX }}
           EXPECT_VERSION: ${{ needs.prepare-release.outputs.crate_version }}
+          CRATE_SUBSET: ${{ inputs.crates }}
         run: |
           set -euo pipefail
-          python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory
+          python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory --only "${CRATE_SUBSET}"
 
   # Combined NGC + Artifactory staging reply on the nightly thread.
   notify-slack-staging:
@@ -945,6 +1075,10 @@ jobs:
           ON_DEMAND:            ${{ needs.prepare-release.outputs.on_demand }}
           RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
           INPUT_ARTIFACTS:      ${{ inputs.artifacts }}
+          CONTAINER_SUBSET:     ${{ inputs.containers }}
+          WHEEL_SUBSET:         ${{ inputs.wheels }}
+          CRATE_SUBSET:         ${{ inputs.crates }}
+          HELM_SUBSET:          ${{ inputs.helm }}
           # Forwarded so the GitLab pipeline can reply on the same thread.
           SLACK_THREAD_TS:      ${{ inputs.slack_thread_ts }}
           SLACK_CHANNEL_ID:     ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
@@ -964,9 +1098,18 @@ jobs:
             NIGHTLY_TAG="${NGC_VERSION_TAG}"
             RC_TAG=""
           elif [ "${ON_DEMAND}" = "true" ]; then
-            PIPELINE_TYPE="rc"
-            RELEASE_TYPE="on-demand"
-            ARTIFACTS="${INPUT_ARTIFACTS:-crate,container,wheel,helm}"
+            # On-demand runs the security pipeline (scans + nSpect + manual-gated
+            # publish); RELEASE_TYPE=ondemand (no hyphen) matches dynamo.yml's rules.
+            PIPELINE_TYPE="security"
+            RELEASE_TYPE="ondemand"
+            # Coarse ARTIFACTS list derived from the per-type subsets ('none' omits
+            # the type). The fine-grained *_SUBSET vars below carry the exact picks.
+            ARTIFACTS=""
+            [ "${WHEEL_SUBSET:-all}" != "none" ]     && ARTIFACTS="${ARTIFACTS},wheel"
+            [ "${CONTAINER_SUBSET:-all}" != "none" ] && ARTIFACTS="${ARTIFACTS},container"
+            [ "${CRATE_SUBSET:-all}" != "none" ]     && ARTIFACTS="${ARTIFACTS},crate"
+            [ "${HELM_SUBSET:-all}" != "none" ]      && ARTIFACTS="${ARTIFACTS},helm"
+            ARTIFACTS="${ARTIFACTS#,}"
             NIGHTLY_TAG=""
             RC_TAG=""
             RELEASE_TAG="v${VERSION}"
@@ -1000,12 +1143,17 @@ jobs:
             --form "variables[NIGHTLY_TAG]=${NIGHTLY_TAG}" \
             --form "variables[RC_TAG]=${RC_TAG}" \
             --form "variables[RELEASE_TAG]=${RELEASE_TAG}" \
+            --form "variables[RELEASE_VERSION]=${VERSION}" \
             --form "variables[WHEEL_VERSION]=${WHEEL_VERSION}" \
             --form "variables[CRATE_VERSION]=${CRATE_VERSION}" \
             --form "variables[CONTAINER_TAG]=${NGC_VERSION_TAG}" \
             --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
             --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
             --form "variables[ARTIFACTS]=${ARTIFACTS}" \
+            --form "variables[CONTAINER_SUBSET]=${CONTAINER_SUBSET}" \
+            --form "variables[WHEEL_SUBSET]=${WHEEL_SUBSET}" \
+            --form "variables[CRATE_SUBSET]=${CRATE_SUBSET}" \
+            --form "variables[HELM_SUBSET]=${HELM_SUBSET}" \
             --form "variables[ENABLE_PULSE_SCAN]=true" \
             --form "variables[ENABLE_WHEEL_SCAN]=true" \
             --form "variables[ENABLE_CRATE_SCAN]=${ENABLE_CRATE_SCAN}" \

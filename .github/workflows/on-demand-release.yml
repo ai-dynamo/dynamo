@@ -33,11 +33,31 @@ on:
         required: false
         type: string
         default: ''
-      artifacts:
-        description: 'Artifacts to release (comma-separated): crate,container,wheel,helm.'
+      containers:
+        description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,snapshot.'
         required: false
         type: string
-        default: crate,container,wheel,helm
+        default: all
+      wheels:
+        description: 'Wheels to release: all | none | csv of ai-dynamo,ai-dynamo-runtime,kvbm.'
+        required: false
+        type: string
+        default: all
+      crates:
+        description: 'Crates to release: all | none | csv of crate names (must be dependency-closed).'
+        required: false
+        type: string
+        default: all
+      helm:
+        description: 'Helm charts to release: all | none | csv of platform,snapshot.'
+        required: false
+        type: string
+        default: all
+      selection:
+        description: 'Optional JSON overriding the four fields, e.g. {"containers":["vllm:runtime"],"wheels":"all","crates":"none","helm":[]}. When non-empty it takes precedence.'
+        required: false
+        type: string
+        default: ''
       dry_run:
         description: 'Create the branch + version bump only; skip staging and the GitLab trigger.'
         required: false
@@ -68,6 +88,10 @@ jobs:
       branch: ${{ steps.bump.outputs.branch }}
       bump_sha: ${{ steps.bump.outputs.bump_sha }}
       is_test: ${{ steps.bump.outputs.is_test }}
+      containers: ${{ steps.resolve.outputs.containers }}
+      wheels: ${{ steps.resolve.outputs.wheels }}
+      crates: ${{ steps.resolve.outputs.crates }}
+      helm: ${{ steps.resolve.outputs.helm }}
     steps:
       - name: Validate inputs
         env:
@@ -88,6 +112,113 @@ jobs:
             echo "::error::source_ref must be 'main', a release/x.y.z branch, or a 40-char SHA (got '${SOURCE_REF}')"
             exit 1
           fi
+
+      # Normalize the per-type fields (or the JSON override) into canonical subset
+      # strings (all|none|csv of normalized tokens) consumed by the bump, release.yml,
+      # and the GitLab trigger. The container grammar expands <fw>[:runtime|:efa]
+      # (bare fw = both) and validates every token; unknown tokens fail fast.
+      - name: Resolve artifact selection
+        id: resolve
+        env:
+          SELECTION: ${{ inputs.selection }}
+          CONTAINERS: ${{ inputs.containers || 'all' }}
+          WHEELS: ${{ inputs.wheels || 'all' }}
+          CRATES: ${{ inputs.crates || 'all' }}
+          HELM: ${{ inputs.helm || 'all' }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY' > "${RUNNER_TEMP}/selection.env"
+          import json, os, sys
+
+          FRAMEWORKS = {"vllm", "sglang", "trtllm"}
+          VARIANTS = {"runtime", "efa"}
+          COMPONENTS = {"frontend", "operator", "planner", "snapshot"}
+          WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime", "kvbm"}
+          HELM_TOKENS = {"platform", "snapshot"}
+
+          def fail(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              sys.exit(1)
+
+          def dedupe(xs):
+              seen = []
+              for x in xs:
+                  if x not in seen:
+                      seen.append(x)
+              return seen
+
+          def as_spec(v):
+              # A JSON value: list -> csv ('none' if empty); scalar -> str.
+              if isinstance(v, list):
+                  return ",".join(str(x) for x in v) if v else "none"
+              return str(v).strip()
+
+          def norm_containers(spec):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              out = []
+              for tok in (t.strip() for t in spec.split(",") if t.strip()):
+                  if tok in COMPONENTS:
+                      out.append(tok)
+                      continue
+                  fw, _, var = tok.partition(":")
+                  if fw not in FRAMEWORKS:
+                      fail(f"unknown container token '{tok}'")
+                  if var == "":
+                      out += [f"{fw}-runtime", f"{fw}-efa"]
+                  elif var in VARIANTS:
+                      out.append(f"{fw}-{var}")
+                  else:
+                      fail(f"unknown variant in '{tok}' (use runtime|efa)")
+              return ",".join(dedupe(out))
+
+          def norm_simple(spec, universe, label):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              sel = [t.strip() for t in spec.split(",") if t.strip()]
+              bad = [t for t in sel if t not in universe]
+              if bad:
+                  fail(f"unknown {label} token(s) {bad}; valid: {sorted(universe)}")
+              return ",".join(dedupe(sel))
+
+          def norm_crates(spec):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              # Crate names are validated (and closure-checked) by stage_crates.py.
+              return ",".join(dedupe(t.strip() for t in spec.split(",") if t.strip()))
+
+          sel = os.environ.get("SELECTION", "").strip()
+          if sel:
+              try:
+                  d = json.loads(sel)
+              except Exception as e:
+                  fail(f"selection is not valid JSON: {e}")
+              if not isinstance(d, dict):
+                  fail("selection JSON must be an object")
+              c, w, cr, h = (as_spec(d.get(k, "all")) for k in ("containers", "wheels", "crates", "helm"))
+          else:
+              c = os.environ.get("CONTAINERS", "all")
+              w = os.environ.get("WHEELS", "all")
+              cr = os.environ.get("CRATES", "all")
+              h = os.environ.get("HELM", "all")
+
+          print(f"containers={norm_containers(c)}")
+          print(f"wheels={norm_simple(w, WHEEL_TOKENS, 'wheel')}")
+          print(f"crates={norm_crates(cr)}")
+          print(f"helm={norm_simple(h, HELM_TOKENS, 'helm')}")
+          PY
+          echo "Resolved selection:"
+          cat "${RUNNER_TEMP}/selection.env"
+          cat "${RUNNER_TEMP}/selection.env" >> "$GITHUB_OUTPUT"
 
       - name: Mint app token
         id: app-token
@@ -110,6 +241,8 @@ jobs:
           RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/0.0.0test' || '') }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CONTAINERS: ${{ steps.resolve.outputs.containers }}
+          HELM: ${{ steps.resolve.outputs.helm }}
         run: |
           set -euo pipefail
 
@@ -143,7 +276,8 @@ jobs:
           # New branch: set the version from THIS workflow's script (GITHUB_SHA, not
           # source_ref which may predate --set-version), sync the lockfile, push.
           git show "${GITHUB_SHA}:.github/scripts/apply_dev_version.py" > "${RUNNER_TEMP}/apply_dev_version.py"
-          python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}"
+          python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}" \
+            --containers "${CONTAINERS}" --helm "${HELM}"
 
           if ! command -v cargo >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 --retry 5 --retry-delay 2 -sSf https://sh.rustup.rs \
@@ -250,8 +384,12 @@ jobs:
     with:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
-      # TEMPORARY(test): || defaults let push/test runs (no inputs) reach release.yml. REVERT to bare inputs.* .
+      # TEMPORARY(test): || default lets push/test runs (no inputs) reach release.yml. REVERT to bare inputs.release_version .
       release_version: ${{ inputs.release_version || '0.0.0' }}
-      artifacts: ${{ inputs.artifacts || 'crate,container,wheel,helm' }}
+      # Normalized subsets from resolve-selection (always set, even on push/test).
+      containers: ${{ needs.prepare-branch.outputs.containers }}
+      wheels: ${{ needs.prepare-branch.outputs.wheels }}
+      crates: ${{ needs.prepare-branch.outputs.crates }}
+      helm: ${{ needs.prepare-branch.outputs.helm }}
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
     secrets: inherit
