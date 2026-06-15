@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the apiVersion conversion utility (convert_api_version)."""
+
 import shutil
 import subprocess as _sp
 from pathlib import Path as _Path
@@ -41,6 +43,7 @@ def c_test_normalize(value):
 
 
 def test_load_docs_parses_multiple_documents_and_drops_empty():
+    """Load docs parses multiple documents and drops empty."""
     text = """\
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -60,6 +63,7 @@ metadata:
 
 
 def test_is_convertible_only_true_for_nvidia_group():
+    """Is convertible only true for nvidia group."""
     assert c.is_convertible({"apiVersion": "nvidia.com/v1alpha1", "kind": "X"}) is True
     assert c.is_convertible({"apiVersion": "nvidia.com/v1beta1", "kind": "X"}) is True
     assert c.is_convertible({"apiVersion": "v1", "kind": "ConfigMap"}) is False
@@ -69,6 +73,7 @@ def test_is_convertible_only_true_for_nvidia_group():
 
 
 def test_build_conversion_review_shape():
+    """Build conversion review shape."""
     objs = [{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"}]
     review = c.build_conversion_review(objs, "nvidia.com/v1beta1", "uid-123")
     assert review["apiVersion"] == "apiextensions.k8s.io/v1"
@@ -79,6 +84,7 @@ def test_build_conversion_review_shape():
 
 
 def _response(uid="u", status="Success", objects=None, message=None):
+    """Build a ConversionReview response payload for tests."""
     result = {"status": status}
     if message is not None:
         result["message"] = message
@@ -88,23 +94,27 @@ def _response(uid="u", status="Success", objects=None, message=None):
 
 
 def test_parse_conversion_response_returns_converted_objects():
+    """Parse conversion response returns converted objects."""
     obj = {"apiVersion": "nvidia.com/v1beta1", "kind": "DynamoGraphDeployment"}
     out = c.parse_conversion_response(_response(uid="u", objects=[obj]), "u")
     assert out == [obj]
 
 
 def test_parse_conversion_response_raises_on_failed_status():
+    """Parse conversion response raises on failed status."""
     resp = _response(status="Failed", message="bad spec")
     with pytest.raises(c.ConversionError, match="bad spec"):
         c.parse_conversion_response(resp, "u")
 
 
 def test_parse_conversion_response_raises_on_uid_mismatch():
+    """Parse conversion response raises on uid mismatch."""
     with pytest.raises(c.ConversionError, match="uid"):
         c.parse_conversion_response(_response(uid="other"), "u")
 
 
 def test_clean_for_authoring_strips_server_fields_preserves_annotations():
+    """Clean for authoring strips server fields preserves annotations."""
     obj = {
         "metadata": {
             "name": "m",
@@ -150,6 +160,7 @@ def _echo_webhook_fn_factory(converted_by_kind):
     a canned converted object list keyed by kind."""
 
     def webhook_fn(review, kind):
+        """Echo the request uid and return the canned converted objects for the kind."""
         return {
             "response": {
                 "uid": review["request"]["uid"],
@@ -162,6 +173,7 @@ def _echo_webhook_fn_factory(converted_by_kind):
 
 
 def test_convert_docs_passes_through_non_nvidia_docs_unchanged():
+    """Convert docs passes through non nvidia docs unchanged."""
     cm = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm"}}
     out = c.convert_docs(
         [cm], target="nvidia.com/v1beta1", webhook_fn=lambda review, kind: None
@@ -170,6 +182,7 @@ def test_convert_docs_passes_through_non_nvidia_docs_unchanged():
 
 
 def test_convert_docs_skips_docs_already_at_target():
+    """Convert docs skips docs already at target."""
     doc = {
         "apiVersion": "nvidia.com/v1beta1",
         "kind": "DynamoGraphDeployment",
@@ -182,6 +195,7 @@ def test_convert_docs_skips_docs_already_at_target():
 
 
 def test_convert_docs_converts_and_cleans_preserving_order():
+    """Convert docs converts and cleans preserving order."""
     alpha = {
         "apiVersion": "nvidia.com/v1alpha1",
         "kind": "DynamoGraphDeployment",
@@ -205,6 +219,7 @@ def test_convert_docs_converts_and_cleans_preserving_order():
 
 
 def test_convert_docs_preserves_all_annotations():
+    """Convert docs preserves all annotations."""
     alpha = {
         "apiVersion": "nvidia.com/v1alpha1",
         "kind": "DynamoGraphDeployment",
@@ -228,6 +243,7 @@ def test_convert_docs_preserves_all_annotations():
 
 
 def test_discover_conversion_service_parses_crd_clientconfig():
+    """Discover conversion service parses crd clientconfig."""
     crd_list = {
         "items": [
             {"spec": {"group": "other.io", "names": {"kind": "DynamoGraphDeployment"}}},
@@ -261,6 +277,7 @@ def test_discover_conversion_service_parses_crd_clientconfig():
 
 
 def test_discover_conversion_service_errors_when_no_webhook():
+    """Discover conversion service errors when no webhook."""
     crd_list = {
         "items": [{"spec": {"group": "nvidia.com", "names": {"kind": "DynamoModel"}}}]
     }
@@ -269,6 +286,7 @@ def test_discover_conversion_service_errors_when_no_webhook():
 
 
 def test_main_reads_input_converts_and_writes_output(tmp_path, monkeypatch):
+    """Main reads input converts and writes output."""
     in_path = tmp_path / "in.yaml"
     out_path = tmp_path / "out.yaml"
     in_path.write_text(
@@ -295,9 +313,11 @@ def test_main_reads_input_converts_and_writes_output(tmp_path, monkeypatch):
 
 
 def test_call_webhook_builds_proxy_path_and_posts(monkeypatch):
+    """Call webhook builds proxy path and posts."""
     captured = {}
 
     def fake_kubectl(args):
+        """Stub _kubectl that records the invocation and returns a canned response."""
         captured["args"] = args
         return "{}"
 
@@ -313,6 +333,7 @@ def test_call_webhook_builds_proxy_path_and_posts(monkeypatch):
 
 
 def test_normalize_drops_nulls_and_empties_recursively():
+    """Normalize drops nulls and empties recursively."""
     obj = {"a": 1, "b": None, "c": {}, "d": [], "e": {"f": None, "g": 2}}
     assert c_test_normalize(obj) == {"a": 1, "e": {"g": 2}}
 
@@ -323,6 +344,7 @@ CONFORMANCE_NAMES = ["agg", "disagg", "disagg_router", "disagg_planner"]
 
 
 def _cluster_available() -> bool:
+    """Return True if a Kubernetes cluster is reachable (gates conformance tests)."""
     if shutil.which("kubectl") is None:
         return False
     try:
@@ -347,6 +369,7 @@ requires_cluster = pytest.mark.skipif(
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize("name", CONFORMANCE_NAMES)
 def test_conformance_vllm_example_pair(name):
+    """Conformance vllm example pair."""
     alpha_path = REPO_ROOT / f"examples/backends/vllm/deploy/{name}.yaml"
     beta_path = REPO_ROOT / f"examples/backends/vllm/deploy/v1beta1/{name}.yaml"
     if not alpha_path.exists() or not beta_path.exists():
@@ -373,6 +396,7 @@ def test_conformance_vllm_example_pair(name):
 
 
 def test_convert_docs_raises_when_webhook_returns_wrong_count():
+    """Convert docs raises when webhook returns wrong count."""
     alpha = {
         "apiVersion": "nvidia.com/v1alpha1",
         "kind": "DynamoGraphDeployment",
@@ -387,6 +411,7 @@ def test_convert_docs_raises_when_webhook_returns_wrong_count():
 
 
 def test_convert_docs_multi_kind_interleaved_preserves_order():
+    """Convert docs multi kind interleaved preserves order."""
     dgd = {
         "apiVersion": "nvidia.com/v1alpha1",
         "kind": "DynamoGraphDeployment",
@@ -431,6 +456,7 @@ def test_dump_docs_quotes_yaml11_ambiguous_strings():
     # go-yaml (kubectl/apiserver, YAML 1.1) reads y/n/Y/N as booleans; PyYAML
     # does not, so unquoted output is re-parsed as bool and breaks the
     # "EnvVar.value must be string" contract on apply. dump_docs must quote them.
+    """Dump docs quotes yaml11 ambiguous strings."""
     docs = [
         {
             "apiVersion": "nvidia.com/v1beta1",

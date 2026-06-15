@@ -277,6 +277,7 @@ class _ManifestDumper(yaml.SafeDumper):
 
 
 def _represent_str(dumper, data):
+    """Represent a str, single-quoting values a YAML 1.1 reader would misread as bool/null."""
     if data in _YAML11_AMBIGUOUS:
         return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="'")
     return dumper.represent_scalar("tag:yaml.org,2002:str", data)
@@ -298,6 +299,7 @@ def dump_docs(docs: list) -> str:
 
 
 def main(argv: list = None) -> int:
+    """CLI entry point: parse args, convert the input manifest, write the result."""
     parser = argparse.ArgumentParser(
         description="Convert nvidia.com CRD manifests between served "
         "apiVersions using the operator's conversion webhook."
