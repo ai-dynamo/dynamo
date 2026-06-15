@@ -207,13 +207,35 @@ pub enum MoveBlockResponse {
     Remove(Vec<SequenceHash>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DirectRequest {
     pub tokens: Vec<Token>,
     pub max_output_tokens: usize,
     pub uuid: Option<Uuid>,
     pub dp_rank: u32,
     pub arrival_timestamp_ms: Option<f64>,
+    /// TODO: Replay maps this to router queue priority only; mock-engine
+    /// scheduling does not consume it yet.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub priority: i32,
+    /// NOTE: Strict priority orders the router's pending queue only. It does
+    /// not affect scheduling inside the selected mock engine.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub strict_priority: u32,
+}
+
+impl DirectRequest {
+    pub fn router_priorities(&self) -> (f64, u32) {
+        (f64::from(self.priority.max(0)), self.strict_priority)
+    }
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Represents the cost of prefilling content in the cache
@@ -1228,6 +1250,50 @@ impl MockEngineArgs {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn direct_request_priorities_are_backward_compatible() {
+        let legacy = json!({
+            "tokens": [1, 2],
+            "max_output_tokens": 3,
+            "uuid": null,
+            "dp_rank": 0,
+            "arrival_timestamp_ms": null
+        });
+        let request: DirectRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(request.priority, 0);
+        assert_eq!(request.strict_priority, 0);
+        assert_eq!(request.router_priorities(), (0.0, 0));
+
+        let rendered = serde_json::to_value(&request).unwrap();
+        assert!(rendered.get("priority").is_none());
+        assert!(rendered.get("strict_priority").is_none());
+    }
+
+    #[test]
+    fn direct_request_derives_router_priorities() {
+        let negative: DirectRequest = serde_json::from_value(json!({
+            "tokens": [1],
+            "max_output_tokens": 1,
+            "uuid": null,
+            "dp_rank": 0,
+            "arrival_timestamp_ms": null,
+            "priority": -7,
+            "strict_priority": 4
+        }))
+        .unwrap();
+        assert_eq!(negative.router_priorities(), (0.0, 4));
+
+        let positive = DirectRequest {
+            priority: 9,
+            strict_priority: 5,
+            ..negative
+        };
+        assert_eq!(positive.router_priorities(), (9.0, 5));
+        let rendered = serde_json::to_value(&positive).unwrap();
+        assert_eq!(rendered["priority"], 9);
+        assert_eq!(rendered["strict_priority"], 5);
+    }
 
     #[test]
     fn test_mock_engine_args_json_round_trip_preserves_worker_type_and_nulls() {

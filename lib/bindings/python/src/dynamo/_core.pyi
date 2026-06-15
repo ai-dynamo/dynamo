@@ -112,6 +112,10 @@ def run_slot_tracker(args: List[str]) -> None:
     """Run the KV router slot tracker with the given arguments."""
     ...
 
+def run_select_service(args: List[str]) -> None:
+    """Run the Dynamo selection service with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -185,7 +189,7 @@ class DistributedRuntime:
         Register an async callback for /engine/{route_name} on the system status server.
 
         Args:
-            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            route_name: The route path (e.g., "control/start_profile" creates /engine/control/start_profile)
             callback: Async function with signature: async def(body: dict) -> dict
 
         Example:
@@ -193,7 +197,7 @@ class DistributedRuntime:
                 await engine.start_profile(**body)
                 return {"status": "ok", "message": "Profiling started"}
 
-            runtime.register_engine_route("start_profile", start_profile)
+            runtime.register_engine_route("control/start_profile", start_profile)
 
         The callback receives the JSON request body as a dict and should return
         a dict that will be serialized as the JSON response.

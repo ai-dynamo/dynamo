@@ -1562,6 +1562,7 @@ fn build_synthetic_requests(
             dp_rank: 0,
             arrival_timestamp_ms: include_arrival_timestamps
                 .then_some(request_idx as f64 * arrival_interval_ms),
+            ..Default::default()
         });
     }
 

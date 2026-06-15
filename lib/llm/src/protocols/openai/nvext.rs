@@ -557,6 +557,13 @@ pub struct AgentHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
 
+    /// Strict router pending-queue priority tier.
+    /// Higher values are always ordered ahead of lower values before applying
+    /// the configured router queue policy.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
+
     /// Expected output sequence length (number of output tokens).
     /// Used as a hint for routing decisions to estimate resource requirements
     /// and for output block tracking decay.
@@ -702,6 +709,18 @@ mod tests {
         assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_agent_hints_strict_priority_serde() {
+        let hints: AgentHints = serde_json::from_str(r#"{"strict_priority":3}"#).unwrap();
+        assert_eq!(hints.strict_priority, Some(3));
+        assert_eq!(
+            serde_json::to_string(&hints).unwrap(),
+            r#"{"strict_priority":3}"#
+        );
+
+        assert!(serde_json::from_str::<AgentHints>(r#"{"strict_priority":-1}"#).is_err());
     }
 
     // Test GAIE Stage 2 disaggregated worker IDs

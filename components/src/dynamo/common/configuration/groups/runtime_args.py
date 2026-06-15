@@ -43,6 +43,10 @@ class DynamoRuntimeConfig(ConfigBase):
     # Honored only by the unified backend's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
+    # Worker-side request admission/rejection knobs. Disabled (None) by
+    # default; when set, these surface env vars that the Rust runtime reads
+    # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
+    engine_request_limit: Optional[int] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -50,6 +54,11 @@ class DynamoRuntimeConfig(ConfigBase):
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
         self._validate_output_modalities()
+
+        if self.engine_request_limit is not None and self.engine_request_limit <= 0:
+            raise ValueError(
+                f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+            )
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
@@ -262,4 +271,21 @@ class DynamoRuntimeArgGroup(ArgGroup):
             'object (e.g. \'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}\') '
             "or '@/path/to/payload.json'. Takes precedence over the engine's "
             "default health_check_payload(). Unified backend only.",
+        )
+
+        # Worker-side request admission/rejection. Defaults to None (disabled);
+        # when unset the worker behaves exactly as before. Surfaces an env var —
+        # the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT directly. The Dynamo-side
+        # overflow queue is a small fixed burst (default 16, hard cap N+16) and is
+        # not a user-facing knob; advanced users may override it via the
+        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT env var.
+        add_argument(
+            g,
+            flag_name="--engine-request-limit",
+            env_var="DYN_ENGINE_REQUEST_LIMIT",
+            default=None,
+            arg_type=int,
+            help="Max requests handled concurrently by the engine (worker-pool "
+            "semaphore size). Enables worker-side request rejection when set. "
+            "Disabled by default.",
         )

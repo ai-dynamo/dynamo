@@ -38,6 +38,11 @@ def get_kv_indexer_command() -> list[str]:
     return [sys.executable, "-m", "dynamo.indexer"]
 
 
+def get_select_service_command() -> list[str]:
+    """Return the preferred standalone selection service command."""
+    return [sys.executable, "-m", "dynamo.select_service"]
+
+
 def get_kv_indexer_test_env() -> Dict[str, str]:
     """Indexer launch env that enables the listener-control test endpoints
     (gated off by default; used by the ZMQ replay scenario)."""
@@ -427,6 +432,58 @@ async def wait_for_indexer_workers_active(
 
     raise RuntimeError(
         f"Timed out waiting for indexer listeners to become active at {workers_url}"
+    )
+
+
+async def wait_for_selection_service_ready(
+    selector_url: str,
+    expected_worker_ids: set[int],
+    timeout_s: float = 30.0,
+) -> None:
+    """Wait until the standalone selection service reports expected workers ready."""
+    if not expected_worker_ids:
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    ready_url = f"{selector_url}/ready"
+
+    async with aiohttp.ClientSession() as session:
+        while loop.time() < deadline:
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                break
+
+            try:
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(ready_url, timeout=request_timeout) as resp:
+                    if resp.status not in (200, 503):
+                        await asyncio.sleep(0.5)
+                        continue
+                    body = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                await asyncio.sleep(0.5)
+                continue
+
+            workers_by_id = {
+                worker["worker_id"]: worker for worker in body.get("workers", [])
+            }
+            all_schedulable = all(
+                workers_by_id.get(worker_id, {}).get("lifecycle") == "schedulable"
+                for worker_id in expected_worker_ids
+            )
+            if (
+                resp.status == 200
+                and body.get("ready") is True
+                and body.get("schedulable_workers", 0) >= len(expected_worker_ids)
+                and all_schedulable
+            ):
+                return
+
+            await asyncio.sleep(0.5)
+
+    raise RuntimeError(
+        f"Timed out waiting for selection service workers to become ready at {ready_url}"
     )
 
 

@@ -19,6 +19,12 @@ from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    IMAGE_URL_KEY,
+    VIDEO_URL_KEY,
+    build_disagg_mm_kwargs,
+    extract_media_urls,
+)
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -29,27 +35,6 @@ _SAMPLING_OPTION_FIELDS = (
     "top_k",
     "min_p",
 )
-
-
-def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
-    """Normalize multimodal URL items from the frontend wire format."""
-
-    items = mm_data.get(media_key)
-    if not items:
-        return None
-
-    urls: list[str] = []
-    for item in items:
-        if isinstance(item, str):
-            urls.append(item)
-            continue
-
-        if isinstance(item, dict):
-            url = item.get("Url")
-            if isinstance(url, str):
-                urls.append(url)
-
-    return urls or None
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
@@ -391,8 +376,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
+            # Decode re-extracts the media so its token layout matches prefill's
+            # and the transferred KV lines up.
+            decode_mm_kwargs = build_disagg_mm_kwargs(request)
+
             decode = await self.engine.async_generate(
                 **input_param,
+                **decode_mm_kwargs,
                 sampling_params=sampling_params,
                 stream=True,
                 **self._routed_experts_kwargs,
@@ -430,7 +420,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
-            video_data = _extract_media_urls(mm_data, "video_url")
+            video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
 
             image_data: list[str] | list[PILImage] | None
             if self._enable_frontend_decoding:
@@ -438,13 +428,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # _enable_frontend_decoding is True. Assert narrows the
                 # Optional for the type checker without runtime branching.
                 assert self._image_loader is not None
-                image_items = mm_data.get("image_url") or []
+                image_items = mm_data.get(IMAGE_URL_KEY) or []
                 if image_items:
                     image_data = await self._image_loader.load_image_batch(image_items)
                 else:
                     image_data = None
             else:
-                image_data = _extract_media_urls(mm_data, "image_url")
+                image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
 
             trace_header = context.trace_headers() if self.enable_trace else None
 

@@ -128,7 +128,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 - **vLLM** — supported. Automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set.
 - **TensorRT-LLM** — supported for non-attention-DP workers (`attention_dp_size == 1`); gated off when `attention_dp_size > 1` pending per-rank FPM emission.
-- **SGLang** — pipeline wired in Dynamo, but the upstream SGLang FPM module is not included in the current 1.2.0 SGLang runtime image. See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) for the runtime-image prerequisite.
+- **SGLang** — pipeline wired in Dynamo, but the upstream SGLang FPM module is not included in the current 1.2.1 SGLang runtime image. See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) for the runtime-image prerequisite.
 
 ### General
 
