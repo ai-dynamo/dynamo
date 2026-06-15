@@ -22,9 +22,11 @@ use super::pythonic::{
 };
 use super::response::ToolCallResponse;
 use super::xml::{
-    detect_tool_call_start_glm47, detect_tool_call_start_kimi_k2, detect_tool_call_start_xml,
+    detect_tool_call_start_glm47, detect_tool_call_start_kimi_k2,
+    detect_tool_call_start_minimax_m3, detect_tool_call_start_xml,
     find_tool_call_end_position_glm47, find_tool_call_end_position_kimi_k2,
-    find_tool_call_end_position_xml, try_tool_call_parse_glm47, try_tool_call_parse_kimi_k2,
+    find_tool_call_end_position_minimax_m3, find_tool_call_end_position_xml,
+    try_tool_call_parse_glm47, try_tool_call_parse_kimi_k2, try_tool_call_parse_minimax_m3,
     try_tool_call_parse_xml,
 };
 use std::collections::HashMap;
@@ -52,6 +54,10 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
+        map.insert("minimax_m3", ToolCallConfig::minimax_m3());
+        map.insert("minimax-m3", ToolCallConfig::minimax_m3());
+        map.insert("minimax_m3_nom", ToolCallConfig::minimax_m3());
+        map.insert("minimax-m3-nom", ToolCallConfig::minimax_m3());
         map.insert("glm47", ToolCallConfig::glm47());
         map.insert("kimi_k2", ToolCallConfig::kimi_k2());
         map.insert("gemma4", ToolCallConfig::gemma4());
@@ -106,6 +112,11 @@ pub async fn try_tool_call_parse(
         ParserConfig::KimiK2(kimi_config) => {
             let (results, normal_content) =
                 try_tool_call_parse_kimi_k2(message, kimi_config, tools)?;
+            Ok((results, normal_content))
+        }
+        ParserConfig::MiniMaxM3(minimax_config) => {
+            let (results, normal_content) =
+                try_tool_call_parse_minimax_m3(message, minimax_config, tools)?;
             Ok((results, normal_content))
         }
         ParserConfig::Gemma4 => {
@@ -163,6 +174,11 @@ pub async fn detect_and_parse_tool_call_with_recovery(
             let mut c = c.clone();
             c.allow_eof_recovery = true;
             ParserConfig::Dsml(c)
+        }
+        ParserConfig::MiniMaxM3(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::MiniMaxM3(c)
         }
         // GLM-4.7 intentionally omitted: match upstream vLLM/SGLang behavior
         // (drop the call when </tool_call> is missing).
@@ -256,6 +272,9 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
             }
             ParserConfig::KimiK2(kimi_config) => {
                 Ok(detect_tool_call_start_kimi_k2(chunk, kimi_config))
+            }
+            ParserConfig::MiniMaxM3(minimax_config) => {
+                Ok(detect_tool_call_start_minimax_m3(chunk, minimax_config))
             }
             ParserConfig::Gemma4 => Ok(detect_tool_call_start_gemma4(chunk)),
         },
@@ -368,6 +387,9 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
             ParserConfig::KimiK2(kimi_config) => {
                 find_tool_call_end_position_kimi_k2(chunk, kimi_config)
             }
+            ParserConfig::MiniMaxM3(minimax_config) => Some(
+                find_tool_call_end_position_minimax_m3(chunk, minimax_config),
+            ),
             ParserConfig::Gemma4 => find_tool_call_end_position_gemma4(chunk),
         },
         None => Some(chunk.len()),
@@ -409,6 +431,10 @@ mod tests {
             "jamba",
             "nemotron_nano",
             "minimax_m2",
+            "minimax_m3",
+            "minimax-m3",
+            "minimax_m3_nom",
+            "minimax-m3-nom",
             "glm47",
             "kimi_k2",
             "gemma4",
@@ -3592,5 +3618,41 @@ weather forecasting
         assert_eq!(name, "batch_process");
         assert!(args["items"].is_array());
         assert_eq!(args["items"], serde_json::json!([1, 2, 3, 4, 5]));
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_simple_tool_call() {
+        let input = r#"I'll check. ]<]minimax[>[<tool_call>
+]<]minimax[>[<invoke name="get_weather">]<]minimax[>[<location>San Francisco]<]minimax[>[</location>]<]minimax[>[<unit>celsius]<]minimax[>[</unit>]<]minimax[>[</invoke>
+]<]minimax[>[</tool_call> trailing text"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("minimax_m3"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("I'll check. ".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco");
+        assert_eq!(args["unit"], "celsius");
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_stream_finalize_recovers_complete_invoke_without_outer_close() {
+        let input = r#"prefix ]<]minimax[>[<tool_call>
+]<]minimax[>[<invoke name="get_weather">]<]minimax[>[<city>Seattle]<]minimax[>[</city>]<]minimax[>[</invoke>"#;
+
+        let (result, content) = detect_and_parse_tool_call_with_recovery(
+            input,
+            Some("minimax-m3"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(content, Some("prefix ".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["city"], "Seattle");
     }
 }

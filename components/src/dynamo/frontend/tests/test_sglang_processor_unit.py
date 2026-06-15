@@ -28,11 +28,13 @@ from dynamo.frontend.sglang_prepost import (
     _flatten_message_content,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
+    _normalize_sglang_parser_name,
     _parse_json_array_buffer,
     build_tool_call_guided_decoding,
     convert_tools,
     create_parsers,
     preprocess_chat_request,
+    resolve_request_force_reasoning,
 )
 from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
@@ -537,6 +539,78 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is not None
         assert rp is not None
 
+    def test_minimax_m3_dynamo_aliases_are_normalized_for_sglang(self, monkeypatch):
+        """Dynamo parser aliases should not leak into SGLang parser lookup."""
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                self.tools = tools
+                self.tool_call_parser = tool_call_parser
+
+        class FakeReasoningParser:
+            def __init__(self, *, model_type, stream_reasoning, force_reasoning):
+                self.model_type = model_type
+                self.stream_reasoning = stream_reasoning
+                self.force_reasoning = force_reasoning
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "ReasoningParser",
+            FakeReasoningParser,
+        )
+
+        tcp, rp = create_parsers(
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+            },
+            tool_call_parser_name="minimax-m3-nom",
+            reasoning_parser_name="minimax_m3",
+        )
+
+        assert tcp.tool_call_parser == "minimax-m3"
+        assert rp.model_type == "minimax-m3"
+
+
+def test_normalize_sglang_parser_name_accepts_minimax_m3_aliases():
+    assert _normalize_sglang_parser_name("minimax-m3") == "minimax-m3"
+    assert _normalize_sglang_parser_name("minimax_m3") == "minimax-m3"
+    assert _normalize_sglang_parser_name("minimax_m3_nom") == "minimax-m3"
+    assert _normalize_sglang_parser_name("minimax-m3-nom") == "minimax-m3"
+    assert _normalize_sglang_parser_name("kimi_k2") == "kimi_k2"
+
+
+def test_minimax_m3_force_reasoning_uses_thinking_mode():
+    assert (
+        resolve_request_force_reasoning(
+            {"chat_template_kwargs": {}},
+            "minimax_m3",
+            template_default=False,
+        )
+        is True
+    )
+    assert (
+        resolve_request_force_reasoning(
+            {"chat_template_kwargs": {"thinking_mode": "disabled"}},
+            "minimax-m3",
+            template_default=True,
+        )
+        is False
+    )
+
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
     def test_none_when_no_tools(self):
@@ -569,6 +643,43 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             )
             is None
         )
+
+    def test_auto_tool_guidance_normalizes_minimax_m3_alias(self, monkeypatch):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        )
+        seen = {}
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                seen["tool_call_parser"] = tool_call_parser
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                assert tool_choice == "auto"
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto"},
+            tool_call_parser_name="minimax_m3_nom",
+            sglang_tools=tools,
+        )
+
+        assert seen["tool_call_parser"] == "minimax-m3"
+        assert guided == {"structural_tag": {"type": "object"}}
 
     def test_required_tool_choice_builds_json_schema_guidance(self):
         tools = convert_tools(

@@ -69,6 +69,8 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
             "minimax_append_think",
             ReasoningParserType::MiniMaxAppendThink,
         );
+        map.insert("minimax_m3", ReasoningParserType::MiniMaxM3);
+        map.insert("minimax-m3", ReasoningParserType::MiniMaxM3);
         // Gemma 4 thinking models: reasoning is wrapped in `<|channel>...<channel|>`
         // with a `thought\n` role label that this parser strips. Pair with
         // `--dyn-tool-call-parser gemma4` for end-to-end Gemma 4 support.
@@ -167,6 +169,8 @@ pub enum ReasoningParserType {
     Mistral,
     Granite,
     MiniMaxAppendThink,
+    /// MiniMax M3 thinking blocks use `<mm:think>...</mm:think>`.
+    MiniMaxM3,
     /// Google Gemma 4 thinking models. Custom `<|channel>...<channel|>`
     /// delimiters with a `thought\n` role-label prefix stripped by the parser.
     Gemma4,
@@ -274,6 +278,17 @@ impl ReasoningParserType {
             ReasoningParserType::MiniMaxAppendThink => ReasoningParserWrapper {
                 parser: Box::new(MiniMaxAppendThinkParser::new()),
             },
+            ReasoningParserType::MiniMaxM3 => ReasoningParserWrapper {
+                parser: Box::new(
+                    BasicReasoningParser::new(
+                        "<mm:think>".into(),
+                        "</mm:think>".into(),
+                        false,
+                        true,
+                    )
+                    .with_dangling_end_recovery(),
+                ),
+            },
             ReasoningParserType::Gemma4 => ReasoningParserWrapper {
                 parser: Box::new(Gemma4ReasoningParser::new()),
             },
@@ -330,12 +345,86 @@ mod tests {
             "nemotron_v3",
             "glm45",
             "minimax_append_think",
+            "minimax_m3",
+            "minimax-m3",
             "gemma4",
             "gemma-4",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
         }
+    }
+
+    #[test] // MiniMax M3
+    fn test_minimax_m3_detect_and_parse() {
+        for parser_name in ["minimax_m3", "minimax-m3"] {
+            let mut parser = ReasoningParserType::get_reasoning_parser_from_name(parser_name);
+            let result =
+                parser.detect_and_parse_reasoning("<mm:think>thinking</mm:think>answer", &[]);
+            assert_eq!(result.reasoning_text, "thinking");
+            assert_eq!(result.normal_text, "answer");
+        }
+    }
+
+    #[test] // MiniMax M3
+    fn test_minimax_m3_streaming() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("minimax_m3");
+
+        let r1 = parser.parse_reasoning_streaming_incremental("<mm:think>rea", &[]);
+        let r2 = parser.parse_reasoning_streaming_incremental("son</mm:think>answer", &[]);
+
+        assert_eq!(
+            format!("{}{}", r1.reasoning_text, r2.reasoning_text),
+            "reason"
+        );
+        assert_eq!(format!("{}{}", r1.normal_text, r2.normal_text), "answer");
+    }
+
+    #[test] // MiniMax M3
+    fn test_minimax_m3_streaming_with_prompt_prefilled_start_marker() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("minimax_m3");
+        parser.set_in_reasoning(true);
+
+        let result = parser.parse_reasoning_streaming_incremental("reason</mm:think>answer", &[]);
+
+        assert_eq!(result.reasoning_text, "reason");
+        assert_eq!(result.normal_text, "answer");
+    }
+
+    #[test] // MiniMax M3
+    fn test_minimax_m3_detect_and_parse_dangling_end_marker() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("minimax_m3");
+        let result = parser.detect_and_parse_reasoning("reason</mm:think>answer", &[]);
+
+        assert_eq!(result.reasoning_text, "reason");
+        assert_eq!(result.normal_text, "answer");
+    }
+
+    #[test] // MiniMax M3
+    fn test_minimax_m3_streaming_dangling_end_marker() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("minimax_m3");
+
+        let r1 = parser.parse_reasoning_streaming_incremental("reason</mm:", &[]);
+        let r2 = parser.parse_reasoning_streaming_incremental("think>answer", &[]);
+
+        assert_eq!(
+            format!("{}{}", r1.reasoning_text, r2.reasoning_text),
+            "reason"
+        );
+        assert_eq!(format!("{}{}", r1.normal_text, r2.normal_text), "answer");
+    }
+
+    #[test] // MiniMax M3
+    fn test_minimax_m3_streaming_close_marker_only_is_stripped() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("minimax_m3");
+
+        let result = parser.parse_reasoning_streaming_incremental(
+            "</mm:think>I'll check the content of both files.",
+            &[],
+        );
+
+        assert_eq!(result.reasoning_text, "");
+        assert_eq!(result.normal_text, "I'll check the content of both files.");
     }
 
     #[test] // REASONING.batch.2.c

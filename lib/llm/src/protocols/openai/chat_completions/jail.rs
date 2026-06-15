@@ -28,6 +28,13 @@ fn is_harmony_parser(parser: Option<&str>) -> bool {
     parser == Some("harmony")
 }
 
+fn drops_trailing_after_tool_call(parser: Option<&str>) -> bool {
+    matches!(
+        parser,
+        Some("minimax_m3" | "minimax-m3" | "minimax_m3_nom" | "minimax-m3-nom")
+    )
+}
+
 fn contains_harmony_protocol(text: &str) -> bool {
     text.contains("<|channel|>")
 }
@@ -212,6 +219,10 @@ impl ChoiceJailState {
         jail_stream: &JailedStream,
         emissions: &mut Vec<ChoiceEmission>,
     ) {
+        if drops_trailing_after_tool_call(jail_stream.tool_call_parser.as_deref()) {
+            return;
+        }
+
         if content.is_empty() {
             return;
         }

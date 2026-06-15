@@ -61,6 +61,7 @@ pub struct BasicReasoningParser {
     stream_reasoning: bool,
     _buffer: String,
     stripped_think_start: bool,
+    recover_dangling_end: bool,
     /// Optional marker that force-exits reasoning mode when encountered inside a
     /// reasoning block (e.g. Kimi-K2/K2.5 models sometimes emit
     /// `<|tool_calls_section_begin|>` without first closing `</think>`).
@@ -81,6 +82,7 @@ impl BasicReasoningParser {
             stream_reasoning,
             _buffer: String::new(),
             stripped_think_start: false,
+            recover_dangling_end: false,
             tool_start_token: None,
         }
     }
@@ -89,6 +91,11 @@ impl BasicReasoningParser {
     /// block.
     pub fn with_tool_start_token(mut self, token: impl Into<String>) -> Self {
         self.tool_start_token = Some(token.into());
+        self
+    }
+
+    pub fn with_dangling_end_recovery(mut self) -> Self {
+        self.recover_dangling_end = true;
         self
     }
 }
@@ -113,8 +120,8 @@ impl ReasoningParser for BasicReasoningParser {
         // consumed it). Without this, the `</think>` markup leaks into
         // normal_text. Matches vLLM's `partition()`-based behavior for the
         // same input.
-        let supports_dangling_end_recovery =
-            self.think_start_token == "<think>" && self.think_end_token == "</think>";
+        let supports_dangling_end_recovery = self.recover_dangling_end
+            || (self.think_start_token == "<think>" && self.think_end_token == "</think>");
         let has_dangling_end = supports_dangling_end_recovery
             && !has_think_tag
             && text.contains(&self.think_end_token);
@@ -354,63 +361,62 @@ impl ReasoningParser for BasicReasoningParser {
                     break;
                 }
             } else {
-                // Not in reasoning. Look for the next <think> block, but also detect
-                // a stray </think> (unmatched close marker) and drop it: parser-owned
-                // syntax must never reach normal_text per the lossless-split contract.
+                // Not in reasoning. Look for the next open marker, but also
+                // handle close markers that appear without a visible opener.
                 let think_pos = current_text.find(self.think_start_token.as_str());
-                let stray_close_pos = current_text.find(self.think_end_token.as_str());
-                match (think_pos, stray_close_pos) {
-                    (Some(s), Some(e)) if s <= e => {
-                        // <think> arrives first → enter reasoning.
-                        accumulated_normal.push_str(&current_text[..s]);
-                        let after_start = s + self.think_start_token.len();
+                let end_pos = current_text.find(self.think_end_token.as_str());
+
+                if let Some(start_pos) = think_pos {
+                    let start_before_end = match end_pos {
+                        Some(end_pos) => start_pos <= end_pos,
+                        None => true,
+                    };
+                    if start_before_end {
+                        accumulated_normal.push_str(&current_text[..start_pos]);
+                        let after_start = start_pos + self.think_start_token.len();
                         self._buffer = current_text[after_start..].to_string();
                         self._in_reasoning = true;
                         self.stripped_think_start = true;
                         continue;
-                    }
-                    (Some(s), None) => {
-                        // Only <think> remains; enter reasoning.
-                        accumulated_normal.push_str(&current_text[..s]);
-                        let after_start = s + self.think_start_token.len();
-                        self._buffer = current_text[after_start..].to_string();
-                        self._in_reasoning = true;
-                        self.stripped_think_start = true;
-                        continue;
-                    }
-                    (_, Some(e)) => {
-                        // Stray </think> arrives before the next <think> (or with no
-                        // opener remaining). Drop the marker, keep the text on either
-                        // side, stay in normal mode. Mirrors the batch path so a
-                        // pattern like `<o>A</c>B</c>C<o>D</c>E` does not leak the
-                        // middle stray close even when a later opener is in buffer.
-                        accumulated_normal.push_str(&current_text[..e]);
-                        let after_end = e + self.think_end_token.len();
-                        self._buffer = current_text[after_end..].to_string();
-                        continue;
-                    }
-                    (None, None) => {
-                        // No complete marker — check for partial at end of buffer.
-                        // The partial could be a prefix of either <think> or </think>
-                        // (both start with `<`), so check both and use the wider overlap.
-                        // Require overlap >= 2 so a lone `<` passes through for tool call
-                        // XML tags like `<invoke>` or `<minimax:tool_call>`.
-                        let ol_start = overlap(&current_text, &self.think_start_token);
-                        let ol_end = overlap(&current_text, &self.think_end_token);
-                        let ol = ol_start.max(ol_end);
-                        if ol >= 2 {
-                            let safe_end = current_text.len() - ol;
-                            if safe_end > 0 {
-                                accumulated_normal.push_str(&current_text[..safe_end]);
-                            }
-                            self._buffer = current_text[safe_end..].to_string();
-                        } else {
-                            accumulated_normal.push_str(&current_text);
-                            self._buffer.clear();
-                        }
-                        break;
                     }
                 }
+
+                if let Some(end_pos) = end_pos {
+                    if self.recover_dangling_end {
+                        accumulated_reasoning.push_str(&current_text[..end_pos]);
+                    } else {
+                        accumulated_normal.push_str(&current_text[..end_pos]);
+                    }
+                    let after_end = end_pos + self.think_end_token.len();
+                    self._buffer = current_text[after_end..].to_string();
+                    self._in_reasoning = false;
+                    self.stripped_think_start = false;
+                    continue;
+                }
+
+                // No complete marker — check for partial at end of buffer.
+                // The partial could be a prefix of either <think> or </think>
+                // (both start with `<`), so check both and use the wider overlap.
+                // Require overlap >= 2 so a lone `<` passes through for tool call
+                // XML tags like `<invoke>` or `<minimax:tool_call>`.
+                let ol_start = overlap(&current_text, &self.think_start_token);
+                let ol_end = overlap(&current_text, &self.think_end_token);
+                let ol = ol_start.max(ol_end);
+                if ol >= 2 {
+                    let safe_end = current_text.len() - ol;
+                    if safe_end > 0 {
+                        if self.recover_dangling_end && ol_end > ol_start {
+                            accumulated_reasoning.push_str(&current_text[..safe_end]);
+                        } else {
+                            accumulated_normal.push_str(&current_text[..safe_end]);
+                        }
+                    }
+                    self._buffer = current_text[safe_end..].to_string();
+                } else {
+                    accumulated_normal.push_str(&current_text);
+                    self._buffer.clear();
+                }
+                break;
             }
         }
 

@@ -93,8 +93,29 @@ def detect_force_reasoning_from_template(chat_template: str | None) -> bool:
 # Reasoning parsers that default to "thinking on" unless the client
 # explicitly opts out via chat_template_kwargs. Mirrors sglang's
 # serving_chat._get_reasoning_from_request table.
-_THINKING_BY_DEFAULT = {"qwen3", "glm45", "nemotron_3", "interns1", "kimi_k2"}
+_THINKING_BY_DEFAULT = {
+    "qwen3",
+    "glm45",
+    "nemotron_3",
+    "interns1",
+    "kimi_k2",
+    "minimax-m3",
+}
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
+
+_SGLANG_PARSER_NAME_ALIASES = {
+    # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. Native
+    # SGLang exposes the same parser as "minimax-m3".
+    "minimax_m3": "minimax-m3",
+    "minimax_m3_nom": "minimax-m3",
+    "minimax-m3-nom": "minimax-m3",
+}
+
+
+def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
+    if not parser_name:
+        return parser_name
+    return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
 
 
 def resolve_request_force_reasoning(
@@ -114,6 +135,7 @@ def resolve_request_force_reasoning(
         enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
       * anything else: follow the statically-detected template default.
     """
+    reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
     if not reasoning_parser_name:
         return False
 
@@ -122,6 +144,8 @@ def resolve_request_force_reasoning(
     )
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
+        if reasoning_parser_name == "minimax-m3":
+            return kwargs.get("thinking_mode") != "disabled"
         flag_key = (
             "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
         )
@@ -258,6 +282,7 @@ def create_parsers(
         if tool_choice == "required" or _is_named_tool_choice(tool_choice):
             tool_call_parser = JsonArrayParser()
         elif tool_call_parser_name:
+            tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
@@ -268,6 +293,7 @@ def create_parsers(
         tool_choice
     )
     if reasoning_parser_name and not guided_decoding_active:
+        reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
@@ -503,6 +529,7 @@ def build_tool_call_guided_decoding(
             ),
         )
     elif tool_call_parser_name:
+        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         parser = FunctionCallParser(
             tools=sglang_tools,
             tool_call_parser=tool_call_parser_name,
@@ -815,7 +842,7 @@ class SglangStreamingPostProcessor:
         self.reasoning_parser = reasoning_parser
         self.history_tool_calls_count = history_tool_calls_count
         self._sglang_tools = sglang_tools or []
-        self._tool_call_parser_name = tool_call_parser_name
+        self._tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a tool call parser is active so
         # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
