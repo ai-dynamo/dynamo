@@ -99,23 +99,14 @@ class CheckpointConfig:
 
 
 def configure_checkpoint_transport_env() -> None:
-    gloo_ifname = os.environ.get("GLOO_SOCKET_IFNAME")
-    if gloo_ifname and gloo_ifname != "lo":
+    hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
+    if hf_hub_offline and hf_hub_offline != "1":
         logger.warning(
-            "Overriding GLOO_SOCKET_IFNAME=%r with 'lo' for checkpoint mode "
-            "because CRIU cannot restore sockets bound to non-loopback addresses",
-            gloo_ifname,
+            "Overriding HF_HUB_OFFLINE=%r with '1' for checkpoint mode "
+            "to avoid external Hugging Face connections during checkpoint/restore",
+            hf_hub_offline,
         )
-    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
-
-    nccl_ifname = os.environ.get("NCCL_SOCKET_IFNAME")
-    if nccl_ifname and nccl_ifname != "lo":
-        logger.warning(
-            "Overriding NCCL_SOCKET_IFNAME=%r with 'lo' for checkpoint mode "
-            "because CRIU cannot restore sockets bound to non-loopback addresses",
-            nccl_ifname,
-        )
-    os.environ["NCCL_SOCKET_IFNAME"] = "lo"
+    os.environ["HF_HUB_OFFLINE"] = "1"
 
     nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
     if nccl_cumem_enable and nccl_cumem_enable != "0":
