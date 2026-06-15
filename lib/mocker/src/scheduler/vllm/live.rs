@@ -227,7 +227,14 @@ async fn receive_requests(
         return None;
     }
 
-    if core.is_empty() {
+    // Block when there is no *runnable* work, even if pinned (stranded) prefills
+    // remain: a pinned-only worker does no model work and can only advance when a
+    // new request or a `release_pin` arrives — both via `request_rx`, which
+    // `recv()` wakes on. Gating on `is_empty()` (which counts pinned) made the
+    // loop hot-spin while a pin was held, starving the decode workers whose
+    // admission the pin's release depends on — a runaway feedback that compounded
+    // the prefill→decode handoff latency until the frontend timed out.
+    if !core.has_runnable_work() {
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => return None,

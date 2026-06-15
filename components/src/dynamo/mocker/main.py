@@ -196,7 +196,9 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         else:
             worker_engine_args = base_engine_args
 
-        kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
+        kv_cache_block_size, runtime_config = build_runtime_config(
+            worker_engine_args, getattr(args, "engine_type", None) or "vllm"
+        )
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(

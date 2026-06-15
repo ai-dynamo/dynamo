@@ -228,7 +228,7 @@ impl SchedulerState {
         self.requests.remove(uuid);
     }
 
-    /// a stranding-candidate prefill completed. Remove it from the
+    /// A stranding-candidate prefill completed. Remove it from the
     /// active queues (it is no longer scheduled) but move its `VllmRequestState`
     /// — which still owns its KV block handles — into the `pinned` map. Because
     /// the handles are retained, the blocks remain counted in
@@ -550,7 +550,7 @@ impl VllmCore {
             },
         );
         self.state.push_waiting(uuid);
-        // a disagg prefill carrying a bootstrap room is a stranding
+        // A disagg prefill carrying a bootstrap room is a stranding
         // candidate — its KV must be pinned (not freed) on prefill completion.
         if request_bootstrap_room.is_some() && self.args.worker_type == WorkerType::Prefill {
             self.state.pinned_candidates.insert(uuid);
@@ -561,7 +561,7 @@ impl VllmCore {
         uuid
     }
 
-    /// release a pinned (stranded) prefill's KV. Runs the deferred
+    /// Release a pinned (stranded) prefill's KV. Runs the deferred
     /// free signals against the KV manager and drops the pinned state. Returns
     /// `true` if a pin was held for `uuid`. Idempotent / safe on unknown uuids.
     pub(crate) fn release_pinned(&mut self, uuid: Uuid) -> bool {
@@ -582,7 +582,7 @@ impl VllmCore {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        // a worker holding pinned (stranded) KV is NOT idle — the
+        // A worker holding pinned (stranded) KV is NOT idle — the
         // replay driver must keep advancing time until the pins release.
         self.state.is_empty() && self.state.pinned.is_empty()
     }

@@ -107,6 +107,11 @@ struct PinRegistration {
     /// Boxed so the channel layer needs no knowledge of the scheduler types.
     /// `Option` so it can be taken and fired at-most-once.
     release: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Cancels the abort-timeout timer task. On the happy path the decode
+    /// connects in ~ms and releases the pin; cancelling stops the (otherwise
+    /// up-to-30s) timer task from lingering, so parked tasks track live
+    /// transfers rather than traffic × timeout.
+    abort_timer: Option<tokio::task::AbortHandle>,
 }
 
 /// Bootstrap server for prefill mockers.
@@ -409,26 +414,38 @@ impl BootstrapServer {
             transfer_id,
             PinRegistration {
                 release: Some(release),
+                abort_timer: None,
             },
         );
         // The prefill's KV is pinned and ready to pull; mark the room complete so
         // a connecting decode receives an immediate ACK.
         self.complete_room(transfer_id);
 
-        // Bound the strand by abort_timeout (when set): no decode by then →
-        // release the pin and ABORT so waiting/late decodes don't hang.
-        if let Some(timeout) = abort_timeout {
-            let server = self.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(timeout).await;
-                // Still pending → no decode pulled within the abort window.
-                if Self::fire_pin_release(&server.pins, transfer_id) {
-                    tracing::warn!(
-                        "Bootstrap: transfer {transfer_id} abort-timeout — releasing pin, aborting"
-                    );
-                    server.abort_room(transfer_id);
-                }
-            });
+        // Bound the strand so a pinned KV is ALWAYS reclaimable: an explicit
+        // `abort_timeout` when set, else `RENDEZVOUS_TIMEOUT` — the same fallback
+        // sglang's `wait_for_decode_ready` already applies (parity). Without this
+        // bound a decode no-show / transient connect failure would leak the pin
+        // forever (its blocks stay counted active, draining the pool). No decode
+        // by the deadline → release the pin and ABORT so waiting/late decodes get
+        // a clean abort rather than hanging.
+        let timeout = abort_timeout.unwrap_or(RENDEZVOUS_TIMEOUT);
+        let server = self.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            // Still pending → no decode pulled within the abort window.
+            if Self::fire_pin_release(&server.pins, transfer_id) {
+                tracing::warn!(
+                    "Bootstrap: transfer {transfer_id} abort-timeout — releasing pin, aborting"
+                );
+                server.abort_room(transfer_id);
+            }
+        });
+        // Record the timer's abort handle so the decode-connect release can cancel
+        // it (happy path: decode pulls in ~ms, no 30s task lingers). If the decode
+        // already released in the tiny window above, the entry is gone and the
+        // timer simply no-ops when it fires.
+        if let Some(mut reg) = self.pins.get_mut(&transfer_id) {
+            reg.abort_timer = Some(handle.abort_handle());
         }
     }
 
@@ -441,6 +458,12 @@ impl BootstrapServer {
             && let Some(release) = reg.release.take()
         {
             release();
+            // Decode pulled (or we are the timer firing): cancel the abort timer
+            // so it does not linger to its deadline. Aborting the currently-firing
+            // timer task is a harmless no-op.
+            if let Some(timer) = reg.abort_timer.take() {
+                timer.abort();
+            }
             return true;
         }
         false

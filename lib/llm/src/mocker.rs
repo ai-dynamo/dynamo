@@ -186,6 +186,10 @@ impl MockEngine {
         self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
     }
 
+    fn is_vllm(&self) -> bool {
+        self.engine_args.engine_type == EngineType::Vllm
+    }
+
     pub async fn start(&self, component: Component) -> Result<()> {
         // Use primary_token() instead of child_token() so the mocker continues running
         // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
@@ -204,13 +208,27 @@ impl MockEngine {
 
         Self::start_session_control_endpoint(component.clone());
 
-        // Start bootstrap server for prefill workers in disaggregated mode
+        // Start the KV-transfer (bootstrap) server for prefill workers in
+        // disaggregated mode. sglang (or vLLM with an explicit --bootstrap-ports)
+        // binds the advertised port — UNCHANGED. A vLLM prefill with no
+        // bootstrap_port still needs the cross-process channel for the
+        // disaggregated_params (NIXL-style) pull, so it binds an OS-assigned
+        // port (0); the real port is emitted in disaggregated_params and the
+        // decode reads it. sglang never reaches the port-0 branch.
+        let transfer_port = self
+            .engine_args
+            .bootstrap_port
+            .or_else(|| (self.engine_args.is_prefill() && self.is_vllm()).then_some(0));
         if self.engine_args.is_prefill()
-            && let Some(port) = self.engine_args.bootstrap_port
+            && let Some(port) = transfer_port
         {
             let server = BootstrapServer::start(port, cancel_token.clone()).await?;
+            tracing::info!(
+                requested_port = port,
+                bound_port = server.port(),
+                "KV-transfer server started for prefill worker"
+            );
             let _ = self.bootstrap_server.set(server);
-            tracing::info!(port = port, "Bootstrap server started for prefill worker");
         }
 
         let kv_component = if self.engine_args.needs_kv_publisher() {
@@ -285,29 +303,14 @@ impl MockEngine {
         });
     }
 
-    /// Wait until the scheduler at `dp_rank` reports both **block** and **sequence**
-    /// headroom for admitting a new request, up to `timeout`. Used by the decode side
-    /// of disagg before connecting to a prefill bootstrap server.
-    ///
-    /// Models real NIXL admission behavior in vLLM v1 and sglang — both engines gate
-    /// the disaggregated KV recv on **two independent budgets**: a block/token budget
-    /// (enough KV-cache blocks to absorb the projected sequence) and a sequence-slot
-    /// budget (a free slot in the per-request scheduling state — vLLM `max_num_seqs` /
-    /// `len(self.running)`; sglang's `DecodeReqToTokenPool`). Both must have headroom;
-    /// either alone blocks the NIXL recv from being armed. Without the seq-slot check
-    /// the prefill-side abort path is unreachable from realistic seq-bound load shapes.
-    ///
-    /// Returns Ok(()) immediately if schedulers haven't reported metrics yet
-    /// (total_blocks == 0) so warmup is graceful. Also treats `max_num_seqs == 0`
-    /// as "no seq cap configured" (mirrors `MockEngineArgs.max_num_seqs == None`).
-    ///
-    /// **No timeout on this side.** Real vLLM and sglang decode workers do
-    /// not run an independent "give up waiting for capacity" timer — a
-    /// WAITING_FOR_REMOTE_KVS request stays WAITING until the scheduler admits it, the
-    /// request context is dropped, or the prefill side's `kv_transfer_abort_timeout_ms`
-    /// fires and closes the bootstrap room (which surfaces to the decode side later when
-    /// it attempts `connect_to_prefill(transfer_id)` — that connect then fails with a
-    /// closed-room error). Cancellation is delegated to the surrounding request context.
+    /// Wait until the scheduler at `dp_rank` reports headroom on **both** budgets
+    /// vLLM/sglang gate the disaggregated KV recv on — block/token capacity AND a
+    /// free sequence slot (`max_num_seqs`). Either alone blocks the recv; gating on
+    /// blocks only would make the prefill-side abort path unreachable under
+    /// seq-bound load. Graceful during warmup (`total_blocks == 0` → Ok) and when
+    /// no seq cap is configured (`max_num_seqs == 0`). No timer on this side —
+    /// cancellation is delegated to the request context; the prefill's
+    /// `kv_transfer_abort_timeout_ms` bounds the strand. See the design doc.
     pub async fn wait_for_decode_kv_capacity(&self, dp_rank: u32) -> Result<()> {
         let schedulers = self
             ._schedulers
@@ -627,7 +630,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         //
         // Both resolve to a single `u64` channel key (the prefill's pin is keyed
         // by request `uuid`; the channel/correlation is keyed by that `u64`).
-        let is_vllm = self.engine_args.engine_type == EngineType::Vllm;
+        let is_vllm = self.is_vllm();
         let bootstrap_server = self.bootstrap_server.clone();
         let abort_timeout = self
             .engine_args

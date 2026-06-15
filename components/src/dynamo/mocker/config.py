@@ -348,6 +348,7 @@ def apply_worker_engine_args_overrides(
 
 def build_runtime_config(
     engine_args: MockEngineArgs,
+    engine_type: str = "vllm",
 ) -> tuple[int, ModelRuntimeConfig]:
     rc = ModelRuntimeConfig()
     # Mocker does not enforce a model context limit.
@@ -366,12 +367,22 @@ def build_runtime_config(
 
     bootstrap_port = engine_args.bootstrap_port
     if engine_args.is_prefill() and bootstrap_port is not None:
+        # Bootstrap rendezvous (sglang, or vLLM with an explicit --bootstrap-ports):
+        # advertise host/port so the (unchanged) prefill_router takes the
+        # Resolved/bootstrap branch. UNCHANGED behavior.
         host = os.environ.get(
             "DYN_HTTP_RPC_HOST", socket.gethostbyname(socket.gethostname())
         )
         rc.set_disaggregated_endpoint(
             bootstrap_host=host, bootstrap_port=bootstrap_port
         )
+    elif engine_args.is_prefill() and engine_type == "vllm":
+        # vLLM disagg WITHOUT a bootstrap address: register as a disagg/prefill
+        # worker with no bootstrap host/port so the unchanged prefill_router takes
+        # the NoBootstrapEndpoint -> output-`disaggregated_params` (NIXL) path
+        # (execution.rs:139,306). No router change; only which existing branch is
+        # taken. sglang never reaches here (it always sets bootstrap_port above).
+        rc.set_disaggregated_endpoint(bootstrap_host=None, bootstrap_port=None)
 
     apply_topology_config(rc)
 
