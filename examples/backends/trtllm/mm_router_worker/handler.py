@@ -31,6 +31,7 @@ class MMRouterHandler:
         model: str,
         model_type: str,
         block_size: int,
+        trust_remote_code: bool = False,
     ):
         """
         Initialize the MM Router Handler.
@@ -42,6 +43,7 @@ class MMRouterHandler:
             model: Model path/name
             model_type: Model type (e.g., "qwen2_vl")
             block_size: KV cache block size
+            trust_remote_code: Allow model repos that execute custom code
         """
         self.kv_router = kv_router
         self.tokenizer = tokenizer
@@ -49,6 +51,7 @@ class MMRouterHandler:
         self.model = model
         self.model_type = model_type
         self.block_size = block_size
+        self.trust_remote_code = trust_remote_code
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         """
@@ -85,6 +88,7 @@ class MMRouterHandler:
                 model_type=self.model_type,
                 request_token_ids=request.get("token_ids"),
                 request_multi_modal_data=request.get("multi_modal_data"),
+                trust_remote_code=self.trust_remote_code,
             )
 
             # Build block_mm_infos for MM-aware hash computation

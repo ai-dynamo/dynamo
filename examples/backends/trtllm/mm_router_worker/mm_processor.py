@@ -71,6 +71,7 @@ def process_multimodal(
     model_type: str,
     request_token_ids: list[int] | None = None,
     request_multi_modal_data: dict | None = None,
+    trust_remote_code: bool = False,
 ) -> ProcessedInput:
     """Process multimodal request: load images, get expanded tokens and mm_hashes."""
     try:
@@ -107,6 +108,7 @@ def process_multimodal(
             model,
             model_type,
             pil_images=pil_images,
+            trust_remote_code=trust_remote_code,
         )
 
         # Compute mm_hash for each image from backend-like multimodal structure.
@@ -187,6 +189,7 @@ def _get_expanded_tokens(
     model_path: str,
     model_type: str,
     pil_images: list[Any] | None = None,
+    trust_remote_code: bool = False,
 ) -> tuple[list[int], list[tuple[int, int]] | None]:
     """Get tokens with visual expansion and find each image's token range."""
     if processor is None:
@@ -207,7 +210,7 @@ def _get_expanded_tokens(
             raise ValueError("processor.image_token_id not found")
 
         # Get replacement_id: TRTLLM uses vocab_size + 1 in KV events
-        replacement_id = _get_replacement_id(model_path)
+        replacement_id = _get_replacement_id(model_path, trust_remote_code)
 
         # Find contiguous image token ranges and replace them in one pass
         contiguous_ranges = _find_and_replace_image_tokens(
@@ -244,7 +247,7 @@ def _compute_tokens_per_image(
         raise NotImplementedError(f"Model type '{model_type}' is not supported yet")
 
 
-def _get_replacement_id(model_path: str) -> int:
+def _get_replacement_id(model_path: str, trust_remote_code: bool = False) -> int:
     """
     Get the replacement token ID for image tokens to match TRTLLM's KV event format.
 
@@ -253,7 +256,9 @@ def _get_replacement_id(model_path: str) -> int:
     """
 
     try:
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code
+        )
         # Some models (e.g. Qwen3-VL) store vocab_size in text_config, not top-level.
         vocab_size = getattr(config, "vocab_size", None)
         if vocab_size is None and hasattr(config, "text_config"):

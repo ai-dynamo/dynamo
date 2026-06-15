@@ -102,6 +102,11 @@ def parse_args() -> argparse.Namespace:
         default="generate",
         help="Downstream TRT-LLM workers' endpoint name",
     )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Allow loading model repos that execute custom code (HF trust_remote_code). Off by default.",
+    )
 
     return parser.parse_args()
 
@@ -164,7 +169,9 @@ async def worker(runtime: DistributedRuntime) -> None:
     processor = None
     try:
         logger.info(f"Loading HuggingFace processor from {args.model}...")
-        processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(
+            args.model, trust_remote_code=args.trust_remote_code
+        )
     except Exception as e:
         logger.warning(f"Failed to load HF processor: {e}")
         logger.warning("Visual token expansion will not be available")
@@ -177,6 +184,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         model=args.model,
         model_type=args.model_type,
         block_size=args.block_size,
+        trust_remote_code=args.trust_remote_code,
     )
 
     # Register this worker's endpoint
