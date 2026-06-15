@@ -105,17 +105,18 @@ def _has_cli_flag(args: list[str], flag: str) -> bool:
     return any(arg == flag or arg.startswith(f"{flag}=") for arg in args)
 
 
-def _get_cli_flag_value(args: list[str], flag: str) -> Optional[str]:
-    """Return a CLI flag value from '--flag val' or '--flag=val' form."""
+def _get_last_cli_flag_value(args: list[str], flag: str) -> Optional[str]:
+    """Return the last CLI flag value from '--flag val' or '--flag=val' form."""
     prefix = f"{flag}="
+    value = None
     for idx, arg in enumerate(args):
         if arg.startswith(prefix):
-            return arg[len(prefix) :]
+            value = arg[len(prefix) :]
         if arg == flag:
             if idx + 1 >= len(args):
-                return None
-            return args[idx + 1]
-    return None
+                continue
+            value = args[idx + 1]
+    return value
 
 
 def _remove_cli_flag_and_value(args: list[str], flag: str) -> list[str]:
@@ -135,23 +136,10 @@ def _remove_cli_flag_and_value(args: list[str], flag: str) -> list[str]:
     return updated
 
 
-def _replace_cli_flag_value(args: list[str], flag: str, value: str) -> list[str]:
-    """Replace a flag value, supporting '--flag val' and '--flag=val' forms."""
-    updated: list[str] = []
-    skip_next = False
-    prefix = f"{flag}="
-    for arg in args:
-        if skip_next:
-            skip_next = False
-            continue
-        if arg == flag:
-            updated.extend([flag, value])
-            skip_next = True
-            continue
-        if arg.startswith(prefix):
-            updated.append(f"{flag}={value}")
-            continue
-        updated.append(arg)
+def _set_cli_flag_value(args: list[str], flag: str, value: str) -> list[str]:
+    """Set a flag value once, preserving argparse's last-value-wins behavior."""
+    updated = _remove_cli_flag_and_value(args, flag)
+    updated.extend([flag, value])
     return updated
 
 
@@ -159,7 +147,7 @@ def _normalize_multimodal_disaggregation_args(
     unknown: list[str], dynamo_config: "DynamoConfig"
 ) -> list[str]:
     """Map Dynamo's canonical multimodal EPD args to SGLang's current flags."""
-    disaggregation_mode = _get_cli_flag_value(unknown, "--disaggregation-mode")
+    disaggregation_mode = _get_last_cli_flag_value(unknown, "--disaggregation-mode")
     if disaggregation_mode is None:
         return unknown
 
@@ -168,7 +156,7 @@ def _normalize_multimodal_disaggregation_args(
         DisaggregationMode.AGGREGATED.value,
         PREFILL_DECODE_DISAGGREGATION_MODE,
     }:
-        unknown = _replace_cli_flag_value(unknown, "--disaggregation-mode", "null")
+        unknown = _set_cli_flag_value(unknown, "--disaggregation-mode", "null")
         disaggregation_mode = "null"
 
     if disaggregation_mode == DisaggregationMode.ENCODE.value:

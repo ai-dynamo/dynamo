@@ -13,17 +13,18 @@ import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
 import dynamo.sglang._compat as sglang_compat
-import dynamo.sglang.args as sglang_args
-from dynamo.common.constants import DisaggregationMode
+from dynamo.common.constants import EmbeddingTransferMode
 from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
 )
 from dynamo.sglang.args import (
+    _normalize_multimodal_disaggregation_args,
     parse_args,
     should_fetch_model,
     use_modelexpress_remote_instance,
 )
+from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
@@ -57,15 +58,24 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
-def _patch_parse_args_side_effects(monkeypatch):
-    monkeypatch.setattr(
-        sglang_args, "should_fetch_model", lambda args, model_path: False
-    )
-    monkeypatch.setattr(
-        sglang_args.ServerArgs,
-        "from_cli_args",
-        staticmethod(lambda parsed_args: parsed_args),
-    )
+def _make_sglang_config(**overrides):
+    config = DynamoSGLangConfig()
+    config.use_sglang_tokenizer = False
+    config.multimodal_encode_worker = False
+    config.multimodal_worker = False
+    config.enable_multimodal = False
+    config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
+    config.embedding_worker = False
+    config.image_diffusion_worker = False
+    config.video_generation_worker = False
+    config.enable_rl = False
+    config.frontend_decoding = False
+    config.sglang_trace_level = 2
+    config.disagg_config = None
+    config.disagg_config_key = None
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
 
 
 def test_compat_restores_sglang_top_level_exports():
@@ -332,94 +342,70 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 @pytest.mark.parametrize(
     (
         "mode",
-        "expected_sglang_mode",
         "expected_encode_worker",
         "expected_mm_worker",
-        "expected_serving_mode",
-        "expected_component",
+        "expected_args",
     ),
     [
-        ("encode", "null", True, False, DisaggregationMode.AGGREGATED, "encode"),
-        ("prefill", "prefill", False, True, DisaggregationMode.PREFILL, "prefill"),
-        ("decode", "decode", False, True, DisaggregationMode.DECODE, "backend"),
-        ("agg", "null", False, False, DisaggregationMode.AGGREGATED, "backend"),
-        ("pd", "null", False, True, DisaggregationMode.AGGREGATED, "backend"),
+        ("encode", True, False, []),
+        ("prefill", False, True, ["--disaggregation-mode", "prefill"]),
+        ("decode", False, True, ["--disaggregation-mode", "decode"]),
+        ("agg", False, False, ["--disaggregation-mode", "null"]),
+        ("pd", False, True, ["--disaggregation-mode", "null"]),
     ],
 )
-@pytest.mark.asyncio
-async def test_enable_multimodal_disaggregation_mode_maps_sglang_roles(
+def test_enable_multimodal_disaggregation_mode_maps_sglang_roles(
     mode,
-    expected_sglang_mode,
     expected_encode_worker,
     expected_mm_worker,
-    expected_serving_mode,
-    expected_component,
-    monkeypatch,
-    mock_sglang_cli,
+    expected_args,
 ):
     """Canonical multimodal roles map to SGLang's current worker flags."""
-    _patch_parse_args_side_effects(monkeypatch)
-    mock_sglang_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--enable-multimodal",
-        "--disaggregation-mode",
-        mode,
+    config = _make_sglang_config(enable_multimodal=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", mode], config
     )
 
-    config = await parse_args(sys.argv[1:])
-
-    assert config.dynamo_args.enable_multimodal is True
-    assert config.dynamo_args.multimodal_encode_worker is expected_encode_worker
-    assert config.dynamo_args.multimodal_worker is expected_mm_worker
-    assert config.server_args.disaggregation_mode == expected_sglang_mode
-    assert config.serving_mode == expected_serving_mode
-    assert config.dynamo_args.component == expected_component
-    assert getattr(config.server_args, "encoder_only", False) is expected_encode_worker
+    assert normalized == expected_args
+    assert config.multimodal_encode_worker is expected_encode_worker
+    assert config.multimodal_worker is expected_mm_worker
 
 
-@pytest.mark.asyncio
-async def test_enable_multimodal_without_role_keeps_standalone_worker(
-    monkeypatch, mock_sglang_cli
-):
+def test_multimodal_disaggregation_mode_uses_last_cli_value():
+    """Config-merged args precede CLI args, so the last explicit value must win."""
+    config = _make_sglang_config(enable_multimodal=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", "prefill", "--disaggregation-mode", "pd"],
+        config,
+    )
+
+    assert normalized == ["--disaggregation-mode", "null"]
+    assert config.multimodal_worker is True
+
+
+def test_enable_multimodal_without_role_keeps_standalone_worker():
     """Capability-only SGLang serving should not select the internal EPD worker."""
-    _patch_parse_args_side_effects(monkeypatch)
-    mock_sglang_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--enable-multimodal",
-    )
+    config = _make_sglang_config(enable_multimodal=True)
 
-    config = await parse_args(sys.argv[1:])
+    normalized = _normalize_multimodal_disaggregation_args([], config)
 
-    assert config.dynamo_args.enable_multimodal is True
-    assert config.dynamo_args.multimodal_worker is False
-    assert config.dynamo_args.multimodal_encode_worker is False
-    assert config.server_args.disaggregation_mode == "null"
-    assert config.dynamo_args.component == "backend"
+    assert normalized == []
+    assert config.enable_multimodal is True
+    assert config.multimodal_worker is False
+    assert config.multimodal_encode_worker is False
 
 
-@pytest.mark.asyncio
-async def test_legacy_multimodal_worker_sets_enable_multimodal(
-    monkeypatch, mock_sglang_cli
-):
+def test_legacy_multimodal_worker_sets_enable_multimodal():
     """Legacy multimodal role stays accepted while enabling the canonical flag."""
-    _patch_parse_args_side_effects(monkeypatch)
-    mock_sglang_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--multimodal-worker",
-        "--disaggregation-mode",
-        "decode",
-    )
+    config = _make_sglang_config(multimodal_worker=True)
 
     with pytest.warns(DeprecationWarning, match="--multimodal-worker"):
-        config = await parse_args(sys.argv[1:])
+        config.validate()
 
-    assert config.dynamo_args.enable_multimodal is True
-    assert config.dynamo_args.multimodal_worker is True
-    assert config.server_args.disaggregation_mode == "decode"
-    assert config.serving_mode == DisaggregationMode.DECODE
+    assert config.enable_multimodal is True
+    assert config.multimodal_worker is True
 
 
 @pytest.mark.asyncio
