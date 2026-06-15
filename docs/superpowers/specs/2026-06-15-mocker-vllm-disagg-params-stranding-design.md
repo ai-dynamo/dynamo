@@ -138,6 +138,29 @@ Verification: `cargo test -p dynamo-mocker --lib` + `dynamo-llm kv_router` +
 warnings`, in `dynamo:latest-vllm-dev` (install rustfmt+clippy; media-ffmpeg
 unbuildable locally).
 
+## Implemented — live engagement & robustness (current)
+
+- **Bootstrap-free live engagement (mocker-only, no router change).** A vLLM disagg
+  prefill registers `set_disaggregated_endpoint(None, None)` (`config.py`) — it
+  advertises as a disagg/prefill worker with no bootstrap host/port — so the
+  **unchanged** prefill_router takes its existing `NoBootstrapEndpoint` →
+  output-`disaggregated_params` branch (`execution.rs`), not `compute_bootstrap_room`.
+  The KV-transfer (channel) server starts for a vLLM prefill on an **OS-assigned port**
+  even without `--bootstrap-ports` (`mocker.rs`); the real port is emitted in
+  `disaggregated_params` and the decode reads it. sglang always sets `bootstrap_port`,
+  so it never reaches this branch — unchanged.
+- **Scheduler liveness.** The live loop blocks on **no runnable work**
+  (`!has_runnable_work()`), not on fully-empty (`is_empty()` counts pinned KV).
+  Otherwise a pinned-only worker hot-spins while holding a pin, starving the decode
+  workers whose admission releases it — a runaway feedback that compounds the
+  prefill→decode handoff latency. A pinned-only worker only advances via a
+  `request_rx` message (new request or `release_pin`), so blocking on `recv()` is
+  correct and deadlock-free.
+- **Always-reclaimable pin.** `register_pin` always installs the reclaim timer
+  (explicit `kv_transfer_abort_timeout_ms` else `RENDEZVOUS_TIMEOUT`) — parity with
+  sglang's `wait_for_decode_ready` — and stores the timer's `AbortHandle` so a
+  decode-connect release cancels it (no lingering task on the happy path).
+
 ## Non-goals
 
 - Replacing/altering the sglang disagg path or its bootstrap format.
