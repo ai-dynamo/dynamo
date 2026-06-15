@@ -133,6 +133,31 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--full-prompt-encoder-class",
+            env_var="DYN_FULL_PROMPT_ENCODER_CLASS",
+            default=None,
+            help=(
+                "Dotted module.ClassName path to a FullPromptEncoder subclass. "
+                "When set, the encoder worker calls this class to produce a fully-spliced "
+                "text+image embedding tensor (Mode 2) instead of image-only embeddings. "
+                "Example: 'my_package.encoders.SafeguardEncoder'. "
+                "The class must be importable inside the encoder worker's container."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--full-prompt-encoder-checkpoint",
+            env_var="DYN_FULL_PROMPT_ENCODER_CHECKPOINT",
+            default=None,
+            help=(
+                "Path to the custom FullPromptEncoder checkpoint (local dir or HF id). "
+                "Passed verbatim to FullPromptEncoder.load(checkpoint_path, device)."
+            ),
+        )
+
+        add_argument(
+            g,
             flag_name="--embedding-transfer-mode",
             env_var="DYN_VLLM_EMBEDDING_TRANSFER_MODE",
             default=EmbeddingTransferMode.NIXL_WRITE.value,
@@ -284,6 +309,10 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+
+    # Custom FullPromptEncoder (Mode 2: encoder produces full prompt embeddings)
+    full_prompt_encoder_class: Optional[str] = None
+    full_prompt_encoder_checkpoint: Optional[str] = None
 
     # Headless mode for multi-node TP/PP
     headless: bool = False

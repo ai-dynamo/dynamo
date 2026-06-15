@@ -201,6 +201,12 @@ class WorkerFactory:
         handler = EncodeWorkerHandler(
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
+            full_prompt_encoder_class=getattr(
+                config, "full_prompt_encoder_class", None
+            ),
+            full_prompt_encoder_checkpoint=getattr(
+                config, "full_prompt_encoder_checkpoint", None
+            ),
         )
         await handler.async_init(runtime)
 

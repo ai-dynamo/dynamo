@@ -32,6 +32,7 @@ from ..multimodal_utils import (
     load_vision_model,
     vLLMMultimodalRequest,
 )
+from ..multimodal_utils.custom_encoder import FullPromptEncoder, load_encoder_class
 from ..multimodal_utils.embedding_cache import EmbeddingCache
 from ..multimodal_utils.model import ModelFamily, resolve_model_family
 
@@ -59,6 +60,8 @@ class EncodeWorkerHandler:
         self,
         engine_args: AsyncEngineArgs,
         embedding_transfer_mode: EmbeddingTransferMode,
+        full_prompt_encoder_class: Optional[str] = None,
+        full_prompt_encoder_checkpoint: Optional[str] = None,
     ) -> None:
         self.engine_args = engine_args
         self.model = self.engine_args.model
@@ -104,30 +107,57 @@ class EncodeWorkerHandler:
             self.check_complete(self.send_complete_queue)
         )
 
+        # ── FullPromptEncoder (Mode 2: class-based, preferred) ───────────────
+        # Load the customer-supplied FullPromptEncoder class if configured.
+        # Takes precedence over DYN_EXTERNAL_PROMPT_EMBEDS env-var mode.
+        self.custom_encoder: Optional[FullPromptEncoder] = None
+        if full_prompt_encoder_class:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            cls = load_encoder_class(full_prompt_encoder_class)
+            self.custom_encoder = cls()
+            checkpoint = full_prompt_encoder_checkpoint or self.model
+            self.custom_encoder.load(checkpoint, device)
+            logger.info(
+                "Loaded FullPromptEncoder: class=%s checkpoint=%s device=%s",
+                full_prompt_encoder_class,
+                checkpoint,
+                device,
+            )
+
         # EXTERNAL_PROMPT_EMBEDS mode: load the LM embed_tokens weight so the
         # encoder can produce a fully-spliced text+image embedding tensor.
-        # Controlled by DYN_EXTERNAL_PROMPT_EMBEDS env var (not resolve_model_family,
-        # since the encoder model itself is a VLM that resolves to QWEN_VL).
+        # Triggered by FullPromptEncoder (class-based) or DYN_EXTERNAL_PROMPT_EMBEDS
+        # env var (legacy). embed_tokens are loaded from pd_model (served_model_name),
+        # NOT from self.model (the VLM), so text token IDs from the LM tokenizer map
+        # correctly to LM embedding vectors.
         self.lm_embed_tokens: Optional[torch.nn.Embedding] = None
         self._image_pad_token_id: Optional[int] = None
         self.vlm_tokenizer: Optional[AutoTokenizer] = None
         self._pd_hidden_size: Optional[int] = None
         self._enc_proj_cache: dict = {}
-        if int(os.getenv("DYN_EXTERNAL_PROMPT_EMBEDS", "0")):
+        _use_spliced_mode = self.custom_encoder is not None or int(
+            os.getenv("DYN_EXTERNAL_PROMPT_EMBEDS", "0")
+        )
+        if _use_spliced_mode:
+            # Determine the PD model path: served_model_name on the encoder worker
+            # is set to the PD model's HF id (e.g. Qwen/Qwen2.5-1.5B) so the
+            # Dynamo model-registry "complete worker set" check passes.
+            _smn = self.engine_args.served_model_name
+            pd_model = (
+                _smn[0] if isinstance(_smn, list) and _smn else (_smn or self.model)
+            )
             logger.info(
-                "EXTERNAL_PROMPT_EMBEDS family detected — loading LM embed_tokens "
-                "from %s (one-time CPU load, then GPU)",
-                self.model,
+                "Spliced-embed mode — loading LM embed_tokens from pd_model=%s "
+                "(one-time CPU load, then GPU)",
+                pd_model,
             )
             from transformers import AutoModel  # lazy import — heavy
 
-            # AutoModelForCausalLM doesn't support VLMs; use AutoModel with
-            # trust_remote_code so Qwen2.5-VL loads correctly.
-            # Use get_input_embeddings() rather than a hardcoded attribute path
-            # because the embedding layer lives at different paths across models
-            # (e.g. .model.embed_tokens for Qwen3, ._input_embed_layer for Qwen2.5-VL).
+            # Load embed_tokens from the PD model, NOT from self.model (the VLM).
+            # The frontend tokenizes prompts using the LM tokenizer; looking up
+            # those token IDs requires the LM's embedding matrix for correct results.
             hf = AutoModel.from_pretrained(
-                self.model,
+                pd_model,
                 device_map="cpu",
                 torch_dtype=torch.float16,
                 trust_remote_code=True,
@@ -161,11 +191,6 @@ class EncodeWorkerHandler:
 
             # Load PD model's hidden_size so the encoder can project
             # enc_hidden → pd_hidden before sending the spliced tensor.
-            # served_model_name can be a list (vLLM accepts multiple aliases).
-            _smn = self.engine_args.served_model_name
-            pd_model = (
-                _smn[0] if isinstance(_smn, list) and _smn else (_smn or self.model)
-            )
             try:
                 from transformers import AutoConfig
 
@@ -224,8 +249,11 @@ class EncodeWorkerHandler:
             request.multimodal_inputs is not None
         ), "multimodal_inputs must not be None for encode worker"
 
-        # EXTERNAL_PROMPT_EMBEDS: produce a fully-spliced text+image embedding.
-        if int(os.getenv("DYN_EXTERNAL_PROMPT_EMBEDS", "0")):
+        # Mode 2: produce a fully-spliced text+image embedding tensor.
+        # FullPromptEncoder class takes precedence; env-var is legacy fallback.
+        if self.custom_encoder is not None or int(
+            os.getenv("DYN_EXTERNAL_PROMPT_EMBEDS", "0")
+        ):
             result = await self._generate_spliced_embeds(request)
             yield result
             return
@@ -448,142 +476,154 @@ class EncodeWorkerHandler:
         """
         assert (
             request.multimodal_inputs is not None
-            and len(request.multimodal_inputs) == 1
-        ), "EXTERNAL_PROMPT_EMBEDS: exactly one image group expected per request"
+        ), "multimodal_inputs must not be None for spliced-embed mode"
+        # Legacy env-var path only handles one image; FullPromptEncoder supports multi.
+        if self.custom_encoder is None and len(request.multimodal_inputs) != 1:
+            raise ValueError(
+                "Built-in spliced-embed mode supports exactly one image per request. "
+                "Implement FullPromptEncoder to support multiple images."
+            )
 
         group = request.multimodal_inputs[0]
         if group.multimodal_input is None or not group.multimodal_input.image_url:
-            raise ValueError(
-                "image_url is required for EXTERNAL_PROMPT_EMBEDS encode worker"
-            )
+            raise ValueError("image_url is required for spliced-embed encode worker")
 
         request_id = request.request_id
 
-        # 1. Load and preprocess the image
-        image = await self.image_loader.load_image(group.multimodal_input.image_url)
-        image_inputs = self.image_processor(images=[image], return_tensors="pt")
+        # Collect all image URLs from the request groups
+        image_urls = [
+            g.multimodal_input.image_url
+            for g in request.multimodal_inputs
+            if g.multimodal_input and g.multimodal_input.image_url
+        ]
 
-        # 2. Encode image through the vision encoder → [N_img, enc_hidden]
-        with torch.no_grad():
-            image_embeds = encode_image_embeddings(
-                self.model, image_inputs, self.vision_encoder, self.projector
-            )
-        image_embeds = image_embeds.reshape(
-            -1, image_embeds.shape[-1]
-        )  # [N_img, hidden]
-        logger.debug(
-            "[spliced] %s: image_embeds shape=%s dtype=%s",
-            request_id,
-            tuple(image_embeds.shape),
-            image_embeds.dtype,
-        )
-
-        # 3. Get token IDs with <|image_pad|> via VLM template re-tokenization.
-        # The Dynamo frontend tokenizes using the PD model's text-only template,
-        # which drops image content — so prompt_token_ids has no <|image_pad|>.
-        # We re-tokenize here using the VLM tokenizer to get the correct structure.
+        # Get text token IDs from the request (tokenized by LM tokenizer on frontend)
         token_ids: list[int] = []
         if request.engine_prompt is not None:
             token_ids = getattr(request.engine_prompt, "prompt_token_ids", None) or []
 
-        if (
-            self.lm_embed_tokens is not None
-            and self._image_pad_token_id is not None
-            and self.vlm_tokenizer is not None
-        ):
-            import re
-
-            try:
-                # Decode text-only tokens to extract user message content
-                decoded = self.vlm_tokenizer.decode(
-                    token_ids, skip_special_tokens=False
-                )
-                user_match = re.search(
-                    r"<\|im_start\|>user\n(.*?)<\|im_end\|>", decoded, re.DOTALL
-                )
-                user_text = user_match.group(1).strip() if user_match else ""
-
-                # Re-render with VLM template, including image placeholder
-                vlm_messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "image": group.multimodal_input.image_url or "",
-                            },
-                            {"type": "text", "text": user_text},
-                        ],
-                    }
-                ]
-                vlm_result = self.vlm_tokenizer.apply_chat_template(
-                    vlm_messages, tokenize=True, add_generation_prompt=True
-                )
-                # apply_chat_template returns BatchEncoding (not a plain dict),
-                # plain list, or plain dict — normalize to a Python list.
-                if hasattr(vlm_result, "input_ids"):
-                    vlm_ids = list(vlm_result.input_ids)
-                elif "input_ids" in vlm_result:
-                    vlm_ids = list(vlm_result["input_ids"])
-                else:
-                    vlm_ids = list(vlm_result)
-                if self._image_pad_token_id in vlm_ids:
-                    token_ids = vlm_ids
-                    logger.debug(
-                        "[spliced] %s: re-tokenized with VLM template → %d tokens, "
-                        "image_pad at pos %d",
-                        request_id,
-                        len(token_ids),
-                        token_ids.index(self._image_pad_token_id),
-                    )
-                else:
-                    logger.warning(
-                        "[spliced] %s: VLM re-tokenize did not produce image_pad; "
-                        "falling back to original tokens",
-                        request_id,
-                    )
-            except Exception as retok_err:
-                logger.warning(
-                    "[spliced] %s: VLM re-tokenize failed (%s); using original tokens",
-                    request_id,
-                    retok_err,
-                )
-
-        if (
-            self.lm_embed_tokens is not None
-            and self._image_pad_token_id is not None
-            and self._image_pad_token_id in token_ids
-        ):
-            # 4. Find the image placeholder position and embed all tokens
-            pad_pos = token_ids.index(self._image_pad_token_id)
-            ids_tensor = torch.tensor(token_ids, dtype=torch.long, device="cuda")
-            with torch.no_grad():
-                all_text_embs = self.lm_embed_tokens(ids_tensor)  # [N_tok, hidden]
-            prefix = all_text_embs[:pad_pos]  # [N_pre, hidden]
-            suffix = all_text_embs[pad_pos + 1 :]  # [N_suf, hidden]
-
-            # 5. Splice: [prefix_text | image | suffix_text]
-            image_embeds = image_embeds.to(prefix.dtype)
-            spliced = torch.cat([prefix, image_embeds, suffix], dim=0)
-            logger.info(
-                "[spliced] %s: prefix=%d image=%d suffix=%d → total=%d",
-                request_id,
-                prefix.shape[0],
-                image_embeds.shape[0],
-                suffix.shape[0],
-                spliced.shape[0],
+        # ── Path A: FullPromptEncoder (class-based, customer-supplied) ────────
+        if self.custom_encoder is not None and self.lm_embed_tokens is not None:
+            spliced = await asyncio.to_thread(
+                self.custom_encoder.encode,
+                image_urls,
+                token_ids,
+                self.lm_embed_tokens,
             )
+            spliced = spliced.reshape(-1, spliced.shape[-1])  # ensure 2D
+
+        # ── Path B: built-in Qwen VLM re-tokenization (env-var legacy) ────────
         else:
-            # Fallback: no text (missing embed_tokens or no pad token in prompt)
-            spliced = image_embeds
-            logger.warning(
-                "[spliced] %s: falling back to image-only embedding "
-                "(lm_embed_tokens=%s, image_pad_token_id=%s, pad_in_tokens=%s)",
+            # 1. Load and preprocess the image (single-image contract for legacy path)
+            image = await self.image_loader.load_image(image_urls[0])
+            image_inputs = self.image_processor(images=[image], return_tensors="pt")
+
+            # 2. Encode image through the vision encoder → [N_img, enc_hidden]
+            with torch.no_grad():
+                image_embeds = encode_image_embeddings(
+                    self.model, image_inputs, self.vision_encoder, self.projector
+                )
+            image_embeds = image_embeds.reshape(
+                -1, image_embeds.shape[-1]
+            )  # [N_img, hidden]
+            logger.debug(
+                "[spliced] %s: image_embeds shape=%s dtype=%s",
                 request_id,
-                self.lm_embed_tokens is not None,
-                self._image_pad_token_id,
-                self._image_pad_token_id in token_ids if token_ids else False,
+                tuple(image_embeds.shape),
+                image_embeds.dtype,
             )
+
+            # Re-tokenize using VLM tokenizer to get <|image_pad|> positions.
+            # The frontend tokenizes with the LM tokenizer (no image placeholder).
+            if (
+                self.lm_embed_tokens is not None
+                and self._image_pad_token_id is not None
+                and self.vlm_tokenizer is not None
+            ):
+                import re
+
+                try:
+                    decoded = self.vlm_tokenizer.decode(
+                        token_ids, skip_special_tokens=False
+                    )
+                    user_match = re.search(
+                        r"<\|im_start\|>user\n(.*?)<\|im_end\|>", decoded, re.DOTALL
+                    )
+                    user_text = user_match.group(1).strip() if user_match else ""
+                    vlm_messages = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "image": group.multimodal_input.image_url or "",
+                                },
+                                {"type": "text", "text": user_text},
+                            ],
+                        }
+                    ]
+                    vlm_result = self.vlm_tokenizer.apply_chat_template(
+                        vlm_messages, tokenize=True, add_generation_prompt=True
+                    )
+                    if hasattr(vlm_result, "input_ids"):
+                        vlm_ids = list(vlm_result.input_ids)
+                    elif "input_ids" in vlm_result:
+                        vlm_ids = list(vlm_result["input_ids"])
+                    else:
+                        vlm_ids = list(vlm_result)
+                    if self._image_pad_token_id in vlm_ids:
+                        token_ids = vlm_ids
+                        logger.debug(
+                            "[spliced] %s: re-tokenized → %d tokens, image_pad at %d",
+                            request_id,
+                            len(token_ids),
+                            token_ids.index(self._image_pad_token_id),
+                        )
+                    else:
+                        logger.warning(
+                            "[spliced] %s: VLM re-tokenize produced no image_pad; "
+                            "falling back to original tokens",
+                            request_id,
+                        )
+                except Exception as retok_err:
+                    logger.warning(
+                        "[spliced] %s: VLM re-tokenize failed (%s); "
+                        "using original tokens",
+                        request_id,
+                        retok_err,
+                    )
+
+            if (
+                self.lm_embed_tokens is not None
+                and self._image_pad_token_id is not None
+                and self._image_pad_token_id in token_ids
+            ):
+                pad_pos = token_ids.index(self._image_pad_token_id)
+                ids_tensor = torch.tensor(token_ids, dtype=torch.long, device="cuda")
+                with torch.no_grad():
+                    all_text_embs = self.lm_embed_tokens(ids_tensor)
+                prefix = all_text_embs[:pad_pos]
+                suffix = all_text_embs[pad_pos + 1 :]
+                image_embeds = image_embeds.to(prefix.dtype)
+                spliced = torch.cat([prefix, image_embeds, suffix], dim=0)
+                logger.info(
+                    "[spliced] %s: prefix=%d image=%d suffix=%d → total=%d",
+                    request_id,
+                    prefix.shape[0],
+                    image_embeds.shape[0],
+                    suffix.shape[0],
+                    spliced.shape[0],
+                )
+            else:
+                spliced = image_embeds
+                logger.warning(
+                    "[spliced] %s: falling back to image-only embedding "
+                    "(lm_embed_tokens=%s, image_pad=%s, pad_in_tokens=%s)",
+                    request_id,
+                    self.lm_embed_tokens is not None,
+                    self._image_pad_token_id,
+                    self._image_pad_token_id in token_ids if token_ids else False,
+                )
 
         # 6. Project enc_hidden → pd_hidden on the encoder side.
         if self._pd_hidden_size is not None:
