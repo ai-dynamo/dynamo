@@ -44,25 +44,6 @@ python -m dynamo.mocker \
     --speedup-ratio 10.0
 ```
 
-### Benchmark Real Frontend Behavior With AIPerf
-
-Use a live mocker-backed deployment when the behavior you need is outside
-offline replay: OpenAI HTTP handling, frontend admission control, request
-rejection, router dispatch, status codes, and request/audit/trace correlation.
-Mocker still avoids model execution, but AIPerf drives the same endpoint shape a
-real deployment exposes.
-
-The typical loop is:
-
-1. Launch a Dynamo frontend plus one or more mocker workers.
-2. Enable any observability you need, for example `DYN_REQUEST_TRACE=1`.
-3. Run AIPerf against the frontend URL.
-
-For benchmark-driver details, see
-[Benchmarking Dynamo Deployments](../benchmarks/benchmarking.md). Use offline
-[DynoSim Runs](runs.md) first when you only need scheduler/cache simulation and
-do not need frontend rejection or HTTP behavior.
-
 ### Disaggregated Serving
 
 ```bash

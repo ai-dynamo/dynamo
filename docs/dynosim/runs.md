@@ -22,15 +22,6 @@ Use DynoSim runs when you want to:
 - compare timing and cache behavior across mocker configurations
 - validate simulation logic in CI without bringing up a distributed stack
 
-## Choosing The Right Workflow
-
-| Workflow | Use It For | What It Does Not Cover |
-| --- | --- | --- |
-| Offline DynoSim replay | Fast deterministic scheduler, cache, router, and planner simulation from Mooncake-style traces | Real HTTP/frontend admission, request rejection, transport errors, status codes |
-| Online DynoSim replay | Exercising live mock-worker runtime paths while still driving a replay workload | Full endpoint-facing benchmark ergonomics and AIPerf dashboards |
-| [Live Mocker + AIPerf](mocker.md) | Benchmarking real Dynamo frontend/router behavior without GPUs, including admission/rejection behavior | Real model execution latency |
-| Request trace to Mooncake | Replaying traffic captured by `DYN_REQUEST_TRACE` | Payload reconstruction and arbitrary text-log conversion |
-
 ## Harness Overview
 
 The DynoSim run harness wires a load driver (trace file or synthetic workload generator) into one or more mocker engine simulations and tees request/token timing into a trace collector.
@@ -75,7 +66,7 @@ flowchart TD
     MES --> P
 ```
 
-See [`lib/mocker/src/replay/offline/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [Live Simulation with Mocker](mocker.md) for engine-core details (scheduler, KV block manager).
+See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [Live Simulation with Mocker](mocker.md) for engine-core details (scheduler, KV block manager).
 
 ## Quick Start
 
@@ -196,20 +187,19 @@ Rows with no `wait_for` use `timestamp` as their start time. Rows with dependenc
 listed request to complete, then wait `delay + tool_wait_ms` before dispatch. `branches` records
 child requests spawned by this row, and `prefix_reset` marks the first row in a trajectory.
 
-Use `request_trace_to_mooncake --agentic` to create this format from Dynamo
-request traces with `agent_context`:
+Use `agent_trace_to_mooncake --agentic` to create this format from Dynamo agent traces:
 
 ```bash
-cargo run -p dynamo-bench --bin request_trace_to_mooncake -- \
+cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
   --agentic \
-  --input-path /tmp/dynamo-request-trace.jsonl \
-  --output-file /tmp/dynamo-request-trace.agentic-mooncake.jsonl
+  --input-path /tmp/dynamo-agent-trace.jsonl \
+  --output-file /tmp/dynamo-agent-trace.agentic-mooncake.jsonl
 ```
 
 Run it with:
 
 ```bash
-python -m dynamo.replay /tmp/dynamo-request-trace.agentic-mooncake.jsonl \
+python -m dynamo.replay /tmp/dynamo-agent-trace.agentic-mooncake.jsonl \
     --trace-format agentic_mooncake \
     --trace-block-size 128 \
     --replay-mode offline \
@@ -576,9 +566,4 @@ Use [Dynamo Benchmarking](../benchmarks/benchmarking.md) when:
 
 - you want end-to-end benchmarking against a live endpoint
 - you need frontend, transport, or cluster-level behavior
-- you need request admission/rejection behavior and HTTP status codes
 - you want AIPerf dashboards and endpoint-facing metrics
-
-For a no-GPU version of that endpoint-facing path, run a live mocker-backed
-Dynamo deployment and drive it with AIPerf; see [Live Simulation with
-Mocker](mocker.md).
