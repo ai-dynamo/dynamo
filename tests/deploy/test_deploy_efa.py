@@ -127,6 +127,7 @@ def assert_nixl_used_libfabric(deployment: ManagedDeployment) -> None:
 
 
 @pytest.mark.framework_with_efa
+@pytest.mark.vllm
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.post_merge
