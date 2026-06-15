@@ -519,6 +519,7 @@ impl WorkloadDriver {
                 arrival_timestamp_ms,
                 priority: turn.priority,
                 strict_priority: turn.strict_priority,
+                ..Default::default()
             };
             session.in_flight = Some(request_uuid);
             session.next_ready_at_ms = None;

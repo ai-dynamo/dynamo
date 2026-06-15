@@ -17,6 +17,10 @@ pub(super) struct DecodeResult {
     pub(super) output_signals: Vec<OutputSignal>,
     pub(super) retracted_any: bool,
     pub(super) end_ms: f64,
+    /// completed disagg-prefill stranding candidates whose KV was
+    /// withheld from freeing. The caller moves these into its pinned set; their
+    /// kv_indices stay allocated until release.
+    pub(super) pinned: Vec<SglangRequest>,
 }
 
 fn decode_capacity_state(
@@ -274,21 +278,30 @@ pub(super) fn simulate_decode_step_with_sampler(
             });
 
             if is_complete {
-                let sequence = req.sequence_tokens();
-                let tokens_to_cache = floor_to_block(sequence.len(), config.block_size);
-                if req.kv_indices.len() > tokens_to_cache {
-                    kv_manager.free_indices(&req.kv_indices[tokens_to_cache..]);
-                }
+                // a disagg-prefill stranding candidate keeps its KV
+                // pinned — withhold all frees/caching here; the caller retains
+                // kv_indices + last_node until release. This keeps the slots
+                // allocated so the pool fills (the cascade).
+                let is_pinned_candidate = config.worker_type
+                    == crate::common::protocols::WorkerType::Prefill
+                    && req.bootstrap_room.is_some();
+                if !is_pinned_candidate {
+                    let sequence = req.sequence_tokens();
+                    let tokens_to_cache = floor_to_block(sequence.len(), config.block_size);
+                    if req.kv_indices.len() > tokens_to_cache {
+                        kv_manager.free_indices(&req.kv_indices[tokens_to_cache..]);
+                    }
 
-                if let Some(last_node) = req.last_node.take() {
-                    if tokens_to_cache > 0 {
-                        kv_manager.cache_finished_req(
-                            &sequence[..tokens_to_cache],
-                            &req.kv_indices[..tokens_to_cache],
-                            last_node,
-                        );
-                    } else {
-                        kv_manager.free_request(last_node);
+                    if let Some(last_node) = req.last_node.take() {
+                        if tokens_to_cache > 0 {
+                            kv_manager.cache_finished_req(
+                                &sequence[..tokens_to_cache],
+                                &req.kv_indices[..tokens_to_cache],
+                                last_node,
+                            );
+                        } else {
+                            kv_manager.free_request(last_node);
+                        }
                     }
                 }
 
@@ -307,8 +320,16 @@ pub(super) fn simulate_decode_step_with_sampler(
     );
     kv_manager.release_decode_reservation(reservation);
 
+    let mut pinned = Vec::new();
     for &idx in completed_indices.iter().rev() {
-        running.remove(idx);
+        let req = running.remove(idx);
+        // stranding candidates carry their (unfreed) KV out to the
+        // caller's pinned set; everyone else was already freed above.
+        if config.worker_type == crate::common::protocols::WorkerType::Prefill
+            && req.bootstrap_room.is_some()
+        {
+            pinned.push(req);
+        }
     }
 
     DecodeResult {
@@ -316,5 +337,6 @@ pub(super) fn simulate_decode_step_with_sampler(
         output_signals,
         retracted_any,
         end_ms: current_time_ms + total_time.as_secs_f64() * 1000.0,
+        pinned,
     }
 }

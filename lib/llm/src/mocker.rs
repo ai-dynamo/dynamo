@@ -624,13 +624,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             .map_err(|e| Error::msg(format!("Bootstrap connection failed: {e}")))?;
         }
 
-        // Convert PreprocessedRequest to DirectRequest for scheduler
+        // Convert PreprocessedRequest to DirectRequest for scheduler.
+        //
+        // for a disagg prefill with a bootstrap room, tag the request
+        // with `bootstrap_room` so the scheduler PINS its KV on prefill
+        // completion (keeps the blocks counted active) instead of freeing them.
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
             max_output_tokens,
             uuid: Some(request_uuid),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
+            bootstrap_room: if is_prefill { bootstrap_room } else { None },
             ..Default::default()
         };
 
@@ -638,11 +643,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         self.active_requests.insert(request_uuid, request_tx);
 
         let bootstrap_server = self.bootstrap_server.clone();
-        let delayed_prefill_submission = if is_prefill {
+        // ordering fix: submit the prefill to the scheduler FIRST so
+        // its KV is genuinely allocated and (on completion) pinned. Previously
+        // submission was deferred until AFTER `wait_for_decode_ready` resolved,
+        // so the scheduler held no request during the wait — no KV, no
+        // pressure, no cascade. Now the wait only governs the *release* of the
+        // already-pinned KV (event-driven strand duration).
+        let release_pin_after_wait = if is_prefill {
             match (bootstrap_server.get().cloned(), bootstrap_room) {
                 (Some(server), Some(room_id)) => {
                     let sender = self.request_sender(dp_rank as usize).await;
-                    Some((server, room_id, sender, direct_request))
+                    self.direct(direct_request, dp_rank as usize).await;
+                    Some((server, room_id, sender))
                 }
                 _ => {
                     self.direct(direct_request, dp_rank as usize).await;
@@ -664,11 +676,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
-            if let Some((server, room_id, sender, direct_request)) = delayed_prefill_submission {
-                // Forensic logging: pin-start event with room_id + prefill dp_rank.
-                // Lets post-hoc analysis join with decode logs on room_id to build the
-                // (prefill -> decode) stranding graph. While this prefill waits for decode to
-                // arrive, its scheduler request stays active so KV stays pinned.
+            if let Some((server, room_id, sender)) = release_pin_after_wait {
+                // the prefill request is ALREADY submitted to the
+                // scheduler (above), so its KV is allocated and, once prefill
+                // compute completes, PINNED (kept counted active). This wait is
+                // the *release* trigger: the strand persists for exactly as long
+                // as the decode takes to arrive and pull the transfer
+                // (event-driven, load-dependent — not a fixed time).
+                //
+                // Forensic logging: pin-start with room_id + prefill dp_rank so
+                // post-hoc analysis can join with decode logs on room_id to
+                // reconstruct the (prefill -> decode) stranding graph.
                 let pin_start = std::time::Instant::now();
                 tracing::info!(
                     target: "mocker::kv_abort",
@@ -681,48 +699,44 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                     // timeout, abort the room so waiting/late decodes get a clean ABORT instead
                     // of hanging, surface the abort to the client, and end the stream.
                     result = server.wait_for_decode_ready(room_id, abort_timeout) => {
-                        if let Err(e) = result {
+                        // Either outcome (decode arrived, or abort-timeout)
+                        // releases the pinned KV — the strand ends here.
+                        let outcome = if let Err(e) = result {
                             tracing::warn!(
                                 "Prefill aborting transfer for room {room_id}: {e}"
                             );
                             server.abort_room(room_id);
-                            tracing::info!(
-                                target: "mocker::kv_abort",
-                                prefill_dp_rank = dp_rank,
-                                room_id,
-                                outcome = "aborted",
-                                duration_ms = pin_start.elapsed().as_millis() as u64,
-                                "prefill_kv_pin_end"
-                            );
+                            Some(e)
+                        } else {
+                            None
+                        };
+                        // Release the pinned KV back to the scheduler (event-driven
+                        // strand release). Best-effort: if the channel is closed
+                        // the scheduler is shutting down and the KV is moot.
+                        let _ = sender.send(DirectRequest::release_pin(request_uuid, dp_rank));
+                        tracing::info!(
+                            target: "mocker::kv_abort",
+                            prefill_dp_rank = dp_rank,
+                            room_id,
+                            outcome = if outcome.is_some() { "aborted" } else { "completed" },
+                            duration_ms = pin_start.elapsed().as_millis() as u64,
+                            "prefill_kv_pin_end"
+                        );
+                        if let Some(e) = outcome {
                             let _ = stream_tx.send(LLMEngineOutput::error(format!(
                                 "NIXL transfer aborted: {e}"
                             )));
                             active_requests.remove(&request_uuid);
                             return;
                         }
-                        tracing::info!(
-                            target: "mocker::kv_abort",
-                            prefill_dp_rank = dp_rank,
-                            room_id,
-                            outcome = "completed",
-                            duration_ms = pin_start.elapsed().as_millis() as u64,
-                            "prefill_kv_pin_end"
-                        );
                     }
                     _ = async_context.stopped() => {
+                        // Cancellation also releases the pin.
+                        let _ = sender.send(DirectRequest::release_pin(request_uuid, dp_rank));
                         let _ = stream_tx.send(LLMEngineOutput::cancelled());
                         active_requests.remove(&request_uuid);
                         return;
                     }
-                }
-
-                if sender.send(direct_request).is_err() {
-                    let _ = stream_tx.send(LLMEngineOutput::error(
-                        "Scheduler input channel closed before bootstrap prefill submission"
-                            .to_string(),
-                    ));
-                    active_requests.remove(&request_uuid);
-                    return;
                 }
             }
 

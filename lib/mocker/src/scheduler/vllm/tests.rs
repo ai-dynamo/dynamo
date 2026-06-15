@@ -242,6 +242,178 @@ mod core_behavior {
         assert_eq!(first.first_token_ms, second.first_token_ms);
     }
 
+    /// a disagg prefill carrying a bootstrap room must STRAND — its
+    /// KV stays counted active after prefill completes, builds pool pressure
+    /// that blocks subsequent requests (the cascade), and only frees on release.
+    #[test]
+    fn test_disagg_prefill_strands_kv_until_release() {
+        // Small pool: 4 blocks x block_size 4 = 16 token slots. A single
+        // ~16-token prefill fills the whole pool.
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .kv_transfer_bandwidth(Some(1.0))
+            .kv_bytes_per_token(Some(1_000_000))
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let mut collector = crate::replay::TraceCollector::default();
+
+        // Disagg prefill #1 — carries a bootstrap room => stranding candidate.
+        let strand_uuid = Uuid::from_u128(0xA1);
+        core.receive(DirectRequest {
+            tokens: vec![1; 12],
+            max_output_tokens: 1,
+            uuid: Some(strand_uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            bootstrap_room: Some(7),
+            ..Default::default()
+        });
+
+        assert_eq!(core.kv_manager.num_active_blocks(), 0, "no work yet");
+
+        // Run the prefill to completion.
+        let pass = core.execute_pass(&mut collector, 0.0);
+        assert!(
+            pass.output_signals
+                .iter()
+                .any(|s| s.uuid == strand_uuid && s.completed),
+            "prefill should complete in one pass"
+        );
+
+        // STRAND: the completed prefill's KV is pinned, not freed. It is no
+        // longer a tracked request, but its blocks stay counted active.
+        assert_eq!(
+            core.num_pinned(),
+            1,
+            "prefill KV must be pinned after completion"
+        );
+        assert!(!core.state.requests.contains_key(&strand_uuid));
+        let pinned_blocks = core.kv_manager.num_active_blocks();
+        assert_eq!(pinned_blocks, 4, "all 4 blocks stay active while stranded");
+
+        // The strand persists across subsequent passes (event-driven, not a
+        // fixed time): active occupancy stays up.
+        for t in 1..=3 {
+            core.execute_pass(&mut collector, t as f64);
+            assert_eq!(
+                core.kv_manager.num_active_blocks(),
+                pinned_blocks,
+                "strand must hold KV across passes until released"
+            );
+        }
+
+        // CASCADE: a new prefill cannot be admitted — the pool is full of
+        // stranded KV — so it stays queued (waiting), producing no completion.
+        let blocked_uuid = Uuid::from_u128(0xB2);
+        core.receive(DirectRequest {
+            tokens: vec![2; 12],
+            max_output_tokens: 1,
+            uuid: Some(blocked_uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            bootstrap_room: Some(8),
+            ..Default::default()
+        });
+        let pass = core.execute_pass(&mut collector, 10.0);
+        assert!(
+            !pass
+                .output_signals
+                .iter()
+                .any(|s| s.uuid == blocked_uuid && s.completed),
+            "second prefill must NOT complete while the pool is full of stranded KV"
+        );
+        assert!(
+            core.state.requests.contains_key(&blocked_uuid),
+            "blocked prefill stays queued (cascade)"
+        );
+        assert_eq!(core.kv_manager.num_active_blocks(), pinned_blocks);
+
+        // RELEASE: decode arrived (or aborted). Free the strand. Now the
+        // blocked request can be admitted and complete.
+        assert!(
+            core.release_pinned(strand_uuid),
+            "release must free the pin"
+        );
+        assert_eq!(core.num_pinned(), 0);
+
+        // Drive passes; the previously-blocked prefill now runs to completion
+        // and frees normally (it too is a strand candidate — pin then release).
+        let mut blocked_completed = false;
+        for t in 11..=20 {
+            let pass = core.execute_pass(&mut collector, t as f64);
+            if pass
+                .output_signals
+                .iter()
+                .any(|s| s.uuid == blocked_uuid && s.completed)
+            {
+                blocked_completed = true;
+                break;
+            }
+        }
+        assert!(
+            blocked_completed,
+            "blocked prefill admits + completes after release"
+        );
+        // Its KV is now itself pinned (it's a strand candidate); release it and
+        // confirm the pool drains fully.
+        assert_eq!(core.num_pinned(), 1);
+        core.release_pinned(blocked_uuid);
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            0,
+            "pool fully drains once all strands release"
+        );
+    }
+
+    /// a NON-disagg prefill (no bootstrap room) must NOT strand — it
+    /// frees its KV immediately on completion, as before.
+    #[test]
+    fn test_non_bootstrap_prefill_does_not_strand() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .kv_transfer_bandwidth(Some(1.0))
+            .kv_bytes_per_token(Some(1_000_000))
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let mut collector = crate::replay::TraceCollector::default();
+        let uuid = Uuid::from_u128(0xC3);
+        core.receive(DirectRequest {
+            tokens: vec![1; 12],
+            max_output_tokens: 1,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            // no bootstrap_room
+            ..Default::default()
+        });
+        let pass = core.execute_pass(&mut collector, 0.0);
+        assert!(
+            pass.output_signals
+                .iter()
+                .any(|s| s.uuid == uuid && s.completed)
+        );
+        assert_eq!(core.num_pinned(), 0, "non-disagg prefill never pins");
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            0,
+            "non-disagg prefill frees KV immediately on completion"
+        );
+    }
+
     #[test]
     fn test_prefill_completion_emits_handoff_delay() {
         let args = MockEngineArgs::builder()

@@ -208,6 +208,24 @@ impl EngineCore {
         }
     }
 
+    /// enable modeled time-based pin release for the offline replay
+    /// path (which can't observe the live cross-instance decode pickup).
+    pub(crate) fn set_time_based_pin_release(&mut self, enabled: bool) {
+        match self {
+            Self::Vllm(core) => core.set_time_based_pin_release(enabled),
+            Self::Sglang(core) => core.set_time_based_pin_release(enabled),
+        }
+    }
+
+    /// earliest modeled pin-release deadline across this core's
+    /// stranded prefills, if any.
+    pub(crate) fn earliest_pin_deadline(&self) -> Option<f64> {
+        match self {
+            Self::Vllm(core) => core.earliest_pin_deadline(),
+            Self::Sglang(core) => core.earliest_pin_deadline(),
+        }
+    }
+
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
         match self {
             Self::Vllm(core) => core.execute_hidden_pass(now_ms),

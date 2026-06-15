@@ -78,6 +78,7 @@ fn make_decoded_request(
         materialized_tokens: prompt_len,
         cached_tokens: 0,
         allocated_tokens: ceil_to_block(prompt_len, config.block_size),
+        bootstrap_room: None,
     }];
     let result = simulate_decode_step(&mut running, kv_manager, config, 0.0, false);
     assert_eq!(result.output_signals.len(), 1);
@@ -170,6 +171,7 @@ mod scheduling {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                bootstrap_room: None,
             },
             SglangRequest {
                 uuid: match_uuid,
@@ -181,6 +183,7 @@ mod scheduling {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                bootstrap_room: None,
             },
         ]);
 
@@ -215,6 +218,7 @@ mod scheduling {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                bootstrap_room: None,
             });
         }
         let unique_uuid = Uuid::new_v4();
@@ -228,6 +232,7 @@ mod scheduling {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            bootstrap_room: None,
         });
 
         apply_schedule_policy(&mut waiting, &kv_manager, &config);
@@ -264,6 +269,7 @@ mod core_behavior {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            bootstrap_room: None,
         }]);
 
         let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
@@ -299,6 +305,7 @@ mod core_behavior {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                bootstrap_room: None,
             },
             SglangRequest {
                 uuid: second_uuid,
@@ -310,6 +317,7 @@ mod core_behavior {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                bootstrap_room: None,
             },
         ]);
 
@@ -344,6 +352,7 @@ mod core_behavior {
             materialized_tokens: 6,
             cached_tokens: 4,
             allocated_tokens: 8,
+            bootstrap_room: None,
         }];
 
         let first = simulate_decode_step(&mut running, &mut kv_manager, &config, 0.0, false);
@@ -389,6 +398,7 @@ mod core_behavior {
             materialized_tokens: 4,
             cached_tokens: 0,
             allocated_tokens: 4,
+            bootstrap_room: None,
         }];
 
         let mut fast_kv_manager = SglangKvManager::new(64, 4, KvEventPublishers::default(), 0);
@@ -403,6 +413,7 @@ mod core_behavior {
             materialized_tokens: 4,
             cached_tokens: 0,
             allocated_tokens: 4,
+            bootstrap_room: None,
         }];
 
         let base = simulate_decode_step(
@@ -453,6 +464,7 @@ mod core_behavior {
                 materialized_tokens: 7,
                 cached_tokens: 4,
                 allocated_tokens: 8,
+                bootstrap_room: None,
             },
             SglangRequest {
                 uuid: Uuid::new_v4(),
@@ -464,6 +476,7 @@ mod core_behavior {
                 materialized_tokens: 5,
                 cached_tokens: 4,
                 allocated_tokens: 8,
+                bootstrap_room: None,
             },
         ];
 
@@ -496,6 +509,7 @@ mod core_behavior {
             materialized_tokens: 4,
             cached_tokens: 0,
             allocated_tokens: 4,
+            bootstrap_room: None,
         }];
 
         simulate_decode_step(&mut running, &mut kv_manager, &config, 0.0, false);
@@ -530,6 +544,73 @@ mod core_behavior {
         let pass = core.execute_pass_internal(None, 0.0);
         assert_eq!(pass.completed_requests, 0);
         assert_eq!(pass.mocker_metrics.active_decode_blocks, 2);
+    }
+
+    /// sglang: a disagg prefill carrying a bootstrap room strands —
+    /// its KV stays allocated (active occupancy stays up) after the prefill
+    /// completes, and only frees on release.
+    #[test]
+    fn test_sglang_disagg_prefill_strands_kv_until_release() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(32)
+            .block_size(4)
+            .speedup_ratio(0.0)
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+        let strand_uuid = Uuid::from_u128(0xD15A);
+        core.receive(DirectRequest {
+            tokens: vec![1; 8],
+            max_output_tokens: 1,
+            uuid: Some(strand_uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            bootstrap_room: Some(42),
+            ..Default::default()
+        });
+
+        // Run the prefill to completion.
+        let mut occupancy = 0;
+        for _ in 0..4 {
+            let pass = core.execute_pass_internal(None, 0.0);
+            occupancy = pass.mocker_metrics.active_decode_blocks;
+            if pass.completed_requests > 0 {
+                break;
+            }
+        }
+        // STRAND: KV pinned, occupancy held.
+        assert_eq!(
+            core.num_pinned(),
+            1,
+            "prefill KV must be pinned after completion"
+        );
+        assert!(occupancy > 0, "stranded KV keeps blocks occupied");
+
+        // The strand persists: occupancy stays up across passes.
+        for _ in 0..3 {
+            let pass = core.execute_pass_internal(None, 0.0);
+            assert_eq!(core.num_pinned(), 1);
+            assert!(
+                pass.mocker_metrics.active_decode_blocks >= occupancy,
+                "strand must hold KV across passes"
+            );
+        }
+
+        // RELEASE: decode arrived (or aborted). Free the strand.
+        assert!(core.release_pinned(strand_uuid), "release frees the pin");
+        assert_eq!(core.num_pinned(), 0);
+        let pass = core.execute_pass_internal(None, 0.0);
+        assert_eq!(
+            pass.mocker_metrics.active_decode_blocks, 0,
+            "pool drains once the strand releases"
+        );
     }
 
     #[test]
@@ -845,6 +926,7 @@ mod router_events {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            bootstrap_room: None,
         }]);
 
         let chunk1 = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);

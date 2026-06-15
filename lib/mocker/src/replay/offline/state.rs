@@ -281,6 +281,7 @@ mod tests {
                 arrival_timestamp_ms: Some(0.0),
                 priority: -3,
                 strict_priority: 9,
+                ..Default::default()
             },
             0.0,
         );

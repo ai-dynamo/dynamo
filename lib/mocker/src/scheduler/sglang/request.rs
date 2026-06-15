@@ -20,6 +20,10 @@ pub(super) struct SglangRequest {
     pub(super) materialized_tokens: usize,
     pub(super) cached_tokens: usize,
     pub(super) allocated_tokens: usize,
+    /// set for a disagg-prefill stranding candidate. When `Some` on a
+    /// prefill worker, this request's KV (kv_indices + last_node) is pinned —
+    /// retained, not freed — on completion until release.
+    pub(super) bootstrap_room: Option<u64>,
 }
 
 impl SglangRequest {
@@ -171,6 +175,7 @@ impl From<DirectRequest> for SglangRequest {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            bootstrap_room: req.bootstrap_room,
         }
     }
 }

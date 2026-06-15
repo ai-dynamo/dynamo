@@ -238,6 +238,18 @@ impl SingleRuntime {
             return Ok(());
         }
 
+        // a worker holding only stranded (pinned) prefill KV does no
+        // model work, so `execute_pass` can't advance time on its own. Jump
+        // virtual time to the earliest modeled strand-release deadline so the
+        // pin frees and replay makes progress (mirrors the offload stall-advance).
+        if let Some(deadline) = self.worker.earliest_pin_deadline()
+            && deadline > self.current_time_ms
+        {
+            self.current_time_ms = deadline;
+            self.consecutive_no_progress_passes = 0;
+            return Ok(());
+        }
+
         self.consecutive_no_progress_passes += 1;
         if self.consecutive_no_progress_passes >= MAX_CONSECUTIVE_NO_PROGRESS_PASSES
             && !self.worker.is_empty()

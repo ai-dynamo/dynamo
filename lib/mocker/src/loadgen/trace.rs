@@ -90,6 +90,7 @@ impl TurnTrace {
             arrival_timestamp_ms,
             priority: self.priority,
             strict_priority: self.strict_priority,
+            ..Default::default()
         })
     }
 

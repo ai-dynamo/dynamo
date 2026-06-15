@@ -31,6 +31,18 @@ pub(crate) struct SglangCore {
     pub(super) kv_manager: SglangKvManager,
     speculative_sampler: Option<SpeculativeDecodeSampler>,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
+    /// completed disagg-prefill requests whose KV (kv_indices +
+    /// last_node) is *pinned* — retained, not freed — modeling NIXL behavior
+    /// where prefill KV stays resident until the matching decode pulls the
+    /// transfer. The retained kv_indices keep those slots out of the free pool,
+    /// so `active_kv_blocks()` stays elevated (the cascade). Released via
+    /// [`SglangCore::release_pinned`].
+    pinned: std::collections::HashMap<Uuid, SglangRequest>,
+    /// Replay: release pins on a modeled virtual-time deadline instead
+    /// of a live decode event. See the vLLM core for the rationale.
+    time_based_pin_release: bool,
+    /// uuid -> virtual-time (ms) deadline for time-based pin release.
+    pinned_release_at: std::collections::HashMap<Uuid, f64>,
 }
 
 impl SglangCore {
@@ -92,10 +104,50 @@ impl SglangCore {
             ),
             speculative_sampler,
             kv_event_buffer,
+            pinned: std::collections::HashMap::new(),
+            time_based_pin_release: false,
+            pinned_release_at: std::collections::HashMap::new(),
         }
     }
 
+    /// switch this core to modeled time-based pin release (replay).
+    pub(crate) fn set_time_based_pin_release(&mut self, enabled: bool) {
+        self.time_based_pin_release = enabled;
+    }
+
+    /// Replay: release any time-based pins whose deadline has passed.
+    fn release_due_pins(&mut self, now_ms: f64) {
+        if self.pinned_release_at.is_empty() {
+            return;
+        }
+        let due: Vec<Uuid> = self
+            .pinned_release_at
+            .iter()
+            .filter(|&(_, &deadline)| deadline <= now_ms)
+            .map(|(&uuid, _)| uuid)
+            .collect();
+        for uuid in due {
+            self.pinned_release_at.remove(&uuid);
+            self.release_pinned(uuid);
+        }
+    }
+
+    /// Replay: earliest modeled pin-release deadline, if any.
+    pub(crate) fn earliest_pin_deadline(&self) -> Option<f64> {
+        self.pinned_release_at
+            .values()
+            .copied()
+            .fold(None, |acc, d| Some(acc.map_or(d, |a: f64| a.min(d))))
+    }
+
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
+        // Live release: a release-pin control message frees the pinned
+        // KV for `uuid` rather than enqueueing a new request.
+        if request.release_pin {
+            let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+            self.release_pinned(uuid);
+            return uuid;
+        }
         let request = SglangRequest::from(request);
         request.debug_assert_invariants(self.config.block_size);
         let uuid = request.uuid;
@@ -103,12 +155,35 @@ impl SglangCore {
         uuid
     }
 
+    /// release a pinned (stranded) prefill's KV. Frees the retained
+    /// kv_indices and last_node back to the KV manager and drops the pinned
+    /// state. Returns `true` if a pin was held. Idempotent.
+    pub(crate) fn release_pinned(&mut self, uuid: Uuid) -> bool {
+        let Some(mut req) = self.pinned.remove(&uuid) else {
+            return false;
+        };
+        if !req.kv_indices.is_empty() {
+            self.kv_manager.free_indices(&req.kv_indices);
+        }
+        if let Some(last_node) = req.last_node.take() {
+            self.kv_manager.free_request(last_node);
+        }
+        true
+    }
+
+    /// Number of currently pinned (stranded) prefill requests. Test/forensics.
+    #[cfg(test)]
+    pub(crate) fn num_pinned(&self) -> usize {
+        self.pinned.len()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
-        self.waiting.is_empty() && self.running.is_empty()
+        // a worker holding pinned (stranded) KV is not idle.
+        self.waiting.is_empty() && self.running.is_empty() && self.pinned.is_empty()
     }
 
     pub(crate) fn num_requests(&self) -> usize {
-        self.waiting.len() + self.running.len()
+        self.waiting.len() + self.running.len() + self.pinned.len()
     }
 
     pub(crate) fn execute_pass(
@@ -128,6 +203,8 @@ impl SglangCore {
         mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
     ) -> EnginePassResult {
+        // Replay: release modeled-time strands whose deadline elapsed.
+        self.release_due_pins(now_ms);
         apply_schedule_policy(&mut self.waiting, &self.kv_manager, &self.config);
 
         let admit = get_new_batch_prefill(
@@ -199,6 +276,25 @@ impl SglangCore {
 
         for req in decode.requests.drain(..).rev() {
             self.waiting.push_front(req);
+        }
+
+        // stranded prefills — retain their (unfreed) KV in the pinned
+        // set until the matching decode releases it.
+        for req in decode.pinned.drain(..) {
+            // Replay: schedule a modeled time-based release at decode_end +
+            // handoff/transfer delay (the offline path can't observe the live
+            // decode pickup).
+            if self.time_based_pin_release {
+                let handoff = decode
+                    .output_signals
+                    .iter()
+                    .find(|s| s.uuid == req.uuid)
+                    .and_then(|s| s.handoff_delay_ms)
+                    .unwrap_or(0.0);
+                self.pinned_release_at
+                    .insert(req.uuid, decode.end_ms + handoff);
+            }
+            self.pinned.insert(req.uuid, req);
         }
 
         if decode.retracted_any {

@@ -12,7 +12,7 @@ pub(crate) struct ReplayWorkerCore {
 
 impl ReplayWorkerCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
-        let core = match args.engine_type {
+        let mut core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
             | crate::common::protocols::EngineType::Trtllm => {
                 let mut core = VllmCore::new(args);
@@ -23,11 +23,14 @@ impl ReplayWorkerCore {
                 EngineCore::Sglang(SglangCore::new(args))
             }
         };
+        // offline replay can't observe live decode pickup, so stranded
+        // prefill KV is released on a modeled time-based deadline.
+        core.set_time_based_pin_release(true);
         Self { core }
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let core = match args.engine_type {
+        let mut core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
             | crate::common::protocols::EngineType::Trtllm => {
                 let mut core = VllmCore::new_with_kv_capture(args, worker_id);
@@ -38,6 +41,7 @@ impl ReplayWorkerCore {
                 EngineCore::Sglang(SglangCore::new_with_kv_capture(args, worker_id))
             }
         };
+        core.set_time_based_pin_release(true);
         Self { core }
     }
 
@@ -72,5 +76,11 @@ impl ReplayWorkerCore {
         now_ms: f64,
     ) -> EnginePassResult {
         self.core.execute_pass(collector, now_ms)
+    }
+
+    /// earliest modeled strand-release deadline, if any. Lets the
+    /// driver advance virtual time to a pin release when otherwise idle.
+    pub(crate) fn earliest_pin_deadline(&self) -> Option<f64> {
+        self.core.earliest_pin_deadline()
     }
 }

@@ -222,11 +222,36 @@ pub struct DirectRequest {
     /// not affect scheduling inside the selected mock engine.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub strict_priority: u32,
+    /// Disaggregated prefill stranding: when set on a prefill
+    /// worker, the request's KV blocks are *pinned* (kept counted as active)
+    /// after prefill compute completes, instead of being freed immediately.
+    /// The pin models real NIXL behavior where prefill KV stays resident until
+    /// the matching decode pulls the transfer. `None` disables stranding (the
+    /// request frees normally on completion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_room: Option<u64>,
+    /// Release-pin control message (live path): when `true`, this is
+    /// not a new request but a signal to release the pinned KV for `uuid`
+    /// (decode pulled the transfer, or the transfer aborted). The scheduler
+    /// frees the deferred blocks and drops the pinned state instead of
+    /// enqueueing a new sequence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub release_pin: bool,
 }
 
 impl DirectRequest {
     pub fn router_priorities(&self) -> (f64, u32) {
         (f64::from(self.priority.max(0)), self.strict_priority)
+    }
+
+    /// Build a release-pin control message for the live path.
+    pub fn release_pin(uuid: Uuid, dp_rank: u32) -> Self {
+        Self {
+            uuid: Some(uuid),
+            dp_rank,
+            release_pin: true,
+            ..Default::default()
+        }
     }
 }
 
@@ -236,6 +261,10 @@ fn is_zero_i32(value: &i32) -> bool {
 
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Represents the cost of prefilling content in the cache

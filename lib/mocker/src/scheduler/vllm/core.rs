@@ -90,6 +90,18 @@ pub(crate) struct SchedulerState {
     running_members: FxHashSet<Uuid>,
     pub(crate) requests: FxHashMap<Uuid, VllmRequestState>,
     pub(crate) preemptions_total: u64,
+    /// Disaggregated-prefill stranding. Request uuids whose KV must
+    /// be *pinned* on prefill completion instead of freed: a disagg prefill
+    /// whose `DirectRequest` carried a `bootstrap_room`. Recorded at `receive`.
+    pinned_candidates: FxHashSet<Uuid>,
+    /// Pinned request states whose prefill compute has completed but whose KV
+    /// has NOT been freed (modeling NIXL: prefill KV stays resident until the
+    /// matching decode pulls the transfer). The retained `ActiveSequence` keeps
+    /// its block handles, so these blocks stay counted in
+    /// `KvManager::num_active_blocks()` and create real pool pressure (the
+    /// cascade). Released via [`VllmCore::release_pinned`] (live: decode-ready
+    /// or abort; replay: modeled time-based release).
+    pub(crate) pinned: FxHashMap<Uuid, VllmRequestState>,
 }
 
 pub(super) struct PreemptedRequest {
@@ -205,6 +217,20 @@ impl SchedulerState {
         self.waiting_members.remove(uuid);
         self.running_members.remove(uuid);
         self.requests.remove(uuid);
+    }
+
+    /// a stranding-candidate prefill completed. Remove it from the
+    /// active queues (it is no longer scheduled) but move its `VllmRequestState`
+    /// — which still owns its KV block handles — into the `pinned` map. Because
+    /// the handles are retained, the blocks remain counted in
+    /// `num_active_blocks()` until `release_pinned`.
+    pub(crate) fn pin_completed(&mut self, uuid: &Uuid) {
+        self.waiting_members.remove(uuid);
+        self.running_members.remove(uuid);
+        self.pinned_candidates.remove(uuid);
+        if let Some(state) = self.requests.remove(uuid) {
+            self.pinned.insert(*uuid, state);
+        }
     }
 
     pub(crate) fn running_sequence_mut(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
@@ -370,6 +396,17 @@ pub(crate) struct VllmCore {
     /// uuid↔handle mapping.
     #[cfg(feature = "kvbm-offload")]
     pub(super) requests_awaiting_swap_in: Vec<AwaitingSwapIn>,
+
+    /// Replay path: when `true`, pinned (stranded) prefills are
+    /// released on a MODELED virtual-time deadline instead of a live decode
+    /// event. The offline replay can't observe the cross-instance decode pickup,
+    /// so the strand duration is the modeled handoff/transfer time recorded in
+    /// `pinned_release_at`. Live workers leave this `false` and release via the
+    /// event-driven `release_pin` control message.
+    time_based_pin_release: bool,
+    /// uuid -> virtual-time (ms) at which a time-based pin should release.
+    /// Drained at pass entry. Only populated when `time_based_pin_release`.
+    pinned_release_at: FxHashMap<Uuid, f64>,
 }
 
 impl VllmCore {
@@ -433,6 +470,31 @@ impl VllmCore {
             kv_event_buffer,
             #[cfg(feature = "kvbm-offload")]
             requests_awaiting_swap_in: Vec::new(),
+            time_based_pin_release: false,
+            pinned_release_at: FxHashMap::default(),
+        }
+    }
+
+    /// switch this core to modeled time-based pin release (replay).
+    pub(crate) fn set_time_based_pin_release(&mut self, enabled: bool) {
+        self.time_based_pin_release = enabled;
+    }
+
+    /// release any time-based pins whose modeled deadline has passed.
+    /// Called at pass entry by the offline replay driver (no-op for live).
+    fn release_due_pins(&mut self, now_ms: f64) {
+        if self.pinned_release_at.is_empty() {
+            return;
+        }
+        let due: Vec<Uuid> = self
+            .pinned_release_at
+            .iter()
+            .filter(|&(_, &deadline)| deadline <= now_ms)
+            .map(|(&uuid, _)| uuid)
+            .collect();
+        for uuid in due {
+            self.pinned_release_at.remove(&uuid);
+            self.release_pinned(uuid);
         }
     }
 
@@ -457,6 +519,13 @@ impl VllmCore {
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        // Live release: a release-pin control message is not a new
+        // sequence — free the pinned KV for `uuid` and return.
+        if request.release_pin {
+            self.release_pinned(uuid);
+            return uuid;
+        }
+        let request_bootstrap_room = request.bootstrap_room;
         let mut max_output_tokens = request.max_output_tokens;
         if let Some(clamped) = policy::normalize_max_output_tokens(
             self.args.scheduling_policy(),
@@ -491,18 +560,55 @@ impl VllmCore {
             },
         );
         self.state.push_waiting(uuid);
+        // a disagg prefill carrying a bootstrap room is a stranding
+        // candidate — its KV must be pinned (not freed) on prefill completion.
+        if request_bootstrap_room.is_some() && self.args.worker_type == WorkerType::Prefill {
+            self.state.pinned_candidates.insert(uuid);
+        }
         if let Some(request) = self.state.requests.get(&uuid) {
             request.debug_assert_progress(uuid);
         }
         uuid
     }
 
+    /// release a pinned (stranded) prefill's KV. Runs the deferred
+    /// free signals against the KV manager and drops the pinned state. Returns
+    /// `true` if a pin was held for `uuid`. Idempotent / safe on unknown uuids.
+    pub(crate) fn release_pinned(&mut self, uuid: Uuid) -> bool {
+        self.state.pinned_candidates.remove(&uuid);
+        let Some(request) = self.state.pinned.remove(&uuid) else {
+            return false;
+        };
+        for signal in request.sequence.free_signal() {
+            self.kv_manager.process(&signal);
+        }
+        true
+    }
+
+    /// Number of currently pinned (stranded) prefill requests. Test/forensics.
+    #[cfg(test)]
+    pub(crate) fn num_pinned(&self) -> usize {
+        self.state.pinned.len()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
-        self.state.is_empty()
+        // a worker holding pinned (stranded) KV is NOT idle — the
+        // replay driver must keep advancing time until the pins release.
+        self.state.is_empty() && self.state.pinned.is_empty()
     }
 
     pub(crate) fn num_requests(&self) -> usize {
-        self.state.requests.len()
+        self.state.requests.len() + self.state.pinned.len()
+    }
+
+    /// Replay: the earliest modeled pin-release deadline, if any. The
+    /// offline driver uses this to advance virtual time to a strand release when
+    /// no other work is pending (mirrors the offload stall-advance).
+    pub(crate) fn earliest_pin_deadline(&self) -> Option<f64> {
+        self.pinned_release_at
+            .values()
+            .copied()
+            .fold(None, |acc, d| Some(acc.map_or(d, |a: f64| a.min(d))))
     }
 
     /// Read-only view of the scheduler state for policy tests that assert on
@@ -768,6 +874,8 @@ impl VllmCore {
         now_ms: f64,
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> EnginePassResult {
+        // Replay: release modeled-time strands whose deadline elapsed.
+        self.release_due_pins(now_ms);
         let requests_before = self.state.requests.len();
         #[cfg(feature = "kvbm-offload")]
         self.tick_and_promote_swap_ins(now_ms);
@@ -1266,12 +1374,53 @@ impl VllmCore {
         for uuid in ready {
             let mut emitted = false;
             let mut completed = false;
+            // disagg-prefill stranding candidate. On completion its
+            // trailing free (`Deref`) signals are withheld so its KV stays
+            // counted active until `release_pinned`.
+            let is_pinned_candidate = self.state.pinned_candidates.contains(&uuid);
             loop {
                 self.state.debug_assert_ready_to_decode(uuid);
                 let Some(sequence) = self.state.running_sequence_mut(uuid) else {
                     break;
                 };
                 let signals = sequence.generate();
+                let reached_max = sequence.generated_tokens() >= sequence.max_output_tokens();
+                // For a stranding candidate that just completed, withhold the
+                // trailing free signals: apply only allocation (`Use`) signals,
+                // keep the `Deref` frees deferred until release. The retained
+                // sequence reproduces them via `free_signal()` at that point.
+                if is_pinned_candidate && reached_max && !signals.is_empty() {
+                    let alloc_only: Vec<MoveBlock> = signals
+                        .iter()
+                        .filter(|s| !matches!(s, MoveBlock::Deref(_)))
+                        .cloned()
+                        .collect();
+                    if alloc_only.is_empty() || process_signals(&mut self.kv_manager, &alloc_only) {
+                        // Commit the final token's allocation so the retained
+                        // sequence's `num_allocated_tokens` covers its FULL
+                        // footprint (including the just-allocated trailing
+                        // block). Otherwise `free_signal()` at release would
+                        // leave that block stranded forever.
+                        sequence.commit_allocation(sequence.len());
+                        emitted = true;
+                        completed = true;
+                        break;
+                    }
+                    // Allocation for the final token failed — fall through to
+                    // the normal preemption path below.
+                    sequence.pop();
+                    let Some(preempted) = self.policy_preempt() else {
+                        break;
+                    };
+                    running_changed = true;
+                    for signal in preempted.signals {
+                        self.kv_manager.process(&signal);
+                    }
+                    if preempted.uuid == uuid {
+                        break;
+                    }
+                    continue;
+                }
                 if signals.is_empty() || process_signals(&mut self.kv_manager, &signals) {
                     if !signals.is_empty()
                         && sequence.generated_tokens() < sequence.max_output_tokens()
@@ -1319,7 +1468,23 @@ impl VllmCore {
                 handoff_delay_ms,
             });
             if completed {
-                self.state.complete(&uuid);
+                if is_pinned_candidate {
+                    // strand. Move the completed prefill's state
+                    // (still holding its KV block handles) into the pinned set
+                    // instead of freeing it. Its blocks stay counted active in
+                    // the KV manager — building pool pressure (the cascade) —
+                    // until `release_pinned` (decode-ready or abort).
+                    self.state.pin_completed(&uuid);
+                    // Replay: schedule a modeled time-based release at
+                    // decode_start + handoff/transfer delay, since the offline
+                    // path can't observe the live decode pickup.
+                    if self.time_based_pin_release {
+                        let deadline = decode_end_ms + handoff_delay_ms.unwrap_or(0.0);
+                        self.pinned_release_at.insert(uuid, deadline);
+                    }
+                } else {
+                    self.state.complete(&uuid);
+                }
                 running_changed = true;
             }
         }
