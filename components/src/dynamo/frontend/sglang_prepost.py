@@ -22,13 +22,9 @@ from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
-from sglang.srt.parser.jinja_template_utils import (
-    detect_jinja_template_content_format,
-    process_content_for_template_format,
-)
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
-from .utils import random_call_id
+from .utils import PreprocessError, random_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -264,10 +260,7 @@ def create_parsers(
             )
 
     reasoning_parser = None
-    guided_decoding_active = tool_choice == "required" or _is_named_tool_choice(
-        tool_choice
-    )
-    if reasoning_parser_name and not guided_decoding_active:
+    if reasoning_parser_name:
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
@@ -369,16 +362,24 @@ def _normalize_openai_thinking_template_kwargs(
     chat_template_kwargs = dict(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
+
+    def setdefault_reasoning(enabled: bool) -> None:
+        # Different SGLang model families consult different template toggles.
+        chat_template_kwargs.setdefault("thinking", enabled)
+        chat_template_kwargs.setdefault("enable_thinking", enabled)
+
     thinking = request.get("thinking")
-    if "thinking" not in chat_template_kwargs:
-        if isinstance(thinking, bool):
-            chat_template_kwargs["thinking"] = thinking
-        elif isinstance(thinking, dict):
-            thinking_type = thinking.get("type")
-            if thinking_type == "enabled":
-                chat_template_kwargs["thinking"] = True
-            elif thinking_type == "disabled":
-                chat_template_kwargs["thinking"] = False
+    if isinstance(thinking, bool):
+        setdefault_reasoning(thinking)
+    elif isinstance(thinking, dict):
+        thinking_type = thinking.get("type")
+        if thinking_type == "enabled":
+            setdefault_reasoning(True)
+        elif thinking_type == "disabled":
+            setdefault_reasoning(False)
+
+    if request.get("reasoning_effort") == "none":
+        setdefault_reasoning(False)
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -528,6 +529,46 @@ def build_tool_call_guided_decoding(
     return None
 
 
+def build_response_format_guided_decoding(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build Dynamo guided decoding from OpenAI chat response_format."""
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict):
+        return None
+
+    response_format_type = response_format.get("type")
+    if response_format_type == "json_object":
+        return {"json": {"type": "object"}}
+    if response_format_type == "structural_tag":
+        return {"structural_tag": response_format}
+    if response_format_type != "json_schema":
+        return None
+
+    json_schema = response_format.get("json_schema")
+    if isinstance(json_schema, dict):
+        schema = json_schema.get("schema")
+    else:
+        schema = response_format.get("schema")
+    if schema is None:
+        raise PreprocessError(
+            "schema_ is required for json_schema response format request."
+        )
+    if not isinstance(schema, dict):
+        raise PreprocessError(
+            "schema_ must be a JSON object for json_schema response format request."
+        )
+    if not isinstance(json_schema, dict):
+        # This only the effective schema mutation from SGLang's
+        # ChatCompletionRequest.set_json_schema(), not the full response_format
+        # normalization into {"json_schema": {"name", "schema", "strict"}}.
+        schema = copy.deepcopy(schema)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("strict", None)
+    return {"json": schema}
+
+
 def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
     """Flatten ``apply_chat_template`` output to ``list[int]``.
 
@@ -539,38 +580,6 @@ def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
     if isinstance(ids, dict):
         ids = ids.get("input_ids", prompt_token_ids)
     return list(ids)
-
-
-def _normalize_messages_for_template(
-    messages: list[dict[str, Any]], tokenizer: Any
-) -> list[dict[str, Any]]:
-    """Normalize OpenAI media chunks (``image_url``/``video_url``/``audio_url``)
-    to the simple ``image``/``video``/``audio`` types most VLM chat templates
-    branch on. Without this, templates that gate placeholder emission on
-    ``item.type == 'image'`` never fire for raw OpenAI input, and the
-    rendered prompt has no slot for the media bytes that
-    ``extract_mm_urls()`` forwards in parallel. Mirrors the equivalent
-    step in sglang's own OpenAI server and dynamo's Rust default path.
-    """
-    chat_template = getattr(tokenizer, "chat_template", None) or ""
-    content_format = detect_jinja_template_content_format(chat_template)
-    # The media-data side outputs are discarded: dynamo's separate
-    # ``extract_mm_urls()`` channel is the source of truth for the worker.
-    image_sink: list = []
-    video_sink: list = []
-    audio_sink: list = []
-    modality_sink: list = []
-    return [
-        process_content_for_template_format(
-            msg,
-            content_format,
-            image_data=image_sink,
-            video_data=video_sink,
-            audio_data=audio_sink,
-            modalities=modality_sink,
-        )
-        for msg in messages
-    ]
 
 
 def preprocess_chat_request(
@@ -587,7 +596,7 @@ def preprocess_chat_request(
     ``template_force_reasoning`` is the static per-server flag derived from
     the chat template (see :func:`detect_force_reasoning_from_template`);
     the effective per-request value combines it with client knobs
-    (``separate_reasoning``, ``chat_template_kwargs.enable_thinking``).
+    (``separate_reasoning``, ``chat_template_kwargs.{thinking,enable_thinking}``).
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
@@ -661,10 +670,8 @@ def preprocess_chat_request(
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
-        template_messages = _normalize_messages_for_template(messages, tokenizer)
-
         prompt_token_ids = _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(template_messages, **template_kwargs)
+            tokenizer.apply_chat_template(messages, **template_kwargs)
         )
 
     # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
@@ -676,11 +683,20 @@ def preprocess_chat_request(
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
     )
-    guided_decoding = build_tool_call_guided_decoding(
+    response_format_guided_decoding = build_response_format_guided_decoding(request)
+    tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    if (
+        response_format_guided_decoding is not None
+        and tool_call_guided_decoding is not None
+    ):
+        logger.warning(
+            "Tool-call guided decoding will be ignored because of response_format already exists."
+        )
+    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
@@ -838,6 +854,11 @@ class SglangStreamingPostProcessor:
         self._tool_calls_emitted = False
         self._streamed_tool_indices: set[int] = set()
         self._streamed_arg_chars: dict[int, int] = {}  # tool_index -> emitted arg len
+        # Snapshot before authoritative finish-time re-parse.  Re-parse may
+        # rebuild sequential indices; index-keyed streaming progress must not
+        # carry over unless the index+name still matches.
+        self._pre_reparse_streamed_names: dict[int, str] = {}
+        self._pre_reparse_streamed_arg_chars: dict[int, int] = {}
 
     def _known_tool_names(self) -> set[str] | None:
         if not self._sglang_tools:
@@ -885,13 +906,32 @@ class SglangStreamingPostProcessor:
             deltas.append(entry)
         return deltas
 
+    def _streaming_progress_for_index(self, idx: int) -> tuple[bool, int]:
+        """Return (name_sent, emitted_argument_chars) for finish supplemental emit."""
+        current_name = self._tool_call_names.get(idx)
+        if idx in self._streamed_tool_indices:
+            return True, self._streamed_arg_chars.get(idx, 0)
+        if (
+            current_name
+            and self._pre_reparse_streamed_names.get(idx) == current_name
+        ):
+            return True, self._pre_reparse_streamed_arg_chars.get(idx, 0)
+        return False, 0
+
+    def _snapshot_streaming_progress_before_reparse(self) -> None:
+        self._pre_reparse_streamed_names = {
+            idx: self._tool_call_names[idx]
+            for idx in self._streamed_tool_indices
+            if idx in self._tool_call_names
+        }
+        self._pre_reparse_streamed_arg_chars = dict(self._streamed_arg_chars)
+
     def _build_finish_supplemental_tool_deltas(self) -> list[dict[str, Any]]:
         """Emit tool-call deltas not yet sent during streaming (re-parse recovery)."""
         deltas: list[dict[str, Any]] = []
         for idx in sorted(self._tool_call_names):
             full_args = "".join(self._tool_call_args.get(idx, []))
-            name_sent = idx in self._streamed_tool_indices
-            sent_args = self._streamed_arg_chars.get(idx, 0)
+            name_sent, sent_args = self._streaming_progress_for_index(idx)
 
             if not name_sent:
                 entry: dict[str, Any] = {
@@ -943,44 +983,6 @@ class SglangStreamingPostProcessor:
             self.history_tool_calls_count,
         )
 
-    def _incremental_decode(self, new_token_ids: list[int]) -> str:
-        """Decode new tokens with lookback window for multi-byte char boundaries.
-
-        Re-decodes a small window of previous tokens alongside new tokens so that
-        multi-byte characters spanning token boundaries are correctly resolved.
-        Only retains the last LOOKBACK tokens to bound memory usage.
-        """
-        prev_count = len(self._all_token_ids)
-        self._all_token_ids.extend(new_token_ids)
-
-        start = max(0, prev_count - self.LOOKBACK)
-
-        # Trim to avoid unbounded growth -- only the tail matters for decoding
-        if len(self._all_token_ids) > self.LOOKBACK * 16:
-            self._all_token_ids = self._all_token_ids[
-                -(self.LOOKBACK + len(new_token_ids)) :
-            ]
-            prev_count = len(self._all_token_ids) - len(new_token_ids)
-            start = max(0, prev_count - self.LOOKBACK)
-
-        # Decode lookback-only prefix (before new tokens)
-        prefix_tokens = self._all_token_ids[start:prev_count]
-        prefix_text = (
-            self.tokenizer.decode(
-                prefix_tokens, skip_special_tokens=self._skip_special_tokens
-            )
-            if prefix_tokens
-            else ""
-        )
-
-        # Decode lookback + new tokens together
-        window_tokens = self._all_token_ids[start:]
-        window_text = self.tokenizer.decode(
-            window_tokens, skip_special_tokens=self._skip_special_tokens
-        )
-
-        return window_text[len(prefix_text) :]
-
     def process_output(self, engine_response: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single engine response chunk into an OpenAI SSE choice dict.
 
@@ -990,11 +992,8 @@ class SglangStreamingPostProcessor:
         Returns:
             OpenAI choice dict or ``None`` if nothing to emit yet.
         """
-        raw_ids = engine_response.get("token_ids")
-        token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
+        delta_text = engine_response.get("text", "")
         finish_reason = engine_response.get("finish_reason")
-
-        delta_text = self._incremental_decode(token_ids) if token_ids else ""
 
         if self._fast_plain_text:
             if delta_text:
@@ -1176,9 +1175,12 @@ class SglangStreamingPostProcessor:
                 # clear streaming state first so we don't mix a name from
                 # the re-parse with args from streaming at the same index.
                 if final_calls:
+                    self._snapshot_streaming_progress_before_reparse()
                     self._tool_call_ids.clear()
                     self._tool_call_names.clear()
                     self._tool_call_args.clear()
+                    self._streamed_tool_indices.clear()
+                    self._streamed_arg_chars.clear()
                     for seq_idx, tc in enumerate(final_calls):
                         self._tool_call_ids[seq_idx] = self._tool_call_id(
                             tc.name or "", seq_idx
