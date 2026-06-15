@@ -97,6 +97,13 @@ or P/D wiring; use `python -m dynamo.vllm` or
 `python -m dynamo.vllm.unified_main` for the most complete vLLM feature
 coverage.
 
+> [!NOTE]
+> The Rust backend depends on vLLM's engine-core crates, which are not yet
+> published to crates.io and are pulled as git dependencies. They are gated
+> behind the off-by-default `vllm_rs` cargo feature, so the default workspace
+> build does not require the git sources and the crate is excluded from the
+> published Dynamo crates. You must pass `--features vllm_rs` to build or run it.
+
 To run the Rust backend locally, start the same infrastructure services and
 frontend, then launch the Rust worker in another terminal:
 
@@ -107,7 +114,7 @@ python -m dynamo.frontend --http-port 8000
 ```
 
 ```bash
-DYN_SYSTEM_PORT=8081 cargo run -p dynamo-vllm-rs-backend -- Qwen/Qwen3-0.6B -- \
+DYN_SYSTEM_PORT=8081 cargo run -p dynamo-vllm-rs-backend --features vllm_rs -- Qwen/Qwen3-0.6B -- \
   --enforce-eager \
   --max-model-len 4096
 ```
