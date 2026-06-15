@@ -685,6 +685,71 @@ class LoraTestChatPayload(ChatPayload):
 
 
 @dataclass
+class ElasticEPScalePayload(ChatPayload):
+    """Scales the vLLM data-parallel size live, then verifies the worker still
+    serves a chat request post-scale.
+
+    POSTs ``/engine/control/scale_elastic_ep`` on the worker's system port
+    before the chat request (mirroring LoraTestChatPayload's admin-then-infer
+    pattern), so a single payload exercises both the scale control and that
+    generation survives the reconfigure. Requires a worker started with the Ray
+    DP backend + ePLB (see ``examples/backends/vllm/launch/elastic_ep.sh``).
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        new_data_parallel_size: int,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        repeat_count: int = 1,
+        expected_response: Optional[list] = None,
+        expected_log: Optional[list] = None,
+        timeout: int = 300,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=repeat_count,
+            expected_response=expected_response or [],
+            expected_log=expected_log or [],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self.new_data_parallel_size = new_data_parallel_size
+        self._scaled = False
+
+    def _ensure_scaled(self) -> None:
+        """Drive the scale control once before the first chat request."""
+        if self._scaled:
+            return
+        scale_url = (
+            f"http://{self.host}:{self.system_ports[0]}"
+            "/engine/control/scale_elastic_ep"
+        )
+        logger.info(
+            "Scaling elastic EP to data_parallel_size=%s via %s",
+            self.new_data_parallel_size,
+            scale_url,
+        )
+        response = requests.post(
+            scale_url,
+            json={"new_data_parallel_size": self.new_data_parallel_size},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        assert result.get("status") == "ok", f"scale_elastic_ep failed: {result}"
+        assert (
+            result.get("new_data_parallel_size") == self.new_data_parallel_size
+        ), f"unexpected scale_elastic_ep result: {result}"
+        self._scaled = True
+
+    def url(self) -> str:
+        """Scale before the first chat request, then return the chat URL."""
+        self._ensure_scaled()
+        return super().url()
+
+
+@dataclass
 class CompletionPayload(BasePayload):
     """Payload for completions endpoint."""
 

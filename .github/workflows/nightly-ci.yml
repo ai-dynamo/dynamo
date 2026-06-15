@@ -353,8 +353,34 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: vllm and (gpu_2 or gpu_4)
+      # elastic_ep runs in its own dedicated job (vllm-elastic-ep-test) below.
+      gpu_test_markers: vllm and (gpu_2 or gpu_4) and not elastic_ep
       gpu_test_timeout_minutes: 45
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  vllm-elastic-ep-test:
+    name: vllm-runtime # Groups with other vllm jobs in the UI
+    needs: [vllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: vllm
+      test_type: Elastic EP Scaling Test
+      amd_runner: prod-tester-amd-gpu-4-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      enable_coverage: true
+      run_sanity_check: false
+      # Dedicated job: live scale_elastic_ep up/down over the Ray DP backend.
+      # Needs 4 GPUs (start DP=2, scale to 4) and a longer budget than the
+      # general suite (MoE weights + two engine-core reconfigures).
+      gpu_test_markers: vllm and elastic_ep
+      gpu_test_timeout_minutes: 60
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit

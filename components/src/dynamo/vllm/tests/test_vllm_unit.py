@@ -281,7 +281,7 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     config = parse_args()
     assert config.headless is True
 
-    from dynamo.vllm.main import build_headless_namespace
+    from dynamo.vllm.headless import build_headless_namespace
 
     ns = build_headless_namespace(config)
 
