@@ -34,22 +34,14 @@ inputs:
     description: 'Docker Hub password for helm registry login'
     required: false
     default: ''
-  acr_username:
-    description: 'Azure Container Registry username. When set alongside acr_password, creates an imagePullSecret inside the vCluster so nodes without managed-identity ACR access can pull the operator image.'
-    required: false
-    default: ''
-  acr_password:
-    description: 'Azure Container Registry password.'
-    required: false
-    default: ''
   vcluster_k8s_version:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
     default: 'v1.32.13'
-  install_grove:
-    description: 'Whether to install the Grove operator via Helm (default: true). Set to false on clusters where Grove is not needed to avoid rollout failures.'
+  vcluster_host_priority_class:
+    description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-02; use an empty value to disable.'
     required: false
-    default: 'true'
+    default: 'auto'
 
 outputs:
   namespace:
@@ -61,6 +53,9 @@ outputs:
   operator_tag:
     description: 'Resolved operator tag'
     value: ${{ steps.resolve-names.outputs.operator_tag }}
+  vcluster_host_priority_class:
+    description: 'Resolved host PriorityClass applied to pods synced from the vCluster'
+    value: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
 
 runs:
   using: "composite"
@@ -109,23 +104,48 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
       run: |
-        echo "::group::Delete stale vClusters in ${NAMESPACE}"
-        # vCluster only allows one instance per namespace. If a previous run's
-        # cleanup job overlaps with this run's setup, its StatefulSet may still
-        # exist when we reach vcluster create, causing a fatal conflict.
-        STALE=$(kubectl get statefulsets -n "${NAMESPACE}" \
-          --no-headers -o custom-columns=':metadata.name' 2>/dev/null || true)
-        for vc in ${STALE}; do
-          [ -z "${vc}" ] && continue
-          echo "Deleting stale vCluster: ${vc}"
-          vcluster delete "${vc}" --namespace "${NAMESPACE}" 2>&1 || \
-            kubectl delete statefulset "${vc}" -n "${NAMESPACE}" --ignore-not-found 2>&1 || true
-        done
-        if [ -n "${STALE}" ]; then
-          kubectl wait statefulsets --all -n "${NAMESPACE}" \
+        echo "::group::Delete stale vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
+        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "Deleting stale vCluster: ${VCLUSTER_NAME}"
+          vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1 || \
+            kubectl delete statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" --ignore-not-found 2>&1 || true
+          kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
             --for=delete --timeout=120s 2>/dev/null || true
+        else
+          echo "No stale vCluster named ${VCLUSTER_NAME} found."
         fi
+        echo "::endgroup::"
+
+    - name: Resolve vCluster host priority class
+      id: resolve-vcluster-priority
+      shell: bash
+      env:
+        INPUT_PRIORITY_CLASS: ${{ inputs.vcluster_host_priority_class }}
+      run: |
+        echo "::group::Resolve vCluster host priority class"
+        PRIORITY_CLASS="${INPUT_PRIORITY_CLASS}"
+        CURRENT_CONTEXT="${KUBE_CONTEXT:-}"
+        if [ -z "${CURRENT_CONTEXT}" ]; then
+          CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+        fi
+
+        if [ "${PRIORITY_CLASS}" = "auto" ]; then
+          PRIORITY_CLASS=""
+          if [[ "${CURRENT_CONTEXT}" == *aws-dev-02* ]]; then
+            PRIORITY_CLASS="ci-nightly-high-priority"
+          fi
+        fi
+
+        if [ -n "${PRIORITY_CLASS}" ]; then
+          kubectl get priorityclass "${PRIORITY_CLASS}" >/dev/null
+          echo "Using host PriorityClass for vCluster synced pods: ${PRIORITY_CLASS}"
+        else
+          echo "No host PriorityClass override for vCluster synced pods."
+        fi
+
+        echo "priority_class=${PRIORITY_CLASS}" >> "$GITHUB_OUTPUT"
         echo "::endgroup::"
 
     - name: Create vCluster
@@ -133,17 +153,24 @@ runs:
       env:
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_HOST_PRIORITY_CLASS: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         set -x
+        PRIORITY_ARGS=()
+        if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
+          PRIORITY_ARGS+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
+        fi
+
         # The K8s version must be supported by the kr8s Python library used in deploy tests.
         # This is independent of the host cluster version.
-        vcluster create ${VCLUSTER_NAME} \
-          --namespace ${NAMESPACE} \
+        vcluster create "${VCLUSTER_NAME}" \
+          --namespace "${NAMESPACE}" \
           --connect=false \
           --upgrade \
           --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }}
+          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
+          "${PRIORITY_ARGS[@]}"
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
@@ -182,24 +209,6 @@ runs:
           -n default || true
         echo "::endgroup::"
 
-    - name: Create ACR image pull secret in vCluster
-      if: inputs.acr_username != '' && inputs.acr_password != '' && inputs.registry != ''
-      shell: bash
-      env:
-        REGISTRY: ${{ inputs.registry }}
-        ACR_USER: ${{ inputs.acr_username }}
-        ACR_PASS: ${{ inputs.acr_password }}
-      run: |
-        echo "::group::Create ACR pull secret inside vCluster"
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          create secret docker-registry acr-pull-secret \
-          --docker-server="${REGISTRY}" \
-          --docker-username="${ACR_USER}" \
-          --docker-password="${ACR_PASS}" \
-          -n default --dry-run=client -o yaml | \
-          kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster apply -f -
-        echo "::endgroup::"
-
     - name: Login to Docker Hub for Helm
       if: inputs.dockerhub_username != '' && inputs.dockerhub_password != ''
       shell: bash
@@ -214,8 +223,6 @@ runs:
       env:
         REGISTRY: ${{ inputs.registry }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
-        ACR_USER: ${{ inputs.acr_username }}
-        INSTALL_GROVE: ${{ inputs.install_grove }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
         set -x
@@ -232,17 +239,11 @@ runs:
           echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
         fi
 
-        PULL_SECRET_ARGS=""
-        if [ -n "${ACR_USER}" ]; then
-          PULL_SECRET_ARGS="--set dynamo-operator.imagePullSecrets[0].name=acr-pull-secret"
-        fi
-
         KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
         helm upgrade --install dynamo-platform . --namespace default \
           ${IMAGE_ARGS} \
-          ${PULL_SECRET_ARGS} \
           --set dynamo-operator.gpuDiscovery.enabled=false \
-          --set global.grove.install=${INSTALL_GROVE} \
+          --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
           --set 'nats.container.merge.resources.requests.cpu=100m' \
           --set 'nats.container.merge.resources.requests.memory=128Mi' \
