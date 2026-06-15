@@ -22,7 +22,7 @@ def check_convert_records_emits_request_stages_and_metadata():
                     "event_time_unix_ms": 2000,
                     "event_source": "dynamo",
                     "agent_context": {
-                        "session_type_id": "ms_agent",
+                        "session_type_id": "agent_harness",
                         "session_id": "session-1",
                         "trajectory_id": "session-1:researcher",
                     },
@@ -301,7 +301,7 @@ def check_convert_records_splits_overlapping_trajectory_requests_into_lanes():
                 "event_type": "request_end",
                 "event_time_unix_ms": start_ms + total_ms,
                 "agent_context": {
-                    "session_type_id": "ms_agent",
+                    "session_type_id": "agent_harness",
                     "session_id": "session-1",
                     "trajectory_id": "session-1:searcher",
                 },
@@ -356,7 +356,7 @@ def check_convert_records_emits_tool_duration_slices():
                     "event_time_unix_ms": 1300,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_type_id": "ms_agent",
+                        "session_type_id": "agent_harness",
                         "session_id": "session-1",
                         "trajectory_id": "session-1:searcher",
                     },

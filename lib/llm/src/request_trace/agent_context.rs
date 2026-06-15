@@ -632,7 +632,7 @@ mod tests {
 
         let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
-                session_type_id: "ms_agent".to_string(),
+                session_type_id: "agent_harness".to_string(),
                 session_id: "run-finish".to_string(),
                 trajectory_id: "run-finish:agent".to_string(),
                 parent_trajectory_id: None,
@@ -748,7 +748,7 @@ mod tests {
 
         let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
-                session_type_id: "ms_agent".to_string(),
+                session_type_id: "agent_harness".to_string(),
                 session_id: "run-completion-finish".to_string(),
                 trajectory_id: "run-completion-finish:agent".to_string(),
                 parent_trajectory_id: None,
