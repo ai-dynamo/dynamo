@@ -80,6 +80,14 @@ spec:
             - { name: FI_LOG_LEVEL, value: info }
             - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
             - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
+            # NIXL Prometheus telemetry on :19090. The test reads agent_rx_bytes on
+            # the decode worker before/after an inference to prove KV bytes actually
+            # moved over the EFA RDMA path (not merely that LIBFABRIC was selected).
+            # Safe here only because LD_LIBRARY_PATH puts the NIXL lib path first
+            # (see note below) — otherwise the exporter plugin breaks engine init.
+            - { name: NIXL_TELEMETRY_ENABLE, value: "y" }
+            - { name: NIXL_TELEMETRY_EXPORTER, value: prometheus }
+            - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
             # NIXL telemetry plugin (libtelemetry_exporter_prometheus.so) must find
             # libcore.so under /opt/nvidia/nvda_nixl/lib64, so that path MUST come
             # before the EFA lib paths or the worker silently fails engine init.
@@ -123,6 +131,12 @@ spec:
             - { name: FI_LOG_LEVEL, value: info }
             - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
             - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
+            # Decode-side NIXL telemetry: with NIXL READ semantics the decode worker
+            # pulls KV from prefill, so agent_rx_bytes here is the authoritative
+            # "bytes moved over EFA" counter the test asserts increases.
+            - { name: NIXL_TELEMETRY_ENABLE, value: "y" }
+            - { name: NIXL_TELEMETRY_EXPORTER, value: prometheus }
+            - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
             - { name: LD_LIBRARY_PATH, value: /opt/nvidia/nvda_nixl/lib64:/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/local/lib }
             - { name: PATH, value: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/bin:/usr/bin:/bin }
           securityContext:
