@@ -11,7 +11,7 @@ inputs:
     required: false
     default: ''
   vcluster_namespace:
-    description: 'Host namespace where the vCluster will be created (auto-generated if empty)'
+    description: 'Ignored. Namespace is always dynamo-deploy-test.'
     required: false
     default: ''
   registry:
