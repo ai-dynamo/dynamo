@@ -47,6 +47,10 @@ func NewDCDDefaulter() *DCDDefaulter {
 func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dcdDefaultingWebhookName)
 
+	if err := validateAdmissionKind(ctx, nvidiacomv1beta1.DynamoComponentDeploymentGVK); err != nil {
+		return err
+	}
+
 	dcd, ok := obj.(*nvidiacomv1beta1.DynamoComponentDeployment)
 	if !ok {
 		return fmt.Errorf("expected DynamoComponentDeployment but got %T", obj)

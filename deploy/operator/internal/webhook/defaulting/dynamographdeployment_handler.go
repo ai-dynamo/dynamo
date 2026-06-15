@@ -57,6 +57,10 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
 
+	if err := validateAdmissionKind(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+		return err
+	}
+
 	dgd, ok := obj.(*nvidiacomv1alpha1.DynamoGraphDeployment)
 	if !ok {
 		return fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
