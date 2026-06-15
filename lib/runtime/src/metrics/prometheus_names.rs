@@ -91,6 +91,10 @@ pub mod name_prefix {
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
 
+    /// Prefix for request admission/rejection control metrics (e.g.
+    /// `dynamo_rejection_request_total`).
+    pub const REJECTION: &str = "dynamo_rejection";
+
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 

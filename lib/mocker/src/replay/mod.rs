@@ -175,6 +175,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![2; 4],
@@ -182,6 +183,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(2)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(200.0),
+                ..Default::default()
             },
         ];
 

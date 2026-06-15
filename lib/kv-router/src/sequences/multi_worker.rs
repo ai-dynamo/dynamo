@@ -29,7 +29,7 @@ use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
-use super::{PrefillTokenDeltas, WorkerLoadProjection};
+use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
     WorkerWithDpRank,
@@ -225,6 +225,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(
             active_tokens.values().all(|&count| count == 0),
             "expected all workers to have zero active tokens, got {active_tokens:?}",
+        );
+
+        let active_requests = self.active_request_counts();
+        assert!(
+            active_requests.values().all(|&count| count == 0),
+            "expected all workers to have zero active requests, got {active_requests:?}",
         );
 
         assert!(
@@ -559,37 +565,37 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Query all workers for the potential blocks and tokens.
-    pub fn potential_blocks_and_tokens(
+    pub fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-    ) {
-        self.potential_blocks_and_tokens_at(token_sequence, prefill_token_deltas, Instant::now())
+    ) -> PotentialLoadMaps {
+        self.potential_blocks_and_tokens_at::<INCLUDE_ACTIVE_REQUESTS>(
+            token_sequence,
+            prefill_token_deltas,
+            Instant::now(),
+        )
     }
 
-    pub fn potential_blocks_and_tokens_at(
+    pub fn potential_blocks_and_tokens_at<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-    ) {
+    ) -> PotentialLoadMaps {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
         #[cfg(feature = "bench")]
         let num_workers = self.workers.read().slots.len();
 
-        let result = self.prompt_registry.potential_blocks_and_tokens(
-            token_sequence,
-            prefill_token_deltas,
-            decay_now,
-        );
+        let result = self
+            .prompt_registry
+            .potential_blocks_and_tokens::<INCLUDE_ACTIVE_REQUESTS>(
+                token_sequence,
+                prefill_token_deltas,
+                decay_now,
+            );
 
         #[cfg(feature = "bench")]
         {
@@ -685,6 +691,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.request_index.active_lora_counts()
+    }
+
+    pub fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.prompt_registry.active_request_counts()
     }
 
     /// Force expire stale requests across all workers (one-shot).
@@ -1107,6 +1117,17 @@ mod tests {
             .collect()
     }
 
+    fn active_request_count(
+        sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        sequences
+            .active_request_counts()
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
+    }
+
     struct VecSubscriber {
         events: VecDeque<anyhow::Result<ActiveSequenceEvent>>,
     }
@@ -1308,6 +1329,7 @@ mod tests {
             sequences.active_tokens(decay_now).get(&worker).copied(),
             Some(0)
         );
+        assert_eq!(active_request_count(&sequences, worker), 1);
     }
 
     #[test]
@@ -1370,6 +1392,7 @@ mod tests {
         );
 
         sequences.mark_prefill_completed(&a_oldest, query).unwrap();
+        assert_eq!(active_request_count(&sequences, worker_a), 2);
 
         let loads = modeled_time_loads_by_worker(&sequences, query + Duration::from_secs(2));
         assert_eq!(loads.get(&worker_a).copied(), Some(Ok(2_000)));
@@ -1431,6 +1454,7 @@ mod tests {
         );
 
         sequences.free(&later, completion_time).unwrap();
+        assert_eq!(active_request_count(&sequences, worker), 1);
 
         assert_eq!(
             sequences
@@ -1498,7 +1522,7 @@ mod tests {
         let expected =
             naive_potential_loads(&sequences, Some(&prompt), &prefill_token_deltas, decay_now);
 
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt),
             &prefill_token_deltas,
             decay_now,
@@ -1546,7 +1570,7 @@ mod tests {
             )
             .unwrap();
 
-        let (potential_blocks, _) = sequences.potential_blocks_and_tokens_at(
+        let (potential_blocks, _, _) = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&[1, 2, 3, 5]),
             &PrefillTokenDeltas::none(),
             decay_now,
@@ -1602,7 +1626,7 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&base_prompt),
             &PrefillTokenDeltas::none(),
             decay_now,
@@ -1662,12 +1686,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
         assert_eq!(actual.0.get(&worker_a).copied(), Some(4));
         assert_eq!(actual.0.get(&worker_b).copied(), Some(3));
 
@@ -1679,12 +1704,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual_after_free = sequences.potential_blocks_and_tokens_at(
+        let actual_after_free = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        assert_eq!(actual_after_free, expected_after_free);
+        assert_eq!(actual_after_free.0, expected_after_free.0);
+        assert_eq!(actual_after_free.1, expected_after_free.1);
         assert_eq!(actual_after_free.0.get(&worker_a).copied(), Some(4));
         assert_eq!(actual_after_free.0.get(&worker_b).copied(), Some(3));
 
@@ -1718,6 +1744,7 @@ mod tests {
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1766,12 +1793,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1809,6 +1837,10 @@ mod tests {
         assert_eq!(
             sequences.request_index.worker_for(&"req-1".to_string()),
             None
+        );
+        assert_eq!(
+            sequences.active_request_counts().get(&worker).copied(),
+            Some(1)
         );
     }
 
@@ -2033,6 +2065,7 @@ mod tests {
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2338,15 +2371,18 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(active_request_count(&sequences, worker), 1);
         sequences.reconcile_workers([]).unwrap();
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert!(sequences.active_blocks().is_empty());
+        assert!(!sequences.active_request_counts().contains_key(&worker));
         assert!(sequences.request_index.is_empty());
 
         sequences
             .reconcile_workers([WorkerDpRange::new(1, 0, 1)])
             .unwrap();
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
         assert!(sequences.prompt_registry.is_block_index_empty());
     }
 
@@ -2415,9 +2451,7 @@ mod tests {
         sequences.free(&request_id, decay_now).unwrap();
         sequences.free(&request_id, decay_now).unwrap();
 
-        assert!(sequences.request_index.is_empty());
-        assert!(sequences.prompt_registry.is_block_index_empty());
-        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        sequences.assert_completely_drained(decay_now);
     }
 
     #[test]
@@ -2469,8 +2503,11 @@ mod tests {
         let active_tokens = sequences.active_tokens(decay_now);
         assert_eq!(active_tokens.get(&worker).copied(), Some(50));
 
-        let (_, potential_tokens) =
-            sequences.potential_blocks_and_tokens_at(None, &PrefillTokenDeltas::none(), decay_now);
+        let (_, potential_tokens, _) = sequences.potential_blocks_and_tokens_at::<false>(
+            None,
+            &PrefillTokenDeltas::none(),
+            decay_now,
+        );
         assert_eq!(potential_tokens.get(&worker).copied(), Some(50));
 
         assert!(

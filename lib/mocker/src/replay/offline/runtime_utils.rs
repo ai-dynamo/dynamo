@@ -217,6 +217,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms,
+            ..Default::default()
         }
     }
 

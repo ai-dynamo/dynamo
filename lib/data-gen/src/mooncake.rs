@@ -34,7 +34,7 @@ use std::path::Path;
 /// producers and consumers. Field-level aliases on deserialization accept the
 /// upstream Mooncake field names (`input_tokens`, `output_tokens`,
 /// `created_time`, `delay_ms`) without requiring producers to emit them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MooncakeRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -52,6 +52,10 @@ pub struct MooncakeRow {
     pub timestamp: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "delay_ms")]
     pub delay: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
 }
 
 /// One row of an agentic Mooncake replay trace.
@@ -62,7 +66,7 @@ pub struct MooncakeRow {
 /// eligible. Once all dependencies are satisfied, replay waits `delay` plus
 /// `tool_wait_ms` before dispatching the request. Rows with no dependencies
 /// use `timestamp` as their open-loop start time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgenticMooncakeRow {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,6 +85,10 @@ pub struct AgenticMooncakeRow {
     pub timestamp: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "delay_ms")]
     pub delay: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -513,6 +521,7 @@ mod tests {
             hash_ids: Some(vec![0, 1]),
             timestamp: None,
             delay: None,
+            ..Default::default()
         };
         let rendered: Value = serde_json::to_value(&row).unwrap();
         assert!(rendered.get("timestamp").is_none());
@@ -529,6 +538,7 @@ mod tests {
             hash_ids: Some(vec![]),
             timestamp: Some(0.0),
             delay: None,
+            ..Default::default()
         };
         let with_delay = MooncakeRow {
             session_id: Some("s".to_string()),
@@ -537,6 +547,7 @@ mod tests {
             hash_ids: Some(vec![]),
             timestamp: None,
             delay: Some(123.0),
+            ..Default::default()
         };
         let v_ts: Value = serde_json::to_value(&with_timestamp).unwrap();
         let v_dl: Value = serde_json::to_value(&with_delay).unwrap();
@@ -620,6 +631,29 @@ mod tests {
         assert_eq!(row.hash_ids, None);
         assert_eq!(row.timestamp, None);
         assert_eq!(row.delay, None);
+        assert_eq!(row.priority, None);
+        assert_eq!(row.strict_priority, None);
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert!(rendered.get("priority").is_none());
+        assert!(rendered.get("strict_priority").is_none());
+    }
+
+    #[test]
+    fn row_round_trips_priorities() {
+        for priority in [Some(7), Some(0), Some(-3)] {
+            let raw = json!({
+                "output_length": 2,
+                "priority": priority,
+                "strict_priority": 9
+            });
+            let row: MooncakeRow = serde_json::from_value(raw).unwrap();
+            assert_eq!(row.priority, priority);
+            assert_eq!(row.strict_priority, Some(9));
+
+            let rendered: Value = serde_json::to_value(&row).unwrap();
+            assert_eq!(rendered["priority"], json!(priority.unwrap()));
+            assert_eq!(rendered["strict_priority"], json!(9));
+        }
     }
 
     #[test]
@@ -632,6 +666,23 @@ mod tests {
         assert!(row.branches.is_empty());
         assert_eq!(row.prefix_reset, None);
         assert_eq!(row.dependency_delay_ms(), 0.0);
+        assert_eq!(row.priority, None);
+        assert_eq!(row.strict_priority, None);
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert!(rendered.get("priority").is_none());
+        assert!(rendered.get("strict_priority").is_none());
+    }
+
+    #[test]
+    fn agentic_row_round_trips_priorities() {
+        let raw = r#"{"request_id":"r1","priority":-2,"strict_priority":4}"#;
+        let row: AgenticMooncakeRow = serde_json::from_str(raw).unwrap();
+        assert_eq!(row.priority, Some(-2));
+        assert_eq!(row.strict_priority, Some(4));
+
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(rendered["priority"], json!(-2));
+        assert_eq!(rendered["strict_priority"], json!(4));
     }
 
     #[test]
@@ -648,7 +699,7 @@ mod tests {
             branches: vec!["r3".to_string()],
             prefix_reset: Some(false),
             tool_wait_ms: Some(7.0),
-            tool_events: Vec::new(),
+            ..Default::default()
         };
 
         assert_eq!(row.dependency_delay_ms(), 10.0);
@@ -670,8 +721,8 @@ mod tests {
             hash_ids: Some(vec![0, 1]),
             timestamp: Some(0.0),
             delay: Some(0.0),
-            wait_for: Vec::new(),
-            branches: Vec::new(),
+            priority: Some(5),
+            strict_priority: Some(6),
             prefix_reset: Some(true),
             tool_wait_ms: Some(8.0),
             tool_events: vec![AgenticToolEvent {
@@ -685,6 +736,7 @@ mod tests {
                 output_tokens: None,
                 error_type: None,
             }],
+            ..Default::default()
         };
 
         let rendered = serde_json::to_string(&row).unwrap();
@@ -692,6 +744,8 @@ mod tests {
         assert_eq!(decoded.tool_events.len(), 1);
         assert_eq!(decoded.tool_events[0].tool_class, "web_search");
         assert_eq!(decoded.tool_events[0].output_bytes, Some(512));
+        assert_eq!(decoded.priority, Some(5));
+        assert_eq!(decoded.strict_priority, Some(6));
     }
 
     #[test]
@@ -709,6 +763,7 @@ mod tests {
                 hash_ids: Some(vec![0]),
                 timestamp: Some(0.0),
                 delay: None,
+                ..Default::default()
             })
             .unwrap();
         writer.write_sidecar(&json!({"k": "v"})).unwrap();
@@ -747,11 +802,8 @@ mod tests {
                 hash_ids: Some(vec![0]),
                 timestamp: Some(0.0),
                 delay: None,
-                wait_for: Vec::new(),
-                branches: Vec::new(),
                 prefix_reset: Some(true),
-                tool_wait_ms: None,
-                tool_events: Vec::new(),
+                ..Default::default()
             })
             .unwrap();
         let stats = writer.finish().unwrap();

@@ -640,13 +640,48 @@ def _block_tool_call_leaks(block: dict) -> bool:
 
 
 def _overview_status(case: dict | None, impl: str) -> str:
+    """Overview-view cell color, reason-aware and consistent with the markers.
+
+    Returns one of:
+      'na'         - block not recorded / unavailable for this impl
+      'problem'    - red: an UNDOCUMENTED error or RESEARCH divergence
+                     (errors/diverges from the agreed output, no `reason:`)
+      'documented' - neutral: an intentional divergence or a documented
+                     parser error (carries `reason:`)
+      'ok'         - green: matches the agreed output
+
+    Mirrors `peer_status()` for the peer impls. The `_block_tool_call_leaks`
+    glyph (the ↯ marker) is independent of this color and stays as-is; a
+    documented leak keeps its ↯ but is no longer flagged red.
+    """
     if case is None or "expected" not in case:
         return "na"
     block = case.get("expected", {}).get(impl)
     if not isinstance(block, dict) or "unavailable" in block:
         return "na"
-    if "error" in block or _block_tool_call_leaks(block):
-        return "problem"
+
+    if impl == "dynamo":
+        # Dynamo is the oracle: it cannot diverge from itself, so the only red
+        # condition is an UNDOCUMENTED error or markup leak. An error or leak
+        # carrying a `reason:` is intentional and reads as documented.
+        if "error" in block:
+            return "documented" if "reason" in block else "problem"
+        if _block_tool_call_leaks(block):
+            return "documented" if "reason" in block else "problem"
+        return "ok"
+
+    # Peer impls: defer to the marker system's classification so the color
+    # tracks parity rather than a bare wrapper-token regex.
+    dyn = case.get("expected", {}).get("dynamo")
+    if not isinstance(dyn, dict):
+        return "ok"
+    kind, is_unknown = peer_status(case, dyn, impl)
+    if kind in ("na", "unavail"):
+        return "na"
+    if kind == "err":
+        return "documented" if "reason" in block else "problem"
+    if kind == "div":
+        return "problem" if is_unknown else "documented"
     return "ok"
 
 

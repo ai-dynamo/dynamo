@@ -112,6 +112,10 @@ def run_slot_tracker(args: List[str]) -> None:
     """Run the KV router slot tracker with the given arguments."""
     ...
 
+def run_select_service(args: List[str]) -> None:
+    """Run the Dynamo selection service with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -2688,6 +2692,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in hash computation
                            for MM-aware potential-load estimation.
+            lora_name: Optional LoRA adapter name used in block hash computation.
 
         Returns:
             A list of dictionaries, each containing:
@@ -2695,6 +2700,7 @@ class KvRouter:
                 - dp_rank: The data parallel rank
                 - potential_prefill_tokens: Number of tokens that would need prefill
                 - potential_decode_blocks: Number of blocks currently in decode phase
+                - active_requests: Number of active requests tracked on the worker
 
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.
@@ -2958,11 +2964,9 @@ class backend:
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
 
-    class EngineConfig:
+    class LlmRegistration:
         def __init__(
             self,
-            model: str,
-            served_model_name: Optional[str] = None,
             context_length: Optional[int] = None,
             kv_cache_block_size: Optional[int] = None,
             total_kv_blocks: Optional[int] = None,
@@ -2972,12 +2976,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
-            runtime_data: Optional[Dict[str, Any]] = None,
         ) -> None: ...
-        @property
-        def model(self) -> str: ...
-        @property
-        def served_model_name(self) -> Optional[str]: ...
         @property
         def context_length(self) -> Optional[int]: ...
         @property
@@ -2996,8 +2995,23 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
+            llm: Optional["backend.LlmRegistration"] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
         @property
         def runtime_data(self) -> Dict[str, Any]: ...
+        @property
+        def llm(self) -> Optional["backend.LlmRegistration"]: ...
 
     class RuntimeConfig:
         def __init__(
@@ -3038,5 +3052,6 @@ class backend:
             engine: Any,
             config: "backend.WorkerConfig",
             event_loop: Any,
+            raw: bool = False,
         ) -> None: ...
         def run(self) -> Awaitable[None]: ...
