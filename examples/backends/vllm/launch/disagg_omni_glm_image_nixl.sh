@@ -46,7 +46,7 @@ if [ -z "${STAGE_CONFIG:-}" ]; then
 fi
 
 # Namespace must match on both nodes for discovery
-DYN_NAMESPACE="${DYN_NAMESPACE:-dynamo-omni-glm-nixl-shared}"
+export DYN_NAMESPACE="${DYN_NAMESPACE:-dynamo-omni-glm-nixl-shared}"
 
 AR_TP="${AR_TP:-1}"
 DIT_TP="${DIT_TP:-1}"
