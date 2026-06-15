@@ -259,8 +259,12 @@ apply a Dynamo workload, such as the vLLM aggregation example in the
 [AICR repository](https://github.com/NVIDIA/aicr/tree/main/demos/workloads/inference), and watch the
 `DynamoGraphDeployment` converge.
 
+The example manifest assumes specific node labels, including `nodeGroup=cpu-worker`. If your cluster
+uses different labels, such as `nodeGroup=system-worker`, adapt the `DynamoGraphDeployment` node
+selectors before applying it.
+
 ```bash
-kubectl apply -f demos/workloads/inference/vllm-agg.yaml
+kubectl apply -f https://raw.githubusercontent.com/NVIDIA/aicr/refs/heads/main/demos/workloads/inference/vllm-agg.yaml
 kubectl get dynamographdeployments -n dynamo-workload
 kubectl get pods -n dynamo-workload -o wide -w
 ```
