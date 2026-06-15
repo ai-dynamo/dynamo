@@ -603,6 +603,7 @@ mod tests {
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             // NATS
             nats::NATS_SERVER,
+            nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,
