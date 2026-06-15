@@ -41,11 +41,13 @@ export DYN_REQUEST_TRACE_OUTPUT_PATH=/mnt/captures/run-42/request-trace
 | `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES` | `268435456` | Gzip roll threshold in uncompressed bytes. |
 | `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES` | unset | Optional gzip roll threshold in records. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | Optional ZMQ PULL bind address for harness tool events. |
-| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | unset | Optional first-frame ZMQ topic filter. |
+| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | First-frame ZMQ topic filter when endpoint is configured. |
 
 Set the ZMQ endpoint on the process that should own tool-event ingress, usually
 the frontend process. If the same bind address is exported to multiple Dynamo
 processes, the first process binds it and later processes warn and continue.
+The harness should publish `agent-tool-events` as the first ZMQ frame unless
+`DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` is set on Dynamo.
 
 The bus and sinks use best-effort delivery behavior.
 A slow sink can report lag and drop records. Validate captured row counts before

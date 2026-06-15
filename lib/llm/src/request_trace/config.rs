@@ -9,6 +9,8 @@ use dynamo_runtime::config::{
 
 use crate::telemetry::parse_sink_names;
 
+use super::DEFAULT_TOOL_EVENTS_TOPIC;
+
 const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_JSONL_BUFFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_JSONL_FLUSH_INTERVAL_MS: u64 = 1000;
@@ -79,11 +81,13 @@ fn load_from_env() -> RequestTracePolicy {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-    let tool_events_zmq_topic =
+    let tool_events_zmq_topic = tool_events_zmq_endpoint.as_ref().map(|_| {
         std::env::var(env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC)
             .ok()
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_TOOL_EVENTS_TOPIC.to_string())
+    });
 
     RequestTracePolicy {
         enabled,
@@ -125,6 +129,10 @@ mod tests {
                     env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
                     None::<&str>,
                 ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+                    None::<&str>,
+                ),
             ],
             || {
                 let policy = load_from_env();
@@ -160,6 +168,10 @@ mod tests {
                     env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
                     Some("tcp://127.0.0.1:9999"),
                 ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+                    None,
+                ),
             ],
             || {
                 let policy = load_from_env();
@@ -175,6 +187,35 @@ mod tests {
                 assert_eq!(
                     policy.tool_events_zmq_endpoint.as_deref(),
                     Some("tcp://127.0.0.1:9999")
+                );
+                assert_eq!(
+                    policy.tool_events_zmq_topic.as_deref(),
+                    Some("agent-tool-events")
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tool_event_topic_override_requires_endpoint() {
+        temp_env::with_vars(
+            [
+                (env_request_trace::DYN_REQUEST_TRACE, Some("1")),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+                    Some("tcp://127.0.0.1:9999"),
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+                    Some("custom-tool-events"),
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(
+                    policy.tool_events_zmq_topic.as_deref(),
+                    Some("custom-tool-events")
                 );
             },
         );
@@ -192,6 +233,10 @@ mod tests {
                     env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
                     None,
                 ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+                    None,
+                ),
             ],
             || {
                 let policy = load_from_env();
@@ -199,6 +244,7 @@ mod tests {
                 assert!(policy.sinks.is_empty());
                 assert!(policy.output_path.is_none());
                 assert!(policy.tool_events_zmq_endpoint.is_none());
+                assert!(policy.tool_events_zmq_topic.is_none());
             },
         );
     }

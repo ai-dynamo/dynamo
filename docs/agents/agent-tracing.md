@@ -181,7 +181,8 @@ publish. Use it **only** when you need what autodetection and the timing gap can
 *attribution* of tool time, per-tool `duration_ms`, `status` (succeeded/error/cancelled), and output
 sizes. Nothing emits tool events on its own.
 
-Wire format is `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`; use a
+Wire format is `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`; the default
+topic is `agent-tool-events`. Use a
 background publisher, bounded queue, monotonic sequence, and PUSH with HWM.
 **Terminal** `tool_end` / `tool_error`
 rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`)

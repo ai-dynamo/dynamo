@@ -430,7 +430,7 @@ pub mod llm {
         pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
             "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
 
-        /// Optional first-frame ZMQ topic filter for harness tool events.
+        /// First-frame ZMQ topic filter override for harness tool events.
         pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
             "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
