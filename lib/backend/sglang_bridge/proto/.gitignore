@@ -1,0 +1,4 @@
+# Generated at build time by scripts/sync-proto.sh.
+common.proto
+sglang_scheduler.proto
+sglang/

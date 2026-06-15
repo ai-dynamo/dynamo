@@ -89,6 +89,21 @@ dynamo_exit_trap() {
     dynamo_reap_and_exit "$_rc"
 }
 
+# wait_for_port <port> [timeout_secs]
+#
+# Block until a TCP port on 127.0.0.1 accepts connections, or timeout.
+# Returns 0 on success, 1 on timeout. Default timeout: 180s.
+wait_for_port() {
+    local port=$1 timeout=${2:-180}
+    for _ in $(seq 1 "$timeout"); do
+        if (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 wait_any_exit() {
     trap 'dynamo_reap_and_exit 0' TERM INT
     if ! jobs -p | grep -q .; then
@@ -205,6 +220,24 @@ CURL_EOF
 
     echo ""
     echo "=========================================="
+}
+
+# resolve_local_model_dir <hf_id_or_dir>
+#
+# If the argument is a local directory, echo it unchanged. Otherwise treat
+# it as an HF id and resolve a snapshot directory (downloading config +
+# tokenizer only) so callers that need a path-on-disk get one.
+resolve_local_model_dir() {
+    local _model="$1"
+    if [ -d "$_model" ]; then
+        echo "$_model"
+        return
+    fi
+    python3 - "$_model" <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+print(snapshot_download(sys.argv[1], allow_patterns=["*.json", "*.txt", "tokenizer*"]))
+PY
 }
 
 # wait_for_ready <url> [timeout_seconds]
