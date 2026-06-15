@@ -71,7 +71,7 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL></TOOLCALL></TOOLCALL>'
       vllm:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:

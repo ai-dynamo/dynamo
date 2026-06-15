@@ -69,10 +69,20 @@ pub struct JsonParserConfig {
     /// or `parameters` key) as an empty-argument call rather than dropping it.
     /// Matches vLLM's and SGLang's Hermes detectors, which treat a missing
     /// argument key as `{}`. Default `false` keeps every other family's
-    /// stricter behavior (a name-only object is not a call) unchanged; only the
-    /// hermes config (shared by `qwen25`) opts in.
+    /// stricter behavior (a name-only object is not a call) unchanged; only
+    /// `qwen25` opts in.
     #[serde(default)]
     pub allow_name_only_call: bool,
+
+    /// When a complete `<start>...<end>` wrapper is present but nothing parses
+    /// out of it (non-JSON garbage, missing name), discard the jailed region
+    /// instead of leaving the raw markup in `normal_text`; also strip orphan
+    /// end tokens that appear with no opener. Default `false` preserves every
+    /// other family's impl-defined recovery (which may keep the raw text);
+    /// only `qwen25` opts in, since it must never surface tool-call markup to
+    /// the user.
+    #[serde(default)]
+    pub discard_unparseable_wrapper: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -88,6 +98,7 @@ impl Default for JsonParserConfig {
             allow_eof_recovery: false,
             strip_markup_on_recovery: false,
             allow_name_only_call: false,
+            discard_unparseable_wrapper: false,
         }
     }
 }
@@ -397,10 +408,6 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<tool_call>".to_string()],
                 tool_call_end_tokens: vec!["</tool_call>".to_string()],
-                // qwen25 (which aliases this config) and hermes recover a
-                // name-only call (`{"name": "f"}`) as an empty-arg call, matching
-                // vLLM/SGLang's Hermes detectors.
-                allow_name_only_call: true,
                 ..Default::default()
             }),
             structural_tag_builder: Some(StructuralTagBuilder::TriggeredTags(
@@ -417,6 +424,21 @@ impl ToolCallConfig {
                 },
             )),
         }
+    }
+
+    /// Qwen 2.5 shares Hermes' `<tool_call>...</tool_call>` wire format but,
+    /// unlike Hermes, must never surface tool-call markup to the user. It uses
+    /// the Hermes config plus two opt-in flags: recover a name-only call as
+    /// empty-arg, and discard an unparseable wrapper / strip orphan end tokens
+    /// rather than leaking them into `normal_text`. (EOF-recovery opt-out for
+    /// qwen25 stays keyed by name in `detect_and_parse_tool_call_with_recovery`.)
+    pub fn qwen25() -> Self {
+        let mut config = Self::hermes();
+        if let ParserConfig::Json(ref mut json) = config.parser_config {
+            json.allow_name_only_call = true;
+            json.discard_unparseable_wrapper = true;
+        }
+        config
     }
 
     /// Default configuration for nemotron tool calls

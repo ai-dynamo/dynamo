@@ -640,45 +640,50 @@ pub fn try_tool_call_parse_basic_json(
         }
     }
 
-    // No parseable tool call was produced. Decide what (if anything) of the
-    // raw text may pass through as `normal_text` WITHOUT leaking parser-owned
-    // tool-call markers into user-visible content. Two distinct leak shapes:
-    let has_start = config
-        .tool_call_start_tokens
-        .iter()
-        .any(|t| !t.is_empty() && trimmed.contains(t.as_str()));
-    let has_end = config
-        .tool_call_end_tokens
-        .iter()
-        .any(|t| !t.is_empty() && trimmed.contains(t.as_str()));
+    // No parseable tool call was produced. Families that opt into
+    // `discard_unparseable_wrapper` (qwen25) must never surface tool-call
+    // markup, so decide what (if anything) of the raw text may pass through as
+    // `normal_text`. Every other family keeps its impl-defined recovery (the
+    // raw text passes through unchanged below). Two distinct leak shapes:
+    if config.discard_unparseable_wrapper {
+        let has_start = config
+            .tool_call_start_tokens
+            .iter()
+            .any(|t| !t.is_empty() && trimmed.contains(t.as_str()));
+        let has_end = config
+            .tool_call_end_tokens
+            .iter()
+            .any(|t| !t.is_empty() && trimmed.contains(t.as_str()));
 
-    if has_start && has_end {
-        // A complete `<start>...</end>` wrapper was present but nothing parsed
-        // out of it (non-JSON garbage, missing name, etc.). Discard the whole
-        // jailed region rather than leaking the wrapper markup; `normal_text`
-        // already holds the pre-wrapper prefix.
-        return Ok((vec![], Some(normal_text)));
-    }
-    if has_end {
-        // Orphan end token(s) with no matching opener (e.g. `{..}</tool_call>`
-        // or repeated `</tool_call>` runs at `length`). Strip the trailing
-        // stray end markers so the marker never reaches user-visible content,
-        // but keep the surrounding text the model produced outside any call.
-        let mut cleaned = trimmed;
-        loop {
-            let t = cleaned.trim_end();
-            match config
-                .tool_call_end_tokens
-                .iter()
-                .filter(|tok| !tok.is_empty())
-                .find_map(|tok| t.strip_suffix(tok.as_str()))
-            {
-                Some(rest) => cleaned = rest,
-                None => break,
-            }
+        if has_start && has_end {
+            // A complete `<start>...</end>` wrapper was present but nothing
+            // parsed out of it (non-JSON garbage, missing name, etc.). Discard
+            // the whole jailed region rather than leaking the wrapper markup;
+            // `normal_text` already holds the pre-wrapper prefix.
+            return Ok((vec![], Some(normal_text)));
         }
-        if cleaned.len() != trimmed.len() {
-            return Ok((vec![], Some(cleaned.trim().to_string())));
+        if has_end {
+            // Orphan end token(s) with no matching opener (e.g.
+            // `{..}</tool_call>` or repeated `</tool_call>` runs at `length`).
+            // Strip the trailing stray end markers so the marker never reaches
+            // user-visible content, but keep the surrounding text the model
+            // produced outside any call.
+            let mut cleaned = trimmed;
+            loop {
+                let t = cleaned.trim_end();
+                match config
+                    .tool_call_end_tokens
+                    .iter()
+                    .filter(|tok| !tok.is_empty())
+                    .find_map(|tok| t.strip_suffix(tok.as_str()))
+                {
+                    Some(rest) => cleaned = rest,
+                    None => break,
+                }
+            }
+            if cleaned.len() != trimmed.len() {
+                return Ok((vec![], Some(cleaned.trim().to_string())));
+            }
         }
     }
 

@@ -255,19 +255,25 @@ impl ChoiceJailState {
             self.accumulated_content = content.to_string();
             self.accumulated_logprobs = None;
         } else {
-            // Strip any orphan tool-call end markers before emitting. After a
-            // recovered call the remainder can be a run of bare `</tool_call>`
-            // markers (no opener) — parser-owned markup that must not leak. They
-            // can appear at either end (e.g. `</tool_call> trailing prose` or
-            // `prose </tool_call></tool_call>`), so strip from both the start and
-            // the end. Genuine trailing prose carries no end marker and is emitted
-            // unchanged (preserving whitespace).
-            let end_markers: Vec<String> = jail_stream
-                .tool_call_parser
-                .as_deref()
-                .and_then(|p| get_tool_parser_map().get(p))
-                .map(|cfg| cfg.parser_config.tool_call_end_tokens())
-                .unwrap_or_default();
+            // For qwen25, strip any orphan tool-call end markers before
+            // emitting. After a recovered call the remainder can be a run of
+            // bare `</tool_call>` markers (no opener) — parser-owned markup that
+            // must not leak. They can appear at either end (e.g.
+            // `</tool_call> trailing prose` or `prose </tool_call></tool_call>`),
+            // so strip from both the start and the end. Scoped to qwen25 so
+            // other families keep their preserve-on-malformed behavior; genuine
+            // trailing prose carries no end marker and is emitted unchanged.
+            let end_markers: Vec<String> =
+                if jail_stream.tool_call_parser.as_deref() == Some("qwen25") {
+                    jail_stream
+                        .tool_call_parser
+                        .as_deref()
+                        .and_then(|p| get_tool_parser_map().get(p))
+                        .map(|cfg| cfg.parser_config.tool_call_end_tokens())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
             let mut emit = content;
             loop {
                 let trimmed_end = emit.trim_end();
@@ -1180,25 +1186,27 @@ impl JailedStream {
                         // stripping Harmony envelopes when no reasoning parser is configured.
                         // In zero-call Harmony marker cases, emit the stripped normal_text rather
                         // than accumulated_content, which still contains raw protocol markers.
-                        // accumulated_content still carries tool-call markers that the
-                        // parser stripped out of normal_text (e.g. an orphan
+                        // qwen25 must never surface tool-call markup. When its
+                        // parser stripped markers out of normal_text but the
+                        // accumulated buffer still carries them (e.g. an orphan
                         // `</tool_call>` with no opener, jailed on a leading `{`
-                        // false-positive). When that happens, emit the parser's
-                        // stripped text so the marker never leaks; the verbatim
-                        // passthrough is reserved for genuine marker-free text (where
-                        // it preserves whitespace the parser would trim).
-                        let has_residual_markers = self
-                            .tool_call_parser
-                            .as_deref()
-                            .and_then(|p| get_tool_parser_map().get(p))
-                            .map(|cfg| {
-                                let mut markers = cfg.parser_config.tool_call_start_tokens();
-                                markers.extend(cfg.parser_config.tool_call_end_tokens());
-                                markers
-                            })
-                            .unwrap_or_default()
-                            .iter()
-                            .any(|m| !m.is_empty() && accumulated_content.contains(m.as_str()));
+                        // false-positive), emit the parser's stripped text rather
+                        // than the raw buffer. Scoped to qwen25 so other families
+                        // keep their preserve-on-malformed behavior.
+                        let has_residual_markers = self.tool_call_parser.as_deref()
+                            == Some("qwen25")
+                            && self
+                                .tool_call_parser
+                                .as_deref()
+                                .and_then(|p| get_tool_parser_map().get(p))
+                                .map(|cfg| {
+                                    let mut markers = cfg.parser_config.tool_call_start_tokens();
+                                    markers.extend(cfg.parser_config.tool_call_end_tokens());
+                                    markers
+                                })
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|m| !m.is_empty() && accumulated_content.contains(m.as_str()));
                         let content = if is_finalize
                             && self.tool_call_parser.as_deref() == Some("minimax_m2")
                             && self

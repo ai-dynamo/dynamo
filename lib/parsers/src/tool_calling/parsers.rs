@@ -58,7 +58,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("gemma-4", ToolCallConfig::gemma4());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
-        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes; EOF-recovery opt-out is keyed by name in detect_and_parse_tool_call_with_recovery_options
+        map.insert("qwen25", ToolCallConfig::qwen25()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes but never leaks markup; EOF-recovery opt-out is keyed by name in detect_and_parse_tool_call_with_recovery_options
         map
     })
 }
