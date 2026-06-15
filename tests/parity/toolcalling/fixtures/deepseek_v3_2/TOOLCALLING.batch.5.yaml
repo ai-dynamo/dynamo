@@ -21,8 +21,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_5_a
-        calls: []
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
         normal_text: ''
       vllm:
         calls: []
@@ -33,8 +36,11 @@ cases:
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
 
           </｜DSML｜invoke>'
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
-      sglang: *d_5_a
+        reason: "vLLM leaks the DSML envelope into normal_text on missing end-marker recovery; Dynamo recovers the complete <｜DSML｜invoke> call and strips the unterminated outer tag."
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "SGLang drops the call and emits empty content when </｜DSML｜function_calls> is missing; Dynamo recovers the complete <｜DSML｜invoke> call."
   TOOLCALLING.batch.5.b:
     description: Closing </｜DSML｜function_calls> without matching open
     ref: dynamo
@@ -99,7 +105,13 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
@@ -133,7 +145,10 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:

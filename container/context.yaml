@@ -35,7 +35,7 @@ dynamo:
   nats_version: v2.10.28
   etcd_version: v3.5.30
 
-  nixl_ref: 0.10.1
+  nixl_ref: v1.0.1
   nixl_ucx_ref: v1.20.x
   nixl_gdrcopy_ref: v2.5.2
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
@@ -86,8 +86,8 @@ vllm:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
-  enable_modelexpress_p2p: "false"
-  modelexpress_ref: "76fc5d7f06c37121ee8789a29fac6f9b08c4743a"  # v0.3.0
+  enable_modelexpress: "true"
+  modelexpress_version: "0.4.0"
   # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
   aws_sdk_cpp_version: "1.11.760"
 
@@ -123,20 +123,22 @@ sglang:
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
-  nixl_ref: 0.10.1
+  nixl_ref: v1.0.1
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
+  enable_modelexpress: "true"
+  modelexpress_version: "0.4.0"
 
 trtllm:
   cuda13.1:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.3.0rc17
+    runtime_image_tag: 1.3.0rc18
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@998068ef
-  nixl_ref: 0.10.1
+    baseline_sbom: release@998068ef    
+  nixl_ref: v1.0.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"

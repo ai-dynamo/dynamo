@@ -112,6 +112,10 @@ def run_slot_tracker(args: List[str]) -> None:
     """Run the KV router slot tracker with the given arguments."""
     ...
 
+def run_select_service(args: List[str]) -> None:
+    """Run the Dynamo selection service with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -185,7 +189,7 @@ class DistributedRuntime:
         Register an async callback for /engine/{route_name} on the system status server.
 
         Args:
-            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            route_name: The route path (e.g., "control/start_profile" creates /engine/control/start_profile)
             callback: Async function with signature: async def(body: dict) -> dict
 
         Example:
@@ -193,7 +197,7 @@ class DistributedRuntime:
                 await engine.start_profile(**body)
                 return {"status": "ok", "message": "Profiling started"}
 
-            runtime.register_engine_route("start_profile", start_profile)
+            runtime.register_engine_route("control/start_profile", start_profile)
 
         The callback receives the JSON request body as a dict and should return
         a dict that will be serialized as the JSON response.
@@ -708,6 +712,15 @@ class ModelDeploymentCard:
         """Return the source path of this deployment card."""
         ...
 
+    def local_dir(self) -> str:
+        """Resolved metadata directory (post-`download_config`). Raises
+        ValueError if the path contains non-UTF-8 bytes."""
+        ...
+
+    def name(self) -> str:
+        """Return the model name."""
+        ...
+
     def runtime_config(self) -> Any:
         """Return the runtime configuration as a dict."""
         ...
@@ -717,6 +730,7 @@ class ModelRuntimeConfig:
     A model runtime configuration is a collection of runtime information
     """
 
+    context_length: int | None
     total_kv_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
@@ -734,7 +748,6 @@ class ModelRuntimeConfig:
     kv_transfer_domain: str | None
     kv_transfer_enforcement: str | None
     kv_transfer_preferred_weight: float | None
-    tensor_model_config: Any | None
     bootstrap_host: str | None
     bootstrap_port: int | None
 
@@ -766,14 +779,6 @@ class ModelRuntimeConfig:
             bootstrap_port: int | None = None,
         ) -> None:
         """Set the disaggregated endpoint for the model"""
-        ...
-
-    def set_tensor_model_config(self, tensor_model_config: Dict[str, Any]) -> None:
-        """Set the tensor model configuration from a dictionary."""
-        ...
-
-    def get_tensor_model_config(self) -> Any | None:
-        """Get the tensor model configuration."""
         ...
 
 class RoutingConstraints:
@@ -831,13 +836,9 @@ class RadixTree:
     release the Python GIL.
     """
 
-    def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
+    def __init__(self) -> None:
         """
         Create a new RadixTree instance.
-
-        Args:
-            expiration_duration_secs: Optional expiration duration in seconds for cached blocks.
-                                    If None, blocks never expire.
         """
         ...
 
@@ -1375,7 +1376,9 @@ class KserveGrpcService:
         model: str,
         checksum: str,
         engine: PythonAsyncEngine,
-        runtime_config: Optional[ModelRuntimeConfig],
+        *,
+        runtime_config: Optional[ModelRuntimeConfig] = None,
+        tensor_model_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Register a tensor-based model with the service.
@@ -1384,6 +1387,8 @@ class KserveGrpcService:
             model: The model name
             checksum: The model checksum
             engine: The async engine to handle requests
+            runtime_config: Optional runtime-resolved worker metadata
+            tensor_model_config: Optional tensor protocol model metadata
         """
         ...
 
@@ -2120,10 +2125,10 @@ async def register_model(
     model_name: Optional[str] = None,
     *,
     worker_type: WorkerType,
-    context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
     router_mode: Optional[RouterMode] = None,
     runtime_config: Optional[ModelRuntimeConfig] = None,
+    tensor_model_config: Optional[Dict[str, Any]] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
     media_decoder: Optional[MediaDecoder] = None,
@@ -2131,6 +2136,8 @@ async def register_model(
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
     needs: Optional[List[List[WorkerType]]] = None,
+    self_host_metadata: Optional[bool] = None,
+    ignore_weights: bool = False,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2142,13 +2149,16 @@ async def register_model(
 
     For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
     and a minimal model card is registered directly. Use model_path as the display name
-    for these models.
+    for these models. Pass tensor protocol metadata through `tensor_model_config`.
 
     Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and
         peer dependencies. `needs` is a DNF list — each inner list is an
         AND-set, the outer list is OR. `worker_type` is required; backends
         declare it literally at each call site.
+
+    When `ignore_weights` is true, remote HuggingFace model resolution skips
+    weight files and downloads only the metadata needed for registration.
     """
     ...
 
@@ -2572,6 +2582,7 @@ class KvRouter:
         multi_modal_data: Optional[JsonLike] = None,
         mm_routing_info: Optional[JsonLike] = None,
         routing_constraints: Optional[RoutingConstraints] = None,
+        response_buffer_size: int = 100,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -2601,6 +2612,9 @@ class KvRouter:
                             (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
                             used by router selection without changing execution token_ids.
             routing_constraints: Optional request routing constraints used to constrain or prefer tainted workers.
+            response_buffer_size: Maximum number of responses buffered by the Python
+                                  adapter. Set to 0 for demand-driven direct Python
+                                  consumption; negative values are rejected.
 
         Returns:
             An async iterator yielding generation responses
@@ -2617,11 +2631,14 @@ class KvRouter:
     async def generate_from_request(
         self,
         request: JsonLike,
+        response_buffer_size: int = 100,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate from a preprocessed request dict (PreprocessedRequest format).
 
         Accepts a full request dict with token_ids, model, stop_conditions, etc.
+        Set response_buffer_size to 0 for demand-driven direct Python consumption;
+        negative values are rejected.
         Returns an async iterator yielding generation responses.
         """
         ...
@@ -2675,6 +2692,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in hash computation
                            for MM-aware potential-load estimation.
+            lora_name: Optional LoRA adapter name used in block hash computation.
 
         Returns:
             A list of dictionaries, each containing:
@@ -2682,6 +2700,7 @@ class KvRouter:
                 - dp_rank: The data parallel rank
                 - potential_prefill_tokens: Number of tokens that would need prefill
                 - potential_decode_blocks: Number of blocks currently in decode phase
+                - active_requests: Number of active requests tracked on the worker
 
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.
@@ -2778,7 +2797,6 @@ class EntrypointArgs:
         model_path: Optional[str] = None,
         model_name: Optional[str] = None,
         endpoint_id: Optional[str] = None,
-        context_length: Optional[int] = None,
         template_file: Optional[str] = None,
         router_config: Optional[RouterConfig] = None,
         kv_cache_block_size: Optional[int] = None,
@@ -2806,7 +2824,6 @@ class EntrypointArgs:
             model_path: Path to the model directory on disk
             model_name: Model name or dynamo endpoint (e.g. 'dyn://namespace.component.endpoint')
             endpoint_id: Optional endpoint ID
-            context_length: Optional context length override
             template_file: Optional path to a prompt template file
             router_config: Optional router configuration
             kv_cache_block_size: Optional KV cache block size
@@ -2947,11 +2964,9 @@ class backend:
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
 
-    class EngineConfig:
+    class LlmRegistration:
         def __init__(
             self,
-            model: str,
-            served_model_name: Optional[str] = None,
             context_length: Optional[int] = None,
             kv_cache_block_size: Optional[int] = None,
             total_kv_blocks: Optional[int] = None,
@@ -2961,12 +2976,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
-            runtime_data: Optional[Dict[str, Any]] = None,
         ) -> None: ...
-        @property
-        def model(self) -> str: ...
-        @property
-        def served_model_name(self) -> Optional[str]: ...
         @property
         def context_length(self) -> Optional[int]: ...
         @property
@@ -2985,8 +2995,23 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
+            llm: Optional["backend.LlmRegistration"] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
         @property
         def runtime_data(self) -> Dict[str, Any]: ...
+        @property
+        def llm(self) -> Optional["backend.LlmRegistration"]: ...
 
     class RuntimeConfig:
         def __init__(
@@ -3027,5 +3052,6 @@ class backend:
             engine: Any,
             config: "backend.WorkerConfig",
             event_loop: Any,
+            raw: bool = False,
         ) -> None: ...
         def run(self) -> Awaitable[None]: ...

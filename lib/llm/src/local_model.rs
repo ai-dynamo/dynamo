@@ -40,13 +40,17 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
-    match std::env::var(ENV_SELF_HOST_METADATA) {
-        Ok(v) => matches!(
-            v.trim().to_lowercase().as_str(),
+    let value = std::env::var(ENV_SELF_HOST_METADATA).ok();
+    self_host_metadata_default(value.as_deref())
+}
+
+fn self_host_metadata_default(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
+        )
+    })
 }
 
 pub struct LocalModelBuilder {
@@ -54,7 +58,6 @@ pub struct LocalModelBuilder {
     source_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
@@ -90,7 +93,6 @@ impl Default for LocalModelBuilder {
             source_path: Default::default(),
             model_name: Default::default(),
             endpoint_id: Default::default(),
-            context_length: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
@@ -131,11 +133,6 @@ impl LocalModelBuilder {
 
     pub fn endpoint_id(&mut self, endpoint_id: Option<EndpointId>) -> &mut Self {
         self.endpoint_id = endpoint_id;
-        self
-    }
-
-    pub fn context_length(&mut self, context_length: Option<u32>) -> &mut Self {
-        self.context_length = context_length;
         self
     }
 
@@ -331,11 +328,6 @@ impl LocalModelBuilder {
         card.set_name(self.model_name.as_deref().unwrap_or(&alt));
 
         card.kv_cache_block_size = self.kv_cache_block_size;
-
-        // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
-        if let Some(context_length) = self.context_length {
-            card.context_length = context_length;
-        }
 
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
@@ -766,24 +758,21 @@ fn harvest_extra_files(
 mod env_self_host_metadata_tests {
     use super::*;
 
-    #[serial_test::serial]
     #[test]
     fn env_default_parsing() {
-        // SAFETY: all env mutations are serialized via serial_test.
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
-        assert!(!env_self_host_metadata_default(), "unset → default OFF");
+        assert!(!self_host_metadata_default(None), "unset → default OFF");
 
         for v in [
             "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
         ] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(!env_self_host_metadata_default(), "expected OFF for {v:?}");
+            assert!(
+                !self_host_metadata_default(Some(v)),
+                "expected OFF for {v:?}"
+            );
         }
         for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(env_self_host_metadata_default(), "expected ON for {v:?}");
+            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
         }
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
     }
 }
 

@@ -19,7 +19,8 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
         "extra_fields": ["worker_id", "timing"],
         "agent_hints": {
             "osl": 1024,
-            "priority": 5
+            "priority": 5,
+            "strict_priority": 1
         }
     }
 }
@@ -98,13 +99,15 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `priority` | `i32` | `None` | Unified request priority. Higher values mean higher priority at the Dynamo API level. Used for router queue ordering and backend scheduling/eviction. |
+| `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values. Unset is equivalent to `0`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
 ### `priority`
 
-`priority` is the single user-facing scheduling hint. Higher values mean "more important" across Dynamo.
+`priority` is the cross-layer scheduling hint. Higher values mean "more
+important" across Dynamo.
 
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
@@ -116,6 +119,27 @@ For layer-by-layer behavior and backend requirements, see
     "nvext": {
         "agent_hints": {
             "priority": 5
+        }
+    }
+}
+```
+
+### `strict_priority`
+
+`strict_priority` is an unsigned router-only tier for requests waiting in a
+router scheduler queue. The queue orders requests by
+`(strict_priority, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
+requests within the same tier.
+
+This field does not change backend engine priority, preempt running work, or
+provide ordering across router replicas. It also does not prevent an eligible
+new arrival from being admitted directly while other requests are parked.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "strict_priority": 2
         }
     }
 }

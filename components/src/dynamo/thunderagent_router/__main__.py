@@ -226,19 +226,27 @@ class ThunderAgentRouterHandler:
             )
 
     def _extract_worker_id(self, chunk: Any) -> Optional[int]:
-        # Expects the shape set by ``inject_worker_id_from_tracker`` in the
-        # Python bindings. Log once if the shape no longer matches; silent
-        # extraction failure here means we lose worker-affinity on pin.
+        # Expects the shape set by ``inject_worker_id_from_tracker`` in the Python
+        # bindings: worker attribution rides ``routing_data.worker_id``. Log once if the
+        # shape no longer matches; silent extraction failure here means we lose
+        # worker-affinity on pin.
         if not isinstance(chunk, dict):
             self._warn_unexpected_chunk_shape("not a dict")
             return None
-        dp = chunk.get("disaggregated_params")
-        if not isinstance(dp, dict):
-            self._warn_unexpected_chunk_shape("no disaggregated_params dict")
+        routing_data = chunk.get("routing_data")
+        if not isinstance(routing_data, dict):
+            self._warn_unexpected_chunk_shape("no routing_data dict")
             return None
-        info = dp.get("worker_id")
+        info = routing_data.get("worker_id")
         if isinstance(info, dict):
-            worker_id = info.get("worker_id")
+            # ``WorkerIdInfo`` carries prefill/decode IDs (and DP ranks); there is no
+            # nested ``worker_id`` key. The sticky pin is applied as
+            # ``backend_instance_id``, which the frontend resolves to the decode/backend
+            # worker, so prefer ``decode_worker_id`` and fall back to ``prefill_worker_id``
+            # (identical in aggregated mode).
+            worker_id = info.get("decode_worker_id")
+            if not isinstance(worker_id, int):
+                worker_id = info.get("prefill_worker_id")
             if isinstance(worker_id, int):
                 return worker_id
         self._warn_unexpected_chunk_shape("worker_id payload shape changed")

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
@@ -168,18 +171,20 @@ class ObservationData(_message.Message):
     def __init__(self, traffic: _Optional[_Union[TrafficMetrics, _Mapping]] = ..., fpm: _Optional[_Union[FpmData, _Mapping]] = ..., workers: _Optional[_Union[WorkerState, _Mapping]] = ...) -> None: ...
 
 class TrafficMetrics(_message.Message):
-    __slots__ = ("duration_s", "num_req", "isl", "osl", "kv_hit_rate")
+    __slots__ = ("duration_s", "num_req", "isl", "osl", "kv_hit_rate", "accept_length")
     DURATION_S_FIELD_NUMBER: _ClassVar[int]
     NUM_REQ_FIELD_NUMBER: _ClassVar[int]
     ISL_FIELD_NUMBER: _ClassVar[int]
     OSL_FIELD_NUMBER: _ClassVar[int]
     KV_HIT_RATE_FIELD_NUMBER: _ClassVar[int]
+    ACCEPT_LENGTH_FIELD_NUMBER: _ClassVar[int]
     duration_s: float
     num_req: float
     isl: float
     osl: float
     kv_hit_rate: float
-    def __init__(self, duration_s: _Optional[float] = ..., num_req: _Optional[float] = ..., isl: _Optional[float] = ..., osl: _Optional[float] = ..., kv_hit_rate: _Optional[float] = ...) -> None: ...
+    accept_length: float
+    def __init__(self, duration_s: _Optional[float] = ..., num_req: _Optional[float] = ..., isl: _Optional[float] = ..., osl: _Optional[float] = ..., kv_hit_rate: _Optional[float] = ..., accept_length: _Optional[float] = ...) -> None: ...
 
 class FpmData(_message.Message):
     __slots__ = ("prefill_engines", "decode_engines")
@@ -220,18 +225,20 @@ class WorkerState(_message.Message):
     def __init__(self, ready_prefill: _Optional[int] = ..., ready_decode: _Optional[int] = ..., expected_prefill: _Optional[int] = ..., expected_decode: _Optional[int] = ..., prefill_scaling_in_progress: bool = ..., decode_scaling_in_progress: bool = ...) -> None: ...
 
 class PredictionData(_message.Message):
-    __slots__ = ("predicted_num_req", "predicted_isl", "predicted_osl", "source", "predicted_kv_hit_rate")
+    __slots__ = ("predicted_num_req", "predicted_isl", "predicted_osl", "source", "predicted_kv_hit_rate", "predicted_accept_length")
     PREDICTED_NUM_REQ_FIELD_NUMBER: _ClassVar[int]
     PREDICTED_ISL_FIELD_NUMBER: _ClassVar[int]
     PREDICTED_OSL_FIELD_NUMBER: _ClassVar[int]
     SOURCE_FIELD_NUMBER: _ClassVar[int]
     PREDICTED_KV_HIT_RATE_FIELD_NUMBER: _ClassVar[int]
+    PREDICTED_ACCEPT_LENGTH_FIELD_NUMBER: _ClassVar[int]
     predicted_num_req: float
     predicted_isl: float
     predicted_osl: float
     source: str
     predicted_kv_hit_rate: float
-    def __init__(self, predicted_num_req: _Optional[float] = ..., predicted_isl: _Optional[float] = ..., predicted_osl: _Optional[float] = ..., source: _Optional[str] = ..., predicted_kv_hit_rate: _Optional[float] = ...) -> None: ...
+    predicted_accept_length: float
+    def __init__(self, predicted_num_req: _Optional[float] = ..., predicted_isl: _Optional[float] = ..., predicted_osl: _Optional[float] = ..., source: _Optional[str] = ..., predicted_kv_hit_rate: _Optional[float] = ..., predicted_accept_length: _Optional[float] = ...) -> None: ...
 
 class ScalingProposal(_message.Message):
     __slots__ = ("targets", "reason", "source")

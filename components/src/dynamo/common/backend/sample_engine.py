@@ -19,7 +19,13 @@ from dynamo.llm import KvEventPublisher
 
 from . import telemetry
 from .disagg import enforce_prefill_max_tokens, require_prefill_result
-from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
+from .engine import (
+    EngineConfig,
+    GenerateChunk,
+    GenerateRequest,
+    LLMEngine,
+    LlmRegistration,
+)
 from .health_check import build_health_check_payload, is_probe
 from .logprobs import parse_logprob_options
 from .publisher import ComponentSnapshot, KvEventSource, PushSource
@@ -163,11 +169,13 @@ class SampleLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.model_name,
-            context_length=2048,
-            kv_cache_block_size=_SAMPLE_BLOCK_SIZE,
-            total_kv_blocks=1000,
-            max_num_seqs=64,
-            max_num_batched_tokens=2048,
+            llm=LlmRegistration(
+                context_length=2048,
+                kv_cache_block_size=_SAMPLE_BLOCK_SIZE,
+                total_kv_blocks=1000,
+                max_num_seqs=64,
+                max_num_batched_tokens=2048,
+            ),
         )
 
     async def kv_event_sources(self) -> list[KvEventSource]:

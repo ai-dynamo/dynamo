@@ -215,6 +215,7 @@ pub fn build_agentic_mooncake_rows(
             prefix_reset: Some(prefix_reset[idx]),
             tool_wait_ms,
             tool_events,
+            ..Default::default()
         });
     }
 

@@ -317,7 +317,7 @@ async def test_held_over_plugin_emits_held_over_counter(ctx_factory, metrics):
         is_builtin=True,
     )
 
-    # Advance to first-fire moment (PSM-parity anchor: first call
+    # Advance to first-fire moment (first call
     # happens ``interval`` seconds after registration).
     ctx["clock"].advance(60.0)
     # Tick 1: plugin evaluates, result cached.
@@ -544,7 +544,7 @@ async def test_tick_skipped_total_fires_when_plugin_not_due(ctx_factory, metrics
         is_builtin=True,
     )
 
-    # Advance to first-fire moment (PSM-parity anchor on registered_at).
+    # Advance to first-fire moment anchored on registered_at.
     ctx["clock"].advance(60.0)
     # Tick 1: first call, is_due=True → triggered, no skip
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
@@ -594,7 +594,7 @@ async def test_tick_lag_seconds_set_when_plugin_evaluated(ctx_factory, metrics):
         is_builtin=True,
     )
 
-    # Advance to first-fire moment (PSM-parity anchor on registered_at).
+    # Advance to first-fire moment anchored on registered_at.
     ctx["clock"].advance(5.0)
     # Tick 1: first call → lag=0 (no prior due_at to be late against)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})

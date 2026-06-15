@@ -63,7 +63,7 @@ impl ZmqSocket {
         Ok(())
     }
 
-    #[cfg(any(feature = "standalone-slot-tracker", test))]
+    #[cfg(feature = "standalone-slot-tracker")]
     pub(crate) fn disconnect(&self, endpoint: &str) -> Result<()> {
         self.socket().disconnect(endpoint)?;
         Ok(())

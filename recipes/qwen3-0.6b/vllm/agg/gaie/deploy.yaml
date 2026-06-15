@@ -15,7 +15,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "16"
@@ -56,7 +56,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
         args:
           - -m
           - dynamo.frontend
@@ -78,7 +78,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           workingDir: /workspace/examples/backends/vllm
       replicas: 2
       resources:
