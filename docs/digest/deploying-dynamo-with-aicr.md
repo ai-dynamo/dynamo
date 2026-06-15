@@ -270,8 +270,38 @@ kubectl get dynamographdeployments -n dynamo-workload
 kubectl get pods -n dynamo-workload -o wide -w
 ```
 
-For the default Dynamo-router path, verify the frontend service. For the Gateway / EPP path, verify
-the Gateway, InferencePool, HTTPRoute, EPP pod, and worker frontend sidecars.
+For the default Dynamo-router path, call the OpenAI-compatible API through the Dynamo frontend
+service:
+
+```bash
+kubectl get svc vllm-agg-frontend -n dynamo-workload
+kubectl port-forward -n dynamo-workload svc/vllm-agg-frontend 8000:8000
+```
+
+In another terminal:
+
+```bash
+curl http://localhost:8000/v1/models
+
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello from AICR Dynamo"}],"max_tokens":30,"stream":false}'
+```
+
+AICR inference recipes also install `agentgateway` and an `inference-gateway` Gateway in the
+`agentgateway-system` namespace. The `vllm-agg` example above uses the direct frontend path; for the
+Gateway / EPP path, deploy a workload that creates the EPP component, `InferencePool`, and
+`HTTPRoute`, then send the same OpenAI-compatible requests through the Gateway address:
+
+```bash
+kubectl get gateway inference-gateway -n agentgateway-system
+kubectl get inferencepool,httproute -n dynamo-workload
+
+GATEWAY_HOST=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
+curl "http://${GATEWAY_HOST}/v1/models"
+```
+
+For the Gateway / EPP path, also verify the EPP pod and worker frontend sidecars.
 
 ## What Validation Covers
 
