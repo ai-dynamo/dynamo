@@ -77,6 +77,12 @@ pub(crate) struct DisaggRequestState {
     pub(in crate::replay::offline) phase: DisaggPhase,
     prefill_worker_idx: Option<usize>,
     decode_worker_idx: Option<usize>,
+    /// Channel key for this request's prefill→decode KV transfer. Set on the
+    /// prefill request as its `bootstrap_room` (the scheduler's engine-neutral
+    /// pin trigger) so the prefill core PINS its KV on completion; the
+    /// `DisaggRuntime` correlator releases that pin when the matching decode is
+    /// scheduled (event-driven strand release).
+    transfer_id: u64,
 }
 
 #[cfg(test)]
@@ -89,7 +95,7 @@ pub(crate) struct DisaggRequestSnapshot {
 }
 
 impl DisaggRequestState {
-    pub(crate) fn new(request: DirectRequest, arrival_ms: f64) -> Self {
+    pub(crate) fn new(request: DirectRequest, arrival_ms: f64, transfer_id: u64) -> Self {
         #[cfg(not(test))]
         let _ = arrival_ms;
         Self {
@@ -99,6 +105,7 @@ impl DisaggRequestState {
             phase: DisaggPhase::QueuedPrefill,
             prefill_worker_idx: None,
             decode_worker_idx: None,
+            transfer_id,
         }
     }
 
@@ -108,9 +115,23 @@ impl DisaggRequestState {
             .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
     }
 
+    /// The prefill worker that ran this request's prefill, if assigned.
+    pub(crate) fn prefill_worker_idx(&self) -> Option<usize> {
+        self.prefill_worker_idx
+    }
+
+    /// This request's prefill→decode transfer id (channel key).
+    pub(crate) fn transfer_id(&self) -> u64 {
+        self.transfer_id
+    }
+
     pub(crate) fn build_prefill_request(&self) -> Result<DirectRequest> {
         let mut request = self.original_request()?.clone();
         request.max_output_tokens = 1;
+        // Tag the prefill with the transfer id so the scheduler PINS its KV on
+        // completion (models the prefill→decode strand). The pin is released by
+        // the `DisaggRuntime` correlator when the matching decode is scheduled.
+        request.bootstrap_room = Some(self.transfer_id);
         Ok(request)
     }
 
@@ -210,8 +231,26 @@ impl OfflineWorkerState {
         self.core.receive(request);
     }
 
+    /// Release a pinned (stranded) prefill's KV (the event-driven strand
+    /// release). A pinned prefill keeps occupying its worker slot
+    /// (`in_flight`) from completion until this release; freeing it now
+    /// decrements `in_flight`. Idempotent: a no-op if no pin is held for `uuid`.
+    pub(crate) fn release_pinned(&mut self, uuid: uuid::Uuid) -> bool {
+        if self.core.release_pinned(uuid) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn mark_completed(&mut self, completed_requests: usize) {
         self.in_flight = self.in_flight.saturating_sub(completed_requests);
+        // A disagg prefill that completed but PINNED its KV still occupies a
+        // worker slot until its decode releases it (see `release_pinned`); keep
+        // `in_flight` covering those resident pins so the invariant in
+        // `in_flight()` holds and the worker isn't treated as drained early.
+        self.in_flight = self.in_flight.max(self.core.num_requests());
     }
 
     pub(crate) fn mark_busy(&mut self) {
@@ -223,7 +262,11 @@ impl OfflineWorkerState {
     }
 
     pub(crate) fn is_ready(&self) -> bool {
-        !self.busy && !self.core.is_empty()
+        // A worker holding ONLY pinned (stranded) prefill KV has no model work
+        // to do — it must not be driven (that would spin the replay loop with
+        // no progress). It still isn't `is_drained` (the pin holds KV), so the
+        // runtime advances to the matching decode which releases the pin.
+        !self.busy && self.core.has_runnable_work()
     }
 
     pub(crate) fn is_drained(&self) -> bool {
@@ -250,6 +293,12 @@ impl OfflineWorkerState {
     #[cfg(feature = "kvbm-offload")]
     pub(crate) fn earliest_offload_deadline(&self) -> Option<f64> {
         self.core.earliest_offload_deadline()
+    }
+
+    /// Number of pinned (stranded) prefills this worker is holding.
+    #[cfg(test)]
+    pub(crate) fn num_pinned(&self) -> usize {
+        self.core.num_pinned()
     }
 
     #[cfg(test)]
@@ -284,11 +333,17 @@ mod tests {
                 ..Default::default()
             },
             0.0,
+            4242,
         );
 
         let request = state.build_prefill_request().unwrap();
         assert_eq!(request.max_output_tokens, 1);
         assert_eq!(request.priority, -3);
         assert_eq!(request.strict_priority, 9);
+        assert_eq!(
+            request.bootstrap_room,
+            Some(4242),
+            "prefill carries the transfer id as its pin trigger"
+        );
     }
 }

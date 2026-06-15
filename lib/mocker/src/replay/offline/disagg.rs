@@ -71,6 +71,15 @@ pub(in crate::replay) struct DisaggRuntime {
     prefill_router: Option<OfflineReplayRouter>,
     decode_router: Option<OfflineReplayRouter>,
     requests: HashMap<Uuid, DisaggRequestState>,
+    /// In-process `transfer_id → prefill uuid` correlator. A disagg prefill
+    /// PINS its KV on completion (the cascade); this map records which pinned
+    /// prefill each transfer corresponds to so the pin can be released when the
+    /// matching decode is scheduled in-process (event-driven, load-dependent
+    /// strand release — replaces the old modeled time-based release). Entries
+    /// are removed on release; any left at teardown are logged as unmatched.
+    transfer_correlator: HashMap<u64, Uuid>,
+    /// Monotonic source of transfer ids assigned at prefill arrival.
+    next_transfer_id: u64,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
     progress: ReplayProgress,
@@ -197,6 +206,8 @@ impl DisaggRuntime {
             prefill_router,
             decode_router,
             requests: HashMap::new(),
+            transfer_correlator: HashMap::new(),
+            next_transfer_id: 1,
             collector: TraceCollector::default(),
             events: BinaryHeap::new(),
             progress,
@@ -323,7 +334,21 @@ impl DisaggRuntime {
     }
 
     /// Dispatch a request's decode stage onto a specific decode worker.
+    ///
+    /// This is the in-process point at which the matching decode is scheduled,
+    /// so it is also where the stranded prefill's pin is released (event-driven,
+    /// load-dependent strand duration): the prefill held its KV from completion
+    /// until exactly here.
     fn dispatch_decode(&mut self, uuid: Uuid, worker_idx: usize) -> Result<()> {
+        // Release the matching prefill's pinned KV (the strand ends as the decode
+        // is scheduled to pull the transfer). Idempotent: a prefill that did not
+        // pin (e.g. no transfer assigned) is a no-op.
+        let transfer_id = self.state(uuid)?.transfer_id();
+        if let Some(prefill_worker_idx) = self.state(uuid)?.prefill_worker_idx() {
+            self.prefill_engine
+                .release_pinned(prefill_worker_idx, uuid)?;
+        }
+        self.transfer_correlator.remove(&transfer_id);
         let request = self.state(uuid)?.original_request()?.clone();
         self.decode_engine.dispatch(worker_idx, request)?;
         self.state_mut(uuid)?.start_decode(worker_idx);
@@ -423,9 +448,17 @@ impl DisaggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
+        // Assign a transfer id for this request's prefill→decode KV handoff and
+        // record the correlation so the prefill pin can be released when the
+        // matching decode is scheduled.
+        let transfer_id = self.next_transfer_id;
+        self.next_transfer_id += 1;
+        self.transfer_correlator.insert(transfer_id, uuid);
         let queued_request = request.clone();
-        self.requests
-            .insert(uuid, DisaggRequestState::new(request, arrival_time_ms));
+        self.requests.insert(
+            uuid,
+            DisaggRequestState::new(request, arrival_time_ms, transfer_id),
+        );
         if self.prefill_router.is_none() {
             let worker_idx = self.next_prefill_worker();
             self.dispatch_prefill(uuid, worker_idx)?;
@@ -1044,8 +1077,20 @@ impl DisaggRuntime {
         Ok(())
     }
 
+    /// Log any prefill pins whose matching decode never scheduled (a silent
+    /// leak would skew occupancy). Called at teardown.
+    fn log_unmatched_pins(&self) {
+        if !self.transfer_correlator.is_empty() {
+            tracing::warn!(
+                unmatched = self.transfer_correlator.len(),
+                "offline disagg replay teardown: stranded prefill pins whose decode never scheduled"
+            );
+        }
+    }
+
     /// Finalize the replay and return the simulation report directly.
     pub(in crate::replay) fn finalize_report(self) -> crate::replay::TraceSimulationReport {
+        self.log_unmatched_pins();
         self.progress.finish();
         self.collector.finish()
     }
@@ -1078,6 +1123,7 @@ impl DisaggRuntime {
             self.drain_current_timestamp()?;
         }
 
+        self.log_unmatched_pins();
         self.progress.finish();
         self.finish_test_stats();
         Ok((self.collector, self.stats))
@@ -1545,6 +1591,60 @@ mod tests {
         let enqueue_idx = transition_index(transitions, DisaggTransition::DecodeEnqueued { uuid });
         assert!(mark_idx < free_idx);
         assert!(free_idx < enqueue_idx);
+    }
+
+    /// Event-driven strand release: a disagg prefill PINS its KV on completion
+    /// and holds it until the matching decode is scheduled in-process — there is
+    /// no time-based release. Stepping the runtime up to (but not through) the
+    /// decode handoff leaves the pin held; advancing past it releases the pin and
+    /// empties the correlator.
+    #[test]
+    fn test_replay_prefill_pin_released_when_decode_scheduled() {
+        // A large handoff delay opens a window where the prefill is complete and
+        // pinned but the decode has not yet been enqueued.
+        let mut config = disagg_config();
+        config.num_prefill_workers = 1;
+        config.num_decode_workers = 1;
+        config.prefill_args.kv_transfer_bandwidth = Some(1.0);
+        config.prefill_args.kv_bytes_per_token = Some(1_000_000);
+
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            None,
+            None,
+            VecDeque::from([request(1, 128, 2, 0.0)]),
+            ReplayMode::Concurrency { max_in_flight: 4 },
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        // Advance to t=1ms: the prefill (speedup 1000x) completes ~instantly and
+        // pins; the decode handoff (~128ms) has not fired yet.
+        runtime.advance_to(1.0).unwrap();
+        assert_eq!(
+            runtime.prefill_engine.total_pinned(),
+            1,
+            "prefill KV must be pinned (stranded) while awaiting its decode"
+        );
+        assert_eq!(
+            runtime.transfer_correlator.len(),
+            1,
+            "the transfer_id -> uuid correlation is recorded while pinned"
+        );
+
+        // Advance past the handoff: the decode is scheduled in-process, which
+        // releases the matching pin (event-driven) and clears the correlator.
+        let done = runtime.advance_to(10_000.0).unwrap();
+        assert!(done, "workload completes once the decode runs");
+        assert_eq!(
+            runtime.prefill_engine.total_pinned(),
+            0,
+            "the pin is released when the decode is scheduled"
+        );
+        assert!(
+            runtime.transfer_correlator.is_empty(),
+            "every transfer correlated to a scheduled decode (no leaked pins)"
+        );
     }
 
     #[test]

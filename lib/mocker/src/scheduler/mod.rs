@@ -190,6 +190,16 @@ impl EngineCore {
         }
     }
 
+    /// True if there is waiting/running work to execute a pass on (pinned KV
+    /// alone is not runnable). Used so the replay driver doesn't spin on a
+    /// worker holding only stranded prefill KV.
+    pub(crate) fn has_runnable_work(&self) -> bool {
+        match self {
+            Self::Vllm(core) => core.has_runnable_work(),
+            Self::Sglang(core) => core.has_runnable_work(),
+        }
+    }
+
     pub(crate) fn num_requests(&self) -> usize {
         match self {
             Self::Vllm(core) => core.num_requests(),
@@ -208,21 +218,13 @@ impl EngineCore {
         }
     }
 
-    /// enable modeled time-based pin release for the offline replay
-    /// path (which can't observe the live cross-instance decode pickup).
-    pub(crate) fn set_time_based_pin_release(&mut self, enabled: bool) {
+    /// Release a pinned (stranded) prefill's KV. Used by the offline replay's
+    /// in-process `transfer_id → uuid` correlator when the matching decode is
+    /// scheduled (the event-driven, load-dependent strand release). Idempotent.
+    pub(crate) fn release_pinned(&mut self, uuid: uuid::Uuid) -> bool {
         match self {
-            Self::Vllm(core) => core.set_time_based_pin_release(enabled),
-            Self::Sglang(core) => core.set_time_based_pin_release(enabled),
-        }
-    }
-
-    /// earliest modeled pin-release deadline across this core's
-    /// stranded prefills, if any.
-    pub(crate) fn earliest_pin_deadline(&self) -> Option<f64> {
-        match self {
-            Self::Vllm(core) => core.earliest_pin_deadline(),
-            Self::Sglang(core) => core.earliest_pin_deadline(),
+            Self::Vllm(core) => core.release_pinned(uuid),
+            Self::Sglang(core) => core.release_pinned(uuid),
         }
     }
 
@@ -246,6 +248,15 @@ impl EngineCore {
         match self {
             Self::Vllm(core) => core.earliest_offload_deadline(),
             Self::Sglang(_) => None,
+        }
+    }
+
+    /// Number of currently pinned (stranded) prefills held by this core.
+    #[cfg(test)]
+    pub(crate) fn num_pinned(&self) -> usize {
+        match self {
+            Self::Vllm(core) => core.num_pinned(),
+            Self::Sglang(core) => core.num_pinned(),
         }
     }
 }

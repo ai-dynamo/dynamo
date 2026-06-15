@@ -422,17 +422,6 @@ pub(crate) struct VllmCore {
     /// uuid↔handle mapping.
     #[cfg(feature = "kvbm-offload")]
     pub(super) requests_awaiting_swap_in: Vec<AwaitingSwapIn>,
-
-    /// Replay path: when `true`, pinned (stranded) prefills are
-    /// released on a MODELED virtual-time deadline instead of a live decode
-    /// event. The offline replay can't observe the cross-instance decode pickup,
-    /// so the strand duration is the modeled handoff/transfer time recorded in
-    /// `pinned_release_at`. Live workers leave this `false` and release via the
-    /// event-driven `release_pin` control message.
-    time_based_pin_release: bool,
-    /// uuid -> virtual-time (ms) at which a time-based pin should release.
-    /// Drained at pass entry. Only populated when `time_based_pin_release`.
-    pinned_release_at: FxHashMap<Uuid, f64>,
 }
 
 impl VllmCore {
@@ -496,31 +485,6 @@ impl VllmCore {
             kv_event_buffer,
             #[cfg(feature = "kvbm-offload")]
             requests_awaiting_swap_in: Vec::new(),
-            time_based_pin_release: false,
-            pinned_release_at: FxHashMap::default(),
-        }
-    }
-
-    /// switch this core to modeled time-based pin release (replay).
-    pub(crate) fn set_time_based_pin_release(&mut self, enabled: bool) {
-        self.time_based_pin_release = enabled;
-    }
-
-    /// release any time-based pins whose modeled deadline has passed.
-    /// Called at pass entry by the offline replay driver (no-op for live).
-    fn release_due_pins(&mut self, now_ms: f64) {
-        if self.pinned_release_at.is_empty() {
-            return;
-        }
-        let due: Vec<Uuid> = self
-            .pinned_release_at
-            .iter()
-            .filter(|&(_, &deadline)| deadline <= now_ms)
-            .map(|(&uuid, _)| uuid)
-            .collect();
-        for uuid in due {
-            self.pinned_release_at.remove(&uuid);
-            self.release_pinned(uuid);
         }
     }
 
@@ -623,18 +587,16 @@ impl VllmCore {
         self.state.is_empty() && self.state.pinned.is_empty()
     }
 
-    pub(crate) fn num_requests(&self) -> usize {
-        self.state.requests.len() + self.state.pinned.len()
+    /// True if there is waiting/running work to execute a pass on. Pinned
+    /// (stranded) prefills are NOT runnable — they hold KV but do no model
+    /// work — so a worker holding ONLY pinned KV is not "ready" and must not
+    /// be driven (otherwise the replay loop spins making no progress).
+    pub(crate) fn has_runnable_work(&self) -> bool {
+        !self.state.is_empty()
     }
 
-    /// Replay: the earliest modeled pin-release deadline, if any. The
-    /// offline driver uses this to advance virtual time to a strand release when
-    /// no other work is pending (mirrors the offload stall-advance).
-    pub(crate) fn earliest_pin_deadline(&self) -> Option<f64> {
-        self.pinned_release_at
-            .values()
-            .copied()
-            .fold(None, |acc, d| Some(acc.map_or(d, |a: f64| a.min(d))))
+    pub(crate) fn num_requests(&self) -> usize {
+        self.state.requests.len() + self.state.pinned.len()
     }
 
     /// Read-only view of the scheduler state for policy tests that assert on
@@ -906,8 +868,6 @@ impl VllmCore {
         now_ms: f64,
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> EnginePassResult {
-        // Replay: release modeled-time strands whose deadline elapsed.
-        self.release_due_pins(now_ms);
         let requests_before = self.state.requests.len();
         #[cfg(feature = "kvbm-offload")]
         self.tick_and_promote_swap_ins(now_ms);
@@ -1505,15 +1465,11 @@ impl VllmCore {
                     // (still holding its KV block handles) into the pinned set
                     // instead of freeing it. Its blocks stay counted active in
                     // the KV manager — building pool pressure (the cascade) —
-                    // until `release_pinned` (decode-ready or abort).
+                    // until `release_pinned`. Both live and replay release the
+                    // pin event-drivenly: live via the cross-process channel,
+                    // replay via the in-process `transfer_id → uuid` correlator
+                    // when the matching decode is scheduled.
                     self.state.pin_completed(&uuid);
-                    // Replay: schedule a modeled time-based release at
-                    // decode_start + handoff/transfer delay, since the offline
-                    // path can't observe the live decode pickup.
-                    if self.time_based_pin_release {
-                        let deadline = decode_end_ms + handoff_delay_ms.unwrap_or(0.0);
-                        self.pinned_release_at.insert(uuid, deadline);
-                    }
                 } else {
                     self.state.complete(&uuid);
                 }

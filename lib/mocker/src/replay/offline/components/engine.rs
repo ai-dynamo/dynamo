@@ -195,6 +195,21 @@ impl EngineComponent {
         Ok(())
     }
 
+    /// Release a pinned (stranded) prefill's KV on `worker_id`. Used by the
+    /// disagg replay's `transfer_id → uuid` correlator to free the prefill pin
+    /// when the matching decode is scheduled. Returns `true` if a pin was held.
+    pub(in crate::replay::offline) fn release_pinned(
+        &mut self,
+        worker_id: usize,
+        uuid: uuid::Uuid,
+    ) -> anyhow::Result<bool> {
+        let worker = self
+            .workers
+            .get_mut(&worker_id)
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
+        Ok(worker.release_pinned(uuid))
+    }
+
     pub(in crate::replay::offline) fn drive_ready(
         &mut self,
         now_ms: f64,
@@ -335,6 +350,15 @@ impl EngineComponent {
             .values()
             .map(OfflineWorkerState::debug_snapshot)
             .collect()
+    }
+
+    /// Total pinned (stranded) prefills held across all workers in this stage.
+    #[cfg(test)]
+    pub(crate) fn total_pinned(&self) -> usize {
+        self.workers
+            .values()
+            .map(OfflineWorkerState::num_pinned)
+            .sum()
     }
 }
 

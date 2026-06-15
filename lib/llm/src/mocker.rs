@@ -20,7 +20,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
+    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
     RawKvEventSink,
 };
 use dynamo_mocker::common::utils::sleep_precise;
@@ -49,6 +49,28 @@ use uuid::Uuid;
 use self::metrics::NativeMockerMetrics;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
+
+/// vLLM-flavored `disaggregated_params` payload emitted by a mocker prefill in
+/// its first output and read back by the matching decode.
+///
+/// This mirrors the *shape* of real vLLM `kv_transfer_params` (NIXL): the
+/// prefill announces an opaque transfer handle plus where to pull it from.
+/// `transfer_id` is the channel key (a [`dynamo_mocker::services::bootstrap::TransferId`]);
+/// `prefill_host`/`prefill_port` address the prefill's bootstrap server so the
+/// decode can connect for the modeled pull. Sourced **post-prefill-compute**
+/// (unlike sglang's frontend-precomputed bootstrap room).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct VllmDisaggParams {
+    transfer_id: u64,
+    prefill_host: String,
+    prefill_port: u16,
+}
+
+impl VllmDisaggParams {
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        serde_json::from_value(value.clone()).ok()
+    }
+}
 
 /// Wrapper to adapt KvEventPublisher to the KvCacheEventSink trait
 struct KvEventSinkAdapter(KvEventPublisher);
@@ -279,7 +301,7 @@ impl MockEngine {
     /// WAITING_FOR_REMOTE_KVS request stays WAITING until the scheduler admits it, the
     /// request context is dropped, or the prefill side's `kv_transfer_abort_timeout_ms`
     /// fires and closes the bootstrap room (which surfaces to the decode side later when
-    /// it attempts `connect_to_prefill(room_id)` — that connect then fails with a
+    /// it attempts `connect_to_prefill(transfer_id)` — that connect then fails with a
     /// closed-room error). Cancellation is delegated to the surrounding request context.
     pub async fn wait_for_decode_kv_capacity(&self, dp_rank: u32) -> Result<()> {
         let schedulers = self
@@ -583,20 +605,52 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             .request_timing(&request.model, dp_rank, is_prefill, request_start)
             .await;
 
-        // Bootstrap rendezvous for disaggregated serving
-        // - Decode: wait for own KV capacity, then send receiver metadata to prefill
-        //   and wait for prefill completion or abort
-        // - Prefill: wait for decode metadata (bounded by abort_timeout when set) before emitting
-        //   output, then complete_room(); on abort-timeout abort_room()
-        let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
+        // Disaggregated-serving KV-transfer coordination. The channel and the
+        // scheduler pin/release core are shared; only the **keying and source**
+        // of the transfer handle differ by path (not by engine — a vLLM mocker
+        // can use either path):
+        //
+        // - **Bootstrap path** (sglang, and vLLM-with-`--bootstrap-ports`): the
+        //   frontend precomputes the channel key and plumbs the bootstrap triple
+        //   on the request's `bootstrap_info`. UNCHANGED behavior.
+        // - **disaggregated_params path** (vLLM NIXL `kv_transfer_params`): the
+        //   prefill EMITS the channel key in its output
+        //   (`disaggregated_params = {transfer_id, prefill_host, prefill_port}`)
+        //   and the decode reads it back from `prefill_result.disaggregated_params`.
+        //   Selected only when no `bootstrap_info` is present (the frontend took
+        //   the output-`disaggregated_params` route).
+        //
+        // Both resolve to a single `u64` channel key (the prefill's pin is keyed
+        // by request `uuid`; the channel/correlation is keyed by that `u64`).
+        let is_vllm = self.engine_args.engine_type == EngineType::Vllm;
+        let bootstrap_server = self.bootstrap_server.clone();
         let abort_timeout = self
             .engine_args
             .kv_transfer_abort_timeout_ms
             .map(Duration::from_millis);
 
-        if let Some(bootstrap_info) = &request.bootstrap_info
-            && self.engine_args.is_decode()
-        {
+        // Resolve the decode-side connect target (host, port, transfer_id), if any.
+        let decode_connect: Option<(String, u16, u64)> = if self.engine_args.is_decode() {
+            if let Some(b) = request.bootstrap_info.as_ref() {
+                // Bootstrap path (both engines): frontend-precomputed triple.
+                Some((b.bootstrap_host.clone(), b.bootstrap_port, b.bootstrap_room))
+            } else if is_vllm {
+                // vLLM disaggregated_params path: the transfer handle rides on
+                // the decode request's `prefill_result.disaggregated_params`,
+                // emitted by the prefill.
+                request
+                    .prefill_result
+                    .as_ref()
+                    .and_then(|r| VllmDisaggParams::parse(&r.disaggregated_params))
+                    .map(|p| (p.prefill_host, p.prefill_port, p.transfer_id))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((host, port, transfer_id)) = &decode_connect {
             // Gate decode on local KV capacity before connecting (see
             // wait_for_decode_kv_capacity). Only when abort_timeout is configured, to
             // preserve the legacy "skip the wait" path for older DGDs.
@@ -606,55 +660,147 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                     .map_err(|e| Error::msg(format!("Decode KV wait failed: {e}")))?;
             }
             // Forensic logging: emit decode-side wait-start event so post-hoc
-            // analysis can reconstruct (decode_worker, target_prefill, room) stranding graphs.
+            // analysis can reconstruct (decode_worker, target_prefill, transfer)
+            // stranding graphs.
             tracing::info!(
                 target: "mocker::kv_abort",
                 decode_dp_rank = dp_rank,
-                room_id = bootstrap_info.bootstrap_room,
-                target_host = %bootstrap_info.bootstrap_host,
-                target_port = bootstrap_info.bootstrap_port,
+                transfer_id = transfer_id,
+                target_host = %host,
+                target_port = port,
                 "decode_kv_wait_start"
             );
-            connect_to_prefill(
-                &bootstrap_info.bootstrap_host,
-                bootstrap_info.bootstrap_port,
-                bootstrap_info.bootstrap_room,
-            )
-            .await
-            .map_err(|e| Error::msg(format!("Bootstrap connection failed: {e}")))?;
+            connect_to_prefill(host, *port, *transfer_id)
+                .await
+                .map_err(|e| Error::msg(format!("Bootstrap connection failed: {e}")))?;
         }
+
+        // Resolve the prefill-side transfer id (the `u64` channel key) and, for
+        // vLLM, the `disaggregated_params` handle to emit. The prefill pins only
+        // when it can hand off over a running bootstrap server, so the strand is
+        // always releasable (decode connect or abort-timeout); without a server
+        // the prefill frees normally (no strand) — e.g. aggregated requests.
+        //
+        // The TWO disagg paths differ in WHO drives the pin release, and the
+        // difference is intentional — vLLM is the NIXL-faithful reframe:
+        //
+        // - **sglang bootstrap path** (`bootstrap_info` present): the decode
+        //   already knows the frontend-precomputed room, so the prefill blocks
+        //   on `wait_for_decode_ready` in the spawned task (KV pinned throughout)
+        //   and `complete_room`s after the first token. UNCHANGED.
+        // - **vLLM disaggregated_params path**: the prefill emits the transfer
+        //   handle in its output and its request stream COMPLETES NORMALLY — it
+        //   does NOT hold the stream open waiting for the pull. The KV pin is
+        //   decoupled from the request lifecycle (as NixlConnector holds KV
+        //   independent of the request): at pin time the prefill REGISTERS the
+        //   release trigger on the long-lived channel server, keyed by
+        //   `transfer_id`. The server fires the registered `release_pin` when the
+        //   matching decode connects (then ACKs it) or on abort-timeout.
+        #[allow(clippy::type_complexity)]
+        let (prefill_transfer_id, emitted_disagg_params, vllm_disagg_handoff): (
+            Option<u64>,
+            Option<serde_json::Value>,
+            bool,
+        ) = if is_prefill {
+            if let Some(b) = request.bootstrap_info.as_ref() {
+                // sglang bootstrap path: pin keyed by the frontend's precomputed
+                // room; the prefill blocks on the pre-emit wait (unchanged).
+                (Some(b.bootstrap_room), None, false)
+            } else if is_vllm && let Some(server) = bootstrap_server.get() {
+                // vLLM disaggregated_params path: generate a transfer id
+                // post-compute and announce it in the output. Release is driven
+                // by the channel server, not by holding the prefill stream.
+                let transfer_id: u64 = rand::rng().random();
+                let params = VllmDisaggParams {
+                    transfer_id,
+                    // The mocker prefill/decode run as local processes; the
+                    // bootstrap server binds 0.0.0.0, so loopback is the
+                    // reachable pull address for the modeled transfer.
+                    prefill_host: "127.0.0.1".to_string(),
+                    prefill_port: server.port(),
+                };
+                let value = serde_json::to_value(&params).expect("VllmDisaggParams serializes");
+                (Some(transfer_id), Some(value), true)
+            } else {
+                (None, None, false)
+            }
+        } else {
+            (None, None, false)
+        };
 
         // Convert PreprocessedRequest to DirectRequest for scheduler.
         //
-        // for a disagg prefill with a bootstrap room, tag the request
-        // with `bootstrap_room` so the scheduler PINS its KV on prefill
-        // completion (keeps the blocks counted active) instead of freeing them.
+        // For a disagg prefill with a transfer id, tag the request with
+        // `bootstrap_room` (the scheduler's pin trigger — an engine-neutral
+        // `u64` regardless of which engine produced it) so the scheduler PINS
+        // its KV on prefill completion (keeps the blocks counted active) instead
+        // of freeing them immediately.
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
             max_output_tokens,
             uuid: Some(request_uuid),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
-            bootstrap_room: if is_prefill { bootstrap_room } else { None },
+            bootstrap_room: prefill_transfer_id,
             ..Default::default()
         };
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
         self.active_requests.insert(request_uuid, request_tx);
 
-        let bootstrap_server = self.bootstrap_server.clone();
         // ordering fix: submit the prefill to the scheduler FIRST so
         // its KV is genuinely allocated and (on completion) pinned. Previously
         // submission was deferred until AFTER `wait_for_decode_ready` resolved,
         // so the scheduler held no request during the wait — no KV, no
-        // pressure, no cascade. Now the wait only governs the *release* of the
-        // already-pinned KV (event-driven strand duration).
-        let release_pin_after_wait = if is_prefill {
-            match (bootstrap_server.get().cloned(), bootstrap_room) {
-                (Some(server), Some(room_id)) => {
+        // pressure, no cascade.
+        //
+        // - sglang: capture `(server, room_id, sender)` so the spawned task can
+        //   run the pre-emit wait that governs the *release* of the pinned KV.
+        // - vLLM: REGISTER the release trigger on the channel server here at pin
+        //   time, then let the stream complete normally. The server fires the
+        //   registered `release_pin` on decode-connect / abort-timeout — the
+        //   prefill task does NOT wait. (This is the decoupling that lets the
+        //   prefill_router drain the prefill stream and route the decode.)
+        let sglang_pin_release = if is_prefill {
+            match (bootstrap_server.get().cloned(), prefill_transfer_id) {
+                (Some(server), Some(transfer_id)) => {
                     let sender = self.request_sender(dp_rank as usize).await;
                     self.direct(direct_request, dp_rank as usize).await;
-                    Some((server, room_id, sender))
+                    if vllm_disagg_handoff {
+                        // vLLM: register the release on the channel server. The
+                        // closure sends the scheduler's `release_pin` for this
+                        // prefill `uuid` when the server fires it (decode pull or
+                        // abort-timeout). The prefill stream is NOT held open.
+                        let pin_start = std::time::Instant::now();
+                        tracing::info!(
+                            target: "mocker::kv_abort",
+                            prefill_dp_rank = dp_rank,
+                            transfer_id,
+                            "prefill_kv_pin_start"
+                        );
+                        let release_sender = sender.clone();
+                        server.register_pin(
+                            transfer_id,
+                            abort_timeout,
+                            Box::new(move || {
+                                // Best-effort: if the channel is closed the
+                                // scheduler is shutting down and the KV is moot.
+                                let _ = release_sender
+                                    .send(DirectRequest::release_pin(request_uuid, dp_rank));
+                                tracing::info!(
+                                    target: "mocker::kv_abort",
+                                    prefill_dp_rank = dp_rank,
+                                    transfer_id,
+                                    duration_ms = pin_start.elapsed().as_millis() as u64,
+                                    "prefill_kv_pin_end"
+                                );
+                            }),
+                        );
+                        None
+                    } else {
+                        // sglang: the spawned task runs the pre-emit wait.
+                        Some((server, transfer_id, sender))
+                    }
                 }
                 _ => {
                     self.direct(direct_request, dp_rank as usize).await;
@@ -673,20 +819,28 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let async_context = ctx.context();
         let reasoning = self.engine_args.reasoning.clone();
         let mut native_timing = native_timing;
+        // The `disaggregated_params` a prefill emits in its output:
+        // - vLLM (disagg): the real `{transfer_id, prefill_host, prefill_port}`
+        //   handle the decode reads back. The decode connects by `transfer_id`.
+        // - sglang (disagg) / any other prefill: the legacy opaque marker,
+        //   unchanged — sglang coordinates over the frontend-precomputed room.
+        let prefill_disagg_params: Option<serde_json::Value> = if is_prefill {
+            emitted_disagg_params.or_else(|| Some(serde_json::json!("dummy")))
+        } else {
+            None
+        };
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
-            if let Some((server, room_id, sender)) = release_pin_after_wait {
-                // the prefill request is ALREADY submitted to the
-                // scheduler (above), so its KV is allocated and, once prefill
-                // compute completes, PINNED (kept counted active). This wait is
-                // the *release* trigger: the strand persists for exactly as long
-                // as the decode takes to arrive and pull the transfer
-                // (event-driven, load-dependent — not a fixed time).
-                //
-                // Forensic logging: pin-start with room_id + prefill dp_rank so
-                // post-hoc analysis can join with decode logs on room_id to
-                // reconstruct the (prefill -> decode) stranding graph.
+            // sglang bootstrap path: the decode already knows the
+            // frontend-precomputed room, so it connects *before* the prefill
+            // emits. The prefill request is ALREADY submitted (above), so its KV
+            // is pinned on completion; this wait is the *release* trigger — the
+            // strand persists for exactly as long as the decode takes to arrive
+            // (event-driven). The vLLM disagg path does NOT reach here: its
+            // release is driven by the channel server (registered above) so the
+            // stream completes normally.
+            if let Some((server, room_id, sender)) = sglang_pin_release {
                 let pin_start = std::time::Instant::now();
                 tracing::info!(
                     target: "mocker::kv_abort",
@@ -695,12 +849,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                     "prefill_kv_pin_start"
                 );
                 tokio::select! {
-                    // Bound the decode-arrival wait by abort_timeout (when set). On
-                    // timeout, abort the room so waiting/late decodes get a clean ABORT instead
-                    // of hanging, surface the abort to the client, and end the stream.
                     result = server.wait_for_decode_ready(room_id, abort_timeout) => {
-                        // Either outcome (decode arrived, or abort-timeout)
-                        // releases the pinned KV — the strand ends here.
                         let outcome = if let Err(e) = result {
                             tracing::warn!(
                                 "Prefill aborting transfer for room {room_id}: {e}"
@@ -710,9 +859,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         } else {
                             None
                         };
-                        // Release the pinned KV back to the scheduler (event-driven
-                        // strand release). Best-effort: if the channel is closed
-                        // the scheduler is shutting down and the KV is moot.
                         let _ = sender.send(DirectRequest::release_pin(request_uuid, dp_rank));
                         tracing::info!(
                             target: "mocker::kv_abort",
@@ -731,7 +877,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         }
                     }
                     _ = async_context.stopped() => {
-                        // Cancellation also releases the pin.
                         let _ = sender.send(DirectRequest::release_pin(request_uuid, dp_rank));
                         let _ = stream_tx.send(LLMEngineOutput::cancelled());
                         active_requests.remove(&request_uuid);
@@ -777,7 +922,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
                         let output = LLMEngineOutput {
                             token_ids: vec![token_id],
-                            disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
+                            disaggregated_params: prefill_disagg_params.clone(),
                             ..Default::default()
                         };
 
@@ -787,9 +932,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         }
 
                         if signal.completed {
-                            // By this point a disagg prefill has already waited for
-                            // decode to arrive (or aborted) in wait_for_decode_ready below, so
-                            // KV stayed pinned during the wait — modeling real NIXL behavior.
+                            // Emit the prefill's completion token. For vLLM disagg
+                            // this carries the real `disaggregated_params` handle
+                            // the decode reads back; the stream then COMPLETES
+                            // normally (no pin-wait here — release is driven by the
+                            // channel server, registered at submit time). sglang
+                            // already waited pre-emit (KV stayed pinned) and ACKs
+                            // the decode (`complete_room`) below — unchanged.
                             if stream_tx.send(output).is_err() {
                                 tracing::error!("Output stream receiver closed.");
                                 break;
@@ -803,11 +952,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                                 sleep_precise(Duration::from_secs_f64(delay_ms / 1000.0)).await;
                             }
 
-                            // Prefill: after first token, mark room complete (unblocks decode)
+                            // sglang bootstrap path: after first token, mark the
+                            // room complete (unblocks the decode). The vLLM disagg
+                            // path already marked the room complete in
+                            // `register_pin`, so it is skipped here (its release is
+                            // server-driven, decoupled from the stream).
                             if is_prefill
-                                && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
+                                && !vllm_disagg_handoff
+                                && let (Some(server), Some(transfer_id)) =
+                                    (bootstrap_server.get(), prefill_transfer_id)
                             {
-                                server.complete_room(room_id);
+                                server.complete_room(transfer_id);
                             }
 
                             if stream_tx.send(LLMEngineOutput::length()).is_err() {
@@ -918,4 +1073,45 @@ pub async fn make_mocker_engine(
         AnnotatedMockEngine::new(MockEngine::new(args), distributed_runtime, endpoint_id);
 
     Ok(Arc::new(annotated_engine))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The vLLM disagg handle the prefill emits must round-trip through the
+    /// `disaggregated_params` JSON the decode reads back, so the decode can
+    /// recover `(prefill_host, prefill_port, transfer_id)` and connect.
+    #[test]
+    fn vllm_disagg_params_round_trip() {
+        let params = VllmDisaggParams {
+            transfer_id: 0xDEAD_BEEF_u64,
+            prefill_host: "127.0.0.1".to_string(),
+            prefill_port: 51234,
+        };
+        let value = serde_json::to_value(&params).unwrap();
+        // It is a structured object (vLLM `kv_transfer_params` shape), not the
+        // legacy opaque marker.
+        assert!(value.get("transfer_id").is_some());
+        assert!(value.get("prefill_host").is_some());
+        assert!(value.get("prefill_port").is_some());
+
+        let parsed = VllmDisaggParams::parse(&value).expect("round-trips");
+        assert_eq!(parsed.transfer_id, 0xDEAD_BEEF_u64);
+        assert_eq!(parsed.prefill_host, "127.0.0.1");
+        assert_eq!(parsed.prefill_port, 51234);
+    }
+
+    /// A request carrying no (or a non-conforming) `disaggregated_params`
+    /// yields no decode connect target — the decode does not strand waiting on
+    /// a transfer that was never announced (aggregated vLLM path).
+    #[test]
+    fn vllm_disagg_params_absent_or_malformed_parse_to_none() {
+        assert!(VllmDisaggParams::parse(&serde_json::json!("dummy")).is_none());
+        assert!(VllmDisaggParams::parse(&serde_json::json!({})).is_none());
+        assert!(
+            VllmDisaggParams::parse(&serde_json::json!({ "transfer_id": 1 })).is_none(),
+            "missing host/port must not parse"
+        );
+    }
 }
