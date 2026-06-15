@@ -64,6 +64,9 @@ tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .view-overview.parser-dynamo td.cell[data-status-dynamo="na"],
 .view-overview.parser-vllm td.cell[data-status-vllm="na"],
 .view-overview.parser-sglang td.cell[data-status-sglang="na"] { background: #d3d8de; color: #d3d8de; }
+.view-overview.parser-dynamo td.cell[data-status-dynamo="documented"],
+.view-overview.parser-vllm td.cell[data-status-vllm="documented"],
+.view-overview.parser-sglang td.cell[data-status-sglang="documented"] { background: #6f9bc7; color: #6f9bc7; }
 .view-details.parser-dynamo td.cell[data-status-dynamo="ok"],
 .view-details.parser-vllm td.cell[data-status-vllm="ok"],
 .view-details.parser-sglang td.cell[data-status-sglang="ok"] { background: #bfe3c6; }
@@ -73,6 +76,9 @@ tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .view-details.parser-dynamo td.cell[data-status-dynamo="na"],
 .view-details.parser-vllm td.cell[data-status-vllm="na"],
 .view-details.parser-sglang td.cell[data-status-sglang="na"] { background: #e4e8ec; }
+.view-details.parser-dynamo td.cell[data-status-dynamo="documented"],
+.view-details.parser-vllm td.cell[data-status-vllm="documented"],
+.view-details.parser-sglang td.cell[data-status-sglang="documented"] { background: #c7d8ea; }
 .view-overview td.cell > a { color: inherit; }
 .view-overview td.cell > a:hover { background: transparent; }
 .view-overview td.cell:hover { filter: brightness(0.98); }
@@ -285,6 +291,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 <p class="stats summary-only">
   Stats for selected perspective:
   <span style="color:#0a7d2c" data-overview-count="ok">0</span> green ·
+  <span style="color:#3f6f9c" data-overview-count="documented">0</span> blue (documented) ·
   <span style="color:#b00" data-overview-count="problem">0</span> red ·
   <span style="color:#555" data-overview-count="na">0</span> gray.
 </p>
@@ -408,7 +415,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   function updateOverviewStats() {
     const parser = activeParser();
     document.querySelectorAll('.tab-panel').forEach(function (panel) {
-      const counts = {ok: 0, problem: 0, na: 0};
+      const counts = {ok: 0, documented: 0, problem: 0, na: 0};
       panel.querySelectorAll('td.cell').forEach(function (cell) {
         const status = cell.getAttribute('data-status-' + parser) || 'na';
         counts[status] = (counts[status] || 0) + 1;

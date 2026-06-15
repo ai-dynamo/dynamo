@@ -17,15 +17,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
+      dynamo:
+        calls: []
+        normal_text: ''
       sglang:
+        reason: 'Incomplete call (open <tool_call>, no close): Dynamo suppresses to empty, SGLang keeps raw. Non-parity by
+          design.'
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
   TOOLCALLING.batch.5.b:
@@ -36,7 +35,6 @@ cases:
     - *id001
     expected:
       dynamo: &id002
-        reason: "Dynamo's qwen25 (hermes alias) parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
       vllm:
@@ -49,22 +47,28 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id003
-        reason: "Dynamo's qwen25 (hermes alias) parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *id003
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        reason: 'Incomplete call (open <tool_call>, no close): Dynamo suppresses to empty, SGLang keeps raw. Non-parity by
+          design.'
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
   TOOLCALLING.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)
     ref: dynamo
-    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name": "get_weather",
-      "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location": "New York"}}'
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>
+      {"name": "get_weather", "arguments": {"location": "Boston"}}
+      </tool_call><tool_call>
+      {"name": "get_weather", "arguments": {"location": "New York"}}
     tools:
     - *id001
     expected:
-      dynamo:
+      dynamo: &id003
         calls:
         - name: get_weather
           arguments:
@@ -72,20 +76,19 @@ cases:
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
-          "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
-          "New York"}}'
+      sglang: *id003
   TOOLCALLING.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
-    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name": "get_weather",
-      "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location": "New York'
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>
+      {"name": "get_weather", "arguments": {"location": "Boston"}}
+      </tool_call><tool_call>
+      {"name": "get_weather", "arguments": {"location": "New York
     tools:
     - *id001
     expected:
-      dynamo:
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -93,8 +96,4 @@ cases:
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang:
-        calls: []
-        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
-          "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
-          "New York'
+      sglang: *id004

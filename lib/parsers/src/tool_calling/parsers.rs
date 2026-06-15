@@ -58,7 +58,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("gemma-4", ToolCallConfig::gemma4());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
-        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes
+        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes; EOF-recovery opt-out is keyed by name in detect_and_parse_tool_call_with_recovery_options
         map
     })
 }
@@ -148,7 +148,10 @@ pub async fn detect_and_parse_tool_call_with_recovery(
     let recovery_config = match &base.parser_config {
         ParserConfig::Json(c) => {
             let mut c = c.clone();
-            c.allow_eof_recovery = true;
+            // qwen25 opts out of EOF recovery so unterminated calls are dropped,
+            // not salvaged. Keyed by name (not a config field) to keep the
+            // exported JsonParserConfig stable for downstream callers.
+            c.allow_eof_recovery = parser_key != "qwen25";
             ParserConfig::Json(c)
         }
         ParserConfig::Xml(c) => {
@@ -170,7 +173,21 @@ pub async fn detect_and_parse_tool_call_with_recovery(
         parser_config: recovery_config,
         structural_tag_builder: None,
     };
-    try_tool_call_parse(message, &cfg, tools).await
+    let (calls, normal_text) = try_tool_call_parse(message, &cfg, tools).await?;
+
+    // An unterminated qwen25 call (open <tool_call>, no close, nothing parsed)
+    // drops its partial markup instead of leaking it. Deliberate non-parity
+    // with SGLang, which surfaces the raw text.
+    if parser_key == "qwen25"
+        && calls.is_empty()
+        && let Some(text) = normal_text.as_deref()
+        && text.contains("<tool_call>")
+        && !text.contains("</tool_call>")
+    {
+        return Ok((calls, Some(String::new())));
+    }
+
+    Ok((calls, normal_text))
 }
 
 /// Deprecated compatibility shim retained for the published `dynamo-parsers`

@@ -70,7 +70,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidator(deployment, h.mgr, h.groveEnabled)
 	return validator.Validate(ctx)
 }
 
@@ -97,7 +97,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidator(newDeployment, h.mgr, h.groveEnabled)
 	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err
