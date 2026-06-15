@@ -64,7 +64,7 @@ pub mod logging {
         /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
-        /// OTLP exporter endpoint URL for logs (defaults to traces endpoint if unset)
+        /// OTLP exporter endpoint URL for logs. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or the protocol default when unset.
         pub const OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
 
         /// Trace sampling ratio used when set. Example: "0.01" samples roughly 1% of traces.
