@@ -51,6 +51,20 @@ const (
 	ConditionReasonTopologyConditionPending   = "TopologyConditionPending"
 )
 
+// +kubebuilder:object:generate=true
+type DeviceSpec struct {
+	// Resources are device resource requests/limits copied directly into the
+	// main container (e.g. "nvidia.com/gpu", "amd.com/gpu",
+	// "nvidia.com/gpumem" for HAMi).
+	Resources corev1.ResourceList `json:"resources,omitempty"`
+	// Tolerations are added to the pod spec for device-specific node taints.
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// NodeSelector restricts pod scheduling to matching nodes (e.g. {"gpu": "on"} for HAMi).
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// SchedulerName overrides the default Kubernetes scheduler (e.g. "hami-scheduler").
+	SchedulerName string `json:"schedulerName,omitempty"`
+}
+
 // CompilationCacheConfig configures a PVC-backed compilation cache for a component.
 // The operator handles backend-specific mount paths and environment variables so
 // users do not need to hand-wire them into the pod template.

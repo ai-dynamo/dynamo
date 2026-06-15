@@ -200,6 +200,11 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 	// experimental block: gpuMemoryService, failover, checkpoint.
 	convertExperimentalToHub(src, dst)
 
+	// device: vendor-agnostic accelerator spec (symmetric field).
+	if src.Device != nil {
+		dst.Device = deviceSpecToHub(src.Device)
+	}
+
 	// Resources + envs + probes + mainContainer -> podTemplate.containers[main].
 	if err := buildPodTemplateToHub(src, dst, ctx); err != nil {
 		return err
@@ -535,6 +540,11 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	if src.ScalingAdapter != nil {
 		dst.ScalingAdapter = &ScalingAdapter{}
 		ConvertToScalingAdapter(src.ScalingAdapter, dst.ScalingAdapter)
+	}
+
+	// device: vendor-agnostic accelerator spec (symmetric field).
+	if src.Device != nil {
+		dst.Device = deviceSpecFromHub(src.Device)
 	}
 
 	// podTemplate -> mainContainer + extraPodSpec + extraPodMetadata +
@@ -2474,4 +2484,66 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		return nil
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Device (vendor-agnostic accelerator spec)
+// ---------------------------------------------------------------------------
+
+// deviceSpecToHub converts v1alpha1.DeviceSpec to v1beta1.DeviceSpec.
+func deviceSpecToHub(src *DeviceSpec) *v1beta1.DeviceSpec {
+	if src == nil {
+		return nil
+	}
+	dst := &v1beta1.DeviceSpec{
+		SchedulerName: src.SchedulerName,
+	}
+	if src.Resources != nil {
+		dst.Resources = make(corev1.ResourceList, len(src.Resources))
+		for k, v := range src.Resources {
+			dst.Resources[k] = v.DeepCopy()
+		}
+	}
+	if src.Tolerations != nil {
+		dst.Tolerations = make([]corev1.Toleration, len(src.Tolerations))
+		for i := range src.Tolerations {
+			src.Tolerations[i].DeepCopyInto(&dst.Tolerations[i])
+		}
+	}
+	if src.NodeSelector != nil {
+		dst.NodeSelector = make(map[string]string, len(src.NodeSelector))
+		for k, v := range src.NodeSelector {
+			dst.NodeSelector[k] = v
+		}
+	}
+	return dst
+}
+
+// deviceSpecFromHub converts v1beta1.DeviceSpec to v1alpha1.DeviceSpec.
+func deviceSpecFromHub(src *v1beta1.DeviceSpec) *DeviceSpec {
+	if src == nil {
+		return nil
+	}
+	dst := &DeviceSpec{
+		SchedulerName: src.SchedulerName,
+	}
+	if src.Resources != nil {
+		dst.Resources = make(corev1.ResourceList, len(src.Resources))
+		for k, v := range src.Resources {
+			dst.Resources[k] = v.DeepCopy()
+		}
+	}
+	if src.Tolerations != nil {
+		dst.Tolerations = make([]corev1.Toleration, len(src.Tolerations))
+		for i := range src.Tolerations {
+			src.Tolerations[i].DeepCopyInto(&dst.Tolerations[i])
+		}
+	}
+	if src.NodeSelector != nil {
+		dst.NodeSelector = make(map[string]string, len(src.NodeSelector))
+		for k, v := range src.NodeSelector {
+			dst.NodeSelector[k] = v
+		}
+	}
+	return dst
 }

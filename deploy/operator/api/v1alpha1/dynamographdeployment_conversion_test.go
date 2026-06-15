@@ -2093,3 +2093,33 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 		}
 	})
 }
+
+func TestDGD_DeviceSpec_RoundTrip(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-spec", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: backendFrameworkSGLang,
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					Device: &v1beta1.DeviceSpec{
+						Resources: corev1.ResourceList{
+							"nvidia.com/gpu":    resource.MustParse("1"),
+							"nvidia.com/gpumem": resource.MustParse("3000"),
+						},
+						Tolerations: []corev1.Toleration{
+							{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists},
+						},
+						NodeSelector:  map[string]string{"gpu": "on"},
+						SchedulerName: "hami-scheduler",
+					},
+				},
+			},
+		},
+	}
+	got := roundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got); diff != "" {
+		t.Errorf("DeviceSpec round-trip mismatch (-want +got):\n%s", diff)
+	}
+}

@@ -191,6 +191,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// depend on them for production workloads.
 	// +optional
 	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
+
+	// Device configures accelerator device requests in a vendor-agnostic way.
+	// When set, the operator copies resources, tolerations, nodeSelector, and
+	// schedulerName directly into the generated pod spec and skips all
+	// NVIDIA-default injections (DRA claim replacement, nvidia.com/gpu
+	// toleration). When absent, existing NVIDIA-default behavior is preserved.
+	// +optional
+	Device *DeviceSpec `json:"device,omitempty"`
 }
 
 // DynamoComponentDeploymentStatus defines the observed state of a DynamoComponentDeployment.

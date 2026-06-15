@@ -161,6 +161,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// multiple engine pods per rank that share GPUs via DRA resource claims.
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
+
+	// Device configures accelerator device requests in a vendor-agnostic way.
+	// When set, the operator copies resources, tolerations, nodeSelector, and
+	// schedulerName directly into the generated pod spec and skips all
+	// NVIDIA-default injections (DRA claim replacement, nvidia.com/gpu
+	// toleration). When absent, existing NVIDIA-default behavior is preserved.
+	// +optional
+	Device *DeviceSpec `json:"device,omitempty"`
 }
 
 type MultinodeSpec struct {

@@ -107,6 +107,20 @@ type Resources struct {
 	Claims []corev1.ResourceClaim `json:"claims,omitempty"`
 }
 
+// +kubebuilder:object:generate=true
+type DeviceSpec struct {
+	// Resources are device resource requests/limits copied directly into the
+	// main container (e.g. "nvidia.com/gpu", "amd.com/gpu",
+	// "nvidia.com/gpumem" for HAMi).
+	Resources corev1.ResourceList `json:"resources,omitempty"`
+	// Tolerations are added to the pod spec for device-specific node taints.
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// NodeSelector restricts pod scheduling to matching nodes (e.g. {"gpu": "on"} for HAMi).
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// SchedulerName overrides the default Kubernetes scheduler (e.g. "hami-scheduler").
+	SchedulerName string `json:"schedulerName,omitempty"`
+}
+
 type DeploymentTargetHPAConf struct {
 	CPU         *int32  `json:"cpu,omitempty"`
 	GPU         *int32  `json:"gpu,omitempty"`
