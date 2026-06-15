@@ -34,10 +34,12 @@ Editorial title direction:
   keep that clarification in the body.
 -->
 
-Running a model with Dynamo on Kubernetes starts with a `DynamoGraphDeployment`, but the graph is
-only the top of the stack. A production inference cluster also needs GPU drivers, device discovery,
-scheduling, health signals, observability, Gateway API resources, and the event transport that lets
-KV-aware routing see live cache state.
+Running a model with [Dynamo](https://github.com/ai-dynamo/dynamo) on
+[Kubernetes](https://kubernetes.io/) starts with a `DynamoGraphDeployment`, but the graph is only the
+top of the stack. A production inference cluster also needs GPU drivers, device discovery,
+scheduling, health signals, observability,
+[Gateway API](https://github.com/kubernetes-sigs/gateway-api) resources, and the event transport that
+lets KV-aware routing see live cache state.
 
 [NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) packages the lower stack as a
 validated, version-locked recipe. You bring an existing GPU Kubernetes cluster. AICR captures its
@@ -48,10 +50,11 @@ validated Dynamo 1.2 inference runtime stack."
 ## Why the Runtime Below Dynamo Matters
 
 Dynamo coordinates inference across multiple components: frontends, routers, workers, the Dynamo
-operator, and optional
-[Gateway API Inference Extension (GAIE) / Endpoint Picker Plugin (EPP)](../kubernetes/inference-gateway.md)
-components. Those components depend on cluster-level services that must agree on Kubernetes version,
-driver stack, GPU allocation model, scheduling policy, node health, metrics, and network reachability.
+operator, and optional [Gateway API](https://github.com/kubernetes-sigs/gateway-api)
+[Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension) /
+[Endpoint Picker Plugin (EPP)](../kubernetes/inference-gateway.md) components. Those components
+depend on cluster-level services that must agree on Kubernetes version, driver stack, GPU allocation
+model, scheduling policy, node health, metrics, and network reachability.
 
 A hand-written Dynamo manifest can start the serving graph, but it does not answer questions like:
 
@@ -79,15 +82,21 @@ mix of operator, chart, and runtime image versions.
 
 Below Dynamo, the recipe brings the cluster services Dynamo expects for validated GPU inference:
 
-- **NVIDIA GPU Operator** for the driver and GPU software stack.
-- **Node Feature Discovery** and GPU labels for placement.
-- **NVIDIA DRA driver for GPUs** for Kubernetes-native GPU allocation.
-- **KAI Scheduler** for accelerator-aware scheduling and gang-style placement.
-- **Grove** for Dynamo component lifecycle on Kubernetes.
-- **Prometheus stack** for cluster, accelerator, and Dynamo service metrics.
+- **[NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator)** for the driver and GPU software
+  stack.
+- **[Node Feature Discovery](https://github.com/kubernetes-sigs/node-feature-discovery)** and GPU
+  labels for placement.
+- **[DRA Driver for NVIDIA GPUs](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu)** for
+  Kubernetes-native GPU allocation.
+- **[KAI Scheduler](https://github.com/kai-scheduler/KAI-Scheduler)** for accelerator-aware
+  scheduling and gang-style placement.
+- **[Grove](https://github.com/ai-dynamo/grove)** for Dynamo component lifecycle on Kubernetes.
+- **[Prometheus stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack)**
+  for cluster, accelerator, and Dynamo service metrics.
 - **Node health management** components such as NVSentinel and Nodewright, where supported by the
   selected recipe.
-- **NATS** from the Dynamo platform chart for the standard Kubernetes KV event plane.
+- **[NATS](https://github.com/nats-io/nats-server)** from the Dynamo platform chart for the standard
+  Kubernetes KV event plane.
 
 The result is a runtime recipe, not a loose list of charts. AICR records the component versions,
 values, node selectors, tolerations, checksums, and validation expectations that make the bundle
@@ -100,11 +109,12 @@ more production-oriented `nvidia.com/v1beta1` API. AICR uses that API as the rec
 serving graph, while the `dynamo-platform` chart provides the operator, CRDs, NATS, and supporting
 control-plane services.
 
-Dynamo is Kubernetes-native in this path. Frontends, vLLM workers, EPP components, and other Dynamo
-services discover each other through Kubernetes resources instead of an etcd deployment. NATS serves
-a different purpose: it is part of the Dynamo dataplane for real-time, high-throughput streaming of
-KV cache location updates. The `dynamo-platform` chart installs NATS so the router and EPP can track
-which workers hold which KV blocks as those blocks are stored and evicted.
+Dynamo is Kubernetes-native in this path. Frontends, [vLLM](https://github.com/vllm-project/vllm)
+workers, EPP components, and other Dynamo services discover each other through Kubernetes resources
+instead of an [etcd](https://etcd.io/) deployment. [NATS](https://github.com/nats-io/nats-server)
+serves a different purpose: it is part of the Dynamo dataplane for real-time, high-throughput
+streaming of KV cache location updates. The `dynamo-platform` chart installs NATS so the router and
+EPP can track which workers hold which KV blocks as those blocks are stored and evicted.
 
 KV-aware routing is one of the main reasons to run Dynamo. Agentic workloads repeatedly append to a
 long prefix: system prompt, tool definitions, conversation history, tool results, and generated
@@ -130,14 +140,16 @@ That distinction matters for vLLM. A vLLM worker may include a setting like:
 {"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}
 ```
 
-That ZMQ publisher is the local vLLM engine event source. Dynamo reads those raw local KV events from
-the worker, normalizes them, and republishes them onto the Dynamo event plane. In the Kubernetes AICR
-path, that event plane is NATS.
+That [ZMQ](https://zeromq.org/) publisher is the local vLLM engine event source. Dynamo reads those
+raw local KV events from the worker, normalizes them, and republishes them onto the Dynamo event
+plane. In the Kubernetes AICR path, that event plane is NATS.
 
 ## Two Routing Paths
 
 AICR's Dynamo recipe covers both Dynamo 1.2 Kubernetes routing paths because they solve different
 operational problems.
+
+### Path 1: Direct Dynamo Frontend
 
 The default path is the **Dynamo frontend router**. A `Frontend` component runs with
 `DYN_ROUTER_MODE=kv`, receives OpenAI-compatible requests, tokenizes prompts, subscribes to worker KV
@@ -146,27 +158,43 @@ inside the Dynamo graph and is the shortest route for validating Dynamo itself.
 
 ```mermaid
 flowchart LR
-    Client["Client"] -->|"OpenAI-compatible request"| Frontend["Dynamo Frontend\nDYN_ROUTER_MODE=kv"]
-    Frontend -->|"request plane\nTCP by default"| Worker["vLLM worker"]
+    Client["Client\nOpenAI-compatible HTTP"] --> Service["Kubernetes Service\nvllm-agg-frontend"]
+    Service --> Frontend["Dynamo Frontend\nDYN_ROUTER_MODE=kv"]
+    Frontend -->|"tokenize + score\nKV overlap / load"| Router["Dynamo router\ncache-aware placement"]
+    Router -->|"request plane\nTCP by default"| Worker["vLLM worker"]
+
     Worker -.->|"local ZMQ\nraw KV events"| Publisher["Dynamo worker\nKV publisher"]
     Publisher -.->|"NATS-backed\nKV event plane"| Frontend
 ```
 
-The Kubernetes-native ingress path is **Gateway / EPP**. In that mode, traffic flows through the
-Kubernetes Gateway API and an InferencePool. The EPP performs endpoint selection using Dynamo's
-KV-aware scoring. Worker frontend sidecars run in `--router-mode direct`, so they honor the worker
-chosen by the EPP instead of making another placement decision. This path matters when the platform
-team wants model-aware routing at the Kubernetes Gateway layer while keeping Dynamo's cache-aware
-selection logic.
+### Path 2: Gateway / EPP
+
+The Kubernetes-native ingress path is **Gateway / EPP**. In that mode, traffic flows through
+[agentgateway](https://github.com/agentgateway/agentgateway), the Kubernetes
+[Gateway API](https://github.com/kubernetes-sigs/gateway-api), an `HTTPRoute`, and a
+[GAIE](https://github.com/kubernetes-sigs/gateway-api-inference-extension) `InferencePool`. Dynamo
+natively integrates with that path: the Dynamo operator reconciles a `DynamoGraphDeployment`
+component of type `epp`, generates the matching `InferencePool`, and runs the EPP that performs
+endpoint selection with Dynamo's KV-aware scoring. Worker frontend sidecars run in
+`--router-mode direct`, so they honor the worker chosen by the EPP instead of making another
+placement decision. This path matters when the platform team wants model-aware routing at the
+Kubernetes Gateway layer while keeping Dynamo's cache-aware selection logic.
 
 ```mermaid
 flowchart LR
-    Client["Client"] -->|"HTTP"| Gateway["Kubernetes Gateway"]
-    Gateway -->|"InferencePool"| EPP["Dynamo EPP\nKV-aware selection"]
-    EPP -->|"chosen worker"| Sidecar["Worker frontend sidecar\n--router-mode direct"]
-    Sidecar --> Worker["vLLM worker"]
+    Client["Client\nOpenAI-compatible HTTP"] --> Gateway["agentgateway\nGateway API data plane"]
+    Gateway --> Route["HTTPRoute"]
+    Route --> Pool["InferencePool\nGAIE"]
+    Pool --> EPP["Dynamo EPP\nKV-aware endpoint picker"]
+    EPP -->|"selected endpoint"| Sidecar["Worker frontend sidecar\n--router-mode direct"]
+    Sidecar -->|"request plane\nTCP by default"| Worker["vLLM worker"]
+
     Worker -.->|"local ZMQ\nraw KV events"| Publisher["Dynamo worker\nKV publisher"]
     Publisher -.->|"NATS-backed\nKV event plane"| EPP
+
+    DGD["DynamoGraphDeployment\ncomponent type: epp"] -.-> Operator["Dynamo operator"]
+    Operator -.->|"creates / reconciles"| Pool
+    Operator -.->|"runs"| EPP
 ```
 
 Both paths depend on the same principle: workers must publish live KV cache events. Without live
@@ -288,14 +316,15 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello from AICR Dynamo"}],"max_tokens":30,"stream":false}'
 ```
 
-AICR inference recipes also install `agentgateway` and an `inference-gateway` Gateway in the
-`agentgateway-system` namespace. `agentgateway` is the Gateway API data plane, not the Dynamo EPP.
-The Dynamo EPP comes from a `DynamoGraphDeployment` component of type `epp`; the Dynamo operator
-generates the matching `InferencePool`, and the Gateway path uses an `HTTPRoute` that references
-that pool, as described in the
-[Gateway API Inference Extension guide](../kubernetes/inference-gateway.md). The `vllm-agg` example
-above uses the direct frontend path. For a Gateway / EPP workload, send the same OpenAI-compatible
-requests through the Gateway address:
+AICR inference recipes also install [agentgateway](https://github.com/agentgateway/agentgateway) and
+an `inference-gateway` Gateway in the `agentgateway-system` namespace. `agentgateway` is the
+Gateway API data plane, not the Dynamo EPP. The Dynamo EPP comes from a `DynamoGraphDeployment`
+component of type `epp`; the Dynamo operator generates the matching `InferencePool`, and the Gateway
+path uses an `HTTPRoute` that references that pool, as described in the
+[Gateway API Inference Extension guide](../kubernetes/inference-gateway.md). That is native Dynamo
+integration with GAIE: Gateway stays Kubernetes-native at ingress, while Dynamo owns the cache-aware
+endpoint selection. The `vllm-agg` example above uses the direct frontend path. For a Gateway / EPP
+workload, send the same OpenAI-compatible requests through the Gateway address:
 
 ```bash
 kubectl get gateway inference-gateway -n agentgateway-system
@@ -327,8 +356,9 @@ check that the cluster has:
 - Gateway / EPP resources when validating the Kubernetes-native ingress path.
 - Autoscaling prerequisites where the selected recipe requires them.
 
-This validation is the main reason to use AICR instead of starting from raw Helm commands. It turns
-"install the charts" into "install this versioned runtime and prove the cluster satisfies the recipe."
+This validation is the main reason to use AICR instead of starting from raw
+[Helm](https://helm.sh/) commands. It turns "install the charts" into "install this versioned runtime
+and prove the cluster satisfies the recipe."
 
 ## Where This Fits
 
