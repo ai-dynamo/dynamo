@@ -174,3 +174,15 @@ cases:
       sglang:
         reasoning_text: 'preamble'
         normal_text: 'body</think>answer'
+  REASONING.batch.3.c:
+    description: Recipientless Harmony commentary is not applicable to DeepSeek V4
+    reason: DeepSeek V4 does not use Harmony commentary channels; visible text and downstream tool handoff use DeepSeek-specific think and DSML tool-call markers.
+  REASONING.batch.3.d:
+    description: Directed Harmony commentary tool calls are not applicable to DeepSeek V4
+    reason: DeepSeek V4 does not use Harmony `commentary to=functions.*` envelopes; downstream tool calls use DeepSeek-specific DSML tool-call markers.
+  REASONING.batch.3.e:
+    description: Directed Harmony analysis tool calls are not applicable to DeepSeek V4
+    reason: DeepSeek V4 does not use Harmony `analysis to=functions.*` envelopes; reasoning is represented by think tags.
+  REASONING.batch.3.f:
+    description: Harmony analysis/commentary/final channel sequencing is not applicable to DeepSeek V4
+    reason: DeepSeek V4 has no Harmony channel protocol, so mixed analysis, commentary tool call, and final-channel sequencing is outside its grammar.

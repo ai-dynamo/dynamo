@@ -184,7 +184,15 @@ impl RouterMode {
 fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]) -> u64 {
     let count = instance_ids.len();
     if count == 1 {
-        return instance_ids[0];
+        let worker_id = instance_ids[0];
+        tracing::info!(
+            router_mode = "power-of-two-choices",
+            worker_id,
+            candidate_count = count,
+            load = occupancy_state.load(worker_id),
+            "Selected worker"
+        );
+        return worker_id;
     }
     let mut rng = rand::rng();
     let idx1 = rng.random_range(0..count);
@@ -194,13 +202,16 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
     let load1 = occupancy_state.load(id1);
     let load2 = occupancy_state.load(id2);
     let selected = if load1 <= load2 { id1 } else { id2 };
-    tracing::debug!(
+    tracing::info!(
+        router_mode = "power-of-two-choices",
+        worker_id = selected,
+        candidate_count = count,
+        load = std::cmp::min(load1, load2),
         candidate_a = id1,
         candidate_a_load = load1,
         candidate_b = id2,
         candidate_b_load = load2,
-        selected = selected,
-        "p2c selection"
+        "Selected worker"
     );
     selected
 }
@@ -507,15 +518,20 @@ where
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
-        let instance_id = {
+        let (instance_id, candidate_count) = {
             let routing_instances = self.client.routing_instances();
             let count = routing_instances.free_ids().len();
             if count == 0 {
                 return Err(self.empty_free_pool_error(&routing_instances));
             }
-            routing_instances.free_ids()[counter % count]
+            (routing_instances.free_ids()[counter % count], count)
         };
-        tracing::trace!("round robin router selected {instance_id}");
+        tracing::info!(
+            router_mode = "round-robin",
+            worker_id = instance_id,
+            candidate_count,
+            "Selected worker"
+        );
 
         self.generate_with_fault_detection(instance_id, request)
             .await
@@ -523,16 +539,21 @@ where
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let instance_id = {
+        let (instance_id, candidate_count) = {
             let routing_instances = self.client.routing_instances();
             let count = routing_instances.free_ids().len();
             if count == 0 {
                 return Err(self.empty_free_pool_error(&routing_instances));
             }
             let counter = rand::rng().random::<u64>() as usize;
-            routing_instances.free_ids()[counter % count]
+            (routing_instances.free_ids()[counter % count], count)
         };
-        tracing::trace!("random router selected {instance_id}");
+        tracing::info!(
+            router_mode = "random",
+            worker_id = instance_id,
+            candidate_count,
+            "Selected worker"
+        );
 
         self.generate_with_fault_detection(instance_id, request)
             .await
@@ -585,6 +606,12 @@ where
                 self.client.endpoint.id()
             ));
         }
+
+        tracing::info!(
+            router_mode = "direct",
+            worker_id = instance_id,
+            "Selected worker"
+        );
 
         self.generate_with_fault_detection(instance_id, request)
             .await
@@ -641,10 +668,13 @@ where
             Some(Some(DeviceType::Cpu))
         );
         tracing::info!(
+            router_mode = "device-aware-weighted",
+            worker_id = instance_id,
+            candidate_count = candidates.len(),
+            load = state.load(instance_id),
             endpoint = %endpoint_id,
-            selected_instance = instance_id,
             is_cpu,
-            "DeviceAwareWeighted selected instance"
+            "Selected worker"
         );
 
         match self
@@ -666,9 +696,12 @@ where
             .await
             .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         let permit = OccupancyPermit::new(state.clone(), instance_id);
-        tracing::trace!(
-            "least loaded router selected {instance_id} (connections: {})",
-            state.load(instance_id)
+        tracing::info!(
+            router_mode = "least-loaded",
+            worker_id = instance_id,
+            candidate_count = instance_ids.len(),
+            load = state.load(instance_id),
+            "Selected worker"
         );
 
         match self

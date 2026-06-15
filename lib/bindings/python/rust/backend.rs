@@ -1024,6 +1024,119 @@ impl PyEngineCore {
         })?
         .map_err(py_err_to_dynamo)
     }
+
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        let engine = self.engine.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<Vec<String>> {
+                let result = engine.bind(py).call_method0("supported_updates")?;
+                let mut updates = Vec::new();
+                for item in result.try_iter()? {
+                    updates.push(item?.extract()?);
+                }
+                Ok(updates)
+            })
+        })
+        .await;
+
+        match join {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(py_err_to_dynamo(e)),
+            Err(join_err) => Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!(
+                    "supported_updates spawn_blocking join failed: {join_err}"
+                ))
+                .build()),
+        }
+    }
+
+    async fn engine_update(
+        &self,
+        update: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let py_body = pythonize(py, &body).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to convert engine update request body to Python: {e}"
+                    ))
+                })?;
+                let coroutine = engine
+                    .bind(py)
+                    .call_method1("engine_update", (update, py_body))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("engine_update offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        let py_result = py_future.await.map_err(py_err_to_dynamo)?;
+
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                depythonize::<serde_json::Value>(py_result.bind(py)).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to serialize engine update response: {e}"
+                    ))
+                })
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("engine_update response offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: rs::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let py_endpoint = Py::new(
+                    py,
+                    crate::Endpoint {
+                        inner: endpoint,
+                        event_loop: event_loop.bind(py).clone().unbind(),
+                    },
+                )?;
+                let coroutine = engine
+                    .bind(py)
+                    .call_method1("on_endpoint_ready", (py_endpoint,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("on_endpoint_ready offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        py_future.await.map_err(py_err_to_dynamo)?;
+        Ok(())
+    }
 }
 
 impl PyEngineCore {
@@ -1215,6 +1328,25 @@ impl LLMEngine for PyLLMEngine {
         body: serde_json::Value,
     ) -> Result<serde_json::Value, DynamoError> {
         self.core.engine_control(control, body).await
+    }
+
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        self.core.supported_updates().await
+    }
+
+    async fn engine_update(
+        &self,
+        update: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        self.core.engine_update(update, body).await
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: rs::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        self.core.on_endpoint_ready(endpoint).await
     }
 }
 

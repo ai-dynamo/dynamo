@@ -122,6 +122,13 @@ def _require_router_aic() -> dict[str, Any]:
     pytest.importorskip(
         "aiconfigurator", reason="router AIC test requires aiconfigurator"
     )
+    # Rust AIC callback imports aiconfigurator.sdk.engine.compile_engine
+    # (Phase 1.5 API from ai-dynamo/aiconfigurator#1200). PyPI releases
+    # predating it don't ship engine.py.
+    pytest.importorskip(
+        "aiconfigurator.sdk.engine",
+        reason="router AIC test requires aiconfigurator.sdk.engine (Phase 1.5)",
+    )
     return ROUTER_AIC_CONFIG.copy()
 
 

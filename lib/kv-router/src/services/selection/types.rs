@@ -410,6 +410,8 @@ pub struct SelectRequest {
     #[serde(default)]
     pub priority_jump: Option<f64>,
     #[serde(default)]
+    pub strict_priority: Option<u32>,
+    #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
     #[serde(default)]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -435,6 +437,8 @@ pub struct SelectAndReserveRequest {
     pub expected_output_tokens: Option<u32>,
     #[serde(default)]
     pub priority_jump: Option<f64>,
+    #[serde(default)]
+    pub strict_priority: Option<u32>,
     #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
     #[serde(default)]

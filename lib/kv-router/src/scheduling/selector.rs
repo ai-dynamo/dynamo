@@ -413,13 +413,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         if self.worker_type == "decode" {
             tracing::info!(
-                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, host_pinned blocks: {}, disk blocks: {}",
-                self.worker_type,
-                best_worker.worker_id,
-                best_worker.dp_rank,
-                best_logit,
-                best_host_pinned_overlap_blocks,
-                best_disk_overlap_blocks,
+                router_mode = "kv",
+                worker_id = best_worker.worker_id,
+                worker_type = %self.worker_type,
+                dp_rank = ?best_worker.dp_rank,
+                logit = best_logit,
+                host_pinned_blocks = best_host_pinned_overlap_blocks,
+                disk_blocks = best_disk_overlap_blocks,
+                "Selected worker"
             );
             let effective_overlap_blocks = request.effective_overlap_blocks_for(best_worker);
             let cached_tokens = request.effective_cached_tokens_for(best_worker);
@@ -435,22 +436,21 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let best_overlap = request.effective_overlap_blocks_for(best_worker);
         let best_cached_tokens = request.effective_cached_tokens_for(best_worker);
 
-        let total_blocks_info = workers
+        let total_kv_blocks = workers
             .get(&best_worker.worker_id)
-            .and_then(|cfg| cfg.total_kv_blocks())
-            .map(|blocks| format!(", total blocks: {}", blocks))
-            .unwrap_or_default();
+            .and_then(|cfg| cfg.total_kv_blocks());
 
         tracing::info!(
-            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}{}",
-            self.worker_type,
-            best_worker.worker_id,
-            best_worker.dp_rank,
-            best_logit,
-            best_overlap,
-            best_host_pinned_overlap_blocks,
-            best_disk_overlap_blocks,
-            total_blocks_info
+            router_mode = "kv",
+            worker_id = best_worker.worker_id,
+            worker_type = %self.worker_type,
+            dp_rank = ?best_worker.dp_rank,
+            logit = best_logit,
+            effective_cached_blocks = best_overlap,
+            host_pinned_blocks = best_host_pinned_overlap_blocks,
+            disk_blocks = best_disk_overlap_blocks,
+            total_kv_blocks = ?total_kv_blocks,
+            "Selected worker"
         );
 
         Ok(WorkerSelectionResult {
