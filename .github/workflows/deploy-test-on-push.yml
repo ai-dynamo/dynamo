@@ -21,9 +21,9 @@ on:
         required: false
         default: ''
       vcluster_host_priority_class:
-        description: 'Optional host PriorityClass for pods synced from vCluster. Leave empty for Azure; aws-dev-02 defaults to ci-nightly-high-priority.'
+        description: 'Host PriorityClass for pods synced from vCluster. Use auto to set ci-nightly-high-priority only for aws-dev-02.'
         required: false
-        default: ''
+        default: 'auto'
 
 concurrency:
   group: aws-dev-02-deploy-test-smoke-${{ github.ref_name }}
@@ -192,7 +192,7 @@ jobs:
       VCLUSTER_NAMESPACE: dynamo-deploy-test
       VCLUSTER_K8S_VERSION: v1.32.13
       VCLUSTER_PROBE_IMAGE: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dockerhub/busybox:1.37
-      VCLUSTER_HOST_PRIORITY_CLASS: ${{ inputs.vcluster_host_priority_class }}
+      VCLUSTER_HOST_PRIORITY_CLASS: ${{ inputs.vcluster_host_priority_class || 'auto' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -227,10 +227,11 @@ jobs:
           kubectl create namespace "${VCLUSTER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
           vcluster delete "${VCLUSTER_NAME}" --namespace "${VCLUSTER_NAMESPACE}" 2>&1 || true
 
-          if [ -z "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
-            case "${KUBE_CONTEXT}" in
-              *aws-dev-02*) VCLUSTER_HOST_PRIORITY_CLASS="ci-nightly-high-priority" ;;
-            esac
+          if [ "${VCLUSTER_HOST_PRIORITY_CLASS}" = "auto" ]; then
+            VCLUSTER_HOST_PRIORITY_CLASS=""
+            if [[ "${KUBE_CONTEXT}" == *aws-dev-02* ]]; then
+              VCLUSTER_HOST_PRIORITY_CLASS="ci-nightly-high-priority"
+            fi
           fi
 
           vcluster_args=(
@@ -240,10 +241,10 @@ jobs:
             --upgrade
             --set controlPlane.distro.k8s.enabled=true
             --set "controlPlane.distro.k8s.version=${VCLUSTER_K8S_VERSION}"
-            --set sync.fromHost.priorityClasses.enabled=true
           )
 
           if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
+            kubectl get priorityclass "${VCLUSTER_HOST_PRIORITY_CLASS}" >/dev/null
             echo "Using host PriorityClass for synced vCluster pods: ${VCLUSTER_HOST_PRIORITY_CLASS}"
             vcluster_args+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
           else
@@ -332,11 +333,6 @@ jobs:
             return 1
           }
 
-          get_vcluster_priority_class() {
-            kubectl --kubeconfig="${VKUBECONFIG}" -n default get pod "$1" \
-              -o jsonpath='{.spec.priorityClassName}' 2>/dev/null || true
-          }
-
           get_host_priority_class() {
             kubectl -n "${VCLUSTER_NAMESPACE}" get pod "$1" \
               -o jsonpath='{.spec.priorityClassName}' 2>/dev/null || true
@@ -351,14 +347,6 @@ jobs:
             kubectl -n "${VCLUSTER_NAMESPACE}" get pod "$1" \
               -o jsonpath='{.spec.nodeName}' 2>/dev/null || true
           }
-
-          for _ in $(seq 1 60); do
-            if kubectl --kubeconfig="${VKUBECONFIG}" get priorityclass "${PRIORITY_CLASS}" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          kubectl --kubeconfig="${VKUBECONFIG}" get priorityclass "${PRIORITY_CLASS}"
 
           kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${AUTO_PROBE_NAME}" --ignore-not-found=true --wait=true
           cat <<EOF | kubectl --kubeconfig="${VKUBECONFIG}" apply -f -
@@ -399,11 +387,10 @@ jobs:
             exit 1
           }
 
-          AUTO_VCLUSTER_PRIORITY_CLASS=$(get_vcluster_priority_class "${AUTO_VCLUSTER_POD}")
           AUTO_HOST_PRIORITY_CLASS=$(get_host_priority_class "${AUTO_HOST_POD}")
           AUTO_HOST_PRIORITY=$(get_host_priority "${AUTO_HOST_POD}")
           AUTO_HOST_NODE=$(get_host_node "${AUTO_HOST_POD}")
-          echo "[auto] vCluster pod=${AUTO_VCLUSTER_POD} priorityClassName=${AUTO_VCLUSTER_PRIORITY_CLASS:-<empty>}"
+          echo "[auto] vCluster pod=${AUTO_VCLUSTER_POD}"
           echo "[auto] host pod=${AUTO_HOST_POD} priorityClassName=${AUTO_HOST_PRIORITY_CLASS:-<empty>}"
           echo "[auto] host priority=${AUTO_HOST_PRIORITY:-<empty>} node=${AUTO_HOST_NODE:-<pending>}"
           echo "::endgroup::"
@@ -411,10 +398,6 @@ jobs:
           if [ "${AUTO_HOST_PRIORITY_CLASS}" != "${PRIORITY_CLASS}" ]; then
             echo "::error::Host pod did not get priorityClassName=${PRIORITY_CLASS}"
             exit 1
-          fi
-
-          if [ -z "${AUTO_VCLUSTER_PRIORITY_CLASS}" ]; then
-            echo "vCluster did not default priorityClassName inside the virtual cluster; the synced host pod still has the required priorityClassName."
           fi
 
           echo "### vCluster smoke PASSED" | tee -a "$GITHUB_STEP_SUMMARY"
