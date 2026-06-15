@@ -217,7 +217,9 @@ aicr validate \
 The full live validation happens after deployment, when AICR can also check that the runtime was
 installed as expected.
 
-Render the deployment bundle with the node placement rules for system and GPU workloads:
+Render the deployment bundle with the node placement rules for system and GPU workloads. The
+selectors and tolerations are cluster-specific: use the labels and taints from your Kubernetes
+nodes, not these example values verbatim.
 
 ```bash
 aicr bundle \
