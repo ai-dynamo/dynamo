@@ -2728,37 +2728,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if pending is not None:
                     pending.release_all()
 
-                # Project enc_hidden → pd_hidden if there is a mismatch.
-                # The encoder's embed_tokens may come from a larger VLM than the PD.
-                if self.model_config is not None:
-                    pd_hidden: int = self.model_config.hf_config.hidden_size  # type: ignore[union-attr]
-                    enc_hidden = spliced.shape[-1]
-                    if enc_hidden != pd_hidden:
-                        cache_key = (
-                            enc_hidden,
-                            pd_hidden,
-                            spliced.dtype,
-                            spliced.device,
-                        )
-                        if cache_key not in self._enc_proj_cache:
-                            rng = torch.Generator(device=spliced.device)
-                            rng.manual_seed(42)
-                            proj = torch.randn(
-                                enc_hidden,
-                                pd_hidden,
-                                dtype=spliced.dtype,
-                                device=spliced.device,
-                                generator=rng,
-                            ) / (enc_hidden**0.5)
-                            self._enc_proj_cache[cache_key] = proj
-                        spliced = spliced @ self._enc_proj_cache[cache_key]
-                        logger.debug(
-                            "External-encoder: projected spliced %d→%d, final shape=%s",
-                            enc_hidden,
-                            pd_hidden,
-                            tuple(spliced.shape),
-                        )
-
+                # Projection (enc_hidden → pd_hidden) is done on the encoder side.
+                # The spliced tensor arrives already in pd_hidden space.
                 spliced = spliced.to("cpu")
 
                 # Serialize for the prompt_embeds wire format that

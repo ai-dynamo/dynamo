@@ -111,6 +111,8 @@ class EncodeWorkerHandler:
         self.lm_embed_tokens: Optional[torch.nn.Embedding] = None
         self._image_pad_token_id: Optional[int] = None
         self.vlm_tokenizer: Optional[AutoTokenizer] = None
+        self._pd_hidden_size: Optional[int] = None
+        self._enc_proj_cache: dict = {}
         if int(os.getenv("DYN_EXTERNAL_PROMPT_EMBEDS", "0")):
             logger.info(
                 "EXTERNAL_PROMPT_EMBEDS family detected — loading LM embed_tokens "
@@ -156,6 +158,33 @@ class EncodeWorkerHandler:
                 self._image_pad_token_id = None
             else:
                 logger.info("Image pad token ID: %d", self._image_pad_token_id)
+
+            # Load PD model's hidden_size so the encoder can project
+            # enc_hidden → pd_hidden before sending the spliced tensor.
+            # served_model_name can be a list (vLLM accepts multiple aliases).
+            _smn = self.engine_args.served_model_name
+            pd_model = (
+                _smn[0] if isinstance(_smn, list) and _smn else (_smn or self.model)
+            )
+            try:
+                from transformers import AutoConfig
+
+                pd_cfg = AutoConfig.from_pretrained(pd_model, trust_remote_code=True)
+                self._pd_hidden_size = pd_cfg.hidden_size
+                logger.info(
+                    "PD model %s hidden_size=%d (encoder will project %d→%d)",
+                    pd_model,
+                    self._pd_hidden_size,
+                    weight.shape[1],
+                    self._pd_hidden_size,
+                )
+            except Exception as cfg_err:
+                logger.warning(
+                    "Could not load PD model config from %s (%s); "
+                    "projection will be skipped — ensure enc_hidden == pd_hidden",
+                    pd_model,
+                    cfg_err,
+                )
 
     async def check_complete(self, queue):
         while True:
@@ -556,8 +585,34 @@ class EncodeWorkerHandler:
                 self._image_pad_token_id in token_ids if token_ids else False,
             )
 
-        # 6. Send the spliced tensor via the embedding sender (same NIXL/local path)
-        spliced_batched = spliced.unsqueeze(0)  # [1, N_total, hidden]
+        # 6. Project enc_hidden → pd_hidden on the encoder side.
+        if self._pd_hidden_size is not None:
+            enc_hidden = spliced.shape[-1]
+            pd_hidden = self._pd_hidden_size
+            if enc_hidden != pd_hidden:
+                cache_key = (enc_hidden, pd_hidden, spliced.dtype, spliced.device)
+                if cache_key not in self._enc_proj_cache:
+                    rng = torch.Generator(device=spliced.device)
+                    rng.manual_seed(42)
+                    proj = torch.randn(
+                        enc_hidden,
+                        pd_hidden,
+                        dtype=spliced.dtype,
+                        device=spliced.device,
+                        generator=rng,
+                    ) / (enc_hidden**0.5)
+                    self._enc_proj_cache[cache_key] = proj
+                spliced = spliced @ self._enc_proj_cache[cache_key]
+                logger.debug(
+                    "[spliced] %s: projected %d→%d, final shape=%s",
+                    request_id,
+                    enc_hidden,
+                    pd_hidden,
+                    tuple(spliced.shape),
+                )
+
+        # 7. Send the spliced (and projected) tensor via the embedding sender.
+        spliced_batched = spliced.unsqueeze(0)  # [1, N_total, pd_hidden]
         (serialized, transfer_future) = await self.embedding_sender.send_embeddings(
             spliced_batched,
             stage_embeddings=True,
