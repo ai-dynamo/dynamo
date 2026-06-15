@@ -253,6 +253,8 @@ navigation:
             path: agents/agent-tracing.md
           - page: Agent Hints
             path: agents/agent-hints.md
+          - page: Priority Scheduling
+            path: agents/priority-scheduling.md
           - page: Use Pi-Mono with Dynamo
             path: agents/pi-mono.md
           - page: ThunderAgent Program Scheduler

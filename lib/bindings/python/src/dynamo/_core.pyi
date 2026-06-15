@@ -112,6 +112,10 @@ def run_slot_tracker(args: List[str]) -> None:
     """Run the KV router slot tracker with the given arguments."""
     ...
 
+def run_select_service(args: List[str]) -> None:
+    """Run the Dynamo selection service with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 

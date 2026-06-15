@@ -110,7 +110,7 @@ def test_generate_parser_parity_table_html() -> None:
     assert "TOOLCALLING.batch.1</td><td>Single tool call" in html
     assert "TOOLCALLING.stream.1.a</td><td>Single complete tool-call payload" in html
     assert re.search(
-        r'data-status-dynamo="ok" data-status-vllm="problem" data-status-sglang="na" '
+        r'data-status-dynamo="ok" data-status-vllm="documented" data-status-sglang="na" '
         r'data-marker-dynamo="" data-marker-vllm="↯" data-marker-sglang="n/a" '
         r'data-marker-parity-dynamo="" data-marker-parity-vllm="↯" '
         r'data-marker-parity-sglang="n/a"><a href="fixtures/deepseek_v4/TOOLCALLING\.batch\.4\.yaml">V</a>'
@@ -120,7 +120,7 @@ def test_generate_parser_parity_table_html() -> None:
     assert 'data-marker-vllm="✗"' in html
     assert 'data-marker-parity-vllm="✗"' in html
     assert re.search(
-        r'data-status-dynamo="ok" data-status-vllm="ok" data-status-sglang="problem" '
+        r'data-status-dynamo="ok" data-status-vllm="ok" data-status-sglang="documented" '
         r'data-marker-dynamo="" data-marker-vllm="" data-marker-sglang="↯" '
         r'data-marker-parity-dynamo="S" data-marker-parity-vllm="S" '
         r'data-marker-parity-sglang="↯DV"><a href="fixtures/harmony/TOOLCALLING\.batch\.yaml">S</a>'
@@ -128,7 +128,7 @@ def test_generate_parser_parity_table_html() -> None:
         html,
     )
     assert re.search(
-        r'data-status-dynamo="ok" data-status-vllm="problem" data-status-sglang="ok" '
+        r'data-status-dynamo="ok" data-status-vllm="documented" data-status-sglang="documented" '
         r'data-marker-dynamo="" data-marker-vllm="↯" data-marker-sglang="" '
         r'data-marker-parity-dynamo="VS" data-marker-parity-vllm="↯DS" '
         r'data-marker-parity-sglang="DV"><a href="fixtures/llama3_json/TOOLCALLING\.batch\.4\.yaml">VS</a>'

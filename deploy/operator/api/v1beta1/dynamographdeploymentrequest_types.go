@@ -445,7 +445,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (planner image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0".
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
 	// For Dynamo < 1.1.0, use dynamo-frontend.
 	// +optional
 	Image string `json:"image,omitempty"`
