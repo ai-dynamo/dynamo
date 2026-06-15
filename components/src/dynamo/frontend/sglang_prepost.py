@@ -792,6 +792,7 @@ class SglangStreamingPostProcessor:
     - Incremental detokenization via sliding-window decode (6-token lookback)
     - Reasoning content extraction via SGLang ReasoningParser
     - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
+    - Incremental OpenAI SSE ``tool_calls`` deltas during streaming
     """
 
     # Lookback window size for incremental detokenization.  UTF-8 characters
@@ -823,19 +824,116 @@ class SglangStreamingPostProcessor:
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
 
         self._all_token_ids: list[int] = []
-        # Tool call accumulation.  SGLang's streaming parser returns
-        # deltas (name in one chunk, argument fragments across subsequent
-        # chunks).  However, the base detector processes at most one event
-        # per call (a name OR an argument diff), and the post-processor
-        # calls it only once per token batch.  When multiple tool calls
-        # arrive together, later calls may not be detected during streaming.
-        # We accumulate all text fed to the parser and, on finish, re-parse
-        # the full text to recover any missed tool calls or arguments.
+        # Tool call accumulation and streaming emission.  SGLang's streaming
+        # parser returns deltas (name in one chunk, argument fragments across
+        # subsequent chunks).  We emit OpenAI-shaped incremental tool_calls
+        # during streaming and re-parse on finish to recover missed calls or
+        # arguments before emitting any remaining deltas.
         self._tool_call_ids: dict[int, str] = {}  # tool_index -> call_id
         self._tool_call_names: dict[int, str] = {}  # tool_index -> name
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+        # Streaming emission tracking (OpenAI SSE incremental tool_calls).
+        self._tool_calls_emitted = False
+        self._streamed_tool_indices: set[int] = set()
+        self._streamed_arg_chars: dict[int, int] = {}  # tool_index -> emitted arg len
+
+    def _known_tool_names(self) -> set[str] | None:
+        if not self._sglang_tools:
+            return None
+        return {t.function.name for t in self._sglang_tools}
+
+    def _should_emit_tool_call(self, tc: ToolCallItem) -> bool:
+        known_names = self._known_tool_names()
+        if known_names and tc.name and tc.name not in known_names:
+            return False
+        return bool(tc.name or tc.parameters)
+
+    def _accumulate_tool_call(self, tc: ToolCallItem) -> None:
+        idx = tc.tool_index
+        if idx not in self._tool_call_ids:
+            self._tool_call_ids[idx] = self._tool_call_id(tc.name or "", idx)
+        if tc.name:
+            self._tool_call_names[idx] = tc.name
+        if tc.parameters:
+            self._tool_call_args.setdefault(idx, []).append(tc.parameters)
+
+    def _build_streaming_tool_call_deltas(
+        self, tool_calls: list[ToolCallItem]
+    ) -> list[dict[str, Any]]:
+        """Convert SGLang parser deltas to OpenAI incremental tool_calls."""
+        deltas: list[dict[str, Any]] = []
+        for tc in tool_calls:
+            if not self._should_emit_tool_call(tc):
+                continue
+            idx = tc.tool_index
+            entry: dict[str, Any] = {"index": idx}
+            if tc.name:
+                if idx not in self._tool_call_ids:
+                    self._tool_call_ids[idx] = self._tool_call_id(tc.name, idx)
+                entry["id"] = self._tool_call_ids[idx]
+                entry["type"] = "function"
+                entry["function"] = {"name": tc.name}
+                self._streamed_tool_indices.add(idx)
+            if tc.parameters:
+                func = entry.setdefault("function", {})
+                func["arguments"] = tc.parameters
+                self._streamed_arg_chars[idx] = self._streamed_arg_chars.get(
+                    idx, 0
+                ) + len(tc.parameters)
+            deltas.append(entry)
+        return deltas
+
+    def _build_finish_supplemental_tool_deltas(self) -> list[dict[str, Any]]:
+        """Emit tool-call deltas not yet sent during streaming (re-parse recovery)."""
+        deltas: list[dict[str, Any]] = []
+        for idx in sorted(self._tool_call_names):
+            full_args = "".join(self._tool_call_args.get(idx, []))
+            name_sent = idx in self._streamed_tool_indices
+            sent_args = self._streamed_arg_chars.get(idx, 0)
+
+            if not name_sent:
+                entry: dict[str, Any] = {
+                    "index": idx,
+                    "id": self._tool_call_ids[idx],
+                    "type": "function",
+                    "function": {
+                        "name": self._tool_call_names[idx],
+                        "arguments": full_args,
+                    },
+                }
+                deltas.append(entry)
+                self._streamed_tool_indices.add(idx)
+                self._streamed_arg_chars[idx] = len(full_args)
+                continue
+
+            if sent_args < len(full_args):
+                deltas.append(
+                    {
+                        "index": idx,
+                        "function": {"arguments": full_args[sent_args:]},
+                    }
+                )
+                self._streamed_arg_chars[idx] = len(full_args)
+        return deltas
+
+    def _build_full_tool_call_deltas(self) -> list[dict[str, Any]]:
+        deltas: list[dict[str, Any]] = []
+        for idx in sorted(self._tool_call_names):
+            full_args = "".join(self._tool_call_args.get(idx, []))
+            deltas.append(
+                {
+                    "index": idx,
+                    "id": self._tool_call_ids[idx],
+                    "type": "function",
+                    "function": {
+                        "name": self._tool_call_names[idx],
+                        "arguments": full_args,
+                    },
+                }
+            )
+        return deltas
 
     def _tool_call_id(self, name: str, index: int) -> str:
         return _tool_call_id_for_parser(
@@ -926,6 +1024,7 @@ class SglangStreamingPostProcessor:
 
         # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text
+        streaming_tool_deltas: list[dict[str, Any]] | None = None
 
         if self.tool_call_parser and normal_text:
             # Accumulate raw text for finish-time re-parse.
@@ -943,13 +1042,15 @@ class SglangStreamingPostProcessor:
             content_text = parsed_text
 
             for tc in tool_calls:
-                idx = tc.tool_index
-                if idx not in self._tool_call_ids:
-                    self._tool_call_ids[idx] = self._tool_call_id(tc.name or "", idx)
-                if tc.name:
-                    self._tool_call_names[idx] = tc.name
-                if tc.parameters:
-                    self._tool_call_args.setdefault(idx, []).append(tc.parameters)
+                self._accumulate_tool_call(tc)
+
+            # Emit incremental tool-call deltas during streaming.  Defer to
+            # finish-time assembly when finish_reason arrives in the same
+            # chunk so malformed/incomplete calls can still be dropped.
+            if tool_calls and finish_reason is None:
+                streaming_tool_deltas = self._build_streaming_tool_call_deltas(
+                    tool_calls
+                )
 
         # -- Assemble delta --
         delta: dict[str, Any] = {"role": "assistant"}
@@ -961,6 +1062,10 @@ class SglangStreamingPostProcessor:
         if reasoning_text:
             delta["reasoning_content"] = reasoning_text
             has_content = True
+        if streaming_tool_deltas:
+            delta["tool_calls"] = streaming_tool_deltas
+            has_content = True
+            self._tool_calls_emitted = True
 
         # On finish, re-parse the full accumulated text to recover tool
         # calls or arguments that the streaming parser missed.
@@ -1101,21 +1206,15 @@ class SglangStreamingPostProcessor:
                 )
 
         if finish_reason and self._tool_call_names:
-            tool_calls_out: list[dict[str, Any]] = []
-            for idx in sorted(self._tool_call_names):
-                tool_calls_out.append(
-                    {
-                        "index": idx,
-                        "id": self._tool_call_ids[idx],
-                        "type": "function",
-                        "function": {
-                            "name": self._tool_call_names[idx],
-                            "arguments": "".join(self._tool_call_args.get(idx, [])),
-                        },
-                    }
-                )
-            delta["tool_calls"] = tool_calls_out
-            has_content = True
+            if self._tool_calls_emitted:
+                supplemental = self._build_finish_supplemental_tool_deltas()
+                if supplemental:
+                    delta["tool_calls"] = supplemental
+                    has_content = True
+            else:
+                delta["tool_calls"] = self._build_full_tool_call_deltas()
+                has_content = True
+                self._tool_calls_emitted = True
 
         # Rewrite finish_reason "stop" → "tool_calls" when tool calls were
         # detected, matching the OpenAI API spec and official SGLang behaviour.
