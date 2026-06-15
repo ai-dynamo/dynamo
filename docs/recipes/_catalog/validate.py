@@ -45,6 +45,7 @@ BENCH_CAT = os.path.join(DOCS_DIR, "benchmarks", "_catalog")
 # --- Optional deps -------------------------------------------------------------
 try:
     import yaml as _yaml  # type: ignore
+
     HAVE_YAML = True
 except Exception:
     _yaml = None
@@ -52,6 +53,7 @@ except Exception:
 
 try:
     import jsonschema as _jsonschema  # type: ignore
+
     HAVE_JSONSCHEMA = True
 except Exception:
     _jsonschema = None
@@ -79,9 +81,9 @@ def _scalar(tok):
         return True
     if tok in ("false", "False"):
         return False
-    if (tok.startswith("'") and tok.endswith("'") and len(tok) >= 2):
+    if tok.startswith("'") and tok.endswith("'") and len(tok) >= 2:
         return tok[1:-1].replace("''", "'")
-    if (tok.startswith('"') and tok.endswith('"') and len(tok) >= 2):
+    if tok.startswith('"') and tok.endswith('"') and len(tok) >= 2:
         return tok[1:-1]
     if tok == "[]":
         return []
@@ -116,7 +118,7 @@ def _split_kv(s):
             in_double = not in_double
         elif c == ":" and not in_single and not in_double:
             if i + 1 == n or s[i + 1] == " ":
-                return s[:i], s[i + 1:].strip()
+                return s[:i], s[i + 1 :].strip()
         i += 1
     return None, None
 
@@ -427,18 +429,22 @@ def check_assets_recipe(obj, label):
     for t in obj.get("targets") or []:
         if not isinstance(t, dict):
             continue
-        dep = (t.get("deploy") or {})
+        dep = t.get("deploy") or {}
         asset = dep.get("asset") if isinstance(dep, dict) else None
         if asset:
             if not os.path.isfile(resolve_repo_path(asset)):
-                err("[%s] target %s deploy asset missing: %s"
-                    % (label, t.get("id"), asset))
+                err(
+                    "[%s] target %s deploy asset missing: %s"
+                    % (label, t.get("id"), asset)
+                )
         bench = t.get("benchmark")
         if isinstance(bench, dict):
             basset = bench.get("asset")
             if basset and not os.path.isfile(resolve_repo_path(basset)):
-                err("[%s] target %s benchmark asset missing: %s"
-                    % (label, t.get("id"), basset))
+                err(
+                    "[%s] target %s benchmark asset missing: %s"
+                    % (label, t.get("id"), basset)
+                )
 
 
 def check_assets_benchmark(obj, label):
@@ -448,8 +454,10 @@ def check_assets_benchmark(obj, label):
         for field in ("deploy", "perf"):
             path = a.get(field)
             if path and not os.path.isfile(resolve_repo_path(path)):
-                err("[%s] arm %r %s asset missing: %s"
-                    % (label, a.get("name"), field, path))
+                err(
+                    "[%s] arm %r %s asset missing: %s"
+                    % (label, a.get("name"), field, path)
+                )
 
 
 # --- Main ----------------------------------------------------------------------
@@ -471,9 +479,7 @@ def main():
     rec_index, rec_entries = load_catalog(
         RECIPES_CAT, "recipes", ["recipes", "deferred_recipes"]
     )
-    ben_index, ben_entries = load_catalog(
-        BENCH_CAT, "benchmarks", ["benchmarks"]
-    )
+    ben_index, ben_entries = load_catalog(BENCH_CAT, "benchmarks", ["benchmarks"])
 
     # 1. index<->file correspondence + 3. dup ids
     rec_ids = check_index_file_correspondence(
@@ -512,28 +518,38 @@ def main():
             continue
         for rb in obj.get("related_benchmarks") or []:
             if rb not in valid_benchmark_targets:
-                err("[recipe:%s] related_benchmarks references unknown benchmark id: %s"
-                    % (fid, rb))
+                err(
+                    "[recipe:%s] related_benchmarks references unknown benchmark id: %s"
+                    % (fid, rb)
+                )
     for fid, obj in sorted(ben_entries.items()):
         if not isinstance(obj, dict):
             continue
         for rr in obj.get("related_recipes") or []:
             if rr not in valid_recipe_targets:
-                err("[benchmark:%s] related_recipes references unknown recipe id: %s"
-                    % (fid, rr))
+                err(
+                    "[benchmark:%s] related_recipes references unknown recipe id: %s"
+                    % (fid, rr)
+                )
         pc = obj.get("promotion_candidate")
         if isinstance(pc, dict):
             drid = pc.get("deferred_recipe_id")
             if drid and drid not in valid_recipe_targets:
-                err("[benchmark:%s] promotion_candidate.deferred_recipe_id unknown: %s"
-                    % (fid, drid))
+                err(
+                    "[benchmark:%s] promotion_candidate.deferred_recipe_id unknown: %s"
+                    % (fid, drid)
+                )
 
     # --- Report ---
     print()
-    print("recipes : %d entries (%d active, %d deferred)"
-          % (len(rec_entries),
-             len((rec_index or {}).get("recipes") or []),
-             len((rec_index or {}).get("deferred_recipes") or [])))
+    print(
+        "recipes : %d entries (%d active, %d deferred)"
+        % (
+            len(rec_entries),
+            len((rec_index or {}).get("recipes") or []),
+            len((rec_index or {}).get("deferred_recipes") or []),
+        )
+    )
     print("benchmarks: %d entries" % len(ben_entries))
     print()
     if WARNINGS:
