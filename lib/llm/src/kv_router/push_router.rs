@@ -38,7 +38,7 @@ use selection::{RoutingRequestParts, WorkerSelection};
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    /// Sticky session routing. Lazily activated when requests carry session_control.
+    /// Sticky routing for trajectory-scoped radix tags.
     pub(super) sticky: Arc<StickySessionCoordinator>,
 }
 

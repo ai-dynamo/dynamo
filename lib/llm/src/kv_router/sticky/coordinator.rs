@@ -113,6 +113,12 @@ impl StickySessionCoordinator {
             });
         };
         let Some(action) = sc.action.as_ref() else {
+            self.router.bind(
+                &sc.session_id,
+                worker,
+                Duration::from_secs(sc.timeout),
+                AffinityKind::EngineBacked,
+            );
             return Ok(SessionRoutingResult {
                 deferred_close: None,
                 rollback: None,
