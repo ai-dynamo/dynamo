@@ -86,19 +86,17 @@ SERVER_METADATA_FIELDS = (
     "selfLink",
 )
 
-INTERNAL_ANNOTATIONS = (
-    "nvidia.com/dgd-status",
-    "nvidia.com/dcd-status",
-    "nvidia.com/dgdr-status",
-    "kubectl.kubernetes.io/last-applied-configuration",
-)
-
 _TOP_LEVEL_ORDER = ("apiVersion", "kind", "metadata", "spec")
 
 
 def clean_for_authoring(obj: dict) -> dict:
-    """Strip server-managed metadata, status, and internal round-trip
-    annotations so the converted object reads like an authorable manifest."""
+    """Strip server-managed metadata and status so the converted object reads
+    like an authorable manifest.
+
+    Annotations are left untouched on purpose: the conversion webhook uses them
+    as hub/spoke preservation annotations (part of the conversion contract), so
+    dropping them could change the resource's meaning.
+    """
     obj = copy.deepcopy(obj)
     obj.pop("status", None)
 
@@ -106,12 +104,6 @@ def clean_for_authoring(obj: dict) -> dict:
     if isinstance(metadata, dict):
         for field in SERVER_METADATA_FIELDS:
             metadata.pop(field, None)
-        annotations = metadata.get("annotations")
-        if isinstance(annotations, dict):
-            for ann in INTERNAL_ANNOTATIONS:
-                annotations.pop(ann, None)
-            if not annotations:
-                metadata.pop("annotations", None)
 
     ordered = {k: obj[k] for k in _TOP_LEVEL_ORDER if k in obj}
     for k, v in obj.items():

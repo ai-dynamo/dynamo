@@ -104,7 +104,7 @@ def test_parse_conversion_response_raises_on_uid_mismatch():
         c.parse_conversion_response(_response(uid="other"), "u")
 
 
-def test_clean_for_authoring_strips_server_and_internal_fields_and_reorders():
+def test_clean_for_authoring_strips_server_fields_preserves_annotations():
     obj = {
         "metadata": {
             "name": "m",
@@ -135,20 +135,14 @@ def test_clean_for_authoring_strips_server_and_internal_fields_and_reorders():
         "managedFields",
     ):
         assert f not in md
-    assert md["annotations"] == {"keep": "yes"}
+    # annotations are left untouched (part of the conversion contract)
+    assert md["annotations"] == {
+        "keep": "yes",
+        "nvidia.com/dgd-spec": "blob",
+        "kubectl.kubernetes.io/last-applied-configuration": "blob",
+    }
     assert list(out.keys())[:4] == ["apiVersion", "kind", "metadata", "spec"]
     assert "status" in obj
-
-
-def test_clean_for_authoring_drops_empty_annotations():
-    obj = {
-        "apiVersion": "nvidia.com/v1beta1",
-        "kind": "DynamoComponentDeployment",
-        "metadata": {"name": "m", "annotations": {"nvidia.com/dcd-spec": "b"}},
-        "spec": {},
-    }
-    out = c.clean_for_authoring(obj)
-    assert "annotations" not in out["metadata"]
 
 
 def _echo_webhook_fn_factory(converted_by_kind):
@@ -210,42 +204,27 @@ def test_convert_docs_converts_and_cleans_preserving_order():
     assert "status" not in out[1]
 
 
-@pytest.mark.parametrize("ann", c.INTERNAL_ANNOTATIONS)
-def test_clean_for_authoring_strips_each_internal_annotation(ann):
-    obj = {
-        "apiVersion": "nvidia.com/v1beta1",
-        "kind": "X",
-        "metadata": {"name": "m", "annotations": {ann: "blob", "keep": "yes"}},
-        "spec": {},
-    }
-    out = c.clean_for_authoring(obj)
-    assert out["metadata"]["annotations"] == {"keep": "yes"}
-
-
-def test_convert_docs_preserves_spec_annotation_strips_status():
+def test_convert_docs_preserves_all_annotations():
     alpha = {
         "apiVersion": "nvidia.com/v1alpha1",
         "kind": "DynamoGraphDeployment",
         "metadata": {"name": "a"},
         "spec": {},
     }
+    annotations = {
+        "nvidia.com/dgd-spec": "blob",
+        "nvidia.com/dgd-status": "blob",
+    }
     beta = {
         "apiVersion": "nvidia.com/v1beta1",
         "kind": "DynamoGraphDeployment",
-        "metadata": {
-            "name": "a",
-            "annotations": {
-                "nvidia.com/dgd-spec": "blob",
-                "nvidia.com/dgd-status": "blob",
-            },
-        },
+        "metadata": {"name": "a", "annotations": dict(annotations)},
         "spec": {},
     }
     fn = _echo_webhook_fn_factory({"DynamoGraphDeployment": [beta]})
     out = c.convert_docs([alpha], target="nvidia.com/v1beta1", webhook_fn=fn)
-    annotations = out[0]["metadata"]["annotations"]
-    assert annotations["nvidia.com/dgd-spec"] == "blob"
-    assert "nvidia.com/dgd-status" not in annotations
+    # annotations are part of the conversion contract — preserved verbatim
+    assert out[0]["metadata"]["annotations"] == annotations
 
 
 def test_discover_conversion_service_parses_crd_clientconfig():
