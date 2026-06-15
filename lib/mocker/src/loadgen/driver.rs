@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
-use super::types::{AgenticTrace, ReadyTurn, ReplayRequestHashes, Trace};
+use super::types::{AgenticTrace, ReadyTurn, ReplayConcurrencyConfig, ReplayRequestHashes, Trace};
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug)]
@@ -23,6 +23,7 @@ struct ConcurrencyState {
     max_active_sessions: usize,
     next_pending_session: usize,
     active_sessions: usize,
+    ramp_duration_ms: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -140,11 +141,29 @@ impl SchedulingPolicy {
 }
 
 impl ConcurrencyState {
-    fn new(max_active_sessions: usize) -> Self {
+    fn new(max_active_sessions: usize, ramp_duration_ms: Option<f64>) -> Self {
         Self {
             max_active_sessions,
             next_pending_session: 0,
             active_sessions: 0,
+            ramp_duration_ms,
+        }
+    }
+
+    fn activate_initial(
+        &mut self,
+        sessions: &mut [SessionRuntime],
+        ready_sessions: &mut BinaryHeap<ReadySession>,
+        now_ms: f64,
+    ) {
+        while self.active_sessions < self.max_active_sessions
+            && self.next_pending_session < sessions.len()
+        {
+            let session_index = self.next_pending_session;
+            self.next_pending_session += 1;
+            let ready_at_ms = now_ms + self.initial_ramp_delay_ms(self.active_sessions);
+            self.push_ready_session(sessions, ready_sessions, session_index, ready_at_ms);
+            self.active_sessions += 1;
         }
     }
 
@@ -159,16 +178,36 @@ impl ConcurrencyState {
         {
             let session_index = self.next_pending_session;
             self.next_pending_session += 1;
-            let session = &mut sessions[session_index];
-            let turn_index = session.next_turn_index;
-            session.next_ready_at_ms = Some(now_ms);
-            ready_sessions.push(ReadySession {
-                ready_at_ms: now_ms,
-                session_index,
-                turn_index,
-            });
+            self.push_ready_session(sessions, ready_sessions, session_index, now_ms);
             self.active_sessions += 1;
         }
+    }
+
+    fn initial_ramp_delay_ms(&self, slot_index: usize) -> f64 {
+        let Some(ramp_duration_ms) = self.ramp_duration_ms else {
+            return 0.0;
+        };
+        if self.max_active_sessions <= 1 {
+            return 0.0;
+        }
+        ramp_duration_ms * slot_index as f64 / (self.max_active_sessions - 1) as f64
+    }
+
+    fn push_ready_session(
+        &self,
+        sessions: &mut [SessionRuntime],
+        ready_sessions: &mut BinaryHeap<ReadySession>,
+        session_index: usize,
+        ready_at_ms: f64,
+    ) {
+        let session = &mut sessions[session_index];
+        let turn_index = session.next_turn_index;
+        session.next_ready_at_ms = Some(ready_at_ms);
+        ready_sessions.push(ReadySession {
+            ready_at_ms,
+            session_index,
+            turn_index,
+        });
     }
 
     fn on_session_finished(
@@ -180,6 +219,15 @@ impl ConcurrencyState {
         self.active_sessions = self.active_sessions.saturating_sub(1);
         self.activate_pending(sessions, ready_sessions, now_ms);
     }
+}
+
+fn validate_concurrency_ramp_duration(ramp_duration_ms: Option<f64>) -> Result<()> {
+    if let Some(ramp_duration_ms) = ramp_duration_ms
+        && (!ramp_duration_ms.is_finite() || ramp_duration_ms <= 0.0)
+    {
+        bail!("concurrency ramp duration must be a finite, positive value when set");
+    }
+    Ok(())
 }
 
 impl AgenticState {
@@ -262,18 +310,23 @@ impl WorkloadDriver {
         )
     }
 
-    /// Build a closed-loop concurrency driver. `max_in_flight` is the *session* cap
-    /// (depth-first): a session holds its slot across all turns + think-time, and new
-    /// sessions are admitted only while fewer than `max_in_flight` are active.
+    /// Build a closed-loop concurrency driver. The concurrency limit is the
+    /// *session* cap (depth-first): a session holds its slot across all turns +
+    /// think-time, and new sessions are admitted only while fewer than that many
+    /// sessions are active.
     pub(crate) fn new_concurrency(
         trace: Trace,
         engine_block_size: usize,
-        max_in_flight: usize,
+        concurrency_config: ReplayConcurrencyConfig,
     ) -> Result<Self> {
+        validate_concurrency_ramp_duration(concurrency_config.ramp_duration_ms)?;
         Self::new(
             trace,
             engine_block_size,
-            SchedulingPolicy::Concurrency(ConcurrencyState::new(max_in_flight)),
+            SchedulingPolicy::Concurrency(ConcurrencyState::new(
+                concurrency_config.max_in_flight,
+                concurrency_config.ramp_duration_ms,
+            )),
             PromptMode::Full,
         )
     }
@@ -281,12 +334,16 @@ impl WorkloadDriver {
     pub(crate) fn new_concurrency_accumulating_deltas(
         trace: Trace,
         engine_block_size: usize,
-        max_in_flight: usize,
+        concurrency_config: ReplayConcurrencyConfig,
     ) -> Result<Self> {
+        validate_concurrency_ramp_duration(concurrency_config.ramp_duration_ms)?;
         Self::new(
             trace,
             engine_block_size,
-            SchedulingPolicy::Concurrency(ConcurrencyState::new(max_in_flight)),
+            SchedulingPolicy::Concurrency(ConcurrencyState::new(
+                concurrency_config.max_in_flight,
+                concurrency_config.ramp_duration_ms,
+            )),
             PromptMode::DeltaCumulative,
         )
     }
@@ -444,7 +501,7 @@ impl WorkloadDriver {
             ready_sessions,
         };
         if let SchedulingPolicy::Concurrency(state) = &mut driver.policy {
-            state.activate_pending(&mut driver.sessions, &mut driver.ready_sessions, 0.0);
+            state.activate_initial(&mut driver.sessions, &mut driver.ready_sessions, 0.0);
         }
         Ok(driver)
     }
@@ -745,9 +802,24 @@ mod tests {
         trace
     }
 
+    fn concurrency_config(max_in_flight: usize) -> ReplayConcurrencyConfig {
+        ReplayConcurrencyConfig::new(max_in_flight)
+    }
+
+    fn ramped_concurrency_config(
+        max_in_flight: usize,
+        ramp_duration_ms: f64,
+    ) -> ReplayConcurrencyConfig {
+        ReplayConcurrencyConfig {
+            max_in_flight,
+            ramp_duration_ms: Some(ramp_duration_ms),
+        }
+    }
+
     #[test]
     fn unknown_completion_preserves_in_flight_state() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
         let admitted = driver.pop_ready(0.0, usize::MAX);
         let request_uuid = admitted[0].request_uuid;
         let session_index = driver.in_flight[&request_uuid].session_index;
@@ -765,7 +837,8 @@ mod tests {
 
     #[test]
     fn unknown_cancellation_is_noop() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
         let admitted = driver.pop_ready(0.0, usize::MAX);
         let request_uuid = admitted[0].request_uuid;
         let session_index = driver.in_flight[&request_uuid].session_index;
@@ -778,7 +851,8 @@ mod tests {
 
     #[test]
     fn inconsistent_session_mapping_preserves_in_flight_entry() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
         let admitted = driver.pop_ready(0.0, usize::MAX);
         let request_uuid = admitted[0].request_uuid;
         let session_index = driver.in_flight[&request_uuid].session_index;
@@ -797,7 +871,8 @@ mod tests {
 
     #[test]
     fn cap_clamps_pop_ready_when_limit_is_unbounded() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
 
         let first = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(first.len(), 1);
@@ -809,8 +884,53 @@ mod tests {
     }
 
     #[test]
+    fn concurrency_ramp_spreads_initial_sessions() {
+        let mut driver = WorkloadDriver::new_concurrency(
+            three_session_trace(),
+            1,
+            ramped_concurrency_config(3, 6_000.0),
+        )
+        .unwrap();
+
+        let at_0 = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(at_0.len(), 1);
+        assert_eq!(at_0[0].session_id, "a");
+        assert_eq!(at_0[0].scheduled_ready_at_ms, 0.0);
+
+        assert_eq!(driver.next_ready_time_ms(), Some(3_000.0));
+        assert!(driver.pop_ready(2_999.0, usize::MAX).is_empty());
+
+        let at_3000 = driver.pop_ready(3_000.0, usize::MAX);
+        assert_eq!(at_3000.len(), 1);
+        assert_eq!(at_3000[0].session_id, "b");
+        assert_eq!(at_3000[0].scheduled_ready_at_ms, 3_000.0);
+
+        assert_eq!(driver.next_ready_time_ms(), Some(6_000.0));
+        let at_6000 = driver.pop_ready(6_000.0, usize::MAX);
+        assert_eq!(at_6000.len(), 1);
+        assert_eq!(at_6000[0].session_id, "c");
+        assert_eq!(at_6000[0].scheduled_ready_at_ms, 6_000.0);
+    }
+
+    #[test]
+    fn concurrency_ramp_rejects_invalid_duration() {
+        let err = WorkloadDriver::new_concurrency(
+            two_session_trace(),
+            1,
+            ramped_concurrency_config(2, f64::NEG_INFINITY),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("concurrency ramp duration must be a finite, positive value")
+        );
+    }
+
+    #[test]
     fn pop_ready_admits_next_turn_after_on_complete() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
@@ -828,7 +948,8 @@ mod tests {
     #[test]
     fn concurrency_is_depth_first_holding_slot_across_think_time() {
         // Session A: 2 turns (turn-1 has a 5ms think-time). Session B: 1 turn. cap = 1.
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
 
         // A.turn0 admitted; B is pending (not activated — cap is 1).
         let a0 = driver.pop_ready(0.0, usize::MAX);
@@ -862,7 +983,9 @@ mod tests {
     #[test]
     fn concurrency_cap2_admits_pending_when_active_session_finishes() {
         // cap = 2: A (2 turns) and B (1 turn) start active; C (1 turn) is pending.
-        let mut driver = WorkloadDriver::new_concurrency(three_session_trace(), 1, 2).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(three_session_trace(), 1, concurrency_config(2))
+                .unwrap();
 
         // Initial cohort: A.t0 and B.t0 (the cap-2 set); C stays pending.
         let first = driver.pop_ready(0.0, usize::MAX);
@@ -911,7 +1034,9 @@ mod tests {
         // Mirrors an online InFlightGuard drop (cancellation), which calls release_cap_slot.
         // cap = 2: A (2 turns) + B (1 turn) active, C (1 turn) pending. A is in think-time,
         // B is in flight and gets cancelled.
-        let mut driver = WorkloadDriver::new_concurrency(three_session_trace(), 1, 2).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(three_session_trace(), 1, concurrency_config(2))
+                .unwrap();
 
         let first = driver.pop_ready(0.0, usize::MAX);
         let a0 = first
@@ -951,7 +1076,8 @@ mod tests {
 
     #[test]
     fn next_ready_time_ms_returns_none_at_cap() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
@@ -973,7 +1099,8 @@ mod tests {
         // usize::MAX cap == effectively uncapped: every session is activated, so the
         // caller's pop_ready limit is the only bound.
         let mut driver =
-            WorkloadDriver::new_concurrency(two_session_trace(), 1, usize::MAX).unwrap();
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(usize::MAX))
+                .unwrap();
 
         let admitted = driver.pop_ready(0.0, 5);
         assert_eq!(
@@ -986,7 +1113,8 @@ mod tests {
 
     #[test]
     fn release_cap_slot_is_noop_after_on_complete() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         let uuid = admitted[0].request_uuid;
@@ -1005,7 +1133,8 @@ mod tests {
 
     #[test]
     fn release_cap_slot_recovers_cap_when_on_complete_was_skipped() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
@@ -1022,7 +1151,8 @@ mod tests {
 
     #[test]
     fn release_cap_slot_terminates_session_so_is_drained_completes() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, concurrency_config(1)).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
@@ -1071,7 +1201,9 @@ mod tests {
                 ],
             }],
         };
-        let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 4, 1).unwrap();
+        let mut driver =
+            WorkloadDriver::new_concurrency_accumulating_deltas(trace, 4, concurrency_config(1))
+                .unwrap();
 
         let first = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(first.len(), 1);

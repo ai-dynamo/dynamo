@@ -23,6 +23,21 @@ pub struct AgenticTrace {
     pub turns: Vec<AgenticTurnTrace>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReplayConcurrencyConfig {
+    pub max_in_flight: usize,
+    pub ramp_duration_ms: Option<f64>,
+}
+
+impl ReplayConcurrencyConfig {
+    pub fn new(max_in_flight: usize) -> Self {
+        Self {
+            max_in_flight,
+            ramp_duration_ms: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceFileFormat {
     Mooncake,

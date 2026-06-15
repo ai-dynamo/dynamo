@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use dynamo_kv_router::config::KvRouterConfig;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{Trace, WorkloadDriver};
+use crate::loadgen::{ReplayConcurrencyConfig, Trace, WorkloadDriver};
 use crate::replay::{
     ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport, normalize_trace_requests,
 };
@@ -173,7 +173,10 @@ pub(crate) fn simulate_concurrency_workload(
         args,
         router_config,
         prefill_load_estimator,
-        trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)?,
+        trace.into_concurrency_driver_with_block_size(
+            engine_block_size,
+            ReplayConcurrencyConfig::new(max_in_flight),
+        )?,
         total_turns,
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
@@ -261,7 +264,10 @@ pub(super) fn simulate_concurrency_workload_with_stats(
         args,
         None,
         None,
-        trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)?,
+        trace.into_concurrency_driver_with_block_size(
+            engine_block_size,
+            ReplayConcurrencyConfig::new(max_in_flight),
+        )?,
         total_turns,
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },

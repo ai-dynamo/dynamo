@@ -20,9 +20,9 @@ use uuid::Uuid;
 
 use super::driver::WorkloadDriver;
 use super::types::{
-    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, LengthSpec, ReplayRequestHashes,
-    RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec,
-    Trace, TurnTrace,
+    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, LengthSpec, ReplayConcurrencyConfig,
+    ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
+    SyntheticTraceSpec, Trace, TurnTrace,
 };
 use crate::common::protocols::DirectRequest;
 
@@ -826,7 +826,11 @@ impl Trace {
     pub fn into_concurrency_driver(self, max_in_flight: usize) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
         let engine_block_size = self.block_size;
-        WorkloadDriver::new_concurrency(self, engine_block_size, max_in_flight)
+        WorkloadDriver::new_concurrency(
+            self,
+            engine_block_size,
+            ReplayConcurrencyConfig::new(max_in_flight),
+        )
     }
 
     pub fn into_trace_driver_with_block_size(
@@ -848,19 +852,23 @@ impl Trace {
     pub fn into_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
-        max_in_flight: usize,
+        concurrency_config: ReplayConcurrencyConfig,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
-        WorkloadDriver::new_concurrency(self, engine_block_size, max_in_flight)
+        WorkloadDriver::new_concurrency(self, engine_block_size, concurrency_config)
     }
 
     pub fn into_delta_accumulating_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
-        max_in_flight: usize,
+        concurrency_config: ReplayConcurrencyConfig,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
-        WorkloadDriver::new_concurrency_accumulating_deltas(self, engine_block_size, max_in_flight)
+        WorkloadDriver::new_concurrency_accumulating_deltas(
+            self,
+            engine_block_size,
+            concurrency_config,
+        )
     }
 
     fn validate(&self, allow_missing_first_timestamp: bool) -> Result<()> {

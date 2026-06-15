@@ -17,7 +17,7 @@ use super::{
     TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
+use crate::loadgen::{AgenticTrace, ReplayConcurrencyConfig, Trace, TraceFileFormat};
 
 fn load_trace_from_file(
     trace_path: &Path,
@@ -555,7 +555,7 @@ pub fn simulate_concurrency_file_with_router_mode(
         prefill_load_estimator,
         trace_path,
         trace_block_size,
-        max_in_flight,
+        ReplayConcurrencyConfig::new(max_in_flight),
         num_workers,
         router_mode,
         TraceFileFormat::Mooncake,
@@ -573,7 +573,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
     trace_block_size: usize,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
     trace_format: TraceFileFormat,
@@ -583,7 +583,12 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    validate_offline_concurrency_args(&args, num_workers, max_in_flight, router_mode)?;
+    validate_offline_concurrency_args(
+        &args,
+        num_workers,
+        concurrency_config.max_in_flight,
+        router_mode,
+    )?;
     if trace_format == TraceFileFormat::AgenticMooncake {
         bail!("agentic_mooncake trace format is not supported with replay_concurrency");
     }
@@ -600,7 +605,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
             router_config,
             prefill_load_estimator,
             trace,
-            max_in_flight,
+            concurrency_config,
             num_workers,
             router_mode,
             record_per_request,
@@ -612,7 +617,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
             router_config,
             prefill_load_estimator,
             trace,
-            max_in_flight,
+            concurrency_config,
             num_workers,
             router_mode,
             record_per_request,
@@ -637,7 +642,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode(
         prefill_load_estimator,
         trace_path,
         trace_block_size,
-        max_in_flight,
+        ReplayConcurrencyConfig::new(max_in_flight),
         router_mode,
         TraceFileFormat::Mooncake,
         0.0,
@@ -654,7 +659,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
     trace_block_size: usize,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     router_mode: ReplayRouterMode,
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
@@ -663,7 +668,11 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    validate_offline_disagg_concurrency_args(
+        &config,
+        concurrency_config.max_in_flight,
+        router_mode,
+    )?;
     if trace_format == TraceFileFormat::AgenticMooncake {
         bail!("agentic_mooncake trace format is not supported for disaggregated replay");
     }
@@ -682,7 +691,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
         router_config,
         prefill_load_estimator,
         trace,
-        max_in_flight,
+        concurrency_config,
         router_mode,
         record_per_request,
         max_sim_time_ms,
@@ -994,29 +1003,35 @@ pub fn simulate_concurrency_workload(
         None,
         None,
         trace,
-        max_in_flight,
+        ReplayConcurrencyConfig::new(max_in_flight),
         num_workers,
         ReplayRouterMode::RoundRobin,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_workload_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    validate_offline_concurrency_args(&args, num_workers, max_in_flight, router_mode)?;
+    validate_offline_concurrency_args(
+        &args,
+        num_workers,
+        concurrency_config.max_in_flight,
+        router_mode,
+    )?;
     crate::replay::offline::simulate_concurrency_workload(
         args,
         router_config,
         prefill_load_estimator,
         trace,
-        max_in_flight,
+        concurrency_config,
         num_workers,
         router_mode,
         false,
@@ -1024,22 +1039,27 @@ pub fn simulate_concurrency_workload_with_router_mode(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_workload_disagg_with_router_mode(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    validate_offline_disagg_concurrency_args(
+        &config,
+        concurrency_config.max_in_flight,
+        router_mode,
+    )?;
     crate::replay::offline::simulate_concurrency_workload_disagg(
         config,
         router_config,
         prefill_load_estimator,
         trace,
-        max_in_flight,
+        concurrency_config,
         router_mode,
         false,
         None,

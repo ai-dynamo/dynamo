@@ -18,7 +18,7 @@ use super::disagg::{DisaggRuntime, ReplayMode as DisaggReplayMode};
 use super::normalize_trace_requests;
 use super::single::{SingleReplayMode, SingleRuntime};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
+use crate::loadgen::{AgenticTrace, ReplayConcurrencyConfig, Trace, WorkloadDriver};
 use crate::replay::OfflineDisaggReplayConfig;
 use crate::replay::{
     ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTimedKvEvent, ReplayTimedOutputSignal,
@@ -302,7 +302,7 @@ pub(crate) fn simulate_concurrency_workload(
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
     record_per_request: bool,
@@ -313,7 +313,7 @@ pub(crate) fn simulate_concurrency_workload(
         router_config,
         prefill_load_estimator,
         trace,
-        max_in_flight,
+        concurrency_config,
         num_workers,
         router_mode,
         false,
@@ -328,7 +328,7 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
     record_per_request: bool,
@@ -339,7 +339,7 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
         router_config,
         prefill_load_estimator,
         trace,
-        max_in_flight,
+        concurrency_config,
         num_workers,
         router_mode,
         true,
@@ -354,7 +354,7 @@ fn simulate_concurrency_workload_with_delta_mode(
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
@@ -365,7 +365,7 @@ fn simulate_concurrency_workload_with_delta_mode(
         simulate_concurrency_workload_single(
             args,
             trace,
-            max_in_flight,
+            concurrency_config,
             accumulate_session_deltas,
             record_per_request,
             max_sim_time_ms,
@@ -376,7 +376,7 @@ fn simulate_concurrency_workload_with_delta_mode(
             router_config,
             prefill_load_estimator,
             trace,
-            max_in_flight,
+            concurrency_config,
             num_workers,
             router_mode,
             accumulate_session_deltas,
@@ -471,14 +471,15 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
+    let max_in_flight = concurrency_config.max_in_flight;
     let driver =
-        WorkloadDriver::new_concurrency(trace, config.prefill_args.block_size, max_in_flight)?;
+        WorkloadDriver::new_concurrency(trace, config.prefill_args.block_size, concurrency_config)?;
     let (collector, _) = DisaggRuntime::new_workload(
         &config,
         router_config,
@@ -568,7 +569,7 @@ pub(crate) fn simulate_agentic_trace_workload_single(
 pub(crate) fn simulate_concurrency_workload_single(
     args: MockEngineArgs,
     trace: Trace,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
@@ -576,13 +577,14 @@ pub(crate) fn simulate_concurrency_workload_single(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
+    let max_in_flight = concurrency_config.max_in_flight;
     let driver = if accumulate_session_deltas {
         trace.into_delta_accumulating_concurrency_driver_with_block_size(
             engine_block_size,
-            max_in_flight,
+            concurrency_config,
         )?
     } else {
-        trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)?
+        trace.into_concurrency_driver_with_block_size(engine_block_size, concurrency_config)?
     };
     let collector = SingleRuntime::new_workload(
         args,
@@ -719,7 +721,7 @@ pub(crate) fn simulate_concurrency_workload_multi(
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
-    max_in_flight: usize,
+    concurrency_config: ReplayConcurrencyConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
@@ -728,13 +730,14 @@ pub(crate) fn simulate_concurrency_workload_multi(
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
+    let max_in_flight = concurrency_config.max_in_flight;
     let driver = if accumulate_session_deltas {
         trace.into_delta_accumulating_concurrency_driver_with_block_size(
             args.block_size,
-            max_in_flight,
+            concurrency_config,
         )?
     } else {
-        trace.into_concurrency_driver_with_block_size(args.block_size, max_in_flight)?
+        trace.into_concurrency_driver_with_block_size(args.block_size, concurrency_config)?
     };
     let (collector, _) = AggRuntime::new_workload(
         &args,
@@ -805,7 +808,10 @@ pub(super) fn run_concurrency_workload_single_collect(
     SingleRuntime::new_workload(
         args,
         trace
-            .into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)
+            .into_concurrency_driver_with_block_size(
+                engine_block_size,
+                ReplayConcurrencyConfig::new(max_in_flight),
+            )
             .unwrap(),
         SingleReplayMode::Concurrency { max_in_flight },
     )
@@ -910,7 +916,10 @@ pub(super) fn run_concurrency_workload_multi_collect_with_stats(
         None,
         None,
         trace
-            .into_concurrency_driver_with_block_size(args.block_size, max_in_flight)
+            .into_concurrency_driver_with_block_size(
+                args.block_size,
+                ReplayConcurrencyConfig::new(max_in_flight),
+            )
             .unwrap(),
         num_workers,
         AggReplayMode::Concurrency { max_in_flight },
@@ -1022,7 +1031,10 @@ pub(super) fn run_concurrency_workload_collect(
         router_config,
         None,
         trace
-            .into_concurrency_driver_with_block_size(config.prefill_args.block_size, max_in_flight)
+            .into_concurrency_driver_with_block_size(
+                config.prefill_args.block_size,
+                ReplayConcurrencyConfig::new(max_in_flight),
+            )
             .unwrap(),
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
