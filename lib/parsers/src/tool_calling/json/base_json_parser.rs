@@ -31,6 +31,16 @@ pub struct CalledFunctionArguments {
     pub arguments: Box<RawValue>,
 }
 
+// A tool call may omit both `arguments` and `parameters` when the function
+// takes no inputs (e.g. `{"name": "get_time"}`). vLLM's and SGLang's Hermes
+// detectors treat that as an empty-argument call; this name-only shape is
+// tried as a last resort (after the `parameters` / `arguments` shapes) so the
+// call is recovered with `{}` args rather than dropped and its wrapper leaked.
+#[derive(Debug, serde::Deserialize)]
+pub struct CalledFunctionNameOnly {
+    pub name: String,
+}
+
 // Extract the contents between start and end tokens using regex parsing.
 // Returns a JSON array string if there are multiple matches, otherwise returns the last match directly.
 fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) -> Option<String> {
@@ -326,7 +336,10 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
 /// than re-serializing a parsed `HashMap` / `Value`, which keeps them
 /// byte-identical to what the model emitted (required for KV-cache append-only
 /// prefix matching across multi-step tool use).
-fn parse_calls(payload: &str) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
+fn parse_calls(
+    payload: &str,
+    allow_name_only: bool,
+) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
     let mk = |name: String, args: &RawValue| ToolCallResponse {
         id: format!("call-{}", Uuid::new_v4()),
         tp: ToolCallType::Function,
@@ -346,6 +359,13 @@ fn parse_calls(payload: &str) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
                 serde_json::from_str::<CalledFunctionParameters>(item_str)
             {
                 calls.push(mk(func_params.name, &func_params.parameters));
+            } else if allow_name_only
+                && let Ok(name_only) =
+                    serde_json::from_str::<CalledFunctionNameOnly>(item_str)
+            {
+                // No `arguments`/`parameters` key — treat as an empty-arg call.
+                let empty = RawValue::from_string("{}".to_string())?;
+                calls.push(mk(name_only.name, &empty));
             }
             // Skip malformed entries silently.
         }
@@ -356,6 +376,13 @@ fn parse_calls(payload: &str) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
     }
     if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(payload) {
         return Ok(Some(vec![mk(single.name, &single.arguments)]));
+    }
+    if allow_name_only
+        && let Ok(name_only) = serde_json::from_str::<CalledFunctionNameOnly>(payload)
+    {
+        // No `arguments`/`parameters` key — treat as an empty-arg call.
+        let empty = RawValue::from_string("{}".to_string())?;
+        return Ok(Some(vec![mk(name_only.name, &empty)]));
     }
     Ok(None)
 }
@@ -478,7 +505,7 @@ pub fn try_tool_call_parse_basic_json(
     // `arguments`, or an array of either). A recognized shape returns here —
     // including an empty array, which is a valid empty result and must not fall
     // through to truncation recovery.
-    if let Some(calls) = parse_calls(json)? {
+    if let Some(calls) = parse_calls(json, config.allow_name_only_call)? {
         return Ok((calls, Some(normal_text)));
     }
 
@@ -501,7 +528,7 @@ pub fn try_tool_call_parse_basic_json(
     {
         let recovered = recover_leading_complete_objects(json);
         if !recovered.is_empty()
-            && let Some(calls) = parse_calls(&format!("[{}]", recovered.join(",")))?
+            && let Some(calls) = parse_calls(&format!("[{}]", recovered.join(",")), config.allow_name_only_call)?
             && !calls.is_empty()
         {
             return Ok((calls, Some(normal_text)));
@@ -515,7 +542,7 @@ pub fn try_tool_call_parse_basic_json(
     // call while the model is still emitting JSON tokens.
     if config.allow_eof_recovery
         && let Some(repaired) = try_repair_truncated_json(json)
-        && let Some(calls) = parse_calls(repaired.as_str())?
+        && let Some(calls) = parse_calls(repaired.as_str(), config.allow_name_only_call)?
         && !calls.is_empty()
     {
         return Ok((calls, Some(normal_text)));
@@ -592,7 +619,7 @@ pub fn try_tool_call_parse_basic_json(
             }
             let payload = payload.trim();
 
-            let calls = parse_calls(payload)?.unwrap_or_default();
+            let calls = parse_calls(payload, config.allow_name_only_call)?.unwrap_or_default();
 
             if !calls.is_empty() {
                 tracing::warn!(
@@ -608,6 +635,48 @@ pub fn try_tool_call_parse_basic_json(
                 "Dropping unparseable tool-call content; wrapper markers stripped, no valid tool call recovered"
             );
             return Ok((vec![], Some(String::new())));
+        }
+    }
+
+    // No parseable tool call was produced. Decide what (if anything) of the
+    // raw text may pass through as `normal_text` WITHOUT leaking parser-owned
+    // tool-call markers into user-visible content. Two distinct leak shapes:
+    let has_start = config
+        .tool_call_start_tokens
+        .iter()
+        .any(|t| !t.is_empty() && trimmed.contains(t.as_str()));
+    let has_end = config
+        .tool_call_end_tokens
+        .iter()
+        .any(|t| !t.is_empty() && trimmed.contains(t.as_str()));
+
+    if has_start && has_end {
+        // A complete `<start>...</end>` wrapper was present but nothing parsed
+        // out of it (non-JSON garbage, missing name, etc.). Discard the whole
+        // jailed region rather than leaking the wrapper markup; `normal_text`
+        // already holds the pre-wrapper prefix.
+        return Ok((vec![], Some(normal_text)));
+    }
+    if has_end {
+        // Orphan end token(s) with no matching opener (e.g. `{..}</tool_call>`
+        // or repeated `</tool_call>` runs at `length`). Strip the trailing
+        // stray end markers so the marker never reaches user-visible content,
+        // but keep the surrounding text the model produced outside any call.
+        let mut cleaned = trimmed;
+        loop {
+            let t = cleaned.trim_end();
+            match config
+                .tool_call_end_tokens
+                .iter()
+                .filter(|tok| !tok.is_empty())
+                .find_map(|tok| t.strip_suffix(tok.as_str()))
+            {
+                Some(rest) => cleaned = rest,
+                None => break,
+            }
+        }
+        if cleaned.len() != trimmed.len() {
+            return Ok((vec![], Some(cleaned.trim().to_string())));
         }
     }
 

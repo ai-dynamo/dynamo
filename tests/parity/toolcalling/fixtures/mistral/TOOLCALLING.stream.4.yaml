@@ -20,7 +20,7 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
         calls:
         - name: get_weather
           arguments:
@@ -29,7 +29,12 @@ cases:
       sglang:
         calls: []
         normal_text: ''
-      vllm: *id001
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from TOOLCALLING.batch.5.c
@@ -57,7 +62,8 @@ cases:
         - name: get_weather
           arguments: '{"loc'
         normal_text: ''
-        reason: vLLM emits a malformed partial call with the incomplete argument fragment as arguments; Dynamo suppresses the unterminated call and emits empty content.
+        reason: vLLM emits a malformed partial call with the incomplete argument fragment as arguments; Dynamo suppresses
+          the unterminated call and emits empty content.
   TOOLCALLING.stream.4.c:
     description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
       repeated close markers
@@ -74,11 +80,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id002
+      dynamo:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS][/TOOL_CALLS][/TOOL_CALLS]'
-      vllm: *id002
       sglang:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}[/TOOL_CALLS[/TOOL_CALLS[/TOOL_CALLS'
-        reason: SGLang strips the trailing ] from each orphan [/TOOL_CALLS] close marker (leaving bracket fragments); Dynamo and vLLM keep the bare body and markers verbatim when the [TOOL_CALLS] opener is absent.
+        reason: SGLang strips the trailing ] from each orphan [/TOOL_CALLS] close marker (leaving bracket fragments); Dynamo
+          and vLLM keep the bare body and markers verbatim when the [TOOL_CALLS] opener is absent.

@@ -17,13 +17,18 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *id001
+      vllm: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
       sglang: *id001
   TOOLCALLING.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
@@ -32,11 +37,14 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id003
-        reason: "Dynamo's hermes parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
+      dynamo:
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}'
+      vllm: &id003
+        reason: vLLM and SGLang's Hermes parsers keep the orphan </tool_call> (no opening
+          <tool_call>) in content; Dynamo strips the stray end marker so it does not leak.
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
-      vllm: *id003
       sglang: *id003
   TOOLCALLING.batch.5.c:
     description: Truncation mid-arguments JSON
@@ -45,11 +53,15 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id004
-        reason: "Dynamo's hermes parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
+      dynamo:
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
-      vllm: *id004
+      vllm: &id004
+        reason: 'Truncated mid-arguments with no </tool_call>: all three engines preserve
+          the raw text; Dynamo''s eof-recovery cannot complete the call. Impl-defined recovery
+          (batch.5), so parity is not expected.'
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
       sglang: *id004
   TOOLCALLING.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)

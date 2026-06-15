@@ -64,6 +64,15 @@ pub struct JsonParserConfig {
     /// trailing marker as leaked text on the next chunk.
     #[serde(default)]
     pub strip_markup_on_recovery: bool,
+
+    /// Recover a name-only tool-call object (`{"name": "f"}`, no `arguments`
+    /// or `parameters` key) as an empty-argument call rather than dropping it.
+    /// Matches vLLM's and SGLang's Hermes detectors, which treat a missing
+    /// argument key as `{}`. Default `false` keeps every other family's
+    /// stricter behavior (a name-only object is not a call) unchanged; only the
+    /// hermes config (shared by `qwen25`) opts in.
+    #[serde(default)]
+    pub allow_name_only_call: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -78,6 +87,7 @@ impl Default for JsonParserConfig {
             bare_json_mode: false,
             allow_eof_recovery: false,
             strip_markup_on_recovery: false,
+            allow_name_only_call: false,
         }
     }
 }
@@ -387,6 +397,10 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<tool_call>".to_string()],
                 tool_call_end_tokens: vec!["</tool_call>".to_string()],
+                // qwen25 (which aliases this config) and hermes recover a
+                // name-only call (`{"name": "f"}`) as an empty-arg call, matching
+                // vLLM/SGLang's Hermes detectors.
+                allow_name_only_call: true,
                 ..Default::default()
             }),
             structural_tag_builder: Some(StructuralTagBuilder::TriggeredTags(

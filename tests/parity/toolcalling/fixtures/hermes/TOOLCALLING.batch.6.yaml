@@ -15,12 +15,16 @@ cases:
         type: object
         properties: {}
     expected:
-      dynamo: &id001
+      dynamo:
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *id001
+      vllm: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
       sglang: *id001
   TOOLCALLING.batch.6.b:
     description: Whitespace inside arguments {}
@@ -29,12 +33,16 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id003
+      dynamo:
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *id003
+      vllm: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
       sglang: *id003
   TOOLCALLING.batch.6.c:
     description: No arguments key
@@ -43,11 +51,17 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id004
-        reason: "Dynamo's hermes parser leaves <tool_call> tag in normal_text on minimal/no-body case"
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm:
+        reason: Name-only call (no arguments key) — vLLM's Hermes parser raises on the
+          missing key and leaves the wrapper in content; Dynamo and SGLang recover it as
+          get_time({}).
         calls: []
         normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
-      vllm: *id004
       sglang:
         calls:
         - name: get_time

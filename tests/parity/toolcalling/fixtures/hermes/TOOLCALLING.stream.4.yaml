@@ -20,13 +20,18 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      sglang: *id001
+      sglang: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
       vllm: *id001
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
@@ -73,10 +78,12 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id002
+      dynamo:
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}'
+      vllm:
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call></tool_call></tool_call>'
-      vllm: *id002
       sglang:
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}'

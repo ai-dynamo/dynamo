@@ -75,9 +75,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls></tool_calls></tool_calls>'
-      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='jamba'

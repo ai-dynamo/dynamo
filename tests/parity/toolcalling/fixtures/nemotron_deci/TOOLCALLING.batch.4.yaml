@@ -18,7 +18,6 @@ cases:
             type: string
     expected:
       dynamo:
-        reason: Unparseable TOOLCALL content (not a JSON tool-call array); Dynamo strips the wrapper markers and drops the content instead of leaking them into normal_text, and records the drop via tracing::warn
         calls: []
         normal_text: ''
       vllm:
@@ -50,7 +49,6 @@ cases:
     - *id001
     expected:
       dynamo:
-        reason: The array element has no name key, so it is not a valid tool call; Dynamo drops it and emits empty normal_text without leaking the wrapper markers
         calls: []
         normal_text: ''
       vllm:
@@ -76,9 +74,12 @@ cases:
         unavailable: SGLang has no detector for family='nemotron_deci'
   TOOLCALLING.batch.4.e:
     description: Malformed-prefix recovery — n/a for this family's syntax
-    reason: |-
-      TOOLCALLING.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in TOOLCALLING.batch.4.a through 4.d.
+    reason: 'TOOLCALLING.batch.4.e is specific to llama3_json''s raw JSON-object scanner: a malformed JSON-looking prefix
+      is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed
+      parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in TOOLCALLING.batch.4.a
+      through 4.d.'
   TOOLCALLING.batch.4.f:
     description: Tool-name XML tag case - n/a for this family's syntax
-    reason: |-
-      TOOLCALLING.batch.4.f is specific to Qwen3-Coder XML syntax, where the model may emit a tool-name tag such as <terminal> inside <tool_call> instead of the required <function=Terminal> opener. This family does not use Qwen3-Coder's <function=...> opener.
+    reason: TOOLCALLING.batch.4.f is specific to Qwen3-Coder XML syntax, where the model may emit a tool-name tag such as
+      <terminal> inside <tool_call> instead of the required <function=Terminal> opener. This family does not use Qwen3-Coder's
+      <function=...> opener.

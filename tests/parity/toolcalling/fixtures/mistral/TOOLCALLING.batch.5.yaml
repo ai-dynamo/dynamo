@@ -9,7 +9,7 @@ cases:
     ref: dynamo
     model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}]'
     tools:
-    - &id002
+    - &id001
       name: get_weather
       parameters:
         type: object
@@ -17,13 +17,18 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *id001
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
       sglang:
         calls: []
         normal_text: ''
@@ -32,20 +37,22 @@ cases:
     ref: dynamo
     model_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
     tools:
-    - *id002
+    - *id001
     expected:
-      dynamo: &id003
-        reason: "Dynamo's mistral parser leaves [/TOOL_CALLS] in normal_text on missing/orphan end marker (impl-defined recovery)"
+      dynamo:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      vllm: &id002
+        reason: Dynamo's mistral parser leaves [/TOOL_CALLS] in normal_text on missing/orphan end marker (impl-defined recovery)
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
-      vllm: *id003
-      sglang: *id003
+      sglang: *id002
   TOOLCALLING.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
     model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
     tools:
-    - *id002
+    - *id001
     expected:
       dynamo:
         calls: []
@@ -53,7 +60,8 @@ cases:
       vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"loc'
-        reason: vLLM leaves the truncated post-marker JSON body in content; Dynamo suppresses the unterminated [TOOL_CALLS] call and emits empty content.
+        reason: vLLM leaves the truncated post-marker JSON body in content; Dynamo suppresses the unterminated [TOOL_CALLS]
+          call and emits empty content.
       sglang:
         calls: []
         normal_text: ''
@@ -63,9 +71,9 @@ cases:
     model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time![TOOL_CALLS][{"name": "get_weather",
       "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York"}}]'
     tools:
-    - *id002
+    - *id001
     expected:
-      dynamo: &id004
+      dynamo:
         calls:
         - name: get_weather
           arguments:
@@ -74,7 +82,15 @@ cases:
           arguments:
             location: New York
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      vllm: *id004
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       sglang:
         calls: []
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
@@ -84,7 +100,7 @@ cases:
     model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time![TOOL_CALLS][{"name": "get_weather",
       "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York'
     tools:
-    - *id002
+    - *id001
     expected:
       dynamo:
         calls:
@@ -96,8 +112,10 @@ cases:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments":
           {"location": "New York'
-        reason: vLLM leaves the raw truncated body in content; Dynamo recovers the complete leading call (Boston) and drops the truncated trailing call without fabricating it.
+        reason: vLLM leaves the raw truncated body in content; Dynamo recovers the complete leading call (Boston) and drops
+          the truncated trailing call without fabricating it.
       sglang:
         calls: []
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-        reason: SGLang emits no call and keeps the narration prefix; Dynamo recovers the complete leading call (Boston) and drops the truncated trailing call.
+        reason: SGLang emits no call and keeps the narration prefix; Dynamo recovers the complete leading call (Boston) and
+          drops the truncated trailing call.

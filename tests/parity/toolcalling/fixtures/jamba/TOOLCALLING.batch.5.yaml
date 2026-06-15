@@ -35,11 +35,14 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id002
-        reason: "Dynamo's jamba parser leaves closing </tool_calls> envelope plus the JSON array in normal_text when opening <tool_calls> marker is missing (impl-defined recovery)"
+      dynamo:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      vllm:
+        reason: Dynamo's jamba parser leaves closing </tool_calls> envelope plus the JSON array in normal_text when opening
+          <tool_calls> marker is missing (impl-defined recovery)
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
-      vllm: *id002
       sglang:
         unavailable: SGLang has no detector for family='jamba'
   TOOLCALLING.batch.5.c:
@@ -49,11 +52,14 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id003
-        reason: "Dynamo's jamba parser leaves closing </tool_calls> envelope plus the JSON array in normal_text when opening <tool_calls> marker is missing (impl-defined recovery)"
+      dynamo:
         calls: []
         normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
-      vllm: *id003
+      vllm:
+        reason: Dynamo's jamba parser leaves closing </tool_calls> envelope plus the JSON array in normal_text when opening
+          <tool_calls> marker is missing (impl-defined recovery)
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
       sglang:
         unavailable: SGLang has no detector for family='jamba'
   TOOLCALLING.batch.5.d:

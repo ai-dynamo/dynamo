@@ -34,12 +34,17 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id002
+      dynamo:
         calls: []
-        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *id002
+      sglang:
+        reason: 'Orphan </tool_call> with no opener: Dynamo strips the stray end marker
+          from normal_text (no leak); SGLang''s Qwen25Detector leaves it in the raw
+          text. Non-parity by design.'
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
   TOOLCALLING.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -68,7 +73,7 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id003
+      dynamo:
         calls:
         - name: get_weather
           arguments:
@@ -76,7 +81,12 @@ cases:
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *id003
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
   TOOLCALLING.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -88,7 +98,7 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id004
+      dynamo:
         calls:
         - name: get_weather
           arguments:
@@ -96,4 +106,9 @@ cases:
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *id004
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!

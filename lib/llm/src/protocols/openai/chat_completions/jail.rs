@@ -255,16 +255,46 @@ impl ChoiceJailState {
             self.accumulated_content = content.to_string();
             self.accumulated_logprobs = None;
         } else {
-            #[allow(deprecated)]
-            let trailing_choice = create_choice_stream(
-                choice.index,
-                choice.delta.role,
-                content,
-                None,
-                choice.finish_reason,
-                choice.logprobs.clone(),
-            );
-            emissions.push(ChoiceEmission::Trailing(trailing_choice));
+            // Strip any orphan trailing tool-call end markers before emitting.
+            // After a recovered call the trailing remainder can be a run of
+            // bare `</tool_call>` markers (no opener) — parser-owned markup that
+            // must not leak. Genuine trailing prose carries no end marker and is
+            // emitted unchanged (preserving whitespace).
+            let end_markers: Vec<String> = jail_stream
+                .tool_call_parser
+                .as_deref()
+                .and_then(|p| get_tool_parser_map().get(p))
+                .map(|cfg| cfg.parser_config.tool_call_end_tokens())
+                .unwrap_or_default();
+            let mut emit = content;
+            loop {
+                let trimmed_end = emit.trim_end();
+                match end_markers
+                    .iter()
+                    .filter(|m| !m.is_empty())
+                    .find_map(|m| trimmed_end.strip_suffix(m.as_str()))
+                {
+                    Some(rest) => emit = rest,
+                    None => break,
+                }
+            }
+            let emit = if emit.len() != content.len() {
+                emit.trim_end()
+            } else {
+                content
+            };
+            if !emit.is_empty() {
+                #[allow(deprecated)]
+                let trailing_choice = create_choice_stream(
+                    choice.index,
+                    choice.delta.role,
+                    emit,
+                    None,
+                    choice.finish_reason,
+                    choice.logprobs.clone(),
+                );
+                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+            }
         }
     }
 
@@ -1153,6 +1183,29 @@ impl JailedStream {
                         } else if is_harmony_parser(self.tool_call_parser.as_deref())
                             && contains_harmony_protocol(accumulated_content)
                         {
+                            normal_text.as_deref().unwrap_or("")
+                        } else if {
+                            // accumulated_content still carries tool-call markers
+                            // that the parser stripped out of normal_text (e.g.
+                            // an orphan `</tool_call>` with no opener, jailed on a
+                            // leading `{` false-positive). Emit the parser's
+                            // stripped text so the marker never leaks; reserve the
+                            // verbatim passthrough below for genuine marker-free
+                            // text (where it preserves whitespace the parser trims).
+                            let markers = self
+                                .tool_call_parser
+                                .as_deref()
+                                .and_then(|p| get_tool_parser_map().get(p))
+                                .map(|cfg| {
+                                    let mut m = cfg.parser_config.tool_call_start_tokens();
+                                    m.extend(cfg.parser_config.tool_call_end_tokens());
+                                    m
+                                })
+                                .unwrap_or_default();
+                            markers
+                                .iter()
+                                .any(|m| !m.is_empty() && accumulated_content.contains(m.as_str()))
+                        } {
                             normal_text.as_deref().unwrap_or("")
                         } else {
                             accumulated_content

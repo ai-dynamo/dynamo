@@ -74,7 +74,7 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call></tool_call></tool_call>'
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
       sglang:
