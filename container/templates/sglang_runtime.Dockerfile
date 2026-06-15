@@ -107,7 +107,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --break-system-packages --no-deps "accelerate==1.13.0"
 
 # Install distro: openai>=1.x's _base_client imports it unconditionally, and
-# sglang 0.5.12's server_args eagerly imports sglang.srt.entrypoints.openai.protocol
+# SGLang server_args eagerly imports sglang.srt.entrypoints.openai.protocol
 # which pulls in openai.types.responses → triggers openai pkg init → import distro.
 # The upstream lmsysorg/sglang runtime installs openai with --no-deps so distro is
 # missing; without this any dynamo.sglang worker fails to import at startup.
@@ -156,8 +156,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
-# Vendored sglang patches for v${SGLANG_VER} — currently carries
-# sgl-project/sglang#25300 (mm_hashes interop). Drop on upstream bump.
+# Vendored SGLang patches for v${SGLANG_VER}, if any.
 RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/deps/sglang/patches \
     SGLANG_VER=$(python3 -c 'import sglang; print(sglang.__version__)') && \
     PATCH_DIR="/tmp/deps/sglang/patches/v${SGLANG_VER}" && \
