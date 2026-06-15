@@ -250,6 +250,25 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] is None
 
+    def test_metadata_upload_nvext_is_forwarded_to_backend(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {
+                    "metadata_upload": {
+                        "url": "s3://bucket/root/rollouts",
+                    },
+                },
+            },
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["extra_args"]["nvext"]["metadata_upload"] == {
+            "url": "s3://bucket/root/rollouts",
+        }
+
     def test_model_name_and_token_ids(self):
         """Model name and token_ids are set correctly."""
         result = _build_dynamo_preproc(

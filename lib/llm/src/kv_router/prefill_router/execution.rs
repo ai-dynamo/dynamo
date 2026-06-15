@@ -9,7 +9,11 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
-use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
+use dynamo_runtime::{
+    error::{DynamoError, ErrorType, match_error_chain},
+    pipeline::SingleIn,
+    protocols::maybe_error::MaybeError,
+};
 
 use super::{
     InnerPrefillRouter, PrefillError, PrefillQueryOutcome, PrefillResolveDecision, PrefillRouter,
@@ -74,13 +78,18 @@ impl PrefillRouter {
             (id, dp_rank)
         } else {
             // Use shared worker selection logic (update_states=false for peek behavior)
-            // Extract LORA name and priority jump from routing hints
+            // Extract queue and request metadata from routing hints.
             let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
             let priority_jump = req
                 .routing
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
+            let strict_priority = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.strict_priority)
+                .unwrap_or(0);
             let allowed_worker_ids = req
                 .routing
                 .as_ref()
@@ -98,6 +107,7 @@ impl PrefillRouter {
                     false,
                     lora_name,
                     priority_jump,
+                    strict_priority,
                     allowed_worker_ids,
                     routing_constraints,
                 )
@@ -222,6 +232,24 @@ impl PrefillRouter {
             .generate_to_worker(request, target_worker)
             .await
             .map_err(|e| {
+                // A shed prefill worker returns ResourceExhausted. Carry it as the
+                // source so the chain stays downcastable to 503; boxing the raw
+                // anyhow error instead would hide that identity.
+                if match_error_chain(e.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
+                    tracing::warn!(
+                        worker_error = %e,
+                        "Request rejected by prefill worker (at capacity) — returning HTTP 503"
+                    );
+                    return PrefillError::PrefillError(
+                        "prefill worker overloaded".to_string(),
+                        Some(Box::new(
+                            DynamoError::builder()
+                                .error_type(ErrorType::ResourceExhausted)
+                                .message(e.to_string())
+                                .build(),
+                        )),
+                    );
+                }
                 PrefillError::PrefillError(
                     "failed to route to prefill worker".to_string(),
                     Some(e.into()),
@@ -350,6 +378,7 @@ impl PrefillRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillQueryOutcome> {
@@ -371,6 +400,7 @@ impl PrefillRouter {
                         false,
                         lora_name,
                         priority_jump,
+                        strict_priority,
                         None,
                         None,
                         allowed_worker_ids,

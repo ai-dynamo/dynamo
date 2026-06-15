@@ -6,8 +6,10 @@ import pytest
 from dynamo._internal.aic import (
     _DEFAULT_NEXTN_ACCEPT_RATES,
     _NEXTN_ACCEPT_RATES_LEN,
-    AicSession,
+    DEFAULT_FREE_GPU_MEMORY_FRACTION,
+    DEFAULT_MEM_FRACTION_STATIC,
     _pad_nextn_accept_rates,
+    estimate_num_gpu_blocks,
     resolve_backend_version,
 )
 
@@ -19,123 +21,170 @@ pytestmark = [
 ]
 
 
-_GIB = 1 << 30
+def _patch_memory(monkeypatch, return_value=123):
+    """Patch aiconfigurator's unified estimator and record forwarded kwargs.
+
+    ``estimate_num_gpu_blocks`` now delegates the budget math to
+    ``aiconfigurator.sdk.memory.estimate_num_gpu_blocks`` (the single source of
+    truth), so these tests assert the dynamo->AIC mapping rather than recompute
+    the math themselves.
+    """
+    memory = pytest.importorskip("aiconfigurator.sdk.memory")
+    calls = []
+
+    def fake(model_path, system, backend, **kwargs):
+        calls.append(
+            {"model_path": model_path, "system": system, "backend": backend, **kwargs}
+        )
+        return return_value
+
+    monkeypatch.setattr(memory, "estimate_num_gpu_blocks", fake)
+    return calls
 
 
-class FakeBackend:
-    def __init__(self, memory):
-        self._memory = memory
+def test_estimate_num_gpu_blocks_maps_vllm_to_total_fraction(monkeypatch):
+    calls = _patch_memory(monkeypatch, 45)
 
-    def _get_memory_usage(self, *_args, **_kwargs):
-        return self._memory
-
-
-class FakeModel:
-    def get_kvcache_bytes_per_sequence(self, seq_len):
-        return seq_len * _GIB
-
-
-class FakeDatabase:
-    def __init__(self):
-        self.system_spec = {"gpu": {"mem_capacity": 1000 * _GIB}}
-
-
-def make_session(backend_name, memory):
-    session = object.__new__(AicSession)
-    session._backend_name = backend_name
-    session._backend = FakeBackend(memory)
-    session._database = FakeDatabase()
-    session._model = FakeModel()
-    return session
-
-
-def test_estimate_num_gpu_blocks_uses_vllm_total_memory_fraction():
-    session = make_session(
-        "vllm",
-        {
-            "total": 400.0,
-            "kvcache": 50.0,
-            "weights": 300.0,
-            "activations": 40.0,
-            "nccl": 5.0,
-            "others": 5.0,
-        },
-    )
-
-    blocks = session.estimate_num_gpu_blocks(
+    blocks = estimate_num_gpu_blocks(
+        backend_name="vllm",
+        system="h200_sxm",
+        model_path="some/model",
+        tp_size=1,
         block_size=10,
         max_num_batched_tokens=128,
         gpu_memory_utilization=0.8,
     )
 
     assert blocks == 45
+    kw = calls[0]
+    assert kw["backend"] == "vllm"
+    assert kw["memory_fraction_kind"] == "of_total"
+    assert kw["memory_fraction_value"] == 0.8
+    assert kw["scheduler_block_size"] == 10
+    assert kw["max_num_tokens"] == 128
+    assert kw["tp_size"] == 1
 
 
-def test_estimate_num_gpu_blocks_uses_sglang_static_memory_fraction():
-    session = make_session(
-        "sglang",
-        {
-            "total": 900.0,
-            "kvcache": 0.0,
-            "weights": 300.0,
-            "activations": 500.0,
-            "nccl": 10.0,
-            "others": 20.0,
-        },
-    )
+def test_estimate_num_gpu_blocks_maps_sglang_to_static_fraction(monkeypatch):
+    calls = _patch_memory(monkeypatch, 37)
 
-    blocks = session.estimate_num_gpu_blocks(
+    blocks = estimate_num_gpu_blocks(
+        backend_name="sglang",
+        system="h200_sxm",
+        model_path="some/model",
+        tp_size=1,
         block_size=10,
         max_num_batched_tokens=128,
         mem_fraction_static=0.7,
     )
 
     assert blocks == 37
+    assert calls[0]["memory_fraction_kind"] == "of_total"
+    assert calls[0]["memory_fraction_value"] == 0.7
+
+
+def test_estimate_num_gpu_blocks_sglang_defaults_static_fraction(monkeypatch):
+    calls = _patch_memory(monkeypatch)
+
+    estimate_num_gpu_blocks(
+        backend_name="sglang",
+        system="h200_sxm",
+        model_path="some/model",
+        tp_size=1,
+        block_size=10,
+        max_num_batched_tokens=128,
+    )
+
+    assert calls[0]["memory_fraction_value"] == DEFAULT_MEM_FRACTION_STATIC
+
+
+def test_estimate_num_gpu_blocks_maps_trtllm_to_free_fraction(monkeypatch):
+    calls = _patch_memory(monkeypatch, 58)
+
+    # gpu_memory_utilization is accepted for signature parity but ignored for
+    # trtllm; the default free_gpu_memory_fraction drives the budget.
+    estimate_num_gpu_blocks(
+        backend_name="trtllm",
+        system="h200_sxm",
+        model_path="some/model",
+        tp_size=1,
+        block_size=10,
+        max_num_batched_tokens=128,
+        gpu_memory_utilization=0.8,
+    )
+    assert calls[0]["memory_fraction_kind"] == "of_free"
+    assert calls[0]["memory_fraction_value"] == DEFAULT_FREE_GPU_MEMORY_FRACTION
+
+    calls.clear()
+    estimate_num_gpu_blocks(
+        backend_name="trtllm",
+        system="h200_sxm",
+        model_path="some/model",
+        tp_size=1,
+        block_size=10,
+        max_num_batched_tokens=128,
+        free_gpu_memory_fraction=0.8,
+    )
+    assert calls[0]["memory_fraction_value"] == 0.8
+
+
+def test_estimate_num_gpu_blocks_forwards_parallel_mapping_and_version(monkeypatch):
+    calls = _patch_memory(monkeypatch)
+
+    estimate_num_gpu_blocks(
+        backend_name="vllm",
+        system="h200_sxm",
+        model_path="some/model",
+        tp_size=2,
+        block_size=10,
+        max_num_batched_tokens=128,
+        backend_version="0.99.0",
+        moe_tp_size=4,
+        moe_ep_size=8,
+        attention_dp_size=2,
+    )
+
+    kw = calls[0]
+    assert kw["backend_version"] == "0.99.0"
+    assert kw["tp_size"] == 2
+    assert kw["moe_tp_size"] == 4
+    assert kw["moe_ep_size"] == 8
+    assert kw["attention_dp_size"] == 2
+
+
+def test_estimate_num_gpu_blocks_rejects_unsupported_backend():
+    # Validated before aiconfigurator is imported, so no patching is needed.
+    with pytest.raises(ValueError, match="does not support backend"):
+        estimate_num_gpu_blocks(
+            backend_name="not-a-backend",
+            system="h200_sxm",
+            model_path="some/model",
+            tp_size=1,
+            block_size=10,
+            max_num_batched_tokens=128,
+        )
+
+
+def test_estimate_num_gpu_blocks_errors_clearly_when_aic_missing(monkeypatch):
+    # Estimation is opt-in; if it is reached without aiconfigurator installed,
+    # fail loudly with an actionable message (not a raw ModuleNotFoundError, and
+    # not a silent fallback to the default block count).
+    import sys
+
+    monkeypatch.setitem(sys.modules, "aiconfigurator.sdk", None)
+    with pytest.raises(RuntimeError, match="aiconfigurator is required"):
+        estimate_num_gpu_blocks(
+            backend_name="vllm",
+            system="h200_sxm",
+            model_path="some/model",
+            tp_size=1,
+            block_size=10,
+            max_num_batched_tokens=128,
+        )
 
 
 def test_trtllm_version_resolution():
     assert resolve_backend_version("trtllm", "0.20.0") == "0.20.0"
-
-
-def test_estimate_num_gpu_blocks_uses_trtllm_free_memory_fraction():
-    # TRT-LLM now supports KV capacity estimation (it previously raised). It
-    # applies free_gpu_memory_fraction to the memory left *after* the model
-    # footprint, unlike vLLM's gpu_memory_utilization (a fraction of total):
-    #   non_kv = total - kvcache       = 400 - 50   = 350 GiB
-    #   free   = capacity - non_kv     = 1000 - 350  = 650 GiB
-    #   blocks = floor(free * fraction / block_bytes)
-    session = make_session(
-        "trtllm",
-        {
-            "total": 400.0,
-            "kvcache": 50.0,
-            "weights": 300.0,
-            "activations": 40.0,
-            "nccl": 5.0,
-            "others": 5.0,
-        },
-    )
-
-    # Default free_gpu_memory_fraction (0.9): floor(650 * 0.9 / 10) = 58.
-    # gpu_memory_utilization is accepted for signature parity but ignored here.
-    assert (
-        session.estimate_num_gpu_blocks(
-            block_size=10,
-            max_num_batched_tokens=128,
-            gpu_memory_utilization=0.8,
-        )
-        == 58
-    )
-
-    # Explicit free_gpu_memory_fraction drives the budget: floor(650 * 0.8 / 10) = 52.
-    assert (
-        session.estimate_num_gpu_blocks(
-            block_size=10,
-            max_num_batched_tokens=128,
-            free_gpu_memory_fraction=0.8,
-        )
-        == 52
-    )
 
 
 def test_pad_nextn_accept_rates_defaults_when_omitted():

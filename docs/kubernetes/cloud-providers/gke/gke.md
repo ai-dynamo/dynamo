@@ -58,7 +58,7 @@ git clone https://github.com/ai-dynamo/dynamo.git
 cd dynamo
 
 # Checkout the release branch matching your Dynamo platform version
-git checkout release/1.2.0
+git checkout release/1.2.1
 ```
 
 ### Set environment variables for GKE
@@ -132,7 +132,7 @@ spec:
             export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
             /sbin/ldconfig
             python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           name: main
           resources:
             limits:

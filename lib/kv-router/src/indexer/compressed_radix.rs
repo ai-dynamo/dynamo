@@ -126,9 +126,17 @@ impl NodeState {
             || matches!(self.worker_cutoffs.get(&worker), Some(&cutoff) if pos < cutoff)
     }
 
-    fn uncovered_suffix_hashes(&self, cutoff: usize) -> Vec<ExternalSequenceBlockHash> {
-        debug_assert!(cutoff <= self.edge.len());
-        self.edge[cutoff..].iter().map(|&(_, hash)| hash).collect()
+    fn newly_uncovered_hashes(
+        &self,
+        new_cutoff: usize,
+        old_cutoff: usize,
+    ) -> Vec<ExternalSequenceBlockHash> {
+        debug_assert!(new_cutoff <= old_cutoff);
+        debug_assert!(old_cutoff <= self.edge.len());
+        self.edge[new_cutoff..old_cutoff]
+            .iter()
+            .map(|&(_, hash)| hash)
+            .collect()
     }
 
     #[inline]
@@ -267,7 +275,7 @@ impl NodeState {
         }
 
         let new_cutoff = pos;
-        let stale_hashes = self.uncovered_suffix_hashes(new_cutoff);
+        let stale_hashes = self.newly_uncovered_hashes(new_cutoff, current_cutoff);
 
         if new_cutoff == 0 {
             self.drop_worker(worker);
@@ -281,5 +289,50 @@ impl NodeState {
 
     pub(crate) fn has_any_workers(&self) -> bool {
         !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worker() -> WorkerWithDpRank {
+        WorkerWithDpRank::new(1, 0)
+    }
+
+    fn block(hash: u64) -> KvCacheStoredBlockData {
+        KvCacheStoredBlockData {
+            tokens_hash: LocalBlockHash(hash),
+            block_hash: ExternalSequenceBlockHash(hash),
+            mm_extra_info: None,
+        }
+    }
+
+    #[test]
+    fn leaf_to_root_removes_return_only_newly_uncovered_hashes() {
+        let worker = worker();
+        let blocks = [block(1), block(2), block(3), block(4)];
+        let mut state = NodeState::for_blocks(&blocks, worker);
+
+        let pos_4 = state.edge_index[&ExternalSequenceBlockHash(4)];
+        let outcome = state.remove_worker_at_pos(worker, pos_4, ExternalSequenceBlockHash(4));
+        assert_eq!(outcome.stale_hashes, vec![ExternalSequenceBlockHash(4)]);
+        assert_eq!(state.current_cutoff(worker), 3);
+
+        let pos_3 = state.edge_index[&ExternalSequenceBlockHash(3)];
+        let outcome = state.remove_worker_at_pos(worker, pos_3, ExternalSequenceBlockHash(3));
+        assert_eq!(outcome.stale_hashes, vec![ExternalSequenceBlockHash(3)]);
+        assert_eq!(state.current_cutoff(worker), 2);
+
+        let pos_2 = state.edge_index[&ExternalSequenceBlockHash(2)];
+        let outcome = state.remove_worker_at_pos(worker, pos_2, ExternalSequenceBlockHash(2));
+        assert_eq!(outcome.stale_hashes, vec![ExternalSequenceBlockHash(2)]);
+        assert_eq!(state.current_cutoff(worker), 1);
+
+        let pos_1 = state.edge_index[&ExternalSequenceBlockHash(1)];
+        let outcome = state.remove_worker_at_pos(worker, pos_1, ExternalSequenceBlockHash(1));
+        assert_eq!(outcome.stale_hashes, vec![ExternalSequenceBlockHash(1)]);
+        assert_eq!(state.current_cutoff(worker), 0);
+        assert!(!state.has_any_workers());
     }
 }

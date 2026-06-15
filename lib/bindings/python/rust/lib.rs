@@ -168,6 +168,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
+    m.add_function(wrap_pyfunction!(run_select_service, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -251,7 +252,11 @@ where
 }
 
 fn standalone_to_pyerr(err: anyhow::Error) -> PyErr {
-    #[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
+    #[cfg(any(
+        feature = "kv-indexer",
+        feature = "slot-tracker",
+        feature = "select-service"
+    ))]
     if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
         let _ = clap_error.print();
         return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());
@@ -287,6 +292,14 @@ fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_slot_tracker_cli(argv))
+        .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_select_service")]
+#[pyo3(signature = (argv=None))]
+fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || llm::kv::run_select_service_cli(argv))
         .map_err(standalone_to_pyerr)
 }
 
@@ -994,7 +1007,7 @@ impl DistributedRuntime {
     /// Register an async Python callback for /engine/{route_name}
     ///
     /// Args:
-    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     route_name: Route path (e.g., "control/start_profile" → /engine/control/start_profile)
     ///     callback: Async function with signature: async def(body: dict) -> dict
     ///
     /// Example:
@@ -1003,7 +1016,7 @@ impl DistributedRuntime {
     ///     await engine.start_profile(**body)
     ///     return {"status": "ok"}
     ///
-    /// runtime.register_engine_route("start_profile", start_profile)
+    /// runtime.register_engine_route("control/start_profile", start_profile)
     /// ```
     #[pyo3(signature = (route_name, callback))]
     fn register_engine_route(
