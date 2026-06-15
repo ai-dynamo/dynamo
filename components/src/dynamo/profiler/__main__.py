@@ -103,6 +103,12 @@ def _parse_dgdr_spec(config_arg: str) -> DynamoGraphDeploymentRequestSpec:
 
 
 def _parse_args() -> tuple[DynamoGraphDeploymentRequestSpec, ProfilerOperationalConfig]:
+    """Parse profiler CLI arguments.
+
+    Returns the parsed DGDR spec (from ``--config``) and the operational
+    configuration (output directory, timeouts, interpolation granularities,
+    dry-run flag) used to drive profiling.
+    """
     parser = argparse.ArgumentParser(description="Dynamo Profiler")
     parser.add_argument(
         "--config",
@@ -154,6 +160,12 @@ def _parse_args() -> tuple[DynamoGraphDeploymentRequestSpec, ProfilerOperational
 
 
 def main() -> None:
+    """Profiler entry point.
+
+    Configures logging, parses CLI arguments, and runs SLA profiling. On
+    argument-parsing failure it writes a status file before exiting so the
+    container surfaces a useful failure reason.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
