@@ -219,7 +219,8 @@ installed as expected.
 
 Render the deployment bundle with the node placement rules for system and GPU workloads. The
 selectors and tolerations are cluster-specific: use the labels and taints from your Kubernetes
-nodes, not these example values verbatim.
+nodes, not these example values verbatim. If the recipe components need persistent volumes, set
+`--storage-class` to a StorageClass that exists in the target cluster.
 
 ```bash
 aicr bundle \
@@ -230,6 +231,7 @@ aicr bundle \
   --system-node-selector nodeGroup=system-worker \
   --system-node-toleration dedicated=system-workload:NoSchedule \
   --system-node-toleration dedicated=system-workload:NoExecute \
+  --storage-class <storage-class> \
   --output bundle
 ```
 
