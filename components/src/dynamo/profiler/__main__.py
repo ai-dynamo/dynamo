@@ -71,7 +71,15 @@ def _parse_dgdr_spec(config_arg: str) -> DynamoGraphDeploymentRequestSpec:
     Accepts a file path (JSON/YAML) or an inline JSON string.
     """
     path = Path(config_arg)
-    if path.is_file():
+    try:
+        is_file = path.is_file()
+    except OSError:
+        # A large inline JSON --config (e.g. a marshaled DGDR spec passed by the
+        # operator) can exceed the OS path-length limit, so is_file() raises
+        # OSError (ENAMETOOLONG) instead of returning False. Treat that as
+        # "not a path" and fall through to JSON parsing below.
+        is_file = False
+    if is_file:
         text = path.read_text()
         suffix = path.suffix.lower()
         if suffix in (".yaml", ".yml"):
