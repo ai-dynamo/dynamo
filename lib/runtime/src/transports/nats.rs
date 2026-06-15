@@ -322,10 +322,7 @@ impl ClientOptions {
             }
         };
 
-        // A value of 0 is treated as unset: `Duration::from_secs(0)` would make
-        // every request time out immediately, so filter it out and keep the
-        // async-nats default — mirrors `response_inactivity_timeout` in the
-        // push router for the same class of seconds-valued knob.
+        // 0 is treated as unset — Duration::from_secs(0) would time out every request immediately.
         let request_timeout = std::env::var(env_nats::DYN_NATS_REQUEST_TIMEOUT_SECS)
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
