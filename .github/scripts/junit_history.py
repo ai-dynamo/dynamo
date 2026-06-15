@@ -40,6 +40,15 @@ DEFAULT_PRESETS = {
 }
 
 
+def default_cache_dir() -> pathlib.Path:
+    xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache_home:
+        return pathlib.Path(xdg_cache_home).expanduser() / "dynamo-junit-history"
+    if sys.platform == "darwin":
+        return pathlib.Path.home() / "Library" / "Caches" / "dynamo-junit-history"
+    return pathlib.Path.home() / ".cache" / "dynamo-junit-history"
+
+
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
         return None
@@ -759,8 +768,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cache-dir",
         type=pathlib.Path,
-        default=pathlib.Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser()
-        / "dynamo-junit-history",
+        default=default_cache_dir(),
         help="Artifact ZIP cache directory.",
     )
     parser.add_argument(
