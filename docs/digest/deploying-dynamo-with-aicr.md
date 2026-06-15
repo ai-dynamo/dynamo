@@ -188,14 +188,14 @@ aicr snapshot \
   --output snapshot.yaml
 ```
 
-Then select the Dynamo inference recipe for the target environment:
+Then let AICR select the Dynamo inference recipe from the snapshot. The snapshot supplies the
+cluster facts, such as the Kubernetes service, GPU accelerator, GPU count, and node OS. You provide
+the workload intent and platform you want to install:
 
 ```bash
 aicr recipe \
-  --service eks \
-  --accelerator h100 \
+  --snapshot snapshot.yaml \
   --intent inference \
-  --os ubuntu \
   --platform dynamo \
   --output recipe.yaml
 ```
