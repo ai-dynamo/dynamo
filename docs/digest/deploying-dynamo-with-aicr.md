@@ -201,20 +201,9 @@ aicr recipe \
 ```
 
 Because that recipe was selected from `snapshot.yaml`, validating the same recipe against the same
-snapshot is not the interesting check: recipe selection already used those facts. Pre-install
-validation is useful when the recipe came from elsewhere, when it was generated from explicit
-criteria, or when you want to prove it against the live cluster. To check the recipe against the
-current cluster before installing the bundle, omit `--snapshot` and `--no-cluster`:
-
-```bash
-aicr validate \
-  --recipe recipe.yaml \
-  --phase deployment \
-  --output preflight.json
-```
-
-To compare the recipe against a different captured cluster without touching that cluster, validate
-against a different snapshot in `--no-cluster` mode:
+snapshot is not the interesting check: recipe selection already used those facts. Offline validation
+is useful when the recipe came from elsewhere, when it was generated from explicit criteria, or when
+you want to compare it with a different captured cluster without touching that cluster:
 
 ```bash
 aicr validate \
@@ -224,6 +213,9 @@ aicr validate \
   --phase deployment \
   --output dry-run.json
 ```
+
+The full live validation happens after deployment, when AICR can also check that the runtime was
+installed as expected.
 
 Render the deployment bundle with the node placement rules for system and GPU workloads:
 
