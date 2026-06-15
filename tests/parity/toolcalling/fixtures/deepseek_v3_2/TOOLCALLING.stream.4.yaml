@@ -82,11 +82,12 @@ cases:
           location:
             type: string
     expected:
+      # DSML strict-wrapper (spec): the DeepSeek DSML spec defines a tool call AS a
+      # <｜DSML｜function_calls> wrapper block; a bare <｜DSML｜invoke> with no
+      # wrapper is not a conformant tool call. Dynamo now requires the wrapper,
+      # so this yields no call and the orphan markup is suppressed (not leaked).
       dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
+        calls: []
         normal_text: ''
       vllm:
         calls:
@@ -99,9 +100,11 @@ cases:
           </｜DSML｜invoke>
           </｜DSML｜invoke>
           </｜DSML｜invoke>
+        reason: "vLLM (<0.23) recovers the wrapper-less invoke and leaks the markup into normal_text; Dynamo requires the outer <｜DSML｜function_calls> wrapper and emits no call. vLLM 0.23 also becomes strict here (see #10723)."
       sglang:
         calls:
         - arguments:
             location: NYC
           name: get_weather
         normal_text: ''
+        reason: "SGLang stays lenient and recovers the wrapper-less bare <｜DSML｜invoke>; Dynamo requires the outer <｜DSML｜function_calls> wrapper per the DeepSeek DSML spec and emits no call."

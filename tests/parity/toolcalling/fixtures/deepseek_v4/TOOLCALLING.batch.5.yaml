@@ -48,14 +48,15 @@ cases:
     tools:
     - *id001
     expected:
+      # DSML strict-wrapper (spec): a closing </｜DSML｜tool_calls> with no matching open means the
+      # invoke never had its mandatory wrapper. Per the DeepSeek DSML spec this
+      # is not a tool call; Dynamo now emits no call and suppresses the orphan
+      # markup (cleaner than vLLM, which leaks it into content).
       dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
+        calls: []
         normal_text: ''
       vllm:
-        reason: "vLLM leaks the DSML envelope into normal_text on missing/orphan end marker recovery; Dynamo recovers the complete bare <｜DSML｜invoke> call and strips the orphan DSML marker tail."
+        reason: "vLLM leaks the DSML envelope into normal_text on missing/orphan end-marker recovery; Dynamo also emits no call (spec requires the wrapper) but suppresses the orphan markup instead of leaking it."
         calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">
@@ -175,11 +176,12 @@ cases:
     tools:
     - *id001
     expected:
+      # DSML strict-wrapper (spec): the first invoke has no <｜DSML｜tool_calls> wrapper, so per the
+      # DeepSeek DSML spec it is not a tool call. Dynamo now drops the bare
+      # invoke (suppressing its markup) and keeps only the wrapped Boston call,
+      # converging with vLLM on calls.
       dynamo:
         calls:
-        - name: get_weather
-          arguments:
-            location: NYC
         - name: get_weather
           arguments:
             location: Boston
@@ -194,7 +196,7 @@ cases:
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
           </｜DSML｜invoke>
           </｜DSML｜tool_calls>
-        reason: "vLLM preserves the bare DSML invoke before the first <｜DSML｜tool_calls> as content, including the trailing newline; Dynamo recovers it as the first structured call before parsing the wrapped call."
+        reason: "vLLM preserves the bare DSML invoke before the first <｜DSML｜tool_calls> as content; Dynamo also drops it as a call (spec requires the wrapper) but suppresses its markup instead of leaking it, keeping only the wrapped call."
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   TOOLCALLING.batch.5.g:
@@ -208,11 +210,12 @@ cases:
     tools:
     - *id001
     expected:
+      # DSML strict-wrapper (spec): the invoke after the prose has no <｜DSML｜tool_calls> wrapper,
+      # so per the DeepSeek DSML spec it is not a tool call. Dynamo now keeps
+      # only the prefix prose, emits no call, and suppresses the orphan markup
+      # (vLLM leaks the markup into content).
       dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
+        calls: []
         normal_text: I will check that.
       vllm:
         calls: []
@@ -221,6 +224,6 @@ cases:
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
           </｜DSML｜invoke>
           </｜DSML｜tool_calls>
-        reason: "vLLM leaks the DSML envelope into normal_text on orphan close-marker recovery; Dynamo preserves the prefix prose, recovers the complete bare <｜DSML｜invoke> call, and strips the orphan DSML marker tail."
+        reason: "vLLM leaks the DSML envelope into normal_text on orphan close-marker recovery; Dynamo also emits no call (spec requires the wrapper), keeps the prefix prose, and suppresses the orphan markup instead of leaking it."
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'

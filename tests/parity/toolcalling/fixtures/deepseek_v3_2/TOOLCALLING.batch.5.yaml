@@ -52,14 +52,15 @@ cases:
     tools:
     - *id001
     expected:
+      # DSML strict-wrapper (spec): a closing </｜DSML｜function_calls> with no matching open means
+      # the invoke never had its mandatory wrapper. Per the DeepSeek DSML spec
+      # this is not a tool call; Dynamo now emits no call and suppresses the
+      # orphan markup (cleaner than vLLM/SGLang, which leak it into content).
       dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
+        calls: []
         normal_text: ''
       vllm: &d_5_b
-        reason: "vLLM and SGLang preserve orphan DSML markers as content when the opening <｜DSML｜function_calls> wrapper is missing; Dynamo recovers the complete bare <｜DSML｜invoke> call and strips the orphan marker tail."
+        reason: "vLLM and SGLang preserve orphan DSML markers as content when the opening <｜DSML｜function_calls> wrapper is missing; Dynamo also emits no call (spec requires the wrapper) but suppresses the orphan markup instead of leaking it."
         calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">

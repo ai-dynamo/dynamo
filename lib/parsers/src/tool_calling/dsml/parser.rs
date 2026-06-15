@@ -86,7 +86,8 @@ pub fn try_tool_call_parse_dsml(
     let Some(start_idx) = trimmed.find(&config.block_start) else {
         if let Some(marker_idx) = first_orphan_dsml_marker_index(trimmed, config) {
             let marker_tail = &trimmed[marker_idx..];
-            if marker_tail.starts_with(config.invoke_start_prefix.as_str())
+            if !config.require_wrapper
+                && marker_tail.starts_with(config.invoke_start_prefix.as_str())
                 && (marker_tail.contains(config.block_end.as_str()) || config.allow_eof_recovery)
             {
                 let tool_calls = extract_invokes(marker_tail, config)?;
@@ -232,6 +233,11 @@ fn recover_orphan_invokes_in_span(
     span: &str,
     config: &DsmlParserConfig,
 ) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    // Spec-strict configs require the outer wrapper, so a bare invoke (with no
+    // enclosing block, even one preceding a later block) is not recovered.
+    if config.require_wrapper {
+        return Ok(None);
+    }
     let Some(marker_idx) = first_orphan_dsml_marker_index(span, config) else {
         return Ok(None);
     };
@@ -1098,6 +1104,81 @@ mod tests {
         assert_eq!(args1["x"], "1");
         assert_eq!(name2, "b");
         assert_eq!(args2["y"], "2");
+    }
+
+    /// Strict config (`require_wrapper: true`, as the deepseek_v3_2 / deepseek_v4
+    /// factories set) drops the EOF-recovery `allow_eof_recovery` lever on top of
+    /// the recovery test config, so this exercises the production finalize shape.
+    fn get_v4_strict_test_config() -> DsmlParserConfig {
+        DsmlParserConfig {
+            require_wrapper: true,
+            ..get_v4_recovery_test_config()
+        }
+    }
+
+    /// DeepSeek DSML spec: the outer `<｜DSML｜tool_calls>` wrapper is mandatory.
+    /// A complete but wrapper-less `<｜DSML｜invoke>` is NOT a conformant tool
+    /// call, so a strict config recovers nothing and suppresses the orphan
+    /// markup (no leak into normal_text). Mirrors fixture
+    /// deepseek_v4/TOOLCALLING.stream.4.c. Even with `allow_eof_recovery`,
+    /// `require_wrapper` wins.
+    #[test] // TOOLCALLING.stream.4.c, TOOLCALLING.batch.5.c (strict)
+    fn test_parse_deepseek_v4_strict_bare_invoke_without_wrapper_rejected() {
+        let input = "<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜invoke>";
+
+        let config = get_v4_strict_test_config();
+        let (calls, normal_text) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert_eq!(calls.len(), 0, "bare invoke without wrapper is not a call");
+        assert_eq!(
+            normal_text.as_deref(),
+            Some(""),
+            "orphan DSML markup must be suppressed, not leaked into normal_text"
+        );
+    }
+
+    /// Strict config still parses a properly wrapped tool call — strictness only
+    /// rejects the missing wrapper, it does not break the conformant path.
+    #[test]
+    fn test_parse_deepseek_v4_strict_wrapped_invoke_still_parsed() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+
+        let config = get_v4_strict_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        let (name, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "NYC");
+    }
+
+    /// Strict config: a bare invoke preceding a properly wrapped block is dropped
+    /// (and its markup suppressed), while the wrapped block is still parsed.
+    #[test]
+    fn test_parse_deepseek_v4_strict_bare_invoke_before_block_dropped() {
+        let input = "<｜DSML｜invoke name=\"orphan\">\n\
+<｜DSML｜parameter name=\"x\" string=\"true\">1</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"wrapped\">\n\
+<｜DSML｜parameter name=\"y\" string=\"true\">2</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+
+        let config = get_v4_strict_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert_eq!(calls.len(), 1, "only the wrapped invoke is a tool call");
+        let (name, _) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "wrapped");
     }
 
     /// `TOOLCALLING.batch.4` — malformed JSON in a `string="false"` parameter value falls back

@@ -183,6 +183,16 @@ pub struct DsmlParserConfig {
     /// leave this `false`.
     #[serde(default)]
     pub allow_eof_recovery: bool,
+
+    /// Require the outer DSML block wrapper (`<｜DSML｜function_calls>` /
+    /// `<｜DSML｜tool_calls>`) before an `<｜DSML｜invoke>` is treated as a tool
+    /// call. The DeepSeek DSML spec (DeepSeek-V4 `encoding/README.md`) defines a
+    /// tool call AS a wrapper block, so a bare invoke without the wrapper is not
+    /// conformant. When `true`, wrapper-less invokes are NOT recovered: they
+    /// yield no calls and the orphan markup is suppressed from `normal_text`.
+    /// Defaults to `false` (lenient bare-invoke recovery) for back-compat.
+    #[serde(default)]
+    pub require_wrapper: bool,
 }
 
 impl Default for DsmlParserConfig {
@@ -195,6 +205,7 @@ impl Default for DsmlParserConfig {
             parameter_prefix: "<｜DSML｜parameter name=".to_string(),
             parameter_end: "</｜DSML｜parameter>".to_string(),
             allow_eof_recovery: false,
+            require_wrapper: false,
         }
     }
 }
@@ -561,6 +572,10 @@ impl ToolCallConfig {
         let dsml_config = DsmlParserConfig {
             block_start: format!("<｜DSML｜{}>", block_name),
             block_end: format!("</｜DSML｜{}>", block_name),
+            // DeepSeek DSML spec: the outer block wrapper is mandatory; a bare
+            // invoke without it is not a conformant tool call. Both V3.2 and V4
+            // inherit this from the shared helper.
+            require_wrapper: true,
             ..Default::default()
         };
         let structural_tag = StructuralTagBuilder::DsmlToolCalls(DsmlToolCallsConfig {
