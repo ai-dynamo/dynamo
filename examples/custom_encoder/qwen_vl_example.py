@@ -24,7 +24,6 @@ Usage (see enc_full_prompt_pd.sh for the complete launch script):
         --multimodal-encode-worker \\
         --model Qwen/Qwen2.5-VL-3B-Instruct \\
         --full-prompt-encoder-class qwen_vl_example.QwenVLExampleEncoder \\
-        --full-prompt-encoder-checkpoint Qwen/Qwen2.5-VL-3B-Instruct \\
         --served-model-name Qwen/Qwen2.5-1.5B
 """
 

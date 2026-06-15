@@ -61,30 +61,56 @@ class EncodeWorkerHandler:
         engine_args: AsyncEngineArgs,
         embedding_transfer_mode: EmbeddingTransferMode,
         full_prompt_encoder_class: Optional[str] = None,
-        full_prompt_encoder_checkpoint: Optional[str] = None,
     ) -> None:
         self.engine_args = engine_args
         self.model = self.engine_args.model
 
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=True
-        )
-        self.vision_model = load_vision_model(
-            self.model, enforce_eager=self.engine_args.enforce_eager
-        )
-        hidden_size = getattr(self.vision_model, "out_hidden_size", None)
-        if hidden_size is None:
-            hidden_size = getattr(
-                getattr(self.vision_model, "config", None), "hidden_size", "unknown"
-            )
-        logger.debug(f"embedding hidden dim: {hidden_size}")
-        self.min_workers = 1
 
-        # Get encoder components for the model
-        self.vision_encoder, self.projector = get_encoder_components(
-            self.model, self.vision_model
-        )
+        # ── FullPromptEncoder (Mode 2: class-based) ──────────────────────────
+        # When a FullPromptEncoder class is provided, it owns ALL encoding work
+        # (ViT, projector, text splicing).  Skip the built-in VLM loading
+        # entirely — no AutoImageProcessor, no load_vision_model, no
+        # get_encoder_components.  --model is used as the checkpoint path
+        # passed to FullPromptEncoder.load() (so only one flag is needed).
+        self.custom_encoder: Optional[FullPromptEncoder] = None
+        if full_prompt_encoder_class:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            cls = load_encoder_class(full_prompt_encoder_class)
+            self.custom_encoder = cls()
+            # --model is the checkpoint path for the custom encoder.
+            self.custom_encoder.load(self.model, device)
+            logger.info(
+                "FullPromptEncoder loaded: class=%s checkpoint=%s device=%s",
+                full_prompt_encoder_class,
+                self.model,
+                device,
+            )
+            self.image_processor = None
+            self.vision_model = None
+            self.vision_encoder = None
+            self.projector = None
+        else:
+            # Built-in VLM path: load image processor, vision model, encoder.
+            self.image_processor = AutoImageProcessor.from_pretrained(
+                self.model, trust_remote_code=True
+            )
+            self.vision_model = load_vision_model(
+                self.model, enforce_eager=self.engine_args.enforce_eager
+            )
+            hidden_size = getattr(self.vision_model, "out_hidden_size", None)
+            if hidden_size is None:
+                hidden_size = getattr(
+                    getattr(self.vision_model, "config", None),
+                    "hidden_size",
+                    "unknown",
+                )
+            logger.debug(f"embedding hidden dim: {hidden_size}")
+            self.vision_encoder, self.projector = get_encoder_components(
+                self.model, self.vision_model
+            )
+
+        self.min_workers = 1
         self._connector: connect.Connector | None = None
         self._accumulated_time = 0.0
         self._processed_requests = 0
@@ -106,23 +132,6 @@ class EncodeWorkerHandler:
         self.send_complete_checker_task = asyncio.create_task(
             self.check_complete(self.send_complete_queue)
         )
-
-        # ── FullPromptEncoder (Mode 2: class-based, preferred) ───────────────
-        # Load the customer-supplied FullPromptEncoder class if configured.
-        # Takes precedence over DYN_EXTERNAL_PROMPT_EMBEDS env-var mode.
-        self.custom_encoder: Optional[FullPromptEncoder] = None
-        if full_prompt_encoder_class:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            cls = load_encoder_class(full_prompt_encoder_class)
-            self.custom_encoder = cls()
-            checkpoint = full_prompt_encoder_checkpoint or self.model
-            self.custom_encoder.load(checkpoint, device)
-            logger.info(
-                "Loaded FullPromptEncoder: class=%s checkpoint=%s device=%s",
-                full_prompt_encoder_class,
-                checkpoint,
-                device,
-            )
 
         # EXTERNAL_PROMPT_EMBEDS mode: load the LM embed_tokens weight so the
         # encoder can produce a fully-spliced text+image embedding tensor.

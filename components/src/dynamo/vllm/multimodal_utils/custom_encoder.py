@@ -20,9 +20,8 @@ Usage::
     # launch
     python -m dynamo.vllm \\
         --multimodal-encode-worker \\
-        --model Qwen/Qwen2.5-VL-3B-Instruct \\
+        --model /weights/my_encoder \\
         --full-prompt-encoder-class customer_encoder.MyEncoder \\
-        --full-prompt-encoder-checkpoint /weights/my_encoder.pt \\
         --served-model-name my-lm
 """
 

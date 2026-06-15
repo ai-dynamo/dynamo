@@ -138,21 +138,11 @@ class DynamoVllmArgGroup(ArgGroup):
             default=None,
             help=(
                 "Dotted module.ClassName path to a FullPromptEncoder subclass. "
-                "When set, the encoder worker calls this class to produce a fully-spliced "
-                "text+image embedding tensor (Mode 2) instead of image-only embeddings. "
-                "Example: 'my_package.encoders.SafeguardEncoder'. "
-                "The class must be importable inside the encoder worker's container."
-            ),
-        )
-
-        add_argument(
-            g,
-            flag_name="--full-prompt-encoder-checkpoint",
-            env_var="DYN_FULL_PROMPT_ENCODER_CHECKPOINT",
-            default=None,
-            help=(
-                "Path to the custom FullPromptEncoder checkpoint (local dir or HF id). "
-                "Passed verbatim to FullPromptEncoder.load(checkpoint_path, device)."
+                "When set, the encoder worker delegates all encoding (ViT, projector, "
+                "text splicing) to this class and skips built-in VLM loading. "
+                "--model is used as the checkpoint path passed to "
+                "FullPromptEncoder.load(). "
+                "Example: 'my_package.encoders.SafeguardEncoder'."
             ),
         )
 
@@ -312,7 +302,6 @@ class DynamoVllmConfig(ConfigBase):
 
     # Custom FullPromptEncoder (Mode 2: encoder produces full prompt embeddings)
     full_prompt_encoder_class: Optional[str] = None
-    full_prompt_encoder_checkpoint: Optional[str] = None
 
     # Headless mode for multi-node TP/PP
     headless: bool = False

@@ -204,9 +204,6 @@ class WorkerFactory:
             full_prompt_encoder_class=getattr(
                 config, "full_prompt_encoder_class", None
             ),
-            full_prompt_encoder_checkpoint=getattr(
-                config, "full_prompt_encoder_checkpoint", None
-            ),
         )
         await handler.async_init(runtime)
 

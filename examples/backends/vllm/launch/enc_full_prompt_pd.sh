@@ -5,7 +5,8 @@
 # E→PD with FullPromptEncoder: custom vision encoder + text-only LLM PD.
 #
 # Architecture:
-#   Encoder worker: loads a customer-supplied FullPromptEncoder class.
+#   Encoder worker: loads a FullPromptEncoder class via --full-prompt-encoder-class.
+#                   --model is passed as the checkpoint path to encoder.load().
 #                   For each request it calls encoder.encode(image_urls,
 #                   lm_token_ids, lm_embed_tokens) → (seq_len, lm_hidden_dim),
 #                   then transfers the full prompt embedding to the PD via NIXL.
@@ -14,23 +15,19 @@
 #                   processing, no token expansion; just transformer layers.
 #   Frontend:       standard dynamo.frontend OpenAI-compatible HTTP gateway.
 #
-# The example encoder (QwenVLExampleEncoder) uses Qwen2.5-VL's ViT and
-# prepends image tokens before text.  Replace with your own class for
-# production use (learned projector, correct placeholder handling, etc.).
+# The example encoder (QwenVLExampleEncoder) uses Qwen2.5-VL's ViT.
+# Replace with your own class for production (learned projector, etc.).
 #
 # Usage:
 #   ./enc_full_prompt_pd.sh [--encoder-model <hf_id>] [--pd-model <hf_id>]
 #                           [--encoder-class <dotted.ClassName>]
-#                           [--encoder-checkpoint <path>]
 #                           [--single-gpu] [--transfer-mode local|nixl_write]
 #
 # Defaults:
-#   Encoder model: Qwen/Qwen2.5-VL-3B-Instruct (ViT backbone)
-#   Encoder class: examples.custom_encoder.qwen_vl_example.QwenVLExampleEncoder
-#   Encoder ckpt:  same as encoder model
-#   PD model:      Qwen/Qwen2.5-1.5B (text-only LLM)
-#   GPUs:          encoder=2, pd=1  (avoids GPU 0 which is 4 GB A400)
-#   Transfer mode: local
+#   --encoder-model: Qwen/Qwen2.5-VL-3B-Instruct  (ViT backbone + checkpoint)
+#   --encoder-class: examples.custom_encoder.qwen_vl_example.QwenVLExampleEncoder
+#   --pd-model:      Qwen/Qwen2.5-1.5B
+#   GPUs:            encoder=2, pd=1
 
 set -e
 trap 'echo "Cleaning up..."; kill 0' EXIT
@@ -43,7 +40,6 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 ENCODER_MODEL="${DYN_ENCODER_MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 PD_MODEL="${DYN_PD_MODEL:-Qwen/Qwen2.5-1.5B}"
 ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.qwen_vl_example.QwenVLExampleEncoder}"
-ENCODER_CHECKPOINT="${DYN_ENCODER_CHECKPOINT:-$ENCODER_MODEL}"
 DYN_ENCODE_WORKER_GPU="${DYN_ENCODE_WORKER_GPU:-2}"
 DYN_PD_WORKER_GPU="${DYN_PD_WORKER_GPU:-1}"
 TRANSFER_MODE="${DYN_EMBEDDING_TRANSFER_MODE:-local}"
@@ -61,8 +57,6 @@ while [[ $# -gt 0 ]]; do
             PD_MODEL=$2; shift 2 ;;
         --encoder-class)
             ENCODER_CLASS=$2; shift 2 ;;
-        --encoder-checkpoint)
-            ENCODER_CHECKPOINT=$2; shift 2 ;;
         --single-gpu)
             DYN_ENCODE_WORKER_GPU=2
             DYN_PD_WORKER_GPU=2
@@ -78,13 +72,12 @@ Usage: enc_full_prompt_pd.sh [OPTIONS]
 FullPromptEncoder: custom vision encoder produces full prompt embeddings.
 
 Options:
-  --encoder-model <id>       VLM whose ViT is used as backbone (default: Qwen/Qwen2.5-VL-3B-Instruct)
-  --pd-model <id>            Text-only LLM for PD (default: Qwen/Qwen2.5-1.5B)
-  --encoder-class <path>     Dotted module.ClassName for FullPromptEncoder subclass
-  --encoder-checkpoint <p>   Checkpoint passed to FullPromptEncoder.load()
-  --single-gpu               Run encoder + PD on the same GPU (GPU 2, enforce-eager)
-  --transfer-mode <mode>     local|nixl_write|nixl_read (default: local)
-  -h, --help                 Show this help
+  --encoder-model <id>    Checkpoint for FullPromptEncoder.load() (default: Qwen/Qwen2.5-VL-3B-Instruct)
+  --pd-model <id>         Text-only LLM for PD (default: Qwen/Qwen2.5-1.5B)
+  --encoder-class <path>  Dotted module.ClassName for FullPromptEncoder subclass
+  --single-gpu            Run encoder + PD on the same GPU (GPU 2, enforce-eager)
+  --transfer-mode <mode>  local|nixl_write|nixl_read (default: local)
+  -h, --help              Show this help
 EOF
             exit 0 ;;
         *)
@@ -96,7 +89,6 @@ echo "=================================================================="
 echo "  FullPromptEncoder E→PD"
 echo "  Encoder model  : $ENCODER_MODEL (GPU $DYN_ENCODE_WORKER_GPU)"
 echo "  Encoder class  : $ENCODER_CLASS"
-echo "  Encoder ckpt   : $ENCODER_CHECKPOINT"
 echo "  PD model       : $PD_MODEL       (GPU $DYN_PD_WORKER_GPU)"
 echo "  Transfer mode  : $TRANSFER_MODE"
 echo "  HTTP port      : $HTTP_PORT"
@@ -113,6 +105,8 @@ echo "[1/3] Starting frontend (port $HTTP_PORT)..."
 python -m dynamo.frontend &
 
 # ── Encoder worker ────────────────────────────────────────────────────────────
+# --model is passed as the checkpoint path to FullPromptEncoder.load().
+# No --full-prompt-encoder-checkpoint needed.
 echo "[2/3] Starting encoder worker..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097} \
@@ -121,9 +115,8 @@ python -m dynamo.vllm \
     --multimodal-encode-worker \
     --enable-multimodal \
     --model "$ENCODER_MODEL" \
-    --served-model-name "$PD_MODEL" \
     --full-prompt-encoder-class "$ENCODER_CLASS" \
-    --full-prompt-encoder-checkpoint "$ENCODER_CHECKPOINT" \
+    --served-model-name "$PD_MODEL" \
     --gpu-memory-utilization 0.5 \
     --embedding-transfer-mode "$TRANSFER_MODE" \
     $EXTRA_ENCODER_ARGS &
