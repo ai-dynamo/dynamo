@@ -227,8 +227,8 @@ pub(crate) async fn start_kv_router_background(
     consumer_id: String,
     indexer: Indexer,
     kv_router_config: &KvRouterConfig,
+    cancellation_token: CancellationToken,
 ) -> Result<()> {
-    let cancellation_token = component.drt().primary_token();
     let router_snapshot_threshold = kv_router_config.router_snapshot_threshold;
     let router_reset_states = kv_router_config.router_reset_states;
     // Set up NATS connections

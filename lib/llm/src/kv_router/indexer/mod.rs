@@ -20,8 +20,9 @@ use dynamo_kv_router::{
 pub(crate) use dynamo_kv_router::indexer::TieredMatchDetails;
 #[allow(unused_imports)]
 pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
-use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
+use dynamo_runtime::component::Component;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 mod lookup;
 mod recording;
@@ -69,6 +70,7 @@ impl Indexer {
     pub async fn new(
         component: &Component,
         kv_router_config: &KvRouterConfig,
+        cancellation_token: CancellationToken,
         block_size: u32,
         model_name: Option<&str>,
     ) -> Result<Self> {
@@ -97,7 +99,12 @@ impl Indexer {
             );
             let remote =
                 RemoteIndexer::new(component, model_name, kv_router_config.use_kv_events).await?;
-            let approx = SideIndexer::new_predict_on_route(component, kv_router_config, block_size);
+            let approx = SideIndexer::new_predict_on_route(
+                component,
+                kv_router_config,
+                cancellation_token,
+                block_size,
+            );
             return Ok(Self::Remote {
                 primary: Arc::new(remote),
                 approx,
@@ -128,7 +135,6 @@ impl Indexer {
                 });
             }
 
-            let cancellation_token = component.drt().primary_token();
             return Ok(Self::KvIndexer {
                 primary: KvIndexer::new_with_pruning(
                     cancellation_token,
@@ -142,7 +148,12 @@ impl Indexer {
             });
         }
 
-        let approx = SideIndexer::new_predict_on_route(component, kv_router_config, block_size);
+        let approx = SideIndexer::new_predict_on_route(
+            component,
+            kv_router_config,
+            cancellation_token.clone(),
+            block_size,
+        );
 
         if kv_router_config.router_event_threads > 1 {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
@@ -163,8 +174,6 @@ impl Indexer {
         }
 
         let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
-        let cancellation_token = component.drt().primary_token();
-
         Ok(Self::KvIndexer {
             primary: KvIndexer::new_with_pruning(
                 cancellation_token,

@@ -225,12 +225,13 @@ where
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
         let component = endpoint.component();
-        let cancellation_token = component.drt().primary_token();
+        let cancellation_token = component.drt().child_token();
         let min_initial_workers = min_initial_workers_from_env()?;
 
         let indexer = Indexer::new(
             component,
             &kv_router_config,
+            cancellation_token.clone(),
             block_size,
             model_name.as_deref(),
         )
@@ -269,6 +270,7 @@ where
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
             worker_type,
+            cancellation_token.clone(),
         )
         .await?;
 
@@ -276,8 +278,13 @@ where
         if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
-                .await?;
+            indexer::start_subscriber(
+                component.clone(),
+                &kv_router_config,
+                indexer.clone(),
+                cancellation_token.clone(),
+            )
+            .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",

@@ -7,6 +7,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::ActiveLoad;
@@ -398,6 +399,18 @@ pub struct KvWorkerMonitor {
     thresholds: Arc<RwLock<LoadThresholdConfig>>,
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
+    /// Cancels the background monitoring task when the last monitor clone is dropped.
+    cancellation: Arc<MonitorCancellation>,
+}
+
+struct MonitorCancellation {
+    token: CancellationToken,
+}
+
+impl Drop for MonitorCancellation {
+    fn drop(&mut self) {
+        self.token.cancel();
+    }
 }
 
 impl KvWorkerMonitor {
@@ -422,6 +435,9 @@ impl KvWorkerMonitor {
             worker_load_states: Arc::new(DashMap::new()),
             thresholds: Arc::new(RwLock::new(config)),
             started: Arc::new(AtomicBool::new(false)),
+            cancellation: Arc::new(MonitorCancellation {
+                token: CancellationToken::new(),
+            }),
         }
     }
 
@@ -536,7 +552,15 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let endpoint = &self.client.endpoint;
         let component = endpoint.component();
 
-        let cancellation_token = component.drt().child_token();
+        let cancellation_token = self.cancellation.token.child_token();
+        let runtime_cancellation = component.drt().child_token();
+        let cancellation_bridge = cancellation_token.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = runtime_cancellation.cancelled() => cancellation_bridge.cancel(),
+                _ = cancellation_bridge.cancelled() => {}
+            }
+        });
 
         // Watch for runtime config updates from model deployment cards via discovery interface
         let discovery = component.drt().discovery();

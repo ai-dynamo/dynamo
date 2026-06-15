@@ -87,12 +87,15 @@ impl WorkerQueryClient {
     /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
-    pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
+    pub async fn spawn(
+        component: Component,
+        indexer: Indexer,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
         let client = Self::new(component.clone(), indexer, transport);
 
         let client_bg = client.clone();
-        let cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
             if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
                 tracing::error!("WorkerQueryClient discovery loop failed: {e}");

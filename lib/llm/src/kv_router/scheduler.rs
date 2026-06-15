@@ -31,6 +31,7 @@ use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
@@ -66,6 +67,7 @@ where
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         worker_type: &'static str,
+        cancellation_token: CancellationToken,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
@@ -107,13 +109,13 @@ where
             overloaded_worker_provider,
             kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
-            component.drt().child_token(),
+            cancellation_token.clone(),
             worker_type,
             watch_worker_configs,
         ));
 
         let metrics_scheduler = Arc::clone(&inner);
-        let metrics_cancel_token = component.drt().child_token();
+        let metrics_cancel_token = cancellation_token;
         let mut queue_updates = inner.subscribe_queue_updates();
         tokio::spawn(async move {
             let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
@@ -358,6 +360,7 @@ mod tests {
             None::<Arc<NoopOverlapScoresRefresh>>,
             None,
             "decode",
+            CancellationToken::new(),
         )
         .await
         .unwrap();
