@@ -51,7 +51,7 @@ pub fn find_tool_call_end_position_json(
     config: &JsonParserConfig,
 ) -> usize {
     match parser {
-        "hermes" | "nemotron_deci" => {
+        "hermes" | "nemotron_deci" | "qwen25" => {
             let start_token = config.tool_call_start_tokens.first().map(|s| s.as_str());
             if let Some(end_token) = config.tool_call_end_tokens.first() {
                 let Some(first_end) = chunk.find(end_token.as_str()) else {
@@ -89,6 +89,47 @@ pub fn find_tool_call_end_position_json(
                 chunk.len()
             }
         }
+        "deepseek_v3" | "deepseek_v3_1" => {
+            if config
+                .tool_call_start_tokens
+                .iter()
+                .any(|token| !token.is_empty() && chunk.contains(token.as_str()))
+            {
+                return config
+                    .tool_call_end_tokens
+                    .iter()
+                    .find(|token| !token.is_empty())
+                    .and_then(|token| chunk.find(token.as_str()).map(|pos| pos + token.len()))
+                    .unwrap_or(chunk.len());
+            }
+            let begin_token = "<｜tool▁call▁begin｜>";
+            let end_token = "<｜tool▁call▁end｜>";
+            if let Some(pos) = chunk.find(end_token) {
+                let mut cursor = pos + end_token.len();
+                loop {
+                    let rest = &chunk[cursor..];
+                    let trimmed = rest.trim_start();
+                    let trim_offset = rest.len() - trimmed.len();
+                    if trimmed.starts_with(end_token) {
+                        // Orphan repeated close marker — consume it.
+                        cursor += trim_offset + end_token.len();
+                    } else if trimmed.starts_with(begin_token) {
+                        // Another complete bare call follows in the same buffer;
+                        // advance past its close marker so a multi-call buffer is
+                        // not split after the first recovered call.
+                        match trimmed.find(end_token) {
+                            Some(next_end) => cursor += trim_offset + next_end + end_token.len(),
+                            None => break,
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                cursor
+            } else {
+                chunk.len()
+            }
+        }
         _ => chunk.len(),
     }
 }
@@ -101,7 +142,7 @@ mod tests {
     /// all be captured by find_tool_call_end_position_json so that the jail passes the
     /// entire group to the parser rather than emitting the second (and later) calls
     /// as raw trailing text.
-    #[test] // PARSER.batch.2, helper
+    #[test] // TOOLCALLING.batch.2, helper
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<tool_call>".to_string()],
@@ -150,10 +191,80 @@ mod tests {
         );
     }
 
+    // qwen25 aliases the hermes config and must share its jail behavior: two
+    // parallel <tool_call> blocks must be captured as one region, otherwise the
+    // second call's opener leaks into normal_text when split across stream
+    // chunks (e.g. `ol_call>...`). Regression for the qwen25 streaming leak.
+    #[test] // TOOLCALLING.stream.2: qwen25 parallel-call end-position
+    fn test_find_tool_call_end_position_parallel_calls_qwen25() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+
+        // Two parallel calls in the qwen2.5 newline-delimited form.
+        let two_calls = concat!(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}\n</tool_call>\n",
+            "<tool_call>\n{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"EST\"}}\n</tool_call>",
+            "trailing"
+        );
+        let pos = find_tool_call_end_position_json(two_calls, "qwen25", &config);
+        assert!(
+            two_calls[..pos].ends_with("</tool_call>"),
+            "qwen25 should end at last </tool_call>, got: {:?}",
+            &two_calls[..pos]
+        );
+        assert_eq!(&two_calls[pos..], "trailing");
+    }
+
+    // Bare DeepSeek inner calls (no outer <｜tool▁calls▁begin｜> wrapper) arriving
+    // in one streaming buffer must all be captured, not split after the first
+    // <｜tool▁call▁end｜>, so the jail hands the whole group to the parser.
+    #[test] // TOOLCALLING.stream.4 — deepseek bare multi-call end-position
+    fn test_find_tool_call_end_position_deepseek_bare_multi_call() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+            tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+            ..Default::default()
+        };
+
+        // Two bare inner calls back-to-back, then trailing text.
+        let two = concat!(
+            "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"location\":\"NYC\"}<｜tool▁call▁end｜>",
+            "<｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{\"tz\":\"EST\"}<｜tool▁call▁end｜>",
+            "trailing"
+        );
+        let pos = find_tool_call_end_position_json(two, "deepseek_v3", &config);
+        assert!(
+            two[..pos].ends_with("<｜tool▁call▁end｜>"),
+            "should end at last call_end, got: {:?}",
+            &two[..pos]
+        );
+        assert_eq!(
+            &two[pos..],
+            "trailing",
+            "must span BOTH bare calls, not split after the first"
+        );
+
+        // Incomplete second bare call — stop after the first complete one.
+        let incomplete = concat!(
+            "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"location\":\"NYC\"}<｜tool▁call▁end｜>",
+            "<｜tool▁call▁begin｜>get_time<｜tool▁sep｜>{\"tz\":"
+        );
+        let pos_inc = find_tool_call_end_position_json(incomplete, "deepseek_v3", &config);
+        assert!(incomplete[..pos_inc].ends_with("<｜tool▁call▁end｜>"));
+        assert!(
+            incomplete[pos_inc..].starts_with("<｜tool▁call▁begin｜>"),
+            "incomplete trailing call must remain unconsumed"
+        );
+    }
+
     // Recovery for missing outer </TOOLCALL> (max_tokens / EOS truncation):
     // when the inner JSON array is well-formed, treat EOF as the end token
     // and extract the call rather than silently dropping it.
-    #[test] // PARSER.batch.5 — nemotron_deci
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/nemotron_deci/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5 — nemotron_deci
     fn test_parse_nemotron_deci_no_outer_close_recovers() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
@@ -177,7 +288,8 @@ mod tests {
     // but no parser-level test pinned it. This test makes the contract
     // visible at the per-parser surface so a JSON-family refactor can't
     // silently break parallel-call extraction without a per-parser failure.
-    #[test] // PARSER.batch.2 — nemotron_deci
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a in tests/parity/toolcalling/fixtures/nemotron_deci/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2 — nemotron_deci
     fn test_parse_nemotron_deci_multiple_calls() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
@@ -198,7 +310,8 @@ mod tests {
     // `"city":"NYC` with no closing quote, brace, or array bracket). The
     // base parser balances unclosed strings/braces and retries the parse,
     // surfacing the call rather than silently dropping it.
-    #[test] // PARSER.batch.4 — nemotron_deci
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b in tests/parity/toolcalling/fixtures/nemotron_deci/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4 — nemotron_deci
     fn test_parse_nemotron_deci_truncated_json_recovers() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
@@ -219,6 +332,8 @@ mod tests {
         JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            // Mirror the production nemotron_deci config (Config::nemotron_deci).
+            strip_markup_on_recovery: true,
             ..Default::default()
         }
     }
@@ -237,9 +352,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
     }
 
-    /// PARSER.batch.6 — empty args. A no-arg call (`{}`) must still be returned
+    /// TOOLCALLING.batch.6 — empty args. A no-arg call (`{}`) must still be returned
     /// with the function name intact.
-    #[test] // PARSER.batch.6 — nemotron_deci
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/nemotron_deci/TOOLCALLING.batch.6.yaml.
+    #[test] // TOOLCALLING.batch.6 — nemotron_deci
     fn test_parse_nemotron_deci_empty_args() {
         let config = nemotron_deci_config();
         let input = r#"<TOOLCALL>[{"name":"current_time","arguments":{}}]</TOOLCALL>"#;
@@ -250,10 +366,43 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
-    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
+    /// Strict recovery with a leading preamble + orphan close tag. The model
+    /// emits prose, then a complete JSON array, then a stray `</TOOLCALL>` with
+    /// no opener: `Let me check.[{...}]</TOOLCALL>`. The extraction stages split
+    /// this into normal_text="Let me check." and json="[{...}]</TOOLCALL>", so
+    /// recovery must strip markers off `json` (not the re-glued full message) to
+    /// salvage the call. Regression for dropping recoverable calls when a
+    /// preamble is present.
+    #[test]
+    fn test_parse_nemotron_deci_preamble_orphan_close_recovers() {
+        // Mirror the finalize/batch path: the with-recovery dispatcher flips
+        // `allow_eof_recovery=true`, which is the only path strict recovery runs on.
+        let config = JsonParserConfig {
+            allow_eof_recovery: true,
+            ..nemotron_deci_config()
+        };
+        let input =
+            r#"Let me check.[{"name":"get_weather","arguments":{"location":"NYC"}}]</TOOLCALL>"#;
+        let (calls, normal) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "preamble must not drop the recoverable call"
+        );
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"location": "NYC"}));
+        assert_eq!(
+            normal.as_deref(),
+            Some(""),
+            "wrapper markers and preamble are stripped, not leaked into normal_text"
+        );
+    }
+
+    /// TOOLCALLING.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string.
-    #[test] // PARSER.batch.9 — nemotron_deci
+    #[test] // TOOLCALLING.batch.9 — nemotron_deci
     fn test_parse_nemotron_deci_empty_and_whitespace_inputs() {
         let config = nemotron_deci_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -272,10 +421,10 @@ mod tests {
         }
     }
 
-    /// PARSER.batch.10 — duplicate calls (same function name twice in one section).
+    /// TOOLCALLING.batch.10 — duplicate calls (same function name twice in one section).
     /// JSON-array form pin parser-level behavior — both calls returned with
     /// distinct ids.
-    #[test] // PARSER.batch.10 — nemotron_deci
+    #[test] // TOOLCALLING.batch.10 — nemotron_deci
     fn test_parse_nemotron_deci_duplicate_calls_same_name() {
         let config = nemotron_deci_config();
         let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC"}},{"name":"get_weather","arguments":{"city":"LA"}}]</TOOLCALL>"#;

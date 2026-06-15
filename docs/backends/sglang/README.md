@@ -71,7 +71,7 @@ docker run --gpus all -it --rm \
     --ulimit nofile=65536:65536 \
     --cap-add CAP_SYS_PTRACE --ipc host \
     -v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface \
-    nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+    nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 ```
 
 Mount the host Hugging Face cache (`-v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface`) so each container restart doesn't re-download model weights. The container runs as user `dynamo` (UID 1000), which is why the in-container path is `/home/dynamo/.cache/huggingface`.
@@ -128,7 +128,6 @@ pip install -e .
 | [**Request Cancellation**](../../fault-tolerance/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
 | [**Observability**](sglang-observability.md) | ✅ | Metrics, tracing, and Grafana dashboards |
-| [**KVBM**](../../components/kvbm/README.md) | ❌ | Planned |
 
 ## Quick Start
 
@@ -137,7 +136,7 @@ pip install -e .
 Start infrastructure services for local development:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 

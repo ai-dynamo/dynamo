@@ -17,6 +17,8 @@ from typing import cast
 import pytest
 import pytest_asyncio
 
+from tests.utils.gpu_args import build_gpu_mem_args
+
 MODEL_ID = "Qwen/Qwen3-0.6B"
 _BASE_ARGV = [
     "--model-path",
@@ -37,7 +39,6 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.unified,
     pytest.mark.gpu_1,
-    pytest.mark.pre_merge,
     pytest.mark.timeout(300),
     pytest.mark.skipif(
         importlib.util.find_spec("sglang") is None,
@@ -71,7 +72,9 @@ class _FakeContext:
 async def started_engine():
     from dynamo.sglang.llm_engine import SglangLLMEngine
 
-    engine, _ = await SglangLLMEngine.from_args(_BASE_ARGV)
+    engine, _ = await SglangLLMEngine.from_args(
+        [*_BASE_ARGV, *build_gpu_mem_args("build_sglang_gpu_mem_args")]
+    )
     try:
         # Worker_id 0 is fine for tests — the engine doesn't use it.
         engine_config = await engine.start(0)
@@ -80,20 +83,35 @@ async def started_engine():
         await engine.cleanup()
 
 
-async def test_start_populates_registration_metadata(started_engine):
+@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(3.7)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.core
+@pytest.mark.model(MODEL_ID)
+async def test_sglang_engine_all(started_engine, monkeypatch):
+    """Run the SGLang engine pre-merge checks under one engine startup."""
+    await _check_start_populates_registration_metadata(started_engine)
+    await _check_runtime_data_includes_worker_group(monkeypatch)
+    await _check_generate_streams_chunks_with_coherent_final_usage(started_engine)
+    await _check_abort_and_cleanup_are_safe_before_start()
+    await _check_abort_unknown_request_on_running_engine(started_engine)
+
+
+async def _check_start_populates_registration_metadata(started_engine):
     """``start`` must derive ``kv_cache_block_size`` from SGLang's page size
     and populate ``max_num_seqs`` from ``max-running-requests`` — without
     these values the Rust registration path has no routing signals."""
     _engine, cfg = started_engine
-    assert cfg.kv_cache_block_size and cfg.kv_cache_block_size > 0
+    assert cfg.llm is not None
+    assert cfg.llm.kv_cache_block_size and cfg.llm.kv_cache_block_size > 0
     # total_kv_blocks is derived as ceil(max_total_tokens / page_size).
     # When the engine surfaces max_total_num_tokens, the result must be > 0.
-    if cfg.total_kv_blocks is not None:
-        assert cfg.total_kv_blocks > 0
-    assert cfg.max_num_seqs == 4
+    if cfg.llm.total_kv_blocks is not None:
+        assert cfg.llm.total_kv_blocks > 0
+    assert cfg.llm.max_num_seqs == 4
 
 
-async def test_runtime_data_includes_worker_group(monkeypatch):
+async def _check_runtime_data_includes_worker_group(monkeypatch):
     from dynamo.sglang import llm_engine as llm_engine_mod
     from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY
 
@@ -108,7 +126,7 @@ async def test_runtime_data_includes_worker_group(monkeypatch):
     }
 
 
-async def test_generate_streams_chunks_with_coherent_final_usage(started_engine):
+async def _check_generate_streams_chunks_with_coherent_final_usage(started_engine):
     engine, _ = started_engine
     ctx = _FakeContext("gen-1")
 
@@ -133,7 +151,7 @@ async def test_generate_streams_chunks_with_coherent_final_usage(started_engine)
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
 
 
-async def test_abort_and_cleanup_are_safe_before_start():
+async def _check_abort_and_cleanup_are_safe_before_start():
     from dynamo.sglang.llm_engine import SglangLLMEngine
 
     engine, _ = await SglangLLMEngine.from_args(_BASE_ARGV)
@@ -142,7 +160,7 @@ async def test_abort_and_cleanup_are_safe_before_start():
     await engine.cleanup()
 
 
-async def test_abort_unknown_request_on_running_engine(started_engine):
+async def _check_abort_unknown_request_on_running_engine(started_engine):
     """SGLang's ``abort_request`` is best-effort; an unknown rid must not raise."""
     engine, _ = started_engine
     await engine.abort(cast(object, _FakeContext("never-submitted")))  # type: ignore[arg-type]

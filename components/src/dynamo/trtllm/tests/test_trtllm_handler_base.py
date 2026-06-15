@@ -30,6 +30,7 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
     pytest.mark.gpu_1,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 

@@ -53,7 +53,7 @@ python3 -m dynamo.trtllm \
   --namespace dynamo \
   --component mm_router \
   --endpoint generate \
-  --downstream-component tensorrt_llm \
+  --downstream-component backend \
   --downstream-endpoint generate \
   --block-size "$BLOCK_SIZE") &
 
