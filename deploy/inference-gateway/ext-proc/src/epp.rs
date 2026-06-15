@@ -196,14 +196,12 @@ impl Router {
         })
     }
 
-    /// Tokenize a JSON request body and extract the router-relevant
-    /// `priority_jump` from `nvext.agent_hints.priority`.
+    /// Tokenize a JSON request body and extract router queue priorities.
     ///
-    /// Returns `(token_ids, priority_jump)`. `priority_jump` is `0.0` when no
-    /// hint is present. Mirrors the standalone Dynamo preprocessor lift in
-    /// `lib/llm/src/preprocessor.rs` so this gateway path produces the same
-    /// queue ordering as a non-GAIE deployment.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64)> {
+    /// Returns `(token_ids, priority_jump, strict_priority)`. Priorities default
+    /// to zero when absent. Mirrors the standalone Dynamo preprocessor lift in
+    /// `lib/llm/src/preprocessor.rs`.
+    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
@@ -211,6 +209,7 @@ impl Router {
             serde_json::from_str(request_json)?;
 
         let priority_jump = extract_priority_jump(&request);
+        let strict_priority = extract_strict_priority(&request);
 
         let formatted_prompt = self
             .preprocessor
@@ -218,7 +217,11 @@ impl Router {
             .unwrap_or_default();
 
         let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
-        Ok((encoding.token_ids().to_vec(), priority_jump))
+        Ok((
+            encoding.token_ids().to_vec(),
+            priority_jump,
+            strict_priority,
+        ))
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -290,13 +293,13 @@ impl Router {
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
     ///
-    /// `priority_jump` is forwarded to the prefill scheduler queue so that
-    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
-    /// arrivals when the router queue is active.
+    /// Queue priorities are forwarded to the prefill scheduler. `priority_jump`
+    /// adjusts the policy score, while `strict_priority` selects the primary tier.
     pub async fn route_prefill(
         &self,
         tokens: &[u32],
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(u64, Option<u32>)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -313,6 +316,7 @@ impl Router {
                 false,
                 None,
                 priority_jump,
+                strict_priority,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
             )
@@ -339,14 +343,14 @@ impl Router {
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
     ///
-    /// `priority_jump` is forwarded to the decode scheduler queue so that
-    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
-    /// arrivals when the router queue is active.
+    /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
+    /// adjusts the policy score, while `strict_priority` selects the primary tier.
     pub async fn route_decode(
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(WorkerWithDpRank, u32)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -364,6 +368,7 @@ impl Router {
                 false,
                 None,
                 priority_jump,
+                strict_priority,
                 None,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
@@ -483,6 +488,17 @@ fn extract_priority_jump(
                 .or(h.latency_sensitivity)
         })
         .unwrap_or(0.0)
+}
+
+fn extract_strict_priority(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> u32 {
+    request
+        .nvext
+        .as_ref()
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.strict_priority)
+        .unwrap_or(0)
 }
 
 struct DiscoveredModelBootstrap {
@@ -902,7 +918,7 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, priority_jump) = self
+        let (tokens, priority_jump, strict_priority) = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
 
@@ -919,7 +935,12 @@ impl EndpointPicker for Router {
         //   request fail. Silently downgrading to aggregated would defeat
         //   the operator's explicit "strict disagg" policy.
         let prefill_result = self
-            .route_prefill(&tokens, priority_jump, allowed_worker_ids.clone())
+            .route_prefill(
+                &tokens,
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids.clone(),
+            )
             .await;
 
         let is_disaggregated = match &prefill_result {
@@ -948,7 +969,13 @@ impl EndpointPicker for Router {
         // booking ID independent of x-request-id, handle cancellation races, roll
         // back endpoint-resolution failures, and never forward to an unbooked fallback.
         let (decode_worker, _overlap) = self
-            .route_decode(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
+            .route_decode(
+                &tokens,
+                is_disaggregated,
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+            )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
@@ -1107,5 +1134,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(extract_priority_jump(&without_nvext), 0.0);
+    }
+
+    #[test]
+    fn strict_priority_lifted_from_agent_hints() {
+        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "nvext": {"agent_hints": {"strict_priority": 9}}
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(extract_strict_priority(&with_priority), 9);
+
+        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(extract_strict_priority(&without_nvext), 0);
     }
 }
