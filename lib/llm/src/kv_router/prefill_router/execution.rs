@@ -9,7 +9,11 @@ use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
-use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
+use dynamo_runtime::{
+    error::{DynamoError, ErrorType, match_error_chain},
+    pipeline::SingleIn,
+    protocols::maybe_error::MaybeError,
+};
 
 use super::{
     InnerPrefillRouter, PrefillError, PrefillQueryOutcome, PrefillResolveDecision, PrefillRouter,
@@ -74,13 +78,18 @@ impl PrefillRouter {
             (id, dp_rank)
         } else {
             // Use shared worker selection logic (update_states=false for peek behavior)
-            // Extract LORA name and priority jump from routing hints
+            // Extract queue and request metadata from routing hints.
             let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
             let priority_jump = req
                 .routing
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
+            let strict_priority = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.strict_priority)
+                .unwrap_or(0);
             let allowed_worker_ids = req
                 .routing
                 .as_ref()
@@ -98,6 +107,7 @@ impl PrefillRouter {
                     false,
                     lora_name,
                     priority_jump,
+                    strict_priority,
                     allowed_worker_ids,
                     routing_constraints,
                 )
@@ -238,10 +248,29 @@ impl PrefillRouter {
             }
             Err(e) => {
                 // Dispatch rejected (e.g. ResourceExhausted: all eligible / the
-                // pinned prefill worker overloaded). Hand the typed error to the
-                // awaiting caller so it surfaces before decode.
+                // pinned prefill worker overloaded). A shed prefill worker returns
+                // ResourceExhausted; preserve that identity in a fresh DynamoError so
+                // the chain stays downcastable to a 503 (boxing the raw anyhow error
+                // instead would hide it). Other errors are generic routing failures.
+                let admission_err: anyhow::Error =
+                    if match_error_chain(e.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
+                        tracing::warn!(
+                            worker_error = %e,
+                            "Request rejected by prefill worker (at capacity) — returning HTTP 503"
+                        );
+                        DynamoError::builder()
+                            .error_type(ErrorType::ResourceExhausted)
+                            .message(e.to_string())
+                            .build()
+                            .into()
+                    } else {
+                        e
+                    };
+
+                // Hand the typed error to the awaiting caller so it surfaces before
+                // decode rather than being swallowed in this detached task.
                 if let Some(tx) = admission_tx.take() {
-                    let _ = tx.send(Err(e));
+                    let _ = tx.send(Err(admission_err));
                     return Err(PrefillError::PrefillError(
                         "prefill admission failed".to_string(),
                         None,
@@ -249,7 +278,7 @@ impl PrefillRouter {
                 }
                 return Err(PrefillError::PrefillError(
                     "failed to route to prefill worker".to_string(),
-                    Some(e.into()),
+                    Some(admission_err.into()),
                 ));
             }
         };
@@ -384,6 +413,7 @@ impl PrefillRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillQueryOutcome> {
@@ -405,6 +435,7 @@ impl PrefillRouter {
                         false,
                         lora_name,
                         priority_jump,
+                        strict_priority,
                         None,
                         None,
                         allowed_worker_ids,

@@ -110,3 +110,15 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: '<think>preamble</think>body</think>answer'
+  REASONING.stream.4.a:
+    description: Downstream streaming boundary is not applicable to MiniMax append-think
+    reason: MiniMax append-think has no configured Harmony commentary boundary; it emits a synthetic normal-text wrapper around model output.
+  REASONING.stream.4.b:
+    description: Split downstream streaming boundary is not applicable to MiniMax append-think
+    reason: MiniMax append-think has no Harmony `commentary to=functions.*` stream boundary to split across chunks.
+  REASONING.stream.4.c:
+    description: Partial downstream boundary recovery is not applicable to MiniMax append-think
+    reason: MiniMax append-think has no Harmony commentary protocol, so partial commentary-boundary recovery is outside its grammar.
+  REASONING.stream.4.d:
+    description: Directed Harmony analysis tool calls are not applicable to MiniMax append-think
+    reason: This parser family does not use Harmony `analysis to=functions.*` envelopes, so split analysis-channel tool-call handoff is outside its grammar.

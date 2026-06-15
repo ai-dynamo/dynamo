@@ -126,6 +126,8 @@ The trace file must be Mooncake-style JSONL. Each line should contain:
 - `input_length` or `input_tokens`
 - `output_length` or `output_tokens`
 - `hash_ids`
+- optional `priority` (signed soft-priority hint)
+- optional `strict_priority` (unsigned queue tier; larger values run first)
 
 Example:
 
@@ -136,6 +138,11 @@ Example:
 
 Rows without `session_id` are independent timestamped requests. Use this shape for wall-clock
 request traces, including agent-converted traces where parallel LLM calls should remain parallel.
+
+`priority` and `strict_priority` affect only KV-router pending-queue ordering when
+`--router-mode kv_router` is active and requests are actually queued. Negative `priority` values
+have no router effect. These fields do not change round-robin routing, mock-engine scheduling,
+direct-admission behavior, or execution ordering inside a selected worker.
 
 DynoSim runs also support multi-turn sessions. Use the same `session_id` on all turns in a session.
 Multi-turn sessions are closed-loop: turn `n+1` waits until turn `n` completes plus either the

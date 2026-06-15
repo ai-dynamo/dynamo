@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -375,6 +375,69 @@ impl WorkerLoadState {
             false
         })
     }
+
+    fn is_overloaded_for_config(&self, config: &LoadThresholdConfig) -> bool {
+        self.is_overloaded(
+            config.active_decode_blocks_threshold,
+            config.active_prefill_tokens_threshold,
+            config.active_prefill_tokens_threshold_frac,
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct OverloadedWorkerTracker {
+    overloaded_workers: HashSet<u64>,
+}
+
+impl OverloadedWorkerTracker {
+    fn update_worker(&mut self, worker_id: u64, overloaded: bool) -> bool {
+        if overloaded {
+            self.overloaded_workers.insert(worker_id)
+        } else {
+            self.overloaded_workers.remove(&worker_id)
+        }
+    }
+
+    fn replace(&mut self, overloaded_workers: HashSet<u64>) -> bool {
+        if self.overloaded_workers == overloaded_workers {
+            return false;
+        }
+        self.overloaded_workers = overloaded_workers;
+        true
+    }
+
+    fn remove_workers(&mut self, removed_workers: &[u64]) -> bool {
+        let mut changed = false;
+        for worker_id in removed_workers {
+            changed |= self.overloaded_workers.remove(worker_id);
+        }
+        changed
+    }
+
+    #[cfg(test)]
+    fn contains(&self, worker_id: u64) -> bool {
+        self.overloaded_workers.contains(&worker_id)
+    }
+
+    fn ids(&self) -> Vec<u64> {
+        self.overloaded_workers.iter().copied().collect()
+    }
+}
+
+fn collect_overloaded_workers(
+    worker_load_states: &DashMap<u64, WorkerLoadState>,
+    config: &LoadThresholdConfig,
+) -> HashSet<u64> {
+    worker_load_states
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .value()
+                .is_overloaded_for_config(config)
+                .then_some(*entry.key())
+        })
+        .collect()
 }
 
 /// Worker monitor for tracking KV cache usage and overload states.
@@ -619,6 +682,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
             let mut known_worker_dp_ranks: HashMap<u64, std::collections::HashSet<u32>> =
                 HashMap::new();
+            let mut overloaded_tracker = OverloadedWorkerTracker::default();
+            let mut last_thresholds = thresholds.read().unwrap().clone();
 
             loop {
                 // Create a future that either reads from kv_metrics or pends forever if unavailable
@@ -663,6 +728,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
 
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
+                        overloaded_tracker.remove_workers(&removed_workers);
                         client.clear_overloaded_instances_for_removed(&removed_workers);
                         // Mirror the prune to the prefill Client (disagg). Prefill workers are
                         // routed by a separate PrefillRouter with its own Client, so its
@@ -700,6 +766,18 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 }
                             }
                         }
+
+                        let cfg = thresholds.read().unwrap().clone();
+                        last_thresholds = cfg.clone();
+                        let overloaded_workers = collect_overloaded_workers(&worker_load_states, &cfg);
+                        if overloaded_tracker.replace(overloaded_workers) {
+                            let overloaded_instances = overloaded_tracker.ids();
+                            publish_overloaded_instances(
+                                &client,
+                                &prefill_client_holder,
+                                &overloaded_instances,
+                            );
+                        }
                     }
 
                     // Handle KV metrics updates (ActiveLoad) - only if subscriber is available
@@ -728,24 +806,22 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // Snapshot thresholds once per event — rare writes (HTTP endpoint)
                         // mean RwLock contention is effectively zero.
                         let cfg = thresholds.read().unwrap().clone();
+                        let thresholds_changed = cfg != last_thresholds;
 
                         // Update worker load state per dp_rank (for overload detection only).
                         // Note: Prometheus gauges are updated directly by sequence.rs
-                        let total_blocks = {
+                        let (total_blocks, worker_overloaded) = {
                             let mut state = worker_load_states.entry(worker_id).or_default();
                             state.update_from_active_load(
                                 &active_load,
                                 cfg.active_decode_blocks_threshold,
                             );
-                            state.kv_total_blocks.get(&dp_rank).copied()
+                            let total_blocks = state.kv_total_blocks.get(&dp_rank).copied();
+                            let worker_overloaded = state.is_overloaded_for_config(&cfg);
+                            (total_blocks, worker_overloaded)
                         };
 
-                        // Recalculate all overloaded instances and update.
-                        let overloaded_instances =
-                            compute_overloaded_instances(&worker_load_states, &cfg);
-
                         if tracing::enabled!(tracing::Level::DEBUG) {
-                            let worker_overloaded = overloaded_instances.contains(&worker_id);
                             tracing::debug!(
                                 worker_id,
                                 dp_rank,
@@ -761,11 +837,27 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             );
                         }
 
-                        publish_overloaded_instances(
-                            &client,
-                            &prefill_client_holder,
-                            &overloaded_instances,
-                        );
+                        // Recompute the full overloaded set only when thresholds change;
+                        // otherwise incrementally update just this worker. When the set
+                        // changes, publish to both the decode Client and (in disaggregated
+                        // serving) the prefill Client — see `publish_overloaded_instances`.
+                        let overloaded_changed = if thresholds_changed {
+                            last_thresholds = cfg.clone();
+                            let overloaded_workers =
+                                collect_overloaded_workers(&worker_load_states, &cfg);
+                            overloaded_tracker.replace(overloaded_workers)
+                        } else {
+                            overloaded_tracker.update_worker(worker_id, worker_overloaded)
+                        };
+
+                        if overloaded_changed {
+                            let overloaded_instances = overloaded_tracker.ids();
+                            publish_overloaded_instances(
+                                &client,
+                                &prefill_client_holder,
+                                &overloaded_instances,
+                            );
+                        }
                     }
 
                     // Handle decode endpoint instance changes (for ITL and decode metrics cleanup)
@@ -793,6 +885,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
+                            overloaded_tracker.remove_workers(&removed_workers);
+                            client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
                         known_decode_workers = current_instances;
@@ -842,6 +936,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
+                            overloaded_tracker.remove_workers(&removed_workers);
+                            client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
                         known_prefill_workers = current_instances;
@@ -883,10 +979,44 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadThresholdConfig, WorkerLoadState, compute_overloaded_instances,
-        publish_overloaded_instances,
+        LoadThresholdConfig, OverloadedWorkerTracker, WorkerLoadState,
+        compute_overloaded_instances, publish_overloaded_instances,
     };
     use dynamo_kv_router::protocols::ActiveLoad;
+    use std::collections::HashSet;
+
+    #[test]
+    fn overloaded_worker_tracker_updates_one_worker() {
+        let mut tracker = OverloadedWorkerTracker::default();
+
+        assert!(tracker.update_worker(7, true));
+        assert!(tracker.contains(7));
+        assert!(!tracker.update_worker(7, true));
+
+        assert!(tracker.update_worker(7, false));
+        assert!(!tracker.contains(7));
+        assert!(!tracker.update_worker(7, false));
+    }
+
+    #[test]
+    fn overloaded_worker_tracker_replaces_and_removes_workers() {
+        let mut tracker = OverloadedWorkerTracker::default();
+
+        assert!(tracker.replace(HashSet::from([1, 3, 5])));
+        assert!(!tracker.replace(HashSet::from([1, 3, 5])));
+
+        assert!(tracker.remove_workers(&[3, 5]));
+        assert!(tracker.contains(1));
+        assert!(!tracker.contains(3));
+        assert!(!tracker.contains(5));
+        assert!(
+            tracker.update_worker(3, true),
+            "rejoined overloaded workers must be republished after removal"
+        );
+        assert!(tracker.contains(3));
+
+        assert!(!tracker.remove_workers(&[2, 4]));
+    }
 
     #[test]
     fn load_threshold_config_default_is_not_configured() {
