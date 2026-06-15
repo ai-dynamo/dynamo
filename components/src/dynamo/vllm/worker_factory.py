@@ -42,7 +42,7 @@ from .health_check import (
     VllmPrefillHealthCheckPayload,
 )
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
-from .multimodal_handlers import EncodeWorkerHandler
+from .multimodal_handlers import EncodeWorkerHandler, FullPromptEncodeWorkerHandler
 from .publisher import StatLoggerFactory
 
 logger = logging.getLogger(__name__)
@@ -198,13 +198,20 @@ class WorkerFactory:
         )
         shutdown_endpoints[:] = [generate_endpoint]
 
-        handler = EncodeWorkerHandler(
-            config.engine_args,
-            config.embedding_transfer_mode,  # type: ignore[arg-type]
-            full_prompt_encoder_class=getattr(
-                config, "full_prompt_encoder_class", None
-            ),
-        )
+        full_prompt_encoder_class = getattr(config, "full_prompt_encoder_class", None)
+        if full_prompt_encoder_class:
+            handler: EncodeWorkerHandler | FullPromptEncodeWorkerHandler = (
+                FullPromptEncodeWorkerHandler(
+                    config.engine_args,
+                    config.embedding_transfer_mode,  # type: ignore[arg-type]
+                    full_prompt_encoder_class=full_prompt_encoder_class,
+                )
+            )
+        else:
+            handler = EncodeWorkerHandler(
+                config.engine_args,
+                config.embedding_transfer_mode,  # type: ignore[arg-type]
+            )
         await handler.async_init(runtime)
 
         # Encode workers register a model card so the frontend's
