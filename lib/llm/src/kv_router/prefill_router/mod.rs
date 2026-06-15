@@ -143,9 +143,21 @@ impl
                 worker_id,
                 dp_rank,
                 bootstrap_info,
+                permit: load_permit,
             } => {
                 let topology_constraints =
                     self.preflight_kv_transfer_constraints(endpoint_id, Some(worker_id))?;
+
+                // `load_permit` was booked atomically during resolve (peek+book
+                // in one step, no select/track race). The spawned task dispatches
+                // via `direct(worker_id)`, which skips load tracking, so the
+                // permit is held across the spawned prefill to keep LL/P2C/DAW
+                // selection accurate. `None` for KV/RoundRobin/Random.
+                //
+                // RoundRobin counter advance happens inside
+                // commit_selected_prefill_worker below (gated on
+                // preselected_worker.is_none()); advancing here too would
+                // double-count RoundRobin.
 
                 // Bootstrap optimization path: spawn prefill in background
                 self.commit_selected_prefill_worker(
@@ -177,6 +189,7 @@ impl
                     prefill_context,
                     Some(worker_id),
                     prefill_phase_barrier,
+                    load_permit,
                 );
 
                 // Await the prefill dispatch (admission) result before starting
@@ -240,6 +253,7 @@ impl
             PrefillResolveDecision::NoBootstrapEndpoint {
                 worker_id: resolved_wid,
                 dp_rank: resolved_dp_rank,
+                permit: load_permit,
             } => {
                 let topology_constraints =
                     self.preflight_kv_transfer_constraints(endpoint_id, Some(resolved_wid))?;
@@ -263,6 +277,10 @@ impl
                     request_id.clone(),
                     metadata.clone(),
                 );
+                // This branch also dispatches via `direct(resolved_wid)` (inside
+                // execute_prefill), which skips load tracking — so hold the
+                // occupancy booking across the synchronous prefill so LL/P2C/DAW
+                // load is counted here too. Dropped when prefill completes.
                 let completion = Self::execute_prefill(
                     self.prefill_router.get().cloned(),
                     prefill_context,
@@ -271,6 +289,7 @@ impl
                     None, // synchronous path: caller awaits the full completion
                 )
                 .await?;
+                drop(load_permit);
                 (
                     Ok(PrefillOutcome::Completed {
                         result: completion.result,

@@ -7,7 +7,7 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 use dynamo_runtime::{
-    pipeline::{AsyncEngine, ManyOut, PushRouter, SingleIn},
+    pipeline::{AsyncEngine, ManyOut, OccupancyPermit, PushRouter, SingleIn},
     protocols::annotated::Annotated,
 };
 
@@ -111,6 +111,16 @@ impl InnerPrefillRouter {
             router
                 .sticky
                 .refresh_worker_for_phase(request, RequestPhase::Prefill);
+        }
+    }
+
+    /// Commit occupancy load for a bootstrap-dispatched worker. `Some` only for
+    /// `SimpleRouter` occupancy modes; `KvRouter` tracks load via worker-pushed
+    /// kv_metrics events instead.
+    pub(super) fn track_dispatch(&self, instance_id: u64) -> Option<OccupancyPermit> {
+        match self {
+            InnerPrefillRouter::SimpleRouter(router) => router.track_dispatch(instance_id),
+            InnerPrefillRouter::KvRouter(_) => None,
         }
     }
 }

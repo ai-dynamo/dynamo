@@ -61,7 +61,13 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_secs)
 }
 
-struct OccupancyPermit {
+/// RAII handle for one in-flight unit of work charged against
+/// [`RoutingOccupancyState`]. The counter is incremented at construction; the
+/// matching decrement is emitted on drop (or by [`Self::into_tracked_stream`]).
+///
+/// `pub` so `prefill_router` (a separate crate) can hold one across its spawned
+/// prefill task — see [`PushRouter::track_dispatch`].
+pub struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
     instance_id: u64,
     armed: bool,
@@ -747,10 +753,14 @@ where
 
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
-    /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
+    ///
+    /// `None` for [`RouterMode::Direct`] (caller-supplied routing); panics for
+    /// [`RouterMode::KV`], which selects via `kv_chooser::find_best_match`.
     pub fn peek_next_worker(&self) -> Option<u64> {
-        let routing_instances = self.client.routing_instances();
-        let count = routing_instances.free_ids().len();
+        // Select among free (admission-eligible) workers — see select_next_worker
+        // for the per-mode selection rationale.
+        let instance_ids = self.client.routing_instances().free_ids().to_vec();
+        let count = instance_ids.len();
         if count == 0 {
             return None;
         }
@@ -759,18 +769,26 @@ where
             RouterMode::RoundRobin => {
                 // Just peek at the current counter value without incrementing
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
-                Some(routing_instances.free_ids()[counter % count])
+                Some(instance_ids[counter % count])
             }
             RouterMode::Random => {
                 // For random, peeking implies a fresh random selection since it's stateless.
                 // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
                 let counter = rand::rng().random::<u64>() as usize;
-                Some(routing_instances.free_ids()[counter % count])
+                Some(instance_ids[counter % count])
             }
-            RouterMode::PowerOfTwoChoices
-            | RouterMode::Direct
-            | RouterMode::LeastLoaded
-            | RouterMode::DeviceAwareWeighted => None,
+            RouterMode::LeastLoaded => self.occupancy_state.as_deref()?.peek_min(&instance_ids),
+            RouterMode::PowerOfTwoChoices => Some(p2c_select_from(
+                self.occupancy_state.as_deref()?,
+                &instance_ids,
+            )),
+            RouterMode::DeviceAwareWeighted => {
+                // Peek only resolves bootstrap_info; device-class partitioning is
+                // applied when the request actually dispatches. Degenerate to
+                // least-loaded, the mode's documented fallback.
+                self.occupancy_state.as_deref()?.peek_min(&instance_ids)
+            }
+            RouterMode::Direct => None,
             RouterMode::KV => {
                 panic!(
                     "peek_next_worker should not be called for {:?} routing mode",
@@ -778,6 +796,100 @@ where
                 )
             }
         }
+    }
+
+    /// Commit load to an externally-chosen worker (e.g. from
+    /// [`Self::peek_next_worker`]) and return a permit that decrements on drop.
+    /// Needed because [`Self::direct`], used by callers who pre-pick a worker,
+    /// bypasses load tracking — so it must happen here.
+    ///
+    /// `Some` only for the occupancy-counter modes (LeastLoaded,
+    /// PowerOfTwoChoices, DeviceAwareWeighted). Hold the permit for the
+    /// dispatched request's lifetime.
+    pub fn track_dispatch(&self, instance_id: u64) -> Option<OccupancyPermit> {
+        let state = self.occupancy_state.as_ref()?.clone();
+        match self.router_mode {
+            RouterMode::LeastLoaded
+            | RouterMode::PowerOfTwoChoices
+            | RouterMode::DeviceAwareWeighted => {
+                state.increment(instance_id);
+                Some(OccupancyPermit::new(state, instance_id))
+            }
+            RouterMode::RoundRobin | RouterMode::Random | RouterMode::Direct | RouterMode::KV => {
+                None
+            }
+        }
+    }
+
+    /// Atomically select a worker AND book its load, returning the worker id plus
+    /// a permit that releases the booking on drop.
+    ///
+    /// This is the booking counterpart of [`Self::peek_next_worker`] for callers
+    /// (e.g. disagg bootstrap) that resolve a worker up front and then dispatch
+    /// via [`Self::direct`] (which bypasses load tracking). Unlike
+    /// `peek_next_worker()` followed by a separate [`Self::track_dispatch`],
+    /// selection and booking happen as a single operation, so concurrent callers
+    /// cannot observe the same minimum and over-subscribe one worker
+    /// (addresses the LL/P2C/DAW bootstrap accounting race).
+    ///
+    /// Mirrors each mode's normal dispatch policy: LeastLoaded uses the locked
+    /// `select_exact_min_and_increment`; DeviceAwareWeighted applies the same
+    /// device-class candidate grouping as [`Self::device_aware_weighted`] before
+    /// the locked min-select (so the device ratio is preserved on the bootstrap
+    /// path, not degenerated to global least-loaded); P2C matches
+    /// [`Self::power_of_two_choices`].
+    ///
+    /// `Some` only for the occupancy-counter modes (LeastLoaded,
+    /// PowerOfTwoChoices, DeviceAwareWeighted); `None` for RoundRobin/Random
+    /// (no occupancy state — callers fall back to `peek_next_worker`), Direct,
+    /// and KV (which tracks load via worker-pushed metrics, not this counter).
+    pub async fn select_and_reserve(&self) -> Option<(u64, OccupancyPermit)> {
+        let state = self.occupancy_state.as_ref()?.clone();
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids().to_vec();
+        if instance_ids.is_empty() {
+            return None;
+        }
+
+        let instance_id = match self.router_mode {
+            RouterMode::LeastLoaded => state.select_exact_min_and_increment(&instance_ids).await?,
+            RouterMode::PowerOfTwoChoices => {
+                // Matches power_of_two_choices(): p2c is inherently approximate,
+                // so it selects then increments without the exact-select lock.
+                let id = p2c_select_from(state.as_ref(), &instance_ids);
+                state.increment(id);
+                id
+            }
+            RouterMode::DeviceAwareWeighted => {
+                // Mirror device_aware_weighted(): partition by device class and
+                // apply the CPU budget, then min-select within the chosen group.
+                let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = self
+                    .client
+                    .instances()
+                    .iter()
+                    .map(|inst| (inst.instance_id, inst.device_type.clone()))
+                    .collect();
+                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|v| *v >= 1)
+                    .unwrap_or(8);
+                let candidates = device_aware_candidate_group(
+                    state.as_ref(),
+                    &instance_ids,
+                    &device_type_map,
+                    cuda_to_cpu_ratio,
+                );
+                state.select_exact_min_and_increment(&candidates).await?
+            }
+            RouterMode::RoundRobin | RouterMode::Random | RouterMode::Direct | RouterMode::KV => {
+                return None;
+            }
+        };
+
+        // select_exact_min_and_increment / increment above already booked the
+        // load; OccupancyPermit only credits it back on drop (no double-count).
+        Some((instance_id, OccupancyPermit::new(state, instance_id)))
     }
 
     fn occupancy_state(&self) -> anyhow::Result<Arc<RoutingOccupancyState>> {
@@ -1481,7 +1593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn least_loaded_select_and_peek_return_none_with_available_worker() {
+    async fn least_loaded_peek_returns_available_worker_select_stays_none() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -1500,8 +1612,47 @@ mod tests {
             .await
             .unwrap();
 
+        // LeastLoaded routes via peek + OccupancyPermit dispatch, so select_next_worker
+        // stays None; peek must resolve the available worker (the disagg-bootstrap fix).
         assert_eq!(router.select_next_worker(), None);
-        assert_eq!(router.peek_next_worker(), None);
+        assert!(
+            router.peek_next_worker().is_some(),
+            "LeastLoaded peek must return the available worker for disagg bootstrap"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn select_and_reserve_books_load_and_credits_on_drop() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_reserve_router".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+        let state = router.occupancy_state.clone().unwrap();
+
+        // select_and_reserve picks the worker AND books its load atomically, so a
+        // bootstrap-dispatched (direct()) request is reflected in the counter.
+        let (id, permit) = router
+            .select_and_reserve()
+            .await
+            .expect("LeastLoaded reserves the available worker");
+        assert_eq!(state.load(id), 1, "reserve books one in-flight request");
+
+        // The permit credits the booking back on drop (request completed).
+        drop(permit);
+        assert_eq!(state.load(id), 0, "permit releases the booking on drop");
 
         rt.shutdown();
     }
@@ -1704,7 +1855,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_aware_weighted_select_and_peek_return_none_with_available_worker() {
+    async fn device_aware_weighted_peek_returns_available_worker_select_stays_none() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -1724,8 +1875,13 @@ mod tests {
                 .await
                 .unwrap();
 
+        // DeviceAwareWeighted degenerates to least-loaded for peek (device-class
+        // partitioning happens at dispatch); select_next_worker stays None.
         assert_eq!(router.select_next_worker(), None);
-        assert_eq!(router.peek_next_worker(), None);
+        assert!(
+            router.peek_next_worker().is_some(),
+            "DeviceAwareWeighted peek must return the available worker for disagg bootstrap"
+        );
 
         rt.shutdown();
     }
