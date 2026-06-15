@@ -6,9 +6,9 @@
 # This example uses DynamoCheckpoint Auto mode: the operator starts a checkpoint
 # job for TRTLLMWorker, waits for it to become Ready, and then restores the DGD
 # worker from that checkpoint. Use a snapshot placeholder image for the worker
-# and the matching runtime/frontend image for the frontend. The image tags below
-# are examples from a build-on-demand run; replace them with the tags for the
-# Dynamo/TRTLLM revision being tested.
+# and the matching runtime/frontend image for the frontend. Replace the
+# placeholder image names below with the tags for the Dynamo/TRTLLM revision
+# being tested.
 #
 # Requirements validated for the single-GPU TRTLLM path:
 # - Run the normal TRTLLM entrypoint. Do not wrap it in cuda-checkpoint
@@ -19,23 +19,6 @@
 #   listener in the checkpoint will not restore correctly after the placeholder
 #   pod receives a different IP. For one GPU, self/vader is sufficient.
 # - /dev/net/tun is not required when the PodIP listener is avoided.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: trtllm-qwen3-0-6b-snapshot-engine-config
-data:
-  trtllm-qwen3-0-6b-snapshot.yaml: |
-    tensor_parallel_size: 1
-    moe_expert_parallel_size: 1
-    enable_attention_dp: false
-    max_num_tokens: 1024
-    max_batch_size: 1
-    trust_remote_code: true
-    backend: pytorch
-    enable_chunked_prefill: false
-    kv_cache_config:
-      free_gpu_memory_fraction: 0.10
----
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -50,12 +33,9 @@ spec:
       replicas: 1
       podTemplate:
         spec:
-          imagePullSecrets:
-            - name: acr-token-secret
-            - name: ngc-secret
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:ba811fb275fef4c2f246f98bc6e29b8c00bea89f-trtllm-runtime
+              image: my-registry/tensorrtllm-runtime:my-tag
               imagePullPolicy: IfNotPresent
     - name: TRTLLMWorker
       type: worker
@@ -72,9 +52,6 @@ spec:
             - key: nvidia.com/gpu
               operator: Exists
               effect: NoSchedule
-          imagePullSecrets:
-            - name: acr-token-secret
-            - name: ngc-secret
           securityContext:
             fsGroup: 1000
             fsGroupChangePolicy: OnRootMismatch
@@ -84,12 +61,9 @@ spec:
                 claimName: model-cache
             - name: criu-work
               emptyDir: {}
-            - name: engine-config
-              configMap:
-                name: trtllm-qwen3-0-6b-snapshot-engine-config
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:eb04a4ec6f0eef05df6eebb14a38a099b52c075b-trtllm-placeholder
+              image: my-registry/tensorrtllm-placeholder:my-tag
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
@@ -102,7 +76,7 @@ spec:
                 - --served-model-name
                 - Qwen/Qwen3-0.6B
                 - --extra-engine-args
-                - /workspace/trtllm-qwen3-0-6b-snapshot.yaml
+                - ./examples/backends/trtllm/engine_configs/qwen3/snapshot.yaml
               envFrom:
                 - secretRef:
                     name: hf-token-secret
@@ -169,6 +143,3 @@ spec:
                   mountPath: /home/dynamo/.cache/huggingface
                 - name: criu-work
                   mountPath: /var/criu-work
-                - name: engine-config
-                  mountPath: /workspace/trtllm-qwen3-0-6b-snapshot.yaml
-                  subPath: trtllm-qwen3-0-6b-snapshot.yaml

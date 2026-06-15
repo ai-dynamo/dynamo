@@ -59,7 +59,8 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 
 ### 7. **Snapshot Restore Example** (`v1beta1/snapshot-restore.yaml`)
 Experimental Dynamo Snapshot restore example for Qwen3-0.6B with a single
-TensorRT-LLM worker.
+TensorRT-LLM worker. This example uses the conservative engine configuration in
+[`../engine_configs/qwen3/snapshot.yaml`](../engine_configs/qwen3/snapshot.yaml).
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server
