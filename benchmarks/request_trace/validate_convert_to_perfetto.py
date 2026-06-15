@@ -210,6 +210,42 @@ def check_convert_records_accepts_enriched_request_trace_schema():
     assert "dynamo.agent.tool" in categories
 
 
+def check_convert_records_accepts_context_free_request_trace_schema():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "request_end",
+                    "event_time_unix_ms": 1050,
+                    "request": {
+                        "request_id": "req-plain",
+                        "model": "test-model",
+                        "request_received_ms": 1000,
+                        "total_time_ms": 50,
+                        "output_tokens": 4,
+                    },
+                },
+            }
+        ],
+        include_stages=False,
+        include_markers=False,
+    )
+
+    assert converted == 1
+    request = next(
+        event for event in trace["traceEvents"] if event.get("cat") == "dynamo.llm"
+    )
+    assert request["name"] == "LLM request: test-model"
+    assert request["args"]["request_id"] == "req-plain"
+    thread_names = [
+        event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event.get("name") == "thread_name"
+    ]
+    assert thread_names == ["request-only"]
+
+
 def check_convert_records_clamps_stage_rounding_overlap():
     trace, _ = convert_records(
         [
@@ -487,6 +523,7 @@ CHECKS = [
     check_convert_records_emits_request_stages_and_metadata,
     check_convert_records_can_emit_stages_on_separate_tracks,
     check_convert_records_accepts_enriched_request_trace_schema,
+    check_convert_records_accepts_context_free_request_trace_schema,
     check_convert_records_clamps_stage_rounding_overlap,
     check_convert_records_splits_overlapping_trajectory_requests_into_lanes,
     check_convert_records_emits_tool_duration_slices,

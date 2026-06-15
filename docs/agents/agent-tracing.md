@@ -146,8 +146,7 @@ single-choice case; `choices` keeps per-choice finish fields when `n > 1`. For c
 streams, finish metadata is recorded after parser/jail rewrites; completion streams
 record the final OpenAI-compatible completion finish reason. See `RequestTraceRecord`
 / `RequestTraceMetrics` in `lib/llm/src/request_trace/types.rs` for the preferred
-schema. Shared agent-context metric structs live under
-`lib/llm/src/agents/trace/types.rs`.
+schema.
 
 </details>
 

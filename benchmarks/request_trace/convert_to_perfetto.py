@@ -451,19 +451,19 @@ def convert_records(
             continue
 
         agent_context = event.get("agent_context")
-        if not isinstance(agent_context, dict):
-            continue
+        has_agent_context = isinstance(agent_context, dict)
+        agent_context = agent_context if has_agent_context else {}
 
         event_type = event.get("event_type")
-        session_id = _safe_label(agent_context.get("session_id"), "unknown-session")
-        trajectory_id = _safe_label(
-            agent_context.get("trajectory_id"), "unknown-trajectory"
-        )
 
         if event_type == "request_end":
             request = event.get("request")
             if not isinstance(request, dict):
                 continue
+            session_id = _safe_label(agent_context.get("session_id"), "request-trace")
+            trajectory_id = _safe_label(
+                agent_context.get("trajectory_id"), "request-only"
+            )
 
             start_ms = _request_start_ms(event, request)
             if start_ms is None:
@@ -488,10 +488,16 @@ def convert_records(
             continue
 
         if event_type in _TOOL_EVENT_TYPES:
+            if not has_agent_context:
+                continue
             tool = event.get("tool")
             event_time_us = _ms_to_trace_us(event.get("event_time_unix_ms"))
             if not isinstance(tool, dict) or event_time_us is None:
                 continue
+            session_id = _safe_label(agent_context.get("session_id"), "unknown-session")
+            trajectory_id = _safe_label(
+                agent_context.get("trajectory_id"), "unknown-trajectory"
+            )
 
             tool_records.append(
                 {
@@ -586,8 +592,7 @@ def convert_records(
         trace_events.append(
             _make_complete_event(
                 name=(
-                    "LLM request: "
-                    f"{_safe_label(request.get('model'), 'unknown-model')}"
+                    f"LLM request: {_safe_label(request.get('model'), 'unknown-model')}"
                 ),
                 category="dynamo.llm",
                 pid=request_pid,

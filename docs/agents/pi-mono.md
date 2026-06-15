@@ -57,7 +57,7 @@ pi install /absolute/path/to/pi-dynamo-provider
 
 ### 2. Launch Dynamo with tracing enabled
 
-Use the in-repo SGLang launcher (`examples/backends/sglang/launch/agg_agent.sh`), which starts a frontend with KV routing plus one SGLang worker with streaming sessions, KV events, and reasoning/tool parsers wired up. Export the request-trace env vars first so the worker records traces to a JSONL file and binds the ZMQ socket Pi will connect to:
+Use the in-repo SGLang launcher (`examples/backends/sglang/launch/agg_agent.sh`), which starts a frontend with KV routing plus one SGLang worker with streaming sessions, KV events, and reasoning/tool parsers wired up. Export the request-trace env vars first so the frontend records traces to a JSONL file and binds the ZMQ socket Pi will connect to:
 
 ```bash
 export DYN_REQUEST_TRACE=1

@@ -158,6 +158,9 @@ impl FinishReasonMetadata {
         backend_finish_reason: Option<String>,
         stop_reason: Option<dynamo_protocols::types::StopReason>,
     ) {
+        if backend_finish_reason.is_none() && stop_reason.is_none() {
+            return;
+        }
         let choice = self.choice_metadata_mut(choice_index);
         if let Some(backend_finish_reason) = backend_finish_reason {
             choice.backend_finish_reason = Some(backend_finish_reason);
@@ -234,11 +237,11 @@ pub struct RequestTraceToolEvent {
 pub enum RequestTraceToolStatus {
     #[serde(rename = "running")]
     Running,
-    #[serde(rename = "succeeded")]
+    #[serde(rename = "succeeded", alias = "ok", alias = "success")]
     Succeeded,
-    #[serde(rename = "error")]
+    #[serde(rename = "error", alias = "failed")]
     Error,
-    #[serde(rename = "cancelled")]
+    #[serde(rename = "cancelled", alias = "canceled", alias = "timeout")]
     Cancelled,
 }
 
@@ -290,5 +293,34 @@ mod tests {
         assert!(value["request"].get("model").is_none());
         assert!(value["request"].get("finish_reason_metadata").is_none());
         assert!(value["request"].get("payload").is_none());
+    }
+
+    #[test]
+    fn request_trace_tool_status_accepts_documented_aliases() {
+        for (input, expected) in [
+            ("running", RequestTraceToolStatus::Running),
+            ("succeeded", RequestTraceToolStatus::Succeeded),
+            ("ok", RequestTraceToolStatus::Succeeded),
+            ("success", RequestTraceToolStatus::Succeeded),
+            ("error", RequestTraceToolStatus::Error),
+            ("failed", RequestTraceToolStatus::Error),
+            ("cancelled", RequestTraceToolStatus::Cancelled),
+            ("canceled", RequestTraceToolStatus::Cancelled),
+            ("timeout", RequestTraceToolStatus::Cancelled),
+        ] {
+            let parsed: RequestTraceToolStatus =
+                serde_json::from_str(&format!("\"{input}\"")).unwrap();
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    #[test]
+    fn empty_choice_backend_finish_reason_is_ignored() {
+        let mut metadata = FinishReasonMetadata::default();
+
+        metadata.record_choice_backend_finish_reason(0, None, None);
+
+        assert!(metadata.is_empty());
+        assert!(metadata.choices.is_empty());
     }
 }
