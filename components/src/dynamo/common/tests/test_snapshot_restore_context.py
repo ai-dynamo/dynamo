@@ -8,9 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.common.snapshot.constants import (
+    KUBERNETES_OPTIONAL_ENV_NAMES,
     KUBERNETES_REQUIRED_ENV_NAMES,
+    RESTORE_RUNTIME_ENV_NAMES,
     SNAPSHOT_CONTROL_DIR_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
+    SNAPSHOT_RESTORE_STANDBY_ENV,
 )
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
@@ -24,15 +27,16 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 def clean_restore_env(monkeypatch):
     restore_env_names = {
         *KUBERNETES_REQUIRED_ENV_NAMES,
+        *KUBERNETES_OPTIONAL_ENV_NAMES,
+        *RESTORE_RUNTIME_ENV_NAMES,
         SNAPSHOT_CONTROL_DIR_ENV,
-        "DYN_DISCOVERY_BACKEND",
-        "DYN_REQUEST_PLANE",
-        "DYN_EVENT_PLANE",
-        "NATS_SERVER",
-        "ETCD_ENDPOINTS",
+        SNAPSHOT_RESTORE_STANDBY_ENV,
     }
     for name in restore_env_names:
         monkeypatch.delenv(name, raising=False)
+    yield
+    for name in restore_env_names:
+        os.environ.pop(name, None)
 
 
 def write_restore_context(monkeypatch, tmp_path, env):
