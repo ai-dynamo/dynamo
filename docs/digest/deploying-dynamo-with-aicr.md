@@ -289,9 +289,13 @@ curl http://localhost:8000/v1/chat/completions \
 ```
 
 AICR inference recipes also install `agentgateway` and an `inference-gateway` Gateway in the
-`agentgateway-system` namespace. The `vllm-agg` example above uses the direct frontend path; for the
-Gateway / EPP path, deploy a workload that creates the EPP component, `InferencePool`, and
-`HTTPRoute`, then send the same OpenAI-compatible requests through the Gateway address:
+`agentgateway-system` namespace. `agentgateway` is the Gateway API data plane, not the Dynamo EPP.
+The Dynamo EPP comes from a `DynamoGraphDeployment` component of type `epp`; the Dynamo operator
+generates the matching `InferencePool`, and the Gateway path uses an `HTTPRoute` that references
+that pool, as described in the
+[Gateway API Inference Extension guide](../kubernetes/inference-gateway.md). The `vllm-agg` example
+above uses the direct frontend path. For a Gateway / EPP workload, send the same OpenAI-compatible
+requests through the Gateway address:
 
 ```bash
 kubectl get gateway inference-gateway -n agentgateway-system
@@ -299,6 +303,10 @@ kubectl get inferencepool,httproute -n dynamo-workload
 
 GATEWAY_HOST=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
 curl "http://${GATEWAY_HOST}/v1/models"
+
+curl "http://${GATEWAY_HOST}/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello from AICR Dynamo through Gateway / EPP"}],"max_tokens":30,"stream":false}'
 ```
 
 For the Gateway / EPP path, also verify the EPP pod and worker frontend sidecars.
