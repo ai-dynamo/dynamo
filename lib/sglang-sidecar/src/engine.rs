@@ -33,7 +33,7 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
     HEALTH_CHECK_KEY, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, MultimodalData,
-    PreprocessedRequest, WorkerConfig, usage,
+    PreprocessedRequest, TopLogprob, WorkerConfig, usage,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
@@ -112,6 +112,13 @@ impl SglangSidecarEngine {
             disaggregation_mode,
             model_name: discovery.model.model_id.clone(),
             served_model_name,
+            // Response parsers the engine advertises (empty when unset). Written
+            // into the worker's ModelRuntimeConfig so the frontend applies
+            // tool-call / reasoning parsing to this sidecar-served model.
+            reasoning_parser: (!discovery.model.reasoning_parser.is_empty())
+                .then(|| discovery.model.reasoning_parser.clone()),
+            tool_call_parser: (!discovery.model.tool_call_parser.is_empty())
+                .then(|| discovery.model.tool_call_parser.clone()),
             ..Default::default()
         };
 
@@ -310,8 +317,33 @@ impl LLMEngine for SglangSidecarEngine {
                                             );
                                         }
                                         generated += t.token_ids.len() as u32;
+                                        // Chosen-token logprob per output token.
+                                        let log_probs = (!t.logprobs.is_empty()).then(|| {
+                                            t.logprobs.iter().map(|lp| lp.logprob).collect::<Vec<f64>>()
+                                        });
+                                        // Top-K alternatives per output token.
+                                        let top_logprobs = (!t.top_logprobs.is_empty()).then(|| {
+                                            t.top_logprobs
+                                                .iter()
+                                                .map(|tl| {
+                                                    tl.entries
+                                                        .iter()
+                                                        .map(|lp| TopLogprob {
+                                                            rank: lp.rank,
+                                                            token_id: lp.token_id,
+                                                            token: (!lp.token.is_empty())
+                                                                .then(|| lp.token.clone()),
+                                                            logprob: lp.logprob,
+                                                            bytes: None,
+                                                        })
+                                                        .collect::<Vec<_>>()
+                                                })
+                                                .collect::<Vec<_>>()
+                                        });
                                         yield Ok(LLMEngineOutput {
                                             token_ids: t.token_ids,
+                                            log_probs,
+                                            top_logprobs,
                                             ..Default::default()
                                         });
                                     }
@@ -636,6 +668,42 @@ pub(crate) fn build_generate_request(
 
     let media = build_media(request)?;
 
+    // Constrained / guided decoding. Validated by the frontend; the engine's
+    // grammar backend enforces it during sampling. At most one guide is sent.
+    let guided = request.sampling_options.guided_decoding.as_ref().and_then(|g| {
+        use pb::guided_decoding::Guide;
+        let guide = if let Some(json) = &g.json {
+            Some(Guide::JsonSchema(json_value_to_string(json)))
+        } else if let Some(regex) = &g.regex {
+            Some(Guide::Regex(regex.clone()))
+        } else if let Some(grammar) = &g.grammar {
+            Some(Guide::EbnfGrammar(grammar.clone()))
+        } else {
+            g.structural_tag
+                .as_ref()
+                .map(|t| Guide::StructuralTag(json_value_to_string(t)))
+        };
+        guide.map(|guide| pb::GuidedDecoding {
+            guide: Some(guide),
+            backend: g.backend.clone().unwrap_or_default(),
+        })
+    });
+
+    // Per-request LoRA adapter (router/preprocessor sets it on routing hints).
+    let lora_name = request
+        .routing
+        .as_ref()
+        .and_then(|r| r.lora_name.clone())
+        .unwrap_or_default();
+
+    // Logprobs: `logprobs` is the top-alternatives count; `prompt_logprobs`
+    // asks the engine to also score the prompt (offset 0). Absent → completion
+    // tokens only (engine default, signalled by logprob_start_len = -1).
+    let opts = &request.output_options;
+    let return_logprobs = opts.logprobs.is_some() || opts.prompt_logprobs.is_some();
+    let top_logprobs = opts.logprobs.unwrap_or(0);
+    let logprob_start_len = if opts.prompt_logprobs.is_some() { 0 } else { -1 };
+
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
         model: request.model.clone(),
@@ -646,10 +714,24 @@ pub(crate) fn build_generate_request(
         stop,
         stream: true,
         media,
+        guided,
+        lora_name,
+        return_logprobs,
+        top_logprobs,
+        logprob_start_len,
         data_parallel_rank,
         kv_session,
         metadata: Default::default(),
     })
+}
+
+/// A guided-decoding constraint can arrive as a JSON string or a JSON
+/// object/value; flatten to the string SGLang's grammar backend expects.
+fn json_value_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// Map a media-map key (`image_url`/`video_url`/`audio_url`) to its proto

@@ -127,6 +127,7 @@ impl OpenEngine for FakeOpenEngine {
                                 token_ids: vec![1000 + i],
                                 text: format!("t{i}"),
                                 logprobs: Vec::new(),
+                                top_logprobs: Vec::new(),
                             })),
                             usage: None,
                         });
@@ -194,6 +195,8 @@ impl OpenEngine for FakeOpenEngine {
             supports_guided_decoding: false,
             supports_lora: false,
             supports_multimodal: false,
+            reasoning_parser: String::new(),
+            tool_call_parser: String::new(),
         }))
     }
 

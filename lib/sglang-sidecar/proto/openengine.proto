@@ -96,6 +96,14 @@ message ModelInfo {
   bool supports_guided_decoding = 23;
   bool supports_lora = 24;
   bool supports_multimodal = 25;
+
+  // Engine-advertised response parser names. The orchestrator's frontend applies
+  // these to a sidecar-served model's output stream (tool-call extraction,
+  // reasoning/thinking separation) — the engine streams tokens, the frontend
+  // parses. Empty = no parser configured for this model. Discovered from the
+  // engine so the sidecar stays endpoint-only (no parser flags on the worker).
+  string reasoning_parser = 26;
+  string tool_call_parser = 27;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +128,23 @@ message GenerateRequest {
   // The engine fetches/decodes and preprocesses each item, then expands the
   // marker into the model's replacement run. Empty for text-only requests.
   repeated MediaItem media = 8;
+
+  // Constrained / guided decoding. Enforced engine-side by the grammar backend
+  // during sampling — the orchestrator cannot apply it post-hoc. ModelInfo
+  // .supports_guided_decoding advertises whether the engine honors it.
+  GuidedDecoding guided = 9;
+
+  // LoRA adapter name (or path) to apply to this request. Empty = base model.
+  // ModelInfo.supports_lora advertises whether the engine can honor it.
+  string lora_name = 10;
+
+  // Logprobs request controls (TokenOutput.logprobs carries the result).
+  // return_logprobs turns emission on; top_logprobs is the per-token
+  // alternatives count; logprob_start_len is the prompt offset to begin scoring
+  // from (< 0 = engine default, i.e. completion tokens only).
+  bool return_logprobs = 11;
+  uint32 top_logprobs = 12;
+  int32 logprob_start_len = 13;
 
   // Required for decode requests in disaggregated serving.
   KvSessionRef kv_session = 20;
@@ -185,6 +210,21 @@ message StopCondition {
   }
 }
 
+// Constrained / guided decoding spec. At most one of `guide` should be set.
+// The engine enforces the constraint during sampling via its grammar backend
+// (xgrammar / outlines / llguidance); the orchestrator cannot apply it post-hoc.
+message GuidedDecoding {
+  oneof guide {
+    string json_schema = 1;     // output conforms to this JSON schema
+    string regex = 2;           // output matches this regex
+    string ebnf_grammar = 3;    // output follows this EBNF / context-free grammar
+    string structural_tag = 4;  // xgrammar structural-tag constraint (JSON string)
+  }
+  // Optional grammar backend override (e.g. "xgrammar", "outlines",
+  // "llguidance"). Empty = engine default.
+  string backend = 5;
+}
+
 message GenerateResponse {
   string request_id = 1;
 
@@ -201,7 +241,12 @@ message GenerateResponse {
 message TokenOutput {
   repeated uint32 token_ids = 1;
   string text = 2;
+  // Chosen-token logprob, one entry per `token_ids` (rank 0). Populated only
+  // when the request set `return_logprobs`.
   repeated LogProb logprobs = 3;
+  // Per-token top-K alternatives: `top_logprobs[i]` holds the ranked candidates
+  // for `token_ids[i]`. Populated only when the request set `top_logprobs > 0`.
+  repeated TopLogprobs top_logprobs = 4;
 }
 
 message LogProb {
@@ -209,6 +254,11 @@ message LogProb {
   double logprob = 2;
   string token = 3;
   uint32 rank = 4;
+}
+
+// Ranked top-K logprob candidates for a single output position.
+message TopLogprobs {
+  repeated LogProb entries = 1;
 }
 
 message PrefillReady {
