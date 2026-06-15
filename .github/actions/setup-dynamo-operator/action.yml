@@ -204,44 +204,13 @@ runs:
 
         # The K8s version must be supported by the kr8s Python library used in deploy tests.
         # This is independent of the host cluster version.
-<<<<<<< HEAD
-        VCLUSTER_HELM_ARGS=()
-        if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
-          VCLUSTER_CHECKPOINT_VALUES="$(mktemp)"
-          cat > "${VCLUSTER_CHECKPOINT_VALUES}" <<'EOF'
-        sync:
-          fromHost:
-            nodes:
-              enabled: true
-              clearImageStatus: true
-              selector:
-                labels:
-                  kubernetes.azure.com/mode: "user"
-            runtimeClasses:
-              enabled: true
-        EOF
-          VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
-        fi
-
-        vcluster create ${VCLUSTER_NAME} \
-          --namespace ${NAMESPACE} \
-=======
         vcluster create "${VCLUSTER_NAME}" \
           --namespace "${NAMESPACE}" \
->>>>>>> 7b2cb59a1b (Make setup-dynamo-operator handle AWS vCluster priority automatically)
           --connect=false \
           --upgrade \
           --set controlPlane.distro.k8s.enabled=true \
           --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
-<<<<<<< HEAD
-<<<<<<< HEAD
           "${VCLUSTER_HELM_ARGS[@]}"
-=======
-          "${PRIORITY_ARGS[@]}"
->>>>>>> 7b2cb59a1b (Make setup-dynamo-operator handle AWS vCluster priority automatically)
-=======
-          "${VCLUSTER_HELM_ARGS[@]}"
->>>>>>> 7f138bc550 (Use static deploy-test namespace with AWS-aware vCluster priority)
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
@@ -339,25 +308,7 @@ runs:
         cd deploy/helm/charts/platform/
         helm dep build .
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-        CHECKPOINT_HELM_ARGS=(
-          --set dynamo-operator.checkpoint.enabled="${CHECKPOINT_ENABLED}"
-        )
-        if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
-          CHECKPOINT_HELM_ARGS+=(
-            --set dynamo-operator.checkpoint.storage.type=pvc
-            --set dynamo-operator.checkpoint.storage.pvc.pvcName="${CHECKPOINT_STORAGE_PVC_NAME}"
-            --set dynamo-operator.checkpoint.storage.pvc.basePath="${CHECKPOINT_STORAGE_BASE_PATH}"
-            --set dynamo-operator.checkpoint.storage.pvc.create=true
-            --set dynamo-operator.checkpoint.storage.pvc.size="${CHECKPOINT_STORAGE_SIZE}"
-            --set dynamo-operator.checkpoint.storage.pvc.accessMode="${CHECKPOINT_STORAGE_ACCESS_MODE}"
-          )
-=======
-        IMAGE_ARGS=""
-=======
         IMAGE_ARGS=()
->>>>>>> 7f138bc550 (Use static deploy-test namespace with AWS-aware vCluster priority)
         if [ -n "${REGISTRY}" ]; then
           OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
           echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
@@ -367,7 +318,6 @@ runs:
           )
         else
           echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
->>>>>>> 7b2cb59a1b (Make setup-dynamo-operator handle AWS vCluster priority automatically)
         fi
 
         CHECKPOINT_HELM_ARGS=(
