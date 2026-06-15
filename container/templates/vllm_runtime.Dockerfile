@@ -228,6 +228,34 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt
 
+{% if device == "cuda" %}
+# nvidia-cutlass-dsl for CUDA 13: the vllm/vllm-openai:minimax-m3 base ships
+# nvidia-cutlass-dsl without the cu13 runtime libs, so cutlass-backed kernels
+# (the MiniMax-M3 MXFP8 path) fail to import. Force-reinstall the cu13 build.
+# --no-deps keeps the upstream vLLM solve intact; the [cu13] extra is expanded
+# into its concrete pinned packages. Baking this here removes the runtime
+# `pip install --force-reinstall nvidia-cutlass-dsl[cu13]==4.5.1` shim from the
+# MiniMax-M3 deploy manifests.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps --reinstall \
+        nvidia-cutlass-dsl==4.5.1 \
+        nvidia-cutlass-dsl-libs-base==4.5.1 \
+        nvidia-cutlass-dsl-libs-cu13==4.5.1
+
+# The vllm/vllm-openai:minimax-m3 base installs the NIXL Python package under the
+# `nixl_cu${CUDA_MAJOR}` name rather than the importable `nixl` name, so
+# `import nixl` fails. Symlink it into place so the Dynamo runtime can import nixl
+# without a startup shim. Run after the cutlass reinstall above so the symlink is
+# created last and isn't disturbed by earlier pip installs. Only link when the cu
+# wheel package is present and a real `nixl` package isn't already installed.
+# Baking this here removes the runtime `ln -sfn .../nixl_cu13 .../nixl` shim from
+# the MiniMax-M3 deploy manifests.
+RUN if [ -d "${SITE_PACKAGES}/nixl_cu${CUDA_MAJOR}" ] && [ ! -e "${SITE_PACKAGES}/nixl" ]; then \
+        ln -sfn "${SITE_PACKAGES}/nixl_cu${CUDA_MAJOR}" "${SITE_PACKAGES}/nixl"; \
+    fi
+{% endif %}
+
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
 # tool scripts referencing files not present in Dynamo's build context.

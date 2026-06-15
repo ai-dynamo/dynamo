@@ -47,7 +47,7 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.22.1-ubuntu2404
+    runtime_image_tag: minimax-m3@sha256:630c39b136d07d0140da154e5186c1cd339bbd0082d91a2811081468e39beead
   xpu:
     base_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
     runtime_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
