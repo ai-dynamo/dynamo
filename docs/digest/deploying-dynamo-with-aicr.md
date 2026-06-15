@@ -261,7 +261,8 @@ apply a Dynamo workload, such as the vLLM aggregation example in the
 
 The example manifest assumes specific node labels, including `nodeGroup=cpu-worker`. If your cluster
 uses different labels, such as `nodeGroup=system-worker`, adapt the `DynamoGraphDeployment` node
-selectors before applying it.
+selectors before applying it. Do the same for taints and tolerations if the Kubernetes cluster uses
+different scheduling constraints.
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/NVIDIA/aicr/refs/heads/main/demos/workloads/inference/vllm-agg.yaml
