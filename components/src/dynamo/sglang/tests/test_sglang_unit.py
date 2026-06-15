@@ -17,13 +17,22 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
 )
-from dynamo.sglang.args import parse_args
+from dynamo.sglang.args import (
+    parse_args,
+    should_fetch_model,
+    use_modelexpress_remote_instance,
+)
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
+
+try:
+    from dynamo.sglang import register as sglang_register
+except ImportError:
+    sglang_register = None
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -36,6 +45,7 @@ JINJA_TEMPLATE_PATH = str(
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_1,  # needs sglang & GPU packages installed but does not actually use GPU
     pytest.mark.profiled_vram_gib(0),  # These unit tests do not actually use GPU VRAM
     pytest.mark.pre_merge,
@@ -463,35 +473,129 @@ def test_prefill_health_check_payload_is_disagg_compatible_alias():
     assert payload["stop_conditions"]["max_tokens"] == 1
 
 
+def test_use_modelexpress_remote_instance_for_sglang_remote_instance():
+    args = SimpleNamespace(
+        load_format="remote_instance",
+        remote_instance_weight_loader_backend="modelexpress",
+    )
+
+    assert use_modelexpress_remote_instance(args) is True
+
+
+@pytest.mark.parametrize(
+    "load_format, backend",
+    [
+        ("auto", "modelexpress"),
+        ("remote_instance", "nccl"),
+        ("remote_instance", None),
+    ],
+)
+def test_use_modelexpress_remote_instance_rejects_other_load_paths(
+    load_format, backend
+):
+    args = SimpleNamespace(
+        load_format=load_format,
+        remote_instance_weight_loader_backend=backend,
+    )
+
+    assert use_modelexpress_remote_instance(args) is False
+
+
+def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
+    args = SimpleNamespace(
+        load_format="remote_instance",
+        remote_instance_weight_loader_backend="modelexpress",
+    )
+
+    assert should_fetch_model(args, "Qwen/Qwen3-0.6B") is False
+
+
+def test_should_fetch_model_keeps_default_non_local_fetch():
+    args = SimpleNamespace(load_format="auto")
+
+    assert should_fetch_model(args, "Qwen/Qwen3-0.6B") is True
+
+
+@pytest.mark.asyncio
+async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeypatch):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    captured: dict = {}
+
+    async def fake_get_runtime_config(engine, server_args, dynamo_args):
+        return None
+
+    async def fake_register_model(*args, **kwargs):
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sglang_register, "_get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+
+    server_args = SimpleNamespace(
+        model_path="Qwen/Qwen3-0.6B",
+        served_model_name="Qwen/Qwen3-0.6B",
+        context_length=4096,
+        page_size=1,
+        load_format="remote_instance",
+        remote_instance_weight_loader_backend="modelexpress",
+    )
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False,
+        frontend_decoding=False,
+        custom_jinja_template=None,
+    )
+
+    result = await sglang_register._register_model_with_runtime_config(
+        engine=SimpleNamespace(),
+        endpoint=SimpleNamespace(),
+        server_args=server_args,
+        dynamo_args=dynamo_args,
+        worker_type=sglang_register.WorkerType.Aggregated,
+    )
+
+    assert result is True
+    assert captured["kwargs"]["ignore_weights"] is True
+
+
 # ---------------------------------------------------------------------------
-# LoRA registration model_type gate
+# LoRA registration model_type + worker_type gate
 # ---------------------------------------------------------------------------
-# Pins the serving_mode → model_type selection in LoraMixin.load_lora so a
-# refactor that flips prefill back to Chat|Completions cannot silently land:
-# it would re-introduce the disagg hang where the frontend routes
+# Pins the serving_mode → (model_type, worker_type) selection in
+# LoraMixin.load_lora. A refactor that flips prefill back to Chat|Completions
+# (or drops the explicit worker_type) cannot silently land: it would
+# re-introduce the disagg hang where the frontend routes
 # /v1/chat/completions directly to the prefill worker.
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "serving_mode, endpoint_types, expected_model_type_str",
+    "serving_mode, endpoint_types, expected_model_type_str, expected_worker_type",
     [
-        ("prefill", "chat,completions", "prefill"),
-        ("decode", "chat,completions", "chat,completions"),
-        ("agg", "chat,completions", "chat,completions"),
-        ("decode", "completions", "completions"),
-        ("agg", "chat", "chat"),
+        # Prefill workers register the legacy ModelType.Prefill marker bit
+        # (no OpenAI surface, dual-emitted for old-frontend compat) and
+        # worker_type=Prefill.
+        ("prefill", "chat,completions", "prefill", "prefill"),
+        ("decode", "chat,completions", "chat,completions", "decode"),
+        ("agg", "chat,completions", "chat,completions", "aggregated"),
+        ("decode", "completions", "completions", "decode"),
+        ("agg", "chat", "chat", "aggregated"),
     ],
 )
 async def test_lora_registration_model_type_gate(
-    monkeypatch, serving_mode, endpoint_types, expected_model_type_str
+    monkeypatch,
+    serving_mode,
+    endpoint_types,
+    expected_model_type_str,
+    expected_worker_type,
 ):
-    """LoraMixin.load_lora must select model_type based on serving_mode.
+    """LoraMixin.load_lora must select (model_type, worker_type) based on serving_mode.
 
-    PREFILL → ModelType.Prefill (so the prefill router activates and the frontend
-    does not route chat completions directly to prefill).
-    Otherwise → parse_endpoint_types(endpoint_types) (mirrors base-model
-    registration so --endpoint-types overrides are honored).
+    PREFILL → (ModelType.Prefill, WorkerType.Prefill). The prefill router
+    activates off worker_type; ModelType carries the legacy Prefill marker bit
+    (no OpenAI surface, dual-emitted for old-frontend compat). Otherwise
+    model_type follows parse_endpoint_types and worker_type follows the serving
+    mode.
     """
     from unittest.mock import AsyncMock, MagicMock
 
@@ -555,4 +659,7 @@ async def test_lora_registration_model_type_gate(
     assert (
         str(captured["model_type"]) == expected_model_type_str
     ), f"model_type {captured['model_type']} != expected {expected_model_type_str}"
+    assert (
+        str(captured["worker_type"]) == expected_worker_type
+    ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"

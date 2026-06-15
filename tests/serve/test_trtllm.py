@@ -221,12 +221,16 @@ trtllm_configs = {
             router_selection_chat_payload_default(
                 expected_log=[
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker .*worker_id=\d+ worker_type=\w+ dp_rank=\d+ logit=",
                 ]
             ),
         ],
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
+            # Disable ANSI so structured tracing fields render as plain
+            # `key=value` (color codes otherwise split `worker_id`/`=`/value and
+            # break the expected_log regex).
+            "DYN_SDK_DISABLE_ANSI_LOGGING": "1",
         },
     ),
     "disaggregated_router": TRTLLMConfig(
@@ -597,14 +601,16 @@ trtllm_configs = {
             pytest.mark.post_merge,
             pytest.mark.skip(reason="DIS-1566"),
             pytest.mark.timeout(
-                480
-            ),  # 3x measured time (83.85s) + download time (210s) for 7B model
+                300
+            ),  # 1.1B loads quickly; margin covers CI model download
         ],
-        model="deepseek-ai/deepseek-llm-7b-base",
+        # Base model with NO chat template (the point of completions_only),
+        # matching the vllm/sglang configs. Replaces deepseek-llm-7b-base (7B).
+        model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         script_args=["--dyn-endpoint-types", "completions"],
         env={
-            "MODEL_PATH": "deepseek-ai/deepseek-llm-7b-base",
-            "SERVED_MODEL_NAME": "deepseek-ai/deepseek-llm-7b-base",
+            "MODEL_PATH": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+            "SERVED_MODEL_NAME": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         },
         request_payloads=[
             completion_payload_default(),
@@ -675,7 +681,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
     """
 
     # Enable HelloWorld logits processor only for this test
-    monkeypatch.setenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR", "1")
+    monkeypatch.setenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR", "1")
 
     base = trtllm_configs["aggregated"]
     config = TRTLLMConfig(

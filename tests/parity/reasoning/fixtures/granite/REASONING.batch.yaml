@@ -142,3 +142,27 @@ cases:
     description: Open Granite reasoning interrupted by downstream tool-call text is not covered by a paired Dynamo tool call parser
     ref: *upstream_ref
     reason: Granite reasoning parsing has no paired Dynamo tool call parser fixture or open-reasoning tool boundary in this seed fixture set.
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: ''
+    expected:
+      dynamo:
+        unavailable: 'Pattern not applicable: granite does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
+      vllm:
+        unavailable: 'Pattern not applicable: granite does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
+      sglang:
+        unavailable: "UNAVAILABLE: SGLang has no reasoning parser for family='granite'"
+  REASONING.batch.3.c:
+    description: Recipientless Harmony commentary is not applicable to Granite
+    reason: Granite does not use Harmony commentary channels; visible text and reasoning are separated by Granite thought-process and response markers.
+  REASONING.batch.3.d:
+    description: Directed Harmony commentary tool calls are not applicable to Granite
+    reason: Granite does not use Harmony `commentary to=functions.*` envelopes and has no paired Dynamo Harmony tool-call parser fixture.
+  REASONING.batch.3.e:
+    description: Directed Harmony analysis tool calls are not applicable to Granite
+    reason: Granite does not use Harmony `analysis to=functions.*` envelopes; reasoning is represented by Granite thought-process markers.
+  REASONING.batch.3.f:
+    description: Harmony analysis/commentary/final channel sequencing is not applicable to Granite
+    reason: Granite has no Harmony channel protocol, so mixed analysis, commentary tool call, and final-channel sequencing is outside its grammar.

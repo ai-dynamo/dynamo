@@ -33,6 +33,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.7.b:
     description: Unicode + escaped chars
     ref: dynamo
@@ -55,6 +56,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.7.c:
     description: Schema mismatch — string value where schema declares integer
     ref: dynamo
@@ -77,6 +79,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.7.d:
     description: Nested object + array
     ref: dynamo
@@ -106,6 +109,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.7.e:
     description: Large / deep JSON-edge argument payload
     ref: dynamo
@@ -164,6 +168,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   TOOLCALLING.batch.7.f:
     description: Numeric precision edge preserves integer-like number literal
     ref: inferhub live capture on nvidia/mistralai/mixtral-8x22b-instruct-v01

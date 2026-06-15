@@ -197,7 +197,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -224,6 +224,7 @@ impl KvRouterConfig {
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
         mut overlap_score_credit: f64,
+        overlap_score_credit_decay: f64,
         mut prefill_load_scale: f64,
         router_queue_by_incoming_missing_isl: Option<Vec<(usize, usize)>>,
     ) -> PyResult<Self> {
@@ -237,6 +238,7 @@ impl KvRouterConfig {
 
         let inner = RsKvRouterConfig {
             overlap_score_credit,
+            overlap_score_credit_decay,
             prefill_load_scale,
             host_cache_hit_weight,
             disk_cache_hit_weight,
@@ -302,6 +304,20 @@ impl KvRouterConfig {
     }
 
     #[getter]
+    fn overlap_score_credit_decay(&self) -> f64 {
+        self.inner.overlap_score_credit_decay
+    }
+
+    #[setter]
+    fn set_overlap_score_credit_decay(&mut self, value: f64) -> PyResult<()> {
+        let mut inner = self.inner.clone();
+        inner.overlap_score_credit_decay = value;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    #[getter]
     fn overlap_score_weight(&self) -> f64 {
         self.inner.prefill_load_scale
     }
@@ -333,16 +349,20 @@ impl KvRouterConfig {
         Ok(())
     }
 
-    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, prefill_load_scale=None))]
+    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, overlap_score_credit_decay=None, prefill_load_scale=None))]
     fn with_overrides(
         &self,
         overlap_score_weight: Option<f64>,
         overlap_score_credit: Option<f64>,
+        overlap_score_credit_decay: Option<f64>,
         prefill_load_scale: Option<f64>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(credit) = overlap_score_credit {
             inner.overlap_score_credit = credit;
+        }
+        if let Some(decay) = overlap_score_credit_decay {
+            inner.overlap_score_credit_decay = decay;
         }
         if let Some(scale) = prefill_load_scale {
             inner.prefill_load_scale = scale;
@@ -437,7 +457,6 @@ pub(crate) struct EntrypointArgs {
     model_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: Option<u32>,
@@ -452,6 +471,7 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
+    is_decode: bool,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
@@ -462,14 +482,13 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
         model_path: Option<PathBuf>,
         model_name: Option<String>, // e.g. "dyn://namespace.component.endpoint"
         endpoint_id: Option<String>,
-        context_length: Option<u32>,
         template_file: Option<PathBuf>,
         router_config: Option<RouterConfig>,
         kv_cache_block_size: Option<u32>,
@@ -484,6 +503,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         namespace_prefix: Option<String>,
         is_prefill: bool,
+        is_decode: bool,
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
@@ -522,7 +542,6 @@ impl EntrypointArgs {
             model_path,
             model_name,
             endpoint_id: endpoint_id_obj,
-            context_length,
             template_file,
             router_config,
             kv_cache_block_size,
@@ -537,6 +556,7 @@ impl EntrypointArgs {
             namespace,
             namespace_prefix,
             is_prefill,
+            is_decode,
             migration_limit,
             migration_max_seq_len,
             chat_engine_factory,
@@ -568,7 +588,6 @@ pub fn make_engine<'p>(
                 .or_else(|| args.model_path.clone().map(|p| p.display().to_string())),
         )
         .endpoint_id(args.endpoint_id.clone())
-        .context_length(args.context_length)
         .request_template(args.template_file.clone())
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
@@ -747,7 +766,7 @@ async fn select_engine(
                 let moe_ep_size = mocker_args.aic_moe_ep_size;
                 let attention_dp_size = mocker_args.aic_attention_dp_size;
                 let nextn = mocker_args.aic_nextn;
-                let nextn_accept_rates = mocker_args.aic_nextn_accept_rates.as_deref();
+                let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
                 match Python::with_gil(|py| {
                     create_aic_callback(
                         py,
@@ -760,7 +779,7 @@ async fn select_engine(
                         moe_ep_size,
                         attention_dp_size,
                         nextn,
-                        nextn_accept_rates,
+                        undiscounted_accept_rates.as_deref(),
                     )
                 }) {
                     Ok(callback) => {
@@ -791,6 +810,7 @@ async fn select_engine(
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
+                is_decode: args.is_decode,
             }
         }
     };

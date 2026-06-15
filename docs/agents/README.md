@@ -18,6 +18,7 @@ telemetry, routing hints, and backend-specific cache behavior.
 | [Agent Hints](agent-hints.md) | Optional per-request hints such as priority, expected output length, and speculative prefill. |
 | [Priority Scheduling](priority-scheduling.md) | Request priority semantics across the router queue, backend engines, and cache policy. |
 | [Use Pi-Mono with Dynamo](pi-mono.md) | End-to-end quickstart that drives the Pi coding agent through Dynamo with agent context and tool tracing turned on. |
+| [ThunderAgent Program Scheduler](thunderagent-router.md) | Experimental program-level scheduler with tool-boundary pause/resume on top of KV-aware routing: the 5s scheduler tick, the utilization-driven control loop and its knobs, and scheduler observability. |
 | [Tool Calling](../tool-calling/README.md) | Supported tool-call parsers and parser names, plus engine-fallback configurations. |
 | [Reasoning](../reasoning/README.md) | Supported reasoning parsers for chain-of-thought models, plus engine-fallback configurations. |
 

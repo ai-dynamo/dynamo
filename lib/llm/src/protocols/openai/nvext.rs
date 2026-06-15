@@ -251,13 +251,13 @@ impl NvExtResponseFieldSelection {
     /// - emitting provider-specific debug tracing (`"completions nvext"` vs
     ///   `"chat completion nvext"` labels) so log filtering still works.
     ///
-    /// Gating rules match the previous per-site logic byte-for-byte:
+    /// Gating rules:
     ///
     /// - `worker_id` requires the selection flag **and** `tracker.get_worker_info()` to return `Some`.
-    /// - `token_ids` requires the selection flag **and** a `"token_ids"` key on `disaggregated_params`
-    ///   that deserializes into `Vec<u32>`; malformed values silently fall back to `None`.
-    /// - `routed_experts` requires the selection flag **and** a `"routed_experts"` key on
-    ///   `disaggregated_params` (cloned as-is, no validation).
+    /// - `token_ids` requires the selection flag **and** a query-only tokenized prompt stashed on
+    ///   the tracker (`tracker.query_token_ids()`); only the GAIE `query_instance_id` flow sets it.
+    /// - `routed_experts` requires the selection flag **and** a `"routed_experts"` key on the
+    ///   engine's `engine_data` passthrough (cloned as-is, no validation).
     /// - `timing` requires the selection flag, `finish_reason_present == true`, **and** a tracker.
     /// - `engine_data` requires the selection flag **and** a non-`None` `engine_data_from_backend`.
     /// - `stop_reason` requires the selection flag **and** a non-`None` `stop_reason_from_backend`.
@@ -265,7 +265,6 @@ impl NvExtResponseFieldSelection {
     pub fn build_response_nvext(
         &self,
         tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
-        disaggregated_params: Option<&serde_json::Value>,
         finish_reason_present: bool,
         engine_data_from_backend: Option<serde_json::Value>,
         stop_reason_from_backend: Option<StopReason>,
@@ -279,16 +278,17 @@ impl NvExtResponseFieldSelection {
         };
 
         let token_ids = if self.token_ids {
-            disaggregated_params
-                .and_then(|params| params.get("token_ids"))
-                .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok())
+            tracker.and_then(|t| t.query_token_ids().map(<[u32]>::to_vec))
         } else {
             None
         };
 
+        // Routed experts ride the engine's opaque `engine_data` passthrough; pull the key
+        // out before `engine_data` itself is (optionally) moved into its own response field.
         let routed_experts = if self.routed_experts {
-            disaggregated_params
-                .and_then(|params| params.get("routed_experts"))
+            engine_data_from_backend
+                .as_ref()
+                .and_then(|data| data.get("routed_experts"))
                 .cloned()
         } else {
             None
@@ -389,6 +389,28 @@ pub struct RoutingConstraintsSchema {
     pub preferred_taints: std::collections::HashMap<String, f32>,
 }
 
+/// Destination for large backend metadata uploaded out of band.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataUpload {
+    #[serde(deserialize_with = "deserialize_metadata_upload_url")]
+    pub url: String,
+}
+
+fn deserialize_metadata_upload_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let url = String::deserialize(deserializer)?;
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(serde::de::Error::custom(
+            "metadata_upload.url must not be empty",
+        ));
+    }
+    Ok(url.to_string())
+}
+
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -455,6 +477,11 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Upload large backend metadata before the final response is emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub metadata_upload: Option<MetadataUpload>,
 
     /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
     /// When set, the request will be routed to this specific prefill worker.
@@ -529,6 +556,13 @@ pub struct AgentHints {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+
+    /// Strict router pending-queue priority tier.
+    /// Higher values are always ordered ahead of lower values before applying
+    /// the configured router queue policy.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
 
     /// Expected output sequence length (number of output tokens).
     /// Used as a hint for routing decisions to estimate resource requirements
@@ -644,6 +678,7 @@ mod tests {
         assert_eq!(nv_ext.max_thinking_tokens, None);
         assert_eq!(nv_ext.cache_salt, None);
         assert_eq!(nv_ext.extra_fields, None);
+        assert_eq!(nv_ext.metadata_upload, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
@@ -674,6 +709,18 @@ mod tests {
         assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_agent_hints_strict_priority_serde() {
+        let hints: AgentHints = serde_json::from_str(r#"{"strict_priority":3}"#).unwrap();
+        assert_eq!(hints.strict_priority, Some(3));
+        assert_eq!(
+            serde_json::to_string(&hints).unwrap(),
+            r#"{"strict_priority":3}"#
+        );
+
+        assert!(serde_json::from_str::<AgentHints>(r#"{"strict_priority":-1}"#).is_err());
     }
 
     // Test GAIE Stage 2 disaggregated worker IDs
@@ -813,6 +860,44 @@ mod tests {
     }
 
     #[test]
+    fn test_metadata_upload_parses_url() {
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "metadata_upload": {
+                "url": " s3://bucket/root/rollouts "
+            }
+        }))
+        .unwrap();
+
+        let upload = nvext.metadata_upload.as_ref().unwrap();
+        assert_eq!(upload.url, "s3://bucket/root/rollouts");
+        assert!(!NvExtResponseFieldSelection::from_nvext(Some(&nvext)).engine_data);
+
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {
+                    "url": ""
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {
+                    "url": "s3://bucket/root/rollouts",
+                    "format": "json"
+                }
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn test_nvext_response_field_selection_query_instance_id_exception() {
         let nvext = NvExt::builder()
             .annotations(vec!["query_instance_id:".to_string()])
@@ -921,11 +1006,34 @@ mod tests {
         tracker
     }
 
-    fn disagg_params_full() -> serde_json::Value {
-        serde_json::json!({
-            "token_ids": [11u32, 22u32, 33u32],
-            "routed_experts": {"layer_0": [1, 3]},
-        })
+    /// Engine passthrough carrying routed_experts (the SGLang shape).
+    fn engine_data_with_routed_experts() -> serde_json::Value {
+        serde_json::json!({ "routed_experts": {"layer_0": [1, 3]} })
+    }
+
+    /// Tracker seeded with a query-only tokenized prompt (GAIE Stage 1).
+    fn tracker_with_query_token_ids()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+        use crate::protocols::common::timing::RequestTracker;
+        let tracker = std::sync::Arc::new(RequestTracker::new());
+        tracker.set_external_query_token_ids(vec![11u32, 22, 33]);
+        tracker
+    }
+
+    /// Tracker seeded the way the split-router query-only (`query_instance_id`) path does: a
+    /// standalone router forwards `WorkerIdInfo` on `routing_data.worker_id`, which the
+    /// frontend drains onto the tracker via `set_external_worker_info`.
+    fn tracker_with_forwarded_worker_info()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+        use crate::protocols::common::timing::RequestTracker;
+        let tracker = std::sync::Arc::new(RequestTracker::new());
+        tracker.set_external_worker_info(WorkerIdInfo {
+            prefill_worker_id: Some(7),
+            prefill_dp_rank: Some(1),
+            decode_worker_id: Some(9),
+            decode_dp_rank: Some(2),
+        });
+        tracker
     }
 
     // ---------------------------------------------------------------------
@@ -934,12 +1042,12 @@ mod tests {
     fn test_build_response_nvext_all_false_returns_none() {
         let sel = sel_all_false();
         assert!(
-            sel.build_response_nvext(None, None, false, None, None, None, None)
+            sel.build_response_nvext(None, false, None, None, None, None)
                 .is_none(),
             "no fields selected → None"
         );
         assert!(
-            sel.build_response_nvext(None, None, true, None, None, None, None)
+            sel.build_response_nvext(None, true, None, None, None, None)
                 .is_none(),
             "finish_reason alone does not force emission"
         );
@@ -955,13 +1063,40 @@ mod tests {
 
         // finish_reason=false: worker_id still emitted (only timing is finish-gated).
         let out = sel
-            .build_response_nvext(Some(&tracker), None, false, None, None, None, None)
+            .build_response_nvext(Some(&tracker), false, None, None, None, None)
             .expect("worker_id should emit regardless of finish_reason");
 
         assert!(out.worker_id.is_some());
         assert!(out.timing.is_none());
         assert!(out.token_ids.is_none());
         assert!(out.routed_experts.is_none());
+    }
+
+    #[test]
+    fn test_build_response_nvext_surfaces_forwarded_split_router_worker_id() {
+        // Regression: split-router query_instance_id responses forward worker attribution on
+        // `routing_data.worker_id`. The frontend drains it onto the tracker, so nvext must
+        // carry the forwarded IDs. Previously the worker_id was dropped and nvext.worker_id
+        // came back None, losing worker attribution on the query-only path.
+        let sel = NvExtResponseFieldSelection {
+            worker_id: true,
+            ..Default::default()
+        };
+        let tracker = tracker_with_forwarded_worker_info();
+
+        let out = sel
+            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .expect("forwarded worker_id should surface in nvext");
+
+        assert_eq!(
+            out.worker_id,
+            Some(WorkerIdInfo {
+                prefill_worker_id: Some(7),
+                prefill_dp_rank: Some(1),
+                decode_worker_id: Some(9),
+                decode_dp_rank: Some(2),
+            })
+        );
     }
 
     #[test]
@@ -974,7 +1109,7 @@ mod tests {
 
         // timing alone + finish_reason=false → nothing to emit, returns None.
         assert!(
-            sel.build_response_nvext(Some(&tracker), None, false, None, None, None, None)
+            sel.build_response_nvext(Some(&tracker), false, None, None, None, None)
                 .is_none(),
             "timing is gated on finish_reason_present"
         );
@@ -989,7 +1124,7 @@ mod tests {
         let tracker = tracker_with_prefill_worker();
 
         let out = sel
-            .build_response_nvext(Some(&tracker), None, true, None, None, None, None)
+            .build_response_nvext(Some(&tracker), true, None, None, None, None)
             .expect("timing should emit on finish");
 
         assert!(out.timing.is_some());
@@ -1006,21 +1141,21 @@ mod tests {
         };
         // finish=true but no tracker → timing not populated → None.
         assert!(
-            sel.build_response_nvext(None, None, true, None, None, None, None)
+            sel.build_response_nvext(None, true, None, None, None, None)
                 .is_none()
         );
     }
 
     #[test]
-    fn test_build_response_nvext_token_ids_from_disagg_params() {
+    fn test_build_response_nvext_token_ids_from_tracker() {
         let sel = NvExtResponseFieldSelection {
             token_ids: true,
             ..Default::default()
         };
-        let params = disagg_params_full();
+        let tracker = tracker_with_query_token_ids();
 
         let out = sel
-            .build_response_nvext(None, Some(&params), false, None, None, None, None)
+            .build_response_nvext(Some(&tracker), false, None, None, None, None)
             .expect("token_ids should emit when present");
 
         assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
@@ -1030,31 +1165,31 @@ mod tests {
     }
 
     #[test]
-    fn test_build_response_nvext_token_ids_malformed_falls_back_to_none() {
+    fn test_build_response_nvext_token_ids_absent_without_tracker_seed() {
         let sel = NvExtResponseFieldSelection {
             token_ids: true,
             ..Default::default()
         };
-        // String payload cannot deserialize into Vec<u32> — matches existing `.ok()` behavior.
-        let params = serde_json::json!({ "token_ids": "not-an-array" });
+        // Tracker without a query-only prompt seeded → nothing to emit.
+        let tracker = std::sync::Arc::new(crate::protocols::common::timing::RequestTracker::new());
 
         assert!(
-            sel.build_response_nvext(None, Some(&params), false, None, None, None, None)
+            sel.build_response_nvext(Some(&tracker), false, None, None, None, None)
                 .is_none(),
-            "malformed token_ids silently suppressed; nothing else selected → None"
+            "no query token_ids on the tracker; nothing else selected → None"
         );
     }
 
     #[test]
-    fn test_build_response_nvext_routed_experts_cloned_as_is() {
+    fn test_build_response_nvext_routed_experts_from_engine_data() {
         let sel = NvExtResponseFieldSelection {
             routed_experts: true,
             ..Default::default()
         };
-        let params = disagg_params_full();
+        let engine_data = engine_data_with_routed_experts();
 
         let out = sel
-            .build_response_nvext(None, Some(&params), false, None, None, None, None)
+            .build_response_nvext(None, false, Some(engine_data), None, None, None)
             .expect("routed_experts should emit when present");
 
         assert_eq!(
@@ -1072,7 +1207,6 @@ mod tests {
 
         let out = sel
             .build_response_nvext(
-                None,
                 None,
                 true,
                 None,
@@ -1097,7 +1231,7 @@ mod tests {
         };
 
         assert!(
-            sel.build_response_nvext(None, None, true, None, None, None, None)
+            sel.build_response_nvext(None, true, None, None, None, None)
                 .is_none()
         );
     }
@@ -1115,10 +1249,11 @@ mod tests {
             prompt_logprobs: false,
         };
         let tracker = tracker_with_prefill_worker();
-        let params = disagg_params_full();
+        tracker.set_external_query_token_ids(vec![11u32, 22, 33]);
+        let engine_data = engine_data_with_routed_experts();
 
         let out = sel
-            .build_response_nvext(Some(&tracker), Some(&params), true, None, None, None, None)
+            .build_response_nvext(Some(&tracker), true, Some(engine_data), None, None, None)
             .expect("all fields selected and available → Some");
 
         assert!(out.worker_id.is_some());
@@ -1165,7 +1300,7 @@ mod tests {
         };
         let chunk_tokens: &[u32] = &[101, 102, 103];
         let out = sel
-            .build_response_nvext(None, None, false, None, None, Some(chunk_tokens), None)
+            .build_response_nvext(None, false, None, None, Some(chunk_tokens), None)
             .expect("completion_token_ids must be present when requested + provided");
         assert_eq!(out.completion_token_ids, Some(vec![101u32, 102, 103]));
         // Accumulation happens in the response aggregator.
@@ -1194,14 +1329,14 @@ mod tests {
 
         // Intermediate chunk (no finish): suppressed.
         assert!(
-            sel.build_response_nvext(None, None, false, None, None, None, Some(payload.clone()))
+            sel.build_response_nvext(None, false, None, None, None, Some(payload.clone()))
                 .is_none(),
             "prompt_logprobs must be suppressed on intermediate chunks"
         );
 
         // Final chunk: surfaced.
         let out = sel
-            .build_response_nvext(None, None, true, None, None, None, Some(payload.clone()))
+            .build_response_nvext(None, true, None, None, None, Some(payload.clone()))
             .expect("prompt_logprobs must emit on the final chunk");
         let got = out.prompt_logprobs.expect("prompt_logprobs payload");
         assert_eq!(got.len(), 2);

@@ -25,6 +25,7 @@ import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
+    _flatten_message_content,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _parse_json_array_buffer,
@@ -248,6 +249,25 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             None,
         )
         assert result["output_options"]["logprobs"] is None
+
+    def test_metadata_upload_nvext_is_forwarded_to_backend(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {
+                    "metadata_upload": {
+                        "url": "s3://bucket/root/rollouts",
+                    },
+                },
+            },
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["extra_args"]["nvext"]["metadata_upload"] == {
+            "url": "s3://bucket/root/rollouts",
+        }
 
     def test_model_name_and_token_ids(self):
         """Model name and token_ids are set correctly."""
@@ -931,6 +951,41 @@ class TestNormalizePromptTokenIds:  # FRONTEND.6 — prompt-token-id normalizati
         assert _normalize_prompt_token_ids(
             {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
         ) == [1, 2, 3]
+
+
+class TestFlattenMessageContent:  # FRONTEND.1 — DSv4 content-parts array → string
+    # Mirrors SGLang's "string" content format (serving_chat._process_messages):
+    # text parts joined by a single space, non-text parts dropped.
+    def test_string_passes_through(self):
+        assert _flatten_message_content("hello") == "hello"
+
+    def test_none_passes_through(self):
+        assert _flatten_message_content(None) is None
+
+    def test_single_text_part(self):
+        # The common case that crashed the DSv4 encoder.
+        assert _flatten_message_content([{"type": "text", "text": "hi"}]) == "hi"
+
+    def test_text_parts_array_is_space_joined(self):
+        content = [
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ]
+        assert _flatten_message_content(content) == "first second"
+
+    def test_non_text_parts_are_dropped(self):
+        content = [
+            {"type": "text", "text": "caption"},
+            {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
+        ]
+        assert _flatten_message_content(content) == "caption"
+
+    def test_bare_string_items_are_ignored(self):
+        # SGLang's string format only flattens {"type": "text"} dict parts.
+        assert _flatten_message_content(["a", "b"]) == ""
+
+    def test_empty_array_becomes_empty_string(self):
+        assert _flatten_message_content([]) == ""
 
 
 class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from runtime config

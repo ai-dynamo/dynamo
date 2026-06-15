@@ -33,9 +33,9 @@ spec:
           jsonPath: .status.phase
           name: Phase
           type: string
-        - description: Identity hash of the checkpoint
-          jsonPath: .status.identityHash
-          name: Hash
+        - description: Artifact ID of the checkpoint
+          jsonPath: .status.checkpointID
+          name: CheckpointID
           type: string
         - jsonPath: .metadata.creationTimestamp
           name: Age
@@ -146,48 +146,62 @@ spec:
                     - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
                       rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                 identity:
-                  description: Identity defines the inputs that determine checkpoint equivalence
+                  description: |-
+                    Deprecated: required by v1alpha1 for standalone checkpoints. Auto
+                    checkpoints synthesize it; checkpointRef restores use the referenced CR.
                   properties:
                     backendFramework:
-                      description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                      description: |-
+                        BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                        Deprecated: legacy spec.identity only.
                       enum:
                         - vllm
                         - sglang
                         - trtllm
                       type: string
                     dtype:
-                      description: Dtype is the data type (fp16, bf16, fp8, etc.)
+                      description: |-
+                        Dtype is the data type (fp16, bf16, fp8, etc.).
+                        Deprecated: legacy spec.identity only.
                       type: string
                     dynamoVersion:
                       description: |-
-                        DynamoVersion is the Dynamo platform version (optional)
-                        If not specified, version is not included in identity hash
-                        This ensures checkpoint compatibility across Dynamo releases
+                        DynamoVersion is the Dynamo platform version (optional).
+                        Deprecated: legacy spec.identity only.
                       type: string
                     extraParameters:
                       additionalProperties:
                         type: string
                       description: |-
-                        ExtraParameters are additional parameters that affect the checkpoint hash
-                        Use for any framework-specific or custom parameters not covered above
+                        ExtraParameters are additional parameters that affect the checkpoint hash.
+                        Use for any framework-specific or custom parameters not covered above.
+                        Deprecated: legacy spec.identity only.
                       type: object
                     maxModelLen:
-                      description: MaxModelLen is the maximum sequence length
+                      description: |-
+                        MaxModelLen is the maximum sequence length.
+                        Deprecated: legacy spec.identity only.
                       format: int32
                       minimum: 1
                       type: integer
                     model:
-                      description: Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+                      description: |-
+                        Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+                        Deprecated: legacy spec.identity only.
                       type: string
                     pipelineParallelSize:
                       default: 1
-                      description: PipelineParallelSize is the pipeline parallel configuration
+                      description: |-
+                        PipelineParallelSize is the pipeline parallel configuration.
+                        Deprecated: checkpoint launch uses the pod template instead.
                       format: int32
                       minimum: 1
                       type: integer
                     tensorParallelSize:
                       default: 1
-                      description: TensorParallelSize is the tensor parallel configuration
+                      description: |-
+                        TensorParallelSize is the tensor parallel configuration.
+                        Deprecated: checkpoint launch uses the pod template instead.
                       format: int32
                       minimum: 1
                       type: integer
@@ -8316,6 +8330,9 @@ spec:
             status:
               description: DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
               properties:
+                checkpointID:
+                  description: CheckpointID is the artifact ID used by the snapshot protocol.
+                  type: string
                 conditions:
                   description: 'DEPRECATED: Conditions are deprecated. Use status.phase instead.'
                   items:
@@ -8378,8 +8395,9 @@ spec:
                   type: string
                 identityHash:
                   description: |-
-                    IdentityHash is the computed hash of the checkpoint identity
-                    This hash is used to identify equivalent checkpoints
+                    IdentityHash is the computed hash of the checkpoint identity.
+                    Deprecated: use CheckpointID. This field is retained for compatibility
+                    with older status consumers.
                   type: string
                 jobName:
                   description: JobName is the name of the checkpoint creation Job

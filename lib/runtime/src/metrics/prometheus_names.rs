@@ -91,6 +91,10 @@ pub mod name_prefix {
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
 
+    /// Prefix for request admission/rejection control metrics (e.g.
+    /// `dynamo_rejection_request_total`).
+    pub const REJECTION: &str = "dynamo_rejection";
+
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 
@@ -750,6 +754,15 @@ pub mod trtllm_additional {
 
     /// KV cache transfer speed per request in GB/s
     pub const KV_TRANSFER_SPEED_GB_S: &str = "trtllm_kv_transfer_speed_gb_s";
+
+    /// Configured maximum number of TRT-LLM KV events buffered before older events are dropped
+    pub const KV_EVENT_BUFFER_CAPACITY: &str = "trtllm_kv_event_buffer_capacity";
+
+    /// Number of TRT-LLM KV events returned to Dynamo in one polling drain
+    pub const KV_EVENT_DRAIN_BATCH_SIZE: &str = "trtllm_kv_event_drain_batch_size";
+
+    /// Total number of missing TRT-LLM KV event IDs detected by Dynamo
+    pub const KV_EVENT_ID_GAP_EVENTS_TOTAL: &str = "trtllm_kv_event_id_gap_events_total";
 }
 
 // KV cache statistics metrics

@@ -123,7 +123,7 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--enable-anthropic-api` | `DYN_ENABLE_ANTHROPIC_API` | `false` | Enable `/v1/messages` (Anthropic Messages API) |
-| `--dyn-chat-processor` | `DYN_CHAT_PROCESSOR` | `dynamo` | Chat processor: `dynamo` or `vllm` |
+| `--dyn-chat-processor` | `DYN_CHAT_PROCESSOR` | `dynamo` | Chat processor: `dynamo` (default), `vllm`, or `sglang`. See [Parser Configuration](../../tool-calling/parser-configuration.md) for how this combines with the parser flags. |
 | `--dyn-debug-perf` | `DYN_DEBUG_PERF` | `false` | Log per-function timing for preprocessing (vllm processor only) |
 | `--dyn-preprocess-workers` | `DYN_PREPROCESS_WORKERS` | `0` | Worker processes for CPU-bound preprocessing. 0 = main event loop (vllm processor only) |
 | `-i` / `--interactive` | `DYN_INTERACTIVE` | `false` | Interactive text chat mode |
@@ -161,8 +161,19 @@ The frontend exposes the following HTTP endpoints:
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/openapi.json` | OpenAPI specification |
 | `GET` | `/docs` | Swagger UI |
-| `POST` | `/busy_threshold` | Set busy thresholds |
-| `GET` | `/busy_threshold` | Get current busy thresholds |
+| `POST` | `/busy_threshold` | Set busy thresholds (gated by `DYN_ENABLE_FRONTEND_ADMIN_API`, see below) |
+| `GET` | `/busy_threshold` | Get current busy thresholds (gated by `DYN_ENABLE_FRONTEND_ADMIN_API`, see below) |
+
+### Frontend feature switches
+
+Environment variables controlling frontend extensions. Extensions are enabled by default. When deploying, consider whether each is needed for your use case; if not, disable it to prevent accidental abuse.
+
+Set an env value of `0` / `false` / `no` / `off` (case-insensitive) to disable.
+
+| Env Var | Default | Behavior when `false` |
+|---------|---------|------------------------|
+| `DYN_ENABLE_FRONTEND_NVEXT` | `true` | Frontend drops `request.nvext` at handler entry on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and `/v1/embeddings`; ignores routing-override headers (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`, `x-data-parallel-rank`, `x-prefill-dp-rank`); silently ignores the response-side `nvext.extra_fields` opt-in. Note: disabling this breaks EPP / GAIE serving, Prime-RL-style training that uses `nvext.cache_salt`, multi-tenant agent platforms that forward `nvext.agent_hints` / `nvext.agent_context`, and clients that opt into response disclosure via `nvext.extra_fields`. |
+| `DYN_ENABLE_FRONTEND_ADMIN_API` | `true` | `GET /busy_threshold` and `POST /busy_threshold` are not registered (404 instead of 503). Inference, metrics, models, health, and liveness routes are unaffected. |
 
 ### Endpoint Path Customization
 
