@@ -316,7 +316,6 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let completion_token_ids_slice: &[u32] = &delta.token_ids;
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
-            delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
@@ -466,12 +465,12 @@ mod tests {
             stop_reason: None,
             index: Some(0),
             completion_usage: None,
-            disaggregated_params: Some(serde_json::json!({
-                "token_ids": [11, 22, 33],
+            disaggregated_params: None,
+            worker_trace_link: None,
+            // routed_experts rides the engine's opaque passthrough.
+            engine_data: Some(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
             })),
-            worker_trace_link: None,
-            engine_data: None,
             routing_data: None,
         }
     }
@@ -614,6 +613,11 @@ mod tests {
         generator
             .tracker()
             .record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        // The query-only tokenized prompt reaches the delta generator via the tracker,
+        // mirroring the standalone-router round-trip the preprocessor drains.
+        generator
+            .tracker()
+            .set_external_query_token_ids(vec![11, 22, 33]);
 
         let response = generator
             .choice_from_postprocessor(final_backend_output())

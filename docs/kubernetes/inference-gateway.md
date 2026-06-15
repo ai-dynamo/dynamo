@@ -18,7 +18,7 @@ Integrate Dynamo with the Gateway API Inference Extension, also known as Inferen
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](../../recipes/qwen3-0.6b/vllm/agg/gaie).
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
@@ -184,6 +184,7 @@ resolution and router configuration:
 | `DYN_NAMESPACE` | `vllm-agg` | Dynamo discovery namespace (fallback) |
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component name |
 | `DYN_ENFORCE_DISAGG` | `false` | Enforce disaggregated prefill/decode routing |
+| `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode; Rust EPP currently rejects `container` |
 | `RUST_LOG` | `info` | Tracing log level filter |
 
 The gRPC port is hardcoded to `9002` (matching the operator's `EPPGRPCPort` constant).
@@ -192,14 +193,23 @@ Namespace resolution follows the same logic as the Go EPP plugin:
 `DYN_NAMESPACE_PREFIX` > `DYN_NAMESPACE` > `"vllm-agg"` (default).
 
 The Rust EPP also respects the standard Dynamo router environment variables
-(`DYN_OVERLAP_SCORE_WEIGHT`, `DYN_ROUTER_TEMPERATURE`, `DYN_USE_KV_EVENTS`, etc.)
-documented in the Configuration section below.
+(`DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`, `DYN_ROUTER_PREFILL_LOAD_SCALE`,
+`DYN_ROUTER_TEMPERATURE`, `DYN_USE_KV_EVENTS`, etc.) documented in the
+Configuration section below. The deprecated overlap-weight aliases remain
+supported with the same precedence as the Go EPP.
 
 > [!NOTE]
 > The Rust EPP is experimental. It uses Dynamo's native discovery system
 > (`DistributedRuntime`) instead of the GAIE Kubernetes controllers, so it
 > does not require `InferencePool` or `InferenceModel` CRDs for endpoint
 > discovery. It discovers workers through Dynamo's own registration mechanism.
+
+> [!WARNING]
+> The Rust EPP currently supports only pod-level Kubernetes discovery. Deploy
+> one Rust EPP replica per pool because request selection and booking are not
+> yet atomic across concurrent EPP replicas. After a worker-generation rolling
+> update, restart the Rust EPP so it binds to the new generation namespace.
+> Exact streamed output-block updates are also not yet wired into the Rust EPP.
 
 #### `InferencePool` and the data plane (Istio, kGateway, Agentgateway)
 
@@ -304,18 +314,36 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 
 - When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
 - The FrontEnd must run with `--router-mode direct` so that it respects the EPP's routing decisions passed via request headers.
-- Use the `frontendSidecar` field on a worker service to have the operator automatically inject a fully configured frontend sidecar container with all required Dynamo env vars, probes, and ports:
+- In v1beta1 DGD manifests, set the `frontendSidecar` field on a worker
+  component to the name of a container in that component's pod template. The
+  operator merges the required Dynamo env vars, probes, and ports into that
+  sidecar container:
 
 ```yaml
-frontendSidecar:
-  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
-  args:
-    - --router-mode
-    - direct
-  envFromSecret: hf-token-secret
+frontendSidecar: sidecar-frontend
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+        command:
+          - /bin/sh
+          - -c
+        args:
+          - python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME
+      - name: sidecar-frontend
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+        args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+        envFrom:
+          - secretRef:
+              name: hf-token-secret
 ```
 
-- The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
+- The pre-selected workers (decode and prefill in case of disaggregated serving) are passed in request headers and injected into the request routing hints.
 - The `--router-mode direct` flag ensures the routing respects this selection.
 
 **Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
@@ -365,6 +393,7 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
+- `DYN_ROUTER_PREDICTED_TTL_SECS` — Enable predict-on-route entries with this TTL in seconds
 - See the [KV cache routing design](../design-docs/router-design.md) for details.
 
 

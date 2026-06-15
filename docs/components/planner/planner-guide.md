@@ -167,21 +167,27 @@ The same diagnostic signals surfaced in these reports are also exported as Prome
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
 
-### Scheduling / engine selection
+### Scheduling / plugin pipeline
 
-Settings that control which tick engine the planner runs (PR 7 dual-path
-cutover). Live under the `scheduling` sub-tree of `PlannerConfig`.
+The planner runs through the builtin plugin pipeline by default. The base
+pipeline cadence lives under the `scheduling` sub-tree of `PlannerConfig`;
+plugin registration, transport, and auth settings live under
+`plugin_registration`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `scheduling.use_orchestrator` | bool | `false` | When `false`, planner runs the legacy single-class state machine (PSM path — pre-PR-7 behaviour). When `true`, planner runs the plugin-based orchestrator (PROPOSE / RECONCILE / CONSTRAIN / EXECUTE pipeline with the 5 builtin plugins). The orchestrator path emits the full set of `dynamo_planner_plugin_*` Prometheus metrics and structured audit events; the PSM path keeps the legacy metric surface only. **Decision outputs are byte-identical between paths** (locked by `tests/integration/test_dual_path_parity.py`). Default `false` keeps existing behaviour; flip after canary observation. |
-| `scheduling.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. Only meaningful when `use_orchestrator=true`. |
-| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer deadline wrapping the entire 4-stage pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Only meaningful when `use_orchestrator=true`. |
+| `scheduling.scale_interval_seconds` | float | gcd of enabled builtin intervals | Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether that plugin fires on the tick. By default, the cadence is the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`, preserving existing config fire times. |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. |
+| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. |
 
-#### How to enable on a DGD
+Existing planner fields still drive the builtin plugins:
 
-Add the field under `features.planner` in your DGDR (or directly in the
-generated DGD's planner `--config` JSON):
+- `load_adjustment_interval_seconds` schedules `builtin_load_propose`, which reads FPM and worker-count observations and applies the current load-based algorithm.
+- `throughput_adjustment_interval_seconds` schedules `builtin_load_predict` and `builtin_throughput_propose`. The throughput proposer requires the prediction from the same tick, so it only fires when the predict plugin fires.
+- When both builtins propose targets in the same tick, load-based scaling runs after throughput-based scaling and preserves the existing behavior: throughput updates the lower-bound replicas, then load-based scaling can adjust above that floor and apply the global GPU budget clamp.
+- After the plugin pipeline finishes, the planner applies the same final `min_endpoint` and GPU-budget safety checks to builtin and external-plugin targets before scaling the deployment.
+
+#### DGDR example
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -198,15 +204,11 @@ spec:
       itl: 10.0
       pre_deployment_sweeping_mode: rapid
       scheduling:
-        use_orchestrator: true        # opt into plugin-based orchestrator
-        # request_timeout_seconds: 5.0    # default; tune if user plugins are slow
-        # tick_max_duration_seconds: 30.0
+        tick_max_duration_seconds: 30.0
+      plugin_registration:
+        transport:
+          request_timeout_seconds: 5.0
 ```
-
-For ad-hoc validation on an already-deployed DGD, patch the planner's
-`--config` JSON to add `"scheduling": {"use_orchestrator": true}` and
-restart the planner Pod. See the rollout runbook for staged-flip
-guidance.
 
 ## Integration with Profiler
 

@@ -153,3 +153,15 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: '<think>preamble</think>body</think>answer'
+  REASONING.batch.3.c:
+    description: Recipientless Harmony commentary is not applicable to MiniMax append-think
+    reason: MiniMax append-think does not use Harmony commentary channels; it emits a synthetic normal-text wrapper around model output.
+  REASONING.batch.3.d:
+    description: Directed Harmony commentary tool calls are not applicable to MiniMax append-think
+    reason: MiniMax append-think does not use Harmony `commentary to=functions.*` envelopes; downstream tool handoff uses MiniMax-specific output shape when applicable.
+  REASONING.batch.3.e:
+    description: Directed Harmony analysis tool calls are not applicable to MiniMax append-think
+    reason: MiniMax append-think does not use Harmony `analysis to=functions.*` envelopes; reasoning-shaped text remains inside the synthetic normal-text wrapper.
+  REASONING.batch.3.f:
+    description: Harmony analysis/commentary/final channel sequencing is not applicable to MiniMax append-think
+    reason: MiniMax append-think has no Harmony channel protocol, so mixed analysis, commentary tool call, and final-channel sequencing is outside its grammar.

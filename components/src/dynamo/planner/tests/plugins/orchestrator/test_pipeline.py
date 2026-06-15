@@ -365,8 +365,8 @@ async def test_hold_last_cache_inherits_on_idle_tick(ctx_factory):
     ctx = ctx_factory()
     orchestrator = ctx["orchestrator"]
     clock = ctx["clock"]
-    # execution_interval=10s, HOLD_LAST → first tick fires after interval
-    # elapses (PSM-parity anchor), mid-interval tick inherits cache.
+    # execution_interval=10s, HOLD_LAST -> first tick fires after interval
+    # elapses, mid-interval tick inherits cache.
     orchestrator.register_internal(
         plugin_id="propose",
         plugin_type="propose",
@@ -727,8 +727,8 @@ async def test_predict_plugin_throttled_by_execution_interval(ctx_factory):
         is_builtin=True,
     )
     # First fire happens when interval elapses since registration
-    # (PSM-parity anchor — see test_first_fire_anchored_on_registration
-    # _time).  Pre-PR-1 fix: first-ever fired on tick 1 regardless.
+    # (see test_first_fire_anchored_on_registration_time).
+    # Pre-PR-1 fix: first-ever fired on tick 1 regardless.
     ctx["clock"].advance(60.0)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
     assert stub.call_counts["Predict"] == 1

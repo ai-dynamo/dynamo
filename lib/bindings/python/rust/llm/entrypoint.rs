@@ -197,7 +197,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -224,6 +224,7 @@ impl KvRouterConfig {
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
         mut overlap_score_credit: f64,
+        overlap_score_credit_decay: f64,
         mut prefill_load_scale: f64,
         router_queue_by_incoming_missing_isl: Option<Vec<(usize, usize)>>,
     ) -> PyResult<Self> {
@@ -237,6 +238,7 @@ impl KvRouterConfig {
 
         let inner = RsKvRouterConfig {
             overlap_score_credit,
+            overlap_score_credit_decay,
             prefill_load_scale,
             host_cache_hit_weight,
             disk_cache_hit_weight,
@@ -302,6 +304,20 @@ impl KvRouterConfig {
     }
 
     #[getter]
+    fn overlap_score_credit_decay(&self) -> f64 {
+        self.inner.overlap_score_credit_decay
+    }
+
+    #[setter]
+    fn set_overlap_score_credit_decay(&mut self, value: f64) -> PyResult<()> {
+        let mut inner = self.inner.clone();
+        inner.overlap_score_credit_decay = value;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    #[getter]
     fn overlap_score_weight(&self) -> f64 {
         self.inner.prefill_load_scale
     }
@@ -333,16 +349,20 @@ impl KvRouterConfig {
         Ok(())
     }
 
-    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, prefill_load_scale=None))]
+    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, overlap_score_credit_decay=None, prefill_load_scale=None))]
     fn with_overrides(
         &self,
         overlap_score_weight: Option<f64>,
         overlap_score_credit: Option<f64>,
+        overlap_score_credit_decay: Option<f64>,
         prefill_load_scale: Option<f64>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(credit) = overlap_score_credit {
             inner.overlap_score_credit = credit;
+        }
+        if let Some(decay) = overlap_score_credit_decay {
+            inner.overlap_score_credit_decay = decay;
         }
         if let Some(scale) = prefill_load_scale {
             inner.prefill_load_scale = scale;
