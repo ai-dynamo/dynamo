@@ -46,6 +46,29 @@ navigation:
         path: reference/release-artifacts.md
       - page: Examples
         path: getting-started/examples.md
+      - section: Recipes
+        path: recipes/README.mdx
+        contents:
+          - page: Qwen3-32B
+            path: recipes/qwen3-32b.mdx
+          - page: DeepSeek V3.2 NVFP4
+            slug: deepseek-v3-2-nvfp4
+            path: recipes/deepseek-v3-2-nvfp4.mdx
+          - page: Qwen3-VL-30B
+            slug: qwen3-vl-30b
+            path: recipes/qwen3-vl-30b.mdx
+          - page: Kimi-K2.5 NVFP4
+            slug: kimi-k2-5
+            path: recipes/kimi-k2-5.mdx
+          - page: GLM-5 NVFP4
+            slug: glm-5-nvfp4
+            path: recipes/glm-5-nvfp4.mdx
+          - page: GPT-OSS-120B
+            slug: gpt-oss-120b
+            path: recipes/gpt-oss-120b.mdx
+          - page: Variant UX Prototypes
+            slug: variant-ux-prototypes
+            path: recipes/variant-ux-prototypes.mdx
       - page: Glossary
         path: reference/glossary.md
 
