@@ -368,7 +368,7 @@ func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	}
 }
 
-func TestEnsureCRDConversion(t *testing.T) {
+func TestConfigureCRDConversionWebhooks(t *testing.T) {
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: dgdrCRDName,
@@ -393,7 +393,7 @@ func TestEnsureCRDConversion(t *testing.T) {
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.ensureCRDConversion(ctx, []byte("test-ca")); err != nil {
+	if err := injector.configureCRDConversionWebhooks(ctx, []byte("test-ca")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -429,7 +429,7 @@ func TestEnsureCRDConversion(t *testing.T) {
 	}
 }
 
-func TestEnsureCRDConversionWithoutCABundle(t *testing.T) {
+func TestConfigureCRDConversionWebhooksWithoutCABundle(t *testing.T) {
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: dgdCRDName,
@@ -454,7 +454,7 @@ func TestEnsureCRDConversionWithoutCABundle(t *testing.T) {
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.EnsureCRDConversion(ctx); err != nil {
+	if err := injector.ConfigureCRDConversionWebhooks(ctx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -470,7 +470,7 @@ func TestEnsureCRDConversionWithoutCABundle(t *testing.T) {
 	}
 }
 
-func TestEnsureCRDConversionPreservesExistingCABundle(t *testing.T) {
+func TestConfigureCRDConversionWebhooksPreservesExistingCABundle(t *testing.T) {
 	path := "/old-convert"
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
@@ -509,7 +509,7 @@ func TestEnsureCRDConversionPreservesExistingCABundle(t *testing.T) {
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.EnsureCRDConversion(ctx); err != nil {
+	if err := injector.ConfigureCRDConversionWebhooks(ctx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -623,13 +623,13 @@ func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
 	}
 }
 
-func TestEnsureCRDConversion_SkipsWhenCRDNotFound(t *testing.T) {
+func TestConfigureCRDConversionWebhooks_SkipsWhenCRDNotFound(t *testing.T) {
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	cfg.Server.Webhook.ServiceName = testServiceName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	ctx := context.Background()
 
-	if err := injector.ensureCRDConversion(ctx, []byte("test-ca")); err != nil {
+	if err := injector.configureCRDConversionWebhooks(ctx, []byte("test-ca")); err != nil {
 		t.Fatalf("expected no error when CRD not found, got: %v", err)
 	}
 }
