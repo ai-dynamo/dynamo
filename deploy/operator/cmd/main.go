@@ -24,7 +24,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -299,7 +298,9 @@ func main() {
 		setupLog.Error(err, "unable to create cert manager")
 		os.Exit(1)
 	}
-	if err = certMgr.Setup(mainCtx, mgr); err != nil {
+	// Auto mode runs one synchronous certificate refresh with the direct client,
+	// then registers the cert-controller with the not-yet-started manager.
+	if err = certMgr.SetupAndRunOnce(mainCtx, mgr); err != nil {
 		setupLog.Error(err, "failed to setup webhook certificate management")
 		os.Exit(1)
 	}
@@ -570,15 +571,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	webhooksReady := make(chan struct{})
-	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
-		select {
-		case <-webhooksReady:
-			return nil
-		default:
-			return fmt.Errorf("webhook handlers not yet registered")
-		}
-	}); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -598,8 +591,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// CA injection and conversion setup must complete before mgr.Start; without
-	// conversion the alpha-only admission handlers would see inconsistent input.
+	// Registering handlers only changes local manager state. Patch the API
+	// server webhook configs before mgr.Start so admission cannot run without
+	// conversion while the operator is alive.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
@@ -615,7 +609,7 @@ func main() {
 		// CA bundles are patched here. Register conversion endpoints before
 		// waiting for ca.crt so fresh CRDs fail conversion closed instead of
 		// admitting unconverted objects; existing CA bundles are preserved.
-		if err := caInjector.ConfigureCRDConversionWebhooks(mainCtx); err != nil {
+		if err := caInjector.EnsureCRDConversionWebhooks(mainCtx); err != nil {
 			setupLog.Error(err, "failed to configure CRD conversion webhooks")
 			os.Exit(1)
 		}
@@ -624,7 +618,6 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	close(webhooksReady)
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(mainCtx); err != nil {
