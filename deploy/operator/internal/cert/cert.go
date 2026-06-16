@@ -107,9 +107,11 @@ func NewCertManager(cl client.Client, cfg *configv1alpha1.WebhookServer) (*CertM
 	}, nil
 }
 
-// Setup configures certificate management and adds the cert-controller to
-// the manager (auto mode) or closes the ready channel immediately (manual mode).
-func (cm *CertManager) Setup(ctx context.Context, mgr ctrl.Manager) error {
+// SetupAndRunOnce configures certificate management before the manager starts.
+// Auto mode runs the first certificate refresh synchronously through the direct
+// client, then adds the cert-controller to the not-yet-started manager for
+// later rotation. Manual mode expects externally provided certificates.
+func (cm *CertManager) SetupAndRunOnce(ctx context.Context, mgr ctrl.Manager) error {
 	switch cm.cfg.CertProvisionMode {
 	case configv1alpha1.CertProvisionModeManual:
 		cm.logger.Info("Using externally provided certificates (manual mode)",
@@ -123,13 +125,6 @@ func (cm *CertManager) Setup(ctx context.Context, mgr ctrl.Manager) error {
 	default:
 		return fmt.Errorf("unsupported cert provision mode: %q", cm.cfg.CertProvisionMode)
 	}
-}
-
-// WaitReady blocks until certificates have been written to the cert directory.
-func (cm *CertManager) WaitReady() {
-	cm.logger.Info("Waiting for webhook certificates to be ready")
-	<-cm.ready
-	cm.logger.Info("Webhook certificates are ready")
 }
 
 func (cm *CertManager) setupAutoProvisioning(ctx context.Context, mgr ctrl.Manager) error {
@@ -335,11 +330,11 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 	return nil
 }
 
-// ConfigureCRDConversionWebhooks patches the conversion webhook service
+// EnsureCRDConversionWebhooks patches the conversion webhook service
 // reference on each multi-version CRD. Fresh CRDs get no CA bundle, so
 // conversion fails closed until the CA is injected. Existing CA bundles are
 // preserved to keep conversion working during operator restarts.
-func (i *CABundleInjector) ConfigureCRDConversionWebhooks(ctx context.Context) error {
+func (i *CABundleInjector) EnsureCRDConversionWebhooks(ctx context.Context) error {
 	if err := i.configureCRDConversionWebhooks(ctx, nil); err != nil {
 		return err
 	}

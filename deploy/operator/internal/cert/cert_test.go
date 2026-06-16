@@ -145,7 +145,7 @@ func TestCertManager_ManualModeClosesChannelImmediately(t *testing.T) {
 	}
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 
-	if err := cm.Setup(context.Background(), nil); err != nil {
+	if err := cm.SetupAndRunOnce(context.Background(), nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestCertManager_AutoModeConfiguresRotator(t *testing.T) {
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	cm.provisioner = prov
 
-	if err := cm.Setup(context.Background(), nil); err != nil {
+	if err := cm.SetupAndRunOnce(context.Background(), nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -226,7 +226,7 @@ func TestCertManager_AutoModeProvisionerError(t *testing.T) {
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	cm.provisioner = prov
 
-	err := cm.Setup(context.Background(), nil)
+	err := cm.SetupAndRunOnce(context.Background(), nil)
 	if err == nil {
 		t.Fatal("expected error from provisioner")
 	}
@@ -383,7 +383,7 @@ func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	}
 }
 
-func TestConfigureCRDConversionWebhooks(t *testing.T) {
+func TestEnsureCRDConversionWebhooks(t *testing.T) {
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: dgdrCRDName,
@@ -444,7 +444,7 @@ func TestConfigureCRDConversionWebhooks(t *testing.T) {
 	}
 }
 
-func TestConfigureCRDConversionWebhooksWithoutCABundle(t *testing.T) {
+func TestEnsureCRDConversionWebhooksWithoutCABundle(t *testing.T) {
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: dgdCRDName,
@@ -469,7 +469,7 @@ func TestConfigureCRDConversionWebhooksWithoutCABundle(t *testing.T) {
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.ConfigureCRDConversionWebhooks(ctx); err != nil {
+	if err := injector.EnsureCRDConversionWebhooks(ctx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -485,7 +485,7 @@ func TestConfigureCRDConversionWebhooksWithoutCABundle(t *testing.T) {
 	}
 }
 
-func TestConfigureCRDConversionWebhooksPreservesExistingCABundle(t *testing.T) {
+func TestEnsureCRDConversionWebhooksPreservesExistingCABundle(t *testing.T) {
 	path := "/old-convert"
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
@@ -524,7 +524,7 @@ func TestConfigureCRDConversionWebhooksPreservesExistingCABundle(t *testing.T) {
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.ConfigureCRDConversionWebhooks(ctx); err != nil {
+	if err := injector.EnsureCRDConversionWebhooks(ctx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -638,7 +638,7 @@ func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
 	}
 }
 
-func TestConfigureCRDConversionWebhooks_SkipsWhenCRDNotFound(t *testing.T) {
+func TestEnsureCRDConversionWebhooks_SkipsWhenCRDNotFound(t *testing.T) {
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	cfg.Server.Webhook.ServiceName = testServiceName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
