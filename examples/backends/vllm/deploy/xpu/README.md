@@ -13,9 +13,12 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
 |------|---------|-------------|
 | `agg_xpu_dra.yaml` | Aggregated | Single worker with XPU target |
 | `agg_tracing_xpu_dra.yaml` | Aggregated + Tracing | Single worker with OpenTelemetry tracing |
+| `agg_router_xpu_dra.yaml` | Aggregated + KV Router | Aggregated deployment with KV routing |
+| `agg_router_kv_approx_xpu_dra.yaml` | Aggregated + KV Router (Local) | KV routing without NATS dependency |
 | `disagg_xpu_dra.yaml` | Disaggregated | Prefill/decode separation with NixlConnector |
 | `disagg_tracing_xpu_dra.yaml` | Disaggregated + Tracing | Disaggregated with OpenTelemetry tracing |
 | `disagg_planner_xpu_dra.yaml` | Disaggregated + Planner | Global Planner for throughput scaling |
+| `disagg_router_xpu_dra.yaml` | Disaggregated + KV Router | Disaggregated with KV cache routing |
 
 ## Prerequisites
 
