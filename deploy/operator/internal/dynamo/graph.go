@@ -1551,7 +1551,14 @@ func GenerateBasePodSpec(
 	// tolerations, nodeSelector, and schedulerName through directly and skips
 	// the NVIDIA defaults below (DRA claim replacement, auto nvidia.com/gpu
 	// toleration).
+	//
+	// Device and GPU Memory Service are mutually exclusive: GMS is wired to
+	// the NVIDIA DRA driver and would strip the user-supplied GPU resources
+	// and inject a DRA claim on top of them.
 	if component.Device != nil {
+		if GetGPUMemoryService(component) != nil {
+			return nil, fmt.Errorf("spec.components[%s].device cannot be combined with gpuMemoryService because GPU Memory Service uses NVIDIA DRA", component.ComponentName)
+		}
 		applyDeviceSpec(&podSpec, component.Device)
 	}
 

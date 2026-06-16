@@ -96,7 +96,7 @@ func TestApplyDeviceSpec_PreservesPodTemplateOverride(t *testing.T) {
 	podSpec := &corev1.PodSpec{
 		// "gpu" already has a value here; device.NodeSelector["gpu"]="on"
 		// must NOT clobber it.
-		NodeSelector: map[string]string{"role": "inference", "gpu": "off"},
+		NodeSelector:  map[string]string{"role": "inference", "gpu": "off"},
 		SchedulerName: "user-scheduler",
 		Containers: []corev1.Container{{
 			Name: "main",
@@ -269,6 +269,72 @@ func TestHasAnyGPUResource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := HasAnyGPUResource(tt.req); got != tt.want {
 				t.Errorf("HasAnyGPUResource() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppendTolerations_TolerationSecondsDedup(t *testing.T) {
+	// Two NoExecute tolerations with identical key/operator/effect/value but different
+	// TolerationSeconds are functionally distinct (one means immediate eviction,
+	// the other a 300s grace period). The dedup logic must retain both.
+	sec30 := int64(30)
+	sec60 := int64(60)
+	dst := []corev1.Toleration{
+		{
+			Key:               "node.kubernetes.io/unreachable",
+			Operator:          corev1.TolerationOpExists,
+			Effect:            corev1.TaintEffectNoExecute,
+			TolerationSeconds: &sec30,
+		},
+	}
+	src := []corev1.Toleration{
+		{
+			Key:               "node.kubernetes.io/unreachable",
+			Operator:          corev1.TolerationOpExists,
+			Effect:            corev1.TaintEffectNoExecute,
+			TolerationSeconds: &sec30, // duplicate
+		},
+		{
+			Key:               "node.kubernetes.io/unreachable",
+			Operator:          corev1.TolerationOpExists,
+			Effect:            corev1.TaintEffectNoExecute,
+			TolerationSeconds: &sec60, // distinct — different eviction timeout
+		},
+	}
+	result := appendTolerations(dst, src)
+	if len(result) != 2 {
+		t.Fatalf("got %d tolerations, want 2 (sec30 dup + sec60 new)", len(result))
+	}
+	if result[0].TolerationSeconds == nil || *result[0].TolerationSeconds != 30 {
+		t.Errorf("first toleration seconds = %v, want 30", result[0].TolerationSeconds)
+	}
+	if result[1].TolerationSeconds == nil || *result[1].TolerationSeconds != 60 {
+		t.Errorf("second toleration seconds = %v, want 60", result[1].TolerationSeconds)
+	}
+}
+
+func TestTolerationsEqual(t *testing.T) {
+	sec30 := int64(30)
+	base := corev1.Toleration{
+		Key:      "nvidia.com/gpu",
+		Operator: corev1.TolerationOpExists,
+	}
+	tests := []struct {
+		name string
+		a, b corev1.Toleration
+		want bool
+	}{
+		{"identical", base, base, true},
+		{"different key", base, corev1.Toleration{Key: "amd.com/gpu", Operator: corev1.TolerationOpExists}, false},
+		{"nil vs non-nil TolerationSeconds", base, corev1.Toleration{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, TolerationSeconds: &sec30}, false},
+		{"same TolerationSeconds", corev1.Toleration{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, TolerationSeconds: &sec30}, corev1.Toleration{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, TolerationSeconds: &sec30}, true},
+		{"different TolerationSeconds", corev1.Toleration{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, TolerationSeconds: &sec30}, corev1.Toleration{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, TolerationSeconds: func() *int64 { v := int64(60); return &v }()}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tolerationsEqual(tt.a, tt.b); got != tt.want {
+				t.Errorf("tolerationsEqual() = %v, want %v", got, tt.want)
 			}
 		})
 	}

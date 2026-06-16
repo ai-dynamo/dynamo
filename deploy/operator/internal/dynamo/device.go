@@ -20,10 +20,10 @@ import (
 // decided to honor the user's device choice.
 //
 // Pod-level fields (Tolerations, NodeSelector, SchedulerName) are only set when
-// non-empty so existing podTemplate overrides stay intact. Container-level
-// resources are merged into the main container's Resources.Limits and
-// Resources.Requests; existing entries from podTemplate win on conflict so a
-// user can still override individual keys.
+// non-empty so existing podTemplate overrides stay intact. For resource keys
+// listed in device.Resources, device.Resources is authoritative: Limits and
+// Requests are both set to the device value so K8s extended-resource
+// admission (which requires req == lim) passes regardless of podTemplate.
 func applyDeviceSpec(podSpec *corev1.PodSpec, device *v1beta1.DeviceSpec) {
 	if podSpec == nil || device == nil {
 		return
@@ -77,15 +77,15 @@ func applyDeviceSpec(podSpec *corev1.PodSpec, device *v1beta1.DeviceSpec) {
 }
 
 // appendTolerations adds tolerations from src to dst, preserving order and
-// skipping duplicates (matched on key+operator+effect+value).
+// skipping duplicates. Two tolerations are considered duplicates when all
+// fields match, including TolerationSeconds (functionally significant for
+// NoExecute taints: a nil pointer means indefinite tolerance while a non-nil
+// pointer means eviction after the given seconds).
 func appendTolerations(dst, src []corev1.Toleration) []corev1.Toleration {
 	for _, t := range src {
 		duplicate := false
 		for _, existing := range dst {
-			if existing.Key == t.Key &&
-				existing.Operator == t.Operator &&
-				existing.Effect == t.Effect &&
-				existing.Value == t.Value {
+			if tolerationsEqual(existing, t) {
 				duplicate = true
 				break
 			}
@@ -95,6 +95,24 @@ func appendTolerations(dst, src []corev1.Toleration) []corev1.Toleration {
 		}
 	}
 	return dst
+}
+
+// tolerationsEqual reports whether two tolerations are functionally identical,
+// including TolerationSeconds which controls eviction timing under NoExecute.
+func tolerationsEqual(a, b corev1.Toleration) bool {
+	if a.Key != b.Key ||
+		a.Operator != b.Operator ||
+		a.Effect != b.Effect ||
+		a.Value != b.Value {
+		return false
+	}
+	if (a.TolerationSeconds == nil) != (b.TolerationSeconds == nil) {
+		return false
+	}
+	if a.TolerationSeconds != nil && *a.TolerationSeconds != *b.TolerationSeconds {
+		return false
+	}
+	return true
 }
 
 // HasAnyGPUResource reports whether the resource requirements request at least
@@ -121,6 +139,8 @@ func HasAnyGPUResource(resources corev1.ResourceRequirements) bool {
 // vendors. We intentionally do not match the bare "cpu"/"memory" or the
 // generic "gpu.intel.com/..." MIG-style keys are not enumerated; any extended
 // resource containing "/gpu" or starting with "gpu." is treated as GPU-shaped.
+//
+//nolint:goconst // vendor-specific resource names are string literals by convention
 func isExtendedGPUResourceName(name corev1.ResourceName) bool {
 	s := string(name)
 	if s == "" {
