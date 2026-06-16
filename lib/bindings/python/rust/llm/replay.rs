@@ -1621,12 +1621,12 @@ fn fpm_snapshots_to_json(
 /// Reject a goodput SLA threshold that is not a finite, non-negative value;
 /// `None` (unset) is allowed and means "do not gate on this dimension".
 fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
-    if let Some(v) = value {
-        if !v.is_finite() || v < 0.0 {
-            return Err(PyValueError::new_err(format!(
-                "{name} must be a finite, non-negative value, got {v}"
-            )));
-        }
+    if let Some(v) = value
+        && (!v.is_finite() || v < 0.0)
+    {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be a finite, non-negative value, got {v}"
+        )));
     }
     Ok(())
 }
