@@ -138,7 +138,8 @@ const (
 	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
 	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
 	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
-	KubeAnnotationVolcanoQueue      = "scheduling.grove.io/volcano-queue"
+	KubeAnnotationVolcanoQueue      = "nvidia.com/volcano-queue"       // User-provided annotation to specify Volcano queue name
+	GroveAnnotationVolcanoQueue     = "scheduling.grove.io/volcano-queue"
 	VolcanoSchedulerName            = "volcano"
 
 	// Grove multinode role suffixes

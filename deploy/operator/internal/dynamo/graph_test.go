@@ -8666,7 +8666,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 		expectQueue         bool
 	}{
 		{
-			name: "metadata annotation propagates",
+			name: "dynamo metadata annotation maps to grove annotation",
 			metadataAnnotations: map[string]string{
 				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
 			},
@@ -8674,12 +8674,12 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 			expectQueue:   true,
 		},
 		{
-			name: "metadata annotation is trimmed and takes precedence over spec annotation",
+			name: "dynamo metadata annotation is trimmed and takes precedence over spec annotation",
 			metadataAnnotations: map[string]string{
 				commonconsts.KubeAnnotationVolcanoQueue: " metadata-queue ",
 			},
 			specAnnotations: map[string]string{
-				commonconsts.KubeAnnotationVolcanoQueue: "spec-queue",
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
 			},
 			expectedQueue: "metadata-queue",
 			expectQueue:   true,
@@ -8690,7 +8690,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
 			},
 			specAnnotations: map[string]string{
-				commonconsts.KubeAnnotationVolcanoQueue: "spec-queue",
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
 			},
 			expectedQueue: "spec-queue",
 			expectQueue:   true,
@@ -8701,6 +8701,14 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
 			},
 			expectQueue: false,
+		},
+		{
+			name: "legacy grove metadata annotation maps to grove annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "legacy-grove-queue",
+			},
+			expectedQueue: "legacy-grove-queue",
+			expectQueue:   true,
 		},
 	}
 
@@ -8728,10 +8736,10 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 			require.NotNil(t, pcs)
 			if tt.expectQueue {
 				require.NotNil(t, pcs.Annotations)
-				assert.Equal(t, tt.expectedQueue, pcs.Annotations[commonconsts.KubeAnnotationVolcanoQueue])
+				assert.Equal(t, tt.expectedQueue, pcs.Annotations[commonconsts.GroveAnnotationVolcanoQueue])
 				return
 			}
-			assert.NotContains(t, pcs.Annotations, commonconsts.KubeAnnotationVolcanoQueue)
+			assert.NotContains(t, pcs.Annotations, commonconsts.GroveAnnotationVolcanoQueue)
 		})
 	}
 }

@@ -374,14 +374,17 @@ func injectKaiSchedulerIfEnabled(
 	clique.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = queueName
 }
 
-// injectVolcanoQueueAnnotation propagates a DGD metadata annotation onto the
-// generated PodCliqueSet so Grove can consume the queue selection downstream.
+// injectVolcanoQueueAnnotation maps the DGD Volcano queue annotation onto the
+// generated PodCliqueSet annotation consumed by Grove's Volcano backend.
 func injectVolcanoQueueAnnotation(gangSet *grovev1alpha1.PodCliqueSet, annotations map[string]string) {
 	if annotations == nil {
 		return
 	}
 
 	queueName, exists := annotations[commonconsts.KubeAnnotationVolcanoQueue]
+	if !exists {
+		queueName, exists = annotations[commonconsts.GroveAnnotationVolcanoQueue]
+	}
 	if !exists || strings.TrimSpace(queueName) == "" {
 		return
 	}
@@ -389,5 +392,5 @@ func injectVolcanoQueueAnnotation(gangSet *grovev1alpha1.PodCliqueSet, annotatio
 	if gangSet.Annotations == nil {
 		gangSet.Annotations = make(map[string]string)
 	}
-	gangSet.Annotations[commonconsts.KubeAnnotationVolcanoQueue] = strings.TrimSpace(queueName)
+	gangSet.Annotations[commonconsts.GroveAnnotationVolcanoQueue] = strings.TrimSpace(queueName)
 }
