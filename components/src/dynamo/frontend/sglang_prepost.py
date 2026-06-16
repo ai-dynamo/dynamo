@@ -860,6 +860,7 @@ class SglangStreamingPostProcessor:
         history_tool_calls_count: int = 0,
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
+        eos_token_ids: list[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -872,6 +873,7 @@ class SglangStreamingPostProcessor:
         # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
         self._skip_special_tokens = tool_call_parser is None
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
+        self._eos_token_ids = set(eos_token_ids or [])
 
         self._all_token_ids: list[int] = []
         # Tool call accumulation.  SGLang's streaming parser returns
@@ -887,6 +889,13 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+
+    def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
+        if not self._eos_token_ids:
+            return token_ids
+        while token_ids and token_ids[-1] in self._eos_token_ids:
+            token_ids.pop()
+        return token_ids
 
     def _tool_call_id(self, name: str, index: int) -> str:
         return _tool_call_id_for_parser(
@@ -946,6 +955,8 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
+        if finish_reason:
+            token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
 
         delta_text = self._incremental_decode(token_ids) if token_ids else ""
 

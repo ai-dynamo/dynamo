@@ -146,6 +146,14 @@ pub struct MmRoutingInfo {
     /// Block-level multimodal metadata aligned with routing_token_ids blocks.
     /// Use `None` entries for blocks without multimodal objects.
     pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
+
+    /// Effective expanded prompt length (image placeholders expanded to
+    /// per-image token counts) before the block-padding applied to
+    /// `routing_token_ids`. Use this, not `routing_token_ids.len()`, when a
+    /// real token count is needed (e.g. sizing the omitted-`max_tokens` cap),
+    /// so the routing padding doesn't inflate it.
+    #[serde(default)]
+    pub expanded_prompt_len: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

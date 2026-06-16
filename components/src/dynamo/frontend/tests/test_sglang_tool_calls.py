@@ -9,9 +9,17 @@ parse_non_stream fallback for the chunking-sensitivity issue in
 BaseFormatDetector.parse_streaming_increment.
 """
 
+# ruff: noqa: E402
+
 import json
 
 import pytest
+
+pytest.importorskip(
+    "sglang.srt.parser.jinja_template_utils",
+    reason="sglang frontend parser modules are not installed in this environment",
+)
+
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.function_call.function_call_parser import FunctionCallParser

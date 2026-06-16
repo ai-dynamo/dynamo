@@ -1438,10 +1438,27 @@ impl ModelDeploymentCard {
     ) -> anyhow::Result<Self> {
         let local_path = local_path.as_ref();
 
-        // This is usually the right choice
+        // Prefer the model config's architectural context length. Some
+        // multimodal HF configs, including MiniMax-M3-VL, store the language
+        // model config under `text_config`; tokenizer `model_max_length` can
+        // be a much larger sentinel/default and must be a last resort.
         let architectural_max_context_length =
             crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
-                // But sometimes this is
+                .or_else(|_| {
+                    let text_config: serde_json::Value =
+                        crate::file_json_field(&local_path.join("config.json"), "text_config")?;
+                    serde_json::from_value(
+                        text_config
+                            .get("max_position_embeddings")
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Field 'text_config.max_position_embeddings' not found"
+                                )
+                            })?,
+                    )
+                    .context("Failed to deserialize text_config.max_position_embeddings")
+                })
                 .or_else(|_| {
                     crate::file_json_field(
                         &local_path.join("tokenizer_config.json"),
@@ -2112,6 +2129,19 @@ mod tests {
             eos.contains(&200),
             "eos should resolve to 200 from special_tokens_map"
         );
+        Ok(())
+    }
+
+    /// Variant where `special_tokens_map.json` carries the token strings and
+    /// `tokenizer_config.json:added_tokens_decoder` carries the ids.
+    #[test]
+    fn test_config_json_eos_bos_from_special_tokens_map_only_fixture() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-special-tokens-map-only/config.json");
+        let config = HFConfig::from_json_file(&config_file)?;
+
+        assert_eq!(config.bos_token_id(), Some(200019));
+        assert_eq!(config.eos_token_ids(), vec![200020]);
         Ok(())
     }
 
