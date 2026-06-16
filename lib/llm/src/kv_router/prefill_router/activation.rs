@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
-use dynamo_kv_router::conditional_prefill::make_conditional_prefill_policy;
+use dynamo_kv_router::conditional_disagg::make_conditional_disagg_policy;
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -40,8 +40,8 @@ impl PrefillRouter {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             enforce_disagg,
-            conditional_prefill_policy: make_conditional_prefill_policy(None),
-            conditional_prefill_busy_threshold: None,
+            conditional_disagg_policy: make_conditional_disagg_policy(None),
+            conditional_disagg_prefill_busy_threshold: None,
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -67,12 +67,12 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let conditional_prefill_policy = make_conditional_prefill_policy(kv_router_config.as_ref());
+        let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
         // v1.5: dedicated busy threshold falls back to router_queue_threshold
         // when unset. The startup INFO/WARN that surfaces which knob is in
         // effect lives in `validate_kv_router_config`.
-        let conditional_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
-            c.conditional_prefill_busy_threshold
+        let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
+            c.conditional_disagg_prefill_busy_threshold
                 .or(c.router_queue_threshold)
         });
 
@@ -84,8 +84,8 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
-            conditional_prefill_policy,
-            conditional_prefill_busy_threshold,
+            conditional_disagg_policy,
+            conditional_disagg_prefill_busy_threshold,
             prefill_load_estimator,
             model_name,
             namespace,

@@ -664,10 +664,10 @@ where
         self.scheduler.pending_count()
     }
 
-    /// Per-worker prefill-busy peek for conditional-prefill v1.5 load gate.
+    /// Per-worker prefill-busy peek for conditional-disagg v1.5 load gate.
     /// Forwards `SchedulerQueue::worker_is_prefill_busy`; `None` means the
     /// worker is unknown or has no config. Caller provides the busy threshold
-    /// (resolved from `conditional_prefill_busy_threshold` with fallback to
+    /// (resolved from `conditional_disagg_prefill_busy_threshold` with fallback to
     /// `router_queue_threshold`).
     pub fn worker_is_prefill_busy(
         &self,

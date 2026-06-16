@@ -1,30 +1,30 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Conditional-prefill bypass policy.
+//! Conditional-disagg bypass policy.
 //!
 //! Decides whether a request should skip remote prefill and run prefill
 //! locally on the chosen decode worker. The trait operates over a struct of
-//! summary signals (`ConditionalPrefillDecisionInput`). v1 ships a single
-//! production policy (`IslBoundingPolicy`); the `ConditionalPrefillPolicyKind`
-//! enum and `ConditionalPrefillDecisionInput` struct are both designed to
+//! summary signals (`ConditionalDisaggDecisionInput`). v1 ships a single
+//! production policy (`IslBoundingPolicy`); the `ConditionalDisaggPolicyKind`
+//! enum and `ConditionalDisaggDecisionInput` struct are both designed to
 //! grow — future policies (queue-aware, regression-backed) plug in here
 //! without breaking the trait or the router's call site.
 
 use async_trait::async_trait;
 
-use crate::config::{ConditionalPrefillPolicyKind, KvRouterConfig};
+use crate::config::{ConditionalDisaggPolicyKind, KvRouterConfig};
 
 /// Default effective-ISL absolute threshold (tokens). A request bypasses to
 /// AGG only if its net-new prefill stays under this cap.
-pub const DEFAULT_CONDITIONAL_PREFILL_EFF_ISL_THRESHOLD: usize = 2048;
+pub const DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD: usize = 2048;
 
 /// Default effective-ISL ratio threshold. A request bypasses to AGG only if
 /// `eff_isl / prompt_tokens` stays under this fraction (i.e. the device
 /// prefix cache covers enough of the prompt).
-pub const DEFAULT_CONDITIONAL_PREFILL_EFF_ISL_RATIO_THRESHOLD: f64 = 0.7;
+pub const DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD: f64 = 0.7;
 
-/// Inputs passed to a `ConditionalPrefillPolicy` when deciding whether to
+/// Inputs passed to a `ConditionalDisaggPolicy` when deciding whether to
 /// bypass remote prefill.
 ///
 /// **Extensibility:** `#[non_exhaustive]` so future fields (load signals,
@@ -33,7 +33,7 @@ pub const DEFAULT_CONDITIONAL_PREFILL_EFF_ISL_RATIO_THRESHOLD: f64 = 0.7;
 /// via the inherent `new` constructor or struct-update syntax.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
-pub struct ConditionalPrefillDecisionInput {
+pub struct ConditionalDisaggDecisionInput {
     /// Total prompt token count.
     pub prompt_tokens: usize,
 
@@ -52,7 +52,7 @@ pub struct ConditionalPrefillDecisionInput {
     pub prefill_chosen_worker_busy: Option<bool>,
 }
 
-impl ConditionalPrefillDecisionInput {
+impl ConditionalDisaggDecisionInput {
     pub fn new(prompt_tokens: usize, block_size: usize, decode_chosen_overlap_blocks: u32) -> Self {
         Self {
             prompt_tokens,
@@ -81,20 +81,20 @@ impl ConditionalPrefillDecisionInput {
 /// Decision policy invoked by `PrefillRouter` before routing a request.
 ///
 /// **Extensibility:** new policies that need additional inputs should extend
-/// `ConditionalPrefillDecisionInput` (it is `#[non_exhaustive]`). New trait
+/// `ConditionalDisaggDecisionInput` (it is `#[non_exhaustive]`). New trait
 /// methods that future policies need should have default impls so older
 /// policies don't have to opt in.
 #[async_trait]
-pub trait ConditionalPrefillPolicy: Send + Sync {
+pub trait ConditionalDisaggPolicy: Send + Sync {
     fn is_enabled(&self) -> bool;
 
     /// Decide whether the request should skip remote prefill. Async so a
     /// future policy's slow path can consult an external service. v1's
     /// `IslBoundingPolicy` is fully synchronous — the `.await` is a no-op.
-    async fn should_bypass_remote_prefill(&self, input: ConditionalPrefillDecisionInput) -> bool;
+    async fn should_bypass_remote_prefill(&self, input: ConditionalDisaggDecisionInput) -> bool;
 
     /// True iff this policy consumes
-    /// [`ConditionalPrefillDecisionInput::prefill_chosen_worker_busy`]. The
+    /// [`ConditionalDisaggDecisionInput::prefill_chosen_worker_busy`]. The
     /// `PrefillRouter` uses this to skip the extra prefill-worker peek for
     /// policies that don't need the signal (back-compat fast path for
     /// `IslBounding`).
@@ -103,42 +103,42 @@ pub trait ConditionalPrefillPolicy: Send + Sync {
     }
 }
 
-/// Build the configured conditional-prefill policy. Returns a disabled
+/// Build the configured conditional-disagg policy. Returns a disabled
 /// `IslBoundingPolicy` (always returns `false`) when `config` is `None` or
-/// `conditional_prefill_enabled` is false.
-pub fn make_conditional_prefill_policy(
+/// `conditional_disagg_enabled` is false.
+pub fn make_conditional_disagg_policy(
     config: Option<&KvRouterConfig>,
-) -> Box<dyn ConditionalPrefillPolicy> {
+) -> Box<dyn ConditionalDisaggPolicy> {
     let Some(config) = config else {
         return Box::new(IslBoundingPolicy::disabled());
     };
-    match config.conditional_prefill_policy {
-        ConditionalPrefillPolicyKind::IslBounding => {
+    match config.conditional_disagg_policy {
+        ConditionalDisaggPolicyKind::IslBounding => {
             Box::new(IslBoundingPolicy::from_config(config))
         }
-        ConditionalPrefillPolicyKind::PrefillLoad => {
+        ConditionalDisaggPolicyKind::PrefillLoad => {
             Box::new(PrefillLoadPolicy::from_config(config))
         }
-        ConditionalPrefillPolicyKind::IslOrLoad => Box::new(IslOrLoadPolicy::from_config(config)),
+        ConditionalDisaggPolicyKind::IslOrLoad => Box::new(IslOrLoadPolicy::from_config(config)),
     }
 }
 
 /// True iff the policy needs the `prefill_chosen_worker_busy` signal
-/// populated on `ConditionalPrefillDecisionInput`. Used by `PrefillRouter`
+/// populated on `ConditionalDisaggDecisionInput`. Used by `PrefillRouter`
 /// to skip the prefill-worker peek for policies that don't consume the
 /// signal (back-compat fast path for `IslBounding` / `Disabled`).
 pub fn policy_needs_prefill_worker_busy(config: Option<&KvRouterConfig>) -> bool {
     let Some(config) = config else { return false };
-    if !config.conditional_prefill_enabled {
+    if !config.conditional_disagg_enabled {
         return false;
     }
     matches!(
-        config.conditional_prefill_policy,
-        ConditionalPrefillPolicyKind::PrefillLoad | ConditionalPrefillPolicyKind::IslOrLoad,
+        config.conditional_disagg_policy,
+        ConditionalDisaggPolicyKind::PrefillLoad | ConditionalDisaggPolicyKind::IslOrLoad,
     )
 }
 
-/// v1 conditional-prefill policy. Bypasses to AGG when the request is both
+/// v1 conditional-disagg policy. Bypasses to AGG when the request is both
 /// small in absolute net-new prefill AND mostly cached on the decode worker.
 ///
 /// Predicate:
@@ -168,17 +168,17 @@ impl IslBoundingPolicy {
 
     pub fn from_config(config: &KvRouterConfig) -> Self {
         Self {
-            enabled: config.conditional_prefill_enabled,
-            eff_isl_threshold: config.conditional_prefill_eff_isl_threshold,
-            eff_isl_ratio_threshold: config.conditional_prefill_eff_isl_ratio_threshold,
+            enabled: config.conditional_disagg_enabled,
+            eff_isl_threshold: config.conditional_disagg_eff_isl_threshold,
+            eff_isl_ratio_threshold: config.conditional_disagg_eff_isl_ratio_threshold,
         }
     }
 
     pub fn disabled() -> Self {
         Self {
             enabled: false,
-            eff_isl_threshold: DEFAULT_CONDITIONAL_PREFILL_EFF_ISL_THRESHOLD,
-            eff_isl_ratio_threshold: DEFAULT_CONDITIONAL_PREFILL_EFF_ISL_RATIO_THRESHOLD,
+            eff_isl_threshold: DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD,
+            eff_isl_ratio_threshold: DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD,
         }
     }
 }
@@ -190,12 +190,12 @@ impl Default for IslBoundingPolicy {
 }
 
 #[async_trait]
-impl ConditionalPrefillPolicy for IslBoundingPolicy {
+impl ConditionalDisaggPolicy for IslBoundingPolicy {
     fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    async fn should_bypass_remote_prefill(&self, input: ConditionalPrefillDecisionInput) -> bool {
+    async fn should_bypass_remote_prefill(&self, input: ConditionalDisaggDecisionInput) -> bool {
         if !self.enabled {
             return false;
         }
@@ -209,7 +209,7 @@ impl ConditionalPrefillPolicy for IslBoundingPolicy {
     }
 }
 
-/// v1.5 conditional-prefill policy. Bypasses to AGG when the prefill worker
+/// v1.5 conditional-disagg policy. Bypasses to AGG when the prefill worker
 /// the router would pick for this request is already over the existing
 /// prefill-busy line — same predicate the scheduler uses to decide whether
 /// to park a new request in the pending queue:
@@ -240,7 +240,7 @@ impl PrefillLoadPolicy {
 
     pub fn from_config(config: &KvRouterConfig) -> Self {
         Self {
-            enabled: config.conditional_prefill_enabled,
+            enabled: config.conditional_disagg_enabled,
         }
     }
 
@@ -256,12 +256,12 @@ impl Default for PrefillLoadPolicy {
 }
 
 #[async_trait]
-impl ConditionalPrefillPolicy for PrefillLoadPolicy {
+impl ConditionalDisaggPolicy for PrefillLoadPolicy {
     fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    async fn should_bypass_remote_prefill(&self, input: ConditionalPrefillDecisionInput) -> bool {
+    async fn should_bypass_remote_prefill(&self, input: ConditionalDisaggDecisionInput) -> bool {
         if !self.enabled {
             return false;
         }
@@ -311,12 +311,12 @@ impl Default for IslOrLoadPolicy {
 }
 
 #[async_trait]
-impl ConditionalPrefillPolicy for IslOrLoadPolicy {
+impl ConditionalDisaggPolicy for IslOrLoadPolicy {
     fn is_enabled(&self) -> bool {
         self.isl.is_enabled() || self.load.is_enabled()
     }
 
-    async fn should_bypass_remote_prefill(&self, input: ConditionalPrefillDecisionInput) -> bool {
+    async fn should_bypass_remote_prefill(&self, input: ConditionalDisaggDecisionInput) -> bool {
         self.isl.should_bypass_remote_prefill(input).await
             || self.load.should_bypass_remote_prefill(input).await
     }
@@ -329,17 +329,17 @@ impl ConditionalPrefillPolicy for IslOrLoadPolicy {
 // ===== Test-only policies ==================================================
 
 /// Test-only: bypass with a configurable probability. Not exposed via the
-/// `ConditionalPrefillPolicyKind` enum and not selectable from the CLI —
+/// `ConditionalDisaggPolicyKind` enum and not selectable from the CLI —
 /// constructed directly in unit tests.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy)]
-pub struct RandomBypassConditionalPrefillPolicy {
+pub struct RandomBypassConditionalDisaggPolicy {
     enabled: bool,
     bypass_probability: f64,
 }
 
 #[cfg(test)]
-impl RandomBypassConditionalPrefillPolicy {
+impl RandomBypassConditionalDisaggPolicy {
     pub fn new(enabled: bool, bypass_probability: f64) -> Self {
         Self {
             enabled,
@@ -350,12 +350,12 @@ impl RandomBypassConditionalPrefillPolicy {
 
 #[cfg(test)]
 #[async_trait]
-impl ConditionalPrefillPolicy for RandomBypassConditionalPrefillPolicy {
+impl ConditionalDisaggPolicy for RandomBypassConditionalDisaggPolicy {
     fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    async fn should_bypass_remote_prefill(&self, _input: ConditionalPrefillDecisionInput) -> bool {
+    async fn should_bypass_remote_prefill(&self, _input: ConditionalDisaggDecisionInput) -> bool {
         if !self.enabled {
             return false;
         }
@@ -371,8 +371,8 @@ mod tests {
         prompt_tokens: usize,
         overlap_blocks: u32,
         block_size: usize,
-    ) -> ConditionalPrefillDecisionInput {
-        ConditionalPrefillDecisionInput::new(prompt_tokens, block_size, overlap_blocks)
+    ) -> ConditionalDisaggDecisionInput {
+        ConditionalDisaggDecisionInput::new(prompt_tokens, block_size, overlap_blocks)
     }
 
     #[tokio::test]
@@ -442,13 +442,13 @@ mod tests {
 
     #[tokio::test]
     async fn random_bypass_when_disabled_never_bypasses() {
-        let policy = RandomBypassConditionalPrefillPolicy::new(false, 1.0);
+        let policy = RandomBypassConditionalDisaggPolicy::new(false, 1.0);
         assert!(!policy.should_bypass_remote_prefill(input(100, 0, 64)).await);
     }
 
     #[tokio::test]
     async fn random_bypass_zero_probability_never_bypasses() {
-        let policy = RandomBypassConditionalPrefillPolicy::new(true, 0.0);
+        let policy = RandomBypassConditionalDisaggPolicy::new(true, 0.0);
         for _ in 0..50 {
             assert!(!policy.should_bypass_remote_prefill(input(100, 0, 64)).await);
         }
@@ -456,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn random_bypass_one_probability_always_bypasses() {
-        let policy = RandomBypassConditionalPrefillPolicy::new(true, 1.0);
+        let policy = RandomBypassConditionalDisaggPolicy::new(true, 1.0);
         for _ in 0..50 {
             assert!(policy.should_bypass_remote_prefill(input(100, 0, 64)).await);
         }
@@ -469,8 +469,8 @@ mod tests {
         overlap_blocks: u32,
         block_size: usize,
         busy: Option<bool>,
-    ) -> ConditionalPrefillDecisionInput {
-        ConditionalPrefillDecisionInput::new(prompt_tokens, block_size, overlap_blocks)
+    ) -> ConditionalDisaggDecisionInput {
+        ConditionalDisaggDecisionInput::new(prompt_tokens, block_size, overlap_blocks)
             .with_prefill_chosen_worker_busy(busy)
     }
 
@@ -539,12 +539,12 @@ mod tests {
     // Four-quadrant truth table: (isl_says_bypass, worker_busy).
     // Helper: "small + cached" trips IslBounding; "large" doesn't.
 
-    fn small_input(busy: Option<bool>) -> ConditionalPrefillDecisionInput {
+    fn small_input(busy: Option<bool>) -> ConditionalDisaggDecisionInput {
         // 1000 prompt, 14 blocks * 64 = 896 cached → eff_isl = 104 < 2048, ratio = 0.104 < 0.7
         input_with_busy(1000, 14, 64, busy)
     }
 
-    fn large_input(busy: Option<bool>) -> ConditionalPrefillDecisionInput {
+    fn large_input(busy: Option<bool>) -> ConditionalDisaggDecisionInput {
         // 100k prompt, 0 overlap → eff_isl = 100k > 2048
         input_with_busy(100_000, 0, 64, busy)
     }
@@ -621,7 +621,7 @@ mod tests {
     async fn decision_input_new_defaults_busy_to_none() {
         // Back-compat: existing call sites that build via `new` should default
         // the new field to `None`.
-        let input = ConditionalPrefillDecisionInput::new(1000, 64, 0);
+        let input = ConditionalDisaggDecisionInput::new(1000, 64, 0);
         assert_eq!(input.prefill_chosen_worker_busy, None);
     }
 }

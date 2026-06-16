@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::conditional_prefill::ConditionalPrefillPolicy;
+use dynamo_kv_router::conditional_disagg::ConditionalDisaggPolicy;
 use dynamo_kv_router::{PrefillLoadEstimator, protocols::RoutingConstraints};
 use dynamo_runtime::{
     pipeline::{
@@ -35,7 +35,7 @@ use inner::InnerPrefillRouter;
 pub use types::{PrefillError, PrefillQueryOutcome};
 use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
 
-/// Annotation marker the conditional-prefill bypass path sets on a request before
+/// Annotation marker the conditional-disagg bypass path sets on a request before
 /// dispatching it to a DECODE-mode worker. The worker's Python wrapper checks for
 /// this annotation and skips its "disaggregated_params is required" validation,
 /// running the request as AGG instead. Kept in sync with the Python constant in
@@ -52,7 +52,7 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
-    /// Reference to the decode-side `KvRouter` so the conditional-prefill
+    /// Reference to the decode-side `KvRouter` so the conditional-disagg
     /// peek can pick the cache-hot decode worker. `None` for the
     /// non-KV-routing modes and for `disabled()` routers.
     decode_router: Option<Arc<super::KvRouter>>,
@@ -61,14 +61,14 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
-    /// Conditional-prefill bypass policy. Immutable after construction.
+    /// Conditional-disagg bypass policy. Immutable after construction.
     /// `disabled()` initializes to a no-op `IslBoundingPolicy::disabled()`.
-    conditional_prefill_policy: Box<dyn ConditionalPrefillPolicy>,
+    conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// v1.5 load-gate busy threshold. Resolved once at construction:
-    /// `KvRouterConfig::conditional_prefill_busy_threshold` if set, else
+    /// `KvRouterConfig::conditional_disagg_prefill_busy_threshold` if set, else
     /// `KvRouterConfig::router_queue_threshold`. `None` ⇒ load gate is a
     /// no-op (matches startup warning in `validate_kv_router_config`).
-    conditional_prefill_busy_threshold: Option<f64>,
+    conditional_disagg_prefill_busy_threshold: Option<f64>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
@@ -124,9 +124,9 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
-        if self.conditional_prefill_policy.is_enabled() {
+        if self.conditional_disagg_policy.is_enabled() {
             match self
-                .select_decode_worker_for_conditional_prefill(&req, &request_id)
+                .select_decode_worker_for_conditional_disagg(&req, &request_id)
                 .await
             {
                 Ok(Some(decision)) => {
@@ -136,7 +136,7 @@ impl
                         dp_rank = decision.worker.dp_rank,
                         net_new_tokens = decision.net_new_tokens,
                         overlap_tokens = decision.overlap_tokens,
-                        "Conditional prefill routing to decode worker"
+                        "Conditional disagg routing to decode worker"
                     );
 
                     if req.tracker.is_none() {
@@ -173,7 +173,7 @@ impl
                     tracing::warn!(
                         request_id = %request_id,
                         error = %error,
-                        "Conditional prefill decision failed; falling back to remote prefill"
+                        "Conditional disagg decision failed; falling back to remote prefill"
                     );
                 }
             }

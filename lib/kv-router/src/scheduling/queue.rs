@@ -365,7 +365,7 @@ impl<
     /// Per-worker prefill-busy check. Mirrors the per-worker predicate inside
     /// `all_workers_prefill_busy` (`queue.rs:699-744`) but exposes it for a
     /// single worker and lets the caller pass the threshold explicitly, so
-    /// conditional-prefill v1.5 can use a busy-line knob that is independent
+    /// conditional-disagg v1.5 can use a busy-line knob that is independent
     /// of `--router-queue-threshold`.
     ///
     /// Returns:
@@ -374,7 +374,7 @@ impl<
     /// - `None` when the worker has no registered config — i.e. the signal
     ///   can't be computed.
     ///
-    /// Used by conditional-prefill v1.5 (`PrefillLoadPolicy`) to gate bypass
+    /// Used by conditional-disagg v1.5 (`PrefillLoadPolicy`) to gate bypass
     /// decisions on the load of the prefill worker that would actually be
     /// picked for the request. Pure read of `slots.active_tokens()` +
     /// worker config; no mutation, no booking.

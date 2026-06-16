@@ -275,7 +275,7 @@ where
 
     /// Per-worker prefill-busy peek. See
     /// `SchedulerQueue::worker_is_prefill_busy` for full semantics. Used by
-    /// conditional-prefill v1.5 (`PrefillLoadPolicy`) to gate bypass on
+    /// conditional-disagg v1.5 (`PrefillLoadPolicy`) to gate bypass on
     /// whether the prefill worker the router would pick for this request is
     /// already over the existing prefill-busy line.
     pub fn worker_is_prefill_busy(

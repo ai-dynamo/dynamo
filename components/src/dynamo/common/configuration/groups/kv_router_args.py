@@ -49,17 +49,17 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "serve_indexer",
     "shared_cache_multiplier",
     "shared_cache_type",
-    "conditional_prefill_enabled",
-    "conditional_prefill_policy",
-    "conditional_prefill_eff_isl_threshold",
-    "conditional_prefill_eff_isl_ratio_threshold",
-    "conditional_prefill_busy_threshold",
+    "conditional_disagg_enabled",
+    "conditional_disagg_policy",
+    "conditional_disagg_eff_isl_threshold",
+    "conditional_disagg_eff_isl_ratio_threshold",
+    "conditional_disagg_prefill_busy_threshold",
     "router_predicted_ttl_secs",
 )
 
-# Accepted values for `--router-conditional-prefill-policy`. Kept in lock-step
-# with the Rust enum at `lib/kv-router/src/scheduling/config.rs::ConditionalPrefillPolicyKind`.
-CONDITIONAL_PREFILL_POLICY_CHOICES: tuple[str, ...] = (
+# Accepted values for `--router-conditional-disagg-policy`. Kept in lock-step
+# with the Rust enum at `lib/kv-router/src/scheduling/config.rs::ConditionalDisaggPolicyKind`.
+CONDITIONAL_DISAGG_POLICY_CHOICES: tuple[str, ...] = (
     "isl_bounding",
     "prefill_load",
     "isl_or_load",
@@ -70,12 +70,12 @@ CONDITIONAL_PREFILL_POLICY_CHOICES: tuple[str, ...] = (
 # unavailable when `--router-queue-threshold` is unset and the load gate
 # silently degrades to v1 behavior. Validators warn when this combination is
 # requested explicitly.
-LOAD_AWARE_CONDITIONAL_PREFILL_POLICIES: frozenset[str] = frozenset(
+LOAD_AWARE_CONDITIONAL_DISAGG_POLICIES: frozenset[str] = frozenset(
     {"prefill_load", "isl_or_load"}
 )
 
 
-def _warn_conditional_prefill_busy_threshold_resolution(
+def _warn_conditional_disagg_prefill_busy_threshold_resolution(
     *,
     policy: str,
     busy_threshold: Optional[float],
@@ -90,24 +90,24 @@ def _warn_conditional_prefill_busy_threshold_resolution(
     if busy_threshold is not None:
         # Explicit dedicated knob in use. Informational only; not noisy.
         logging.getLogger(__name__).info(
-            "conditional_prefill load gate using "
-            "--router-conditional-prefill-busy-threshold=%s",
+            "conditional_disagg load gate using "
+            "--router-conditional-disagg-prefill-busy-threshold=%s",
             busy_threshold,
         )
     elif queue_threshold is not None:
         # Fallback path; surface the inherited value so operators understand
         # which knob is actually in effect.
         logging.getLogger(__name__).info(
-            "conditional_prefill load gate inheriting "
+            "conditional_disagg load gate inheriting "
             "--router-queue-threshold=%s "
-            "(--router-conditional-prefill-busy-threshold not set)",
+            "(--router-conditional-disagg-prefill-busy-threshold not set)",
             queue_threshold,
         )
     else:
         warnings.warn(
-            f"--router-conditional-prefill-policy={policy!r} consumes the "
+            f"--router-conditional-disagg-policy={policy!r} consumes the "
             "prefill-worker busy signal, but neither "
-            "--router-conditional-prefill-busy-threshold nor "
+            "--router-conditional-disagg-prefill-busy-threshold nor "
             "--router-queue-threshold is set; the load gate will be a no-op. "
             "Set one of these flags to enable it.",
             stacklevel=3,
@@ -191,11 +191,11 @@ class KvRouterConfigBase(ConfigBase):
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
-    conditional_prefill_enabled: bool = False
-    conditional_prefill_policy: str = "isl_bounding"
-    conditional_prefill_eff_isl_threshold: int = 2048
-    conditional_prefill_eff_isl_ratio_threshold: float = 0.7
-    conditional_prefill_busy_threshold: Optional[float] = None
+    conditional_disagg_enabled: bool = False
+    conditional_disagg_policy: str = "isl_bounding"
+    conditional_disagg_eff_isl_threshold: int = 2048
+    conditional_disagg_eff_isl_ratio_threshold: float = 0.7
+    conditional_disagg_prefill_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
 
@@ -451,27 +451,27 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--router-conditional-prefill",
-            env_var="DYN_ROUTER_CONDITIONAL_PREFILL",
+            flag_name="--router-conditional-disagg",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG",
             default=False,
             help=(
-                "[EXPERIMENTAL] KV Router: Enable conditional prefill. When enabled, "
+                "[EXPERIMENTAL] KV Router: Enable conditional disagg. When enabled, "
                 "the frontend may skip remote prefill and route a request directly "
                 "to the cache-hot decode worker (run prefill+decode as AGG) when the "
                 "configured policy decides it's cheaper than DISAGG."
             ),
-            dest="conditional_prefill_enabled",
+            dest="conditional_disagg_enabled",
         )
         add_argument(
             g,
-            flag_name="--router-conditional-prefill-policy",
-            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_POLICY",
+            flag_name="--router-conditional-disagg-policy",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_POLICY",
             default="isl_bounding",
             help=(
-                "KV Router: Which conditional-prefill bypass policy to use. "
+                "KV Router: Which conditional-disagg bypass policy to use. "
                 "'isl_bounding' (default): bypass when net-new prompt tokens are below "
-                "--router-conditional-prefill-eff-isl-threshold AND the eff_isl/prompt ratio "
-                "is below --router-conditional-prefill-eff-isl-ratio-threshold. "
+                "--router-conditional-disagg-eff-isl-threshold AND the eff_isl/prompt ratio "
+                "is below --router-conditional-disagg-eff-isl-ratio-threshold. "
                 "'prefill_load' (v1.5): bypass when the best prefill worker for the request "
                 "is over the existing prefill-busy line (reuses --router-queue-threshold as "
                 "the trigger). "
@@ -479,13 +479,13 @@ class KvRouterArgGroup(ArgGroup):
                 "would bypass."
             ),
             arg_type=str,
-            choices=list(CONDITIONAL_PREFILL_POLICY_CHOICES),
-            dest="conditional_prefill_policy",
+            choices=list(CONDITIONAL_DISAGG_POLICY_CHOICES),
+            dest="conditional_disagg_policy",
         )
         add_argument(
             g,
-            flag_name="--router-conditional-prefill-eff-isl-threshold",
-            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_EFF_ISL_THRESHOLD",
+            flag_name="--router-conditional-disagg-eff-isl-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD",
             default=2048,
             help=(
                 "KV Router: Absolute effective-ISL cutoff (tokens) for the "
@@ -493,12 +493,12 @@ class KvRouterArgGroup(ArgGroup):
                 "`prompt_tokens - decode_overlap * block_size` is strictly less than this."
             ),
             arg_type=int,
-            dest="conditional_prefill_eff_isl_threshold",
+            dest="conditional_disagg_eff_isl_threshold",
         )
         add_argument(
             g,
-            flag_name="--router-conditional-prefill-eff-isl-ratio-threshold",
-            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_EFF_ISL_RATIO_THRESHOLD",
+            flag_name="--router-conditional-disagg-eff-isl-ratio-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
             default=0.7,
             help=(
                 "KV Router: Effective-ISL/prompt-tokens ratio cutoff for the "
@@ -506,12 +506,12 @@ class KvRouterArgGroup(ArgGroup):
                 "`eff_isl / prompt_tokens` is strictly less than this (smaller = stricter)."
             ),
             arg_type=float,
-            dest="conditional_prefill_eff_isl_ratio_threshold",
+            dest="conditional_disagg_eff_isl_ratio_threshold",
         )
         add_argument(
             g,
-            flag_name="--router-conditional-prefill-busy-threshold",
-            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_BUSY_THRESHOLD",
+            flag_name="--router-conditional-disagg-prefill-busy-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
             default=None,
             help=(
                 "KV Router: Dedicated busy-line fraction for the 'prefill_load' / "
@@ -522,7 +522,7 @@ class KvRouterArgGroup(ArgGroup):
                 "decouple the load gate from the queueing trigger."
             ),
             arg_type=float,
-            dest="conditional_prefill_busy_threshold",
+            dest="conditional_disagg_prefill_busy_threshold",
         )
         add_negatable_bool_argument(
             g,

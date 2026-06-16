@@ -311,7 +311,7 @@ def setup_kv_event_publisher(
         return None
 
     # Decode workers do not publish KV events by default. Router features
-    # that need decode-side cache visibility (e.g. router-conditional-prefill
+    # that need decode-side cache visibility (e.g. router-conditional-disagg
     # v1's bypass policy) can opt in with --enable-conditional-disagg.
     if (
         config.disaggregation_mode == DisaggregationMode.DECODE

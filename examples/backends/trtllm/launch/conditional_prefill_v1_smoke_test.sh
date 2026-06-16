@@ -98,10 +98,10 @@ print_launch_banner \
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
     --router-mode kv \
-    --router-conditional-prefill \
-    --router-conditional-prefill-policy isl_bounding \
-    --router-conditional-prefill-eff-isl-threshold "$EFF_ISL_THRESHOLD" \
-    --router-conditional-prefill-eff-isl-ratio-threshold "$EFF_ISL_RATIO_THRESHOLD" \
+    --router-conditional-disagg \
+    --router-conditional-disagg-policy isl_bounding \
+    --router-conditional-disagg-eff-isl-threshold "$EFF_ISL_THRESHOLD" \
+    --router-conditional-disagg-eff-isl-ratio-threshold "$EFF_ISL_RATIO_THRESHOLD" \
     --enforce-disagg \
     ${EXTRA_ROUTER_ARGS:-} &
 

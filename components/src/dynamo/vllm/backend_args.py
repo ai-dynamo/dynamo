@@ -65,7 +65,7 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help="Opt this decode worker into publishing KV events to the "
             "Dynamo router. Required for router features that need decode-"
-            "side cache visibility (e.g. router-conditional-prefill v1's "
+            "side cache visibility (e.g. router-conditional-disagg v1's "
             "bypass policy). No effect on prefill workers.",
         )
 

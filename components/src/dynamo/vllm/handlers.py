@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 
-# Conditional-prefill bypass marker. Kept in sync with
+# Conditional-disagg bypass marker. Kept in sync with
 # `BYPASS_REMOTE_PREFILL_ANNOTATION` in
 # `lib/llm/src/kv_router/prefill_router/mod.rs`. When the Rust router decides
 # a request is cheap enough to run locally on a decode worker (small net-new
@@ -2327,7 +2327,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
             request.get("annotations") or []
         ):
-            # Conditional-prefill bypass: the Rust router skipped the remote
+            # Conditional-disagg bypass: the Rust router skipped the remote
             # prefill stage for this request. Run it like an AGG request
             # (full prefill+decode locally) instead of taking the decode-only
             # paths that expect KV-transfer metadata from an upstream prefill
@@ -2336,7 +2336,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # downstream code will naturally skip the `kv_transfer_params`
             # wiring and let vLLM run a full forward pass.
             logger.debug(
-                "DECODE: conditional-prefill bypass annotation present; "
+                "DECODE: conditional-disagg bypass annotation present; "
                 "running request as AGG (prefill+decode on this worker)."
             )
             is_decode_only = False

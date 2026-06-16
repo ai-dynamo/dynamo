@@ -611,7 +611,7 @@ class TestDecodeWorkerMultimodalBranching:
         assert chunks[0]["status"] == "error"
 
     async def test_decode_only_bypass_annotation_runs_as_agg(self):
-        """Decode worker with conditional-prefill bypass annotation runs as AGG.
+        """Decode worker with conditional-disagg bypass annotation runs as AGG.
 
         With `x-bypass-remote-prefill` set, the decode handler should take
         the AGG multimodal path (`_extract_multimodal_data`) instead of the

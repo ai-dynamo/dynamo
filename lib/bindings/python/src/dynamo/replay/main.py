@@ -571,7 +571,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "Useful for per-request analysis (TTFT vs ISL scatter, ITL trace per request, "
         "worker-residency analysis). Each line carries arrival/admit/token timestamps, "
         "input/output lengths, full ITL series, and prefill/decode worker indices "
-        "(prefill_worker_idx=None indicates a conditional-prefill bypass).",
+        "(prefill_worker_idx=None indicates a conditional-disagg bypass).",
     )
     parser.add_argument(
         "--planner-config",

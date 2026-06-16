@@ -8,7 +8,7 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
-use dynamo_kv_router::conditional_prefill::ConditionalPrefillDecisionInput;
+use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
@@ -21,9 +21,9 @@ use crate::protocols::common::{
     timing::RequestTracker,
 };
 
-/// Conditional-prefill decision: which decode worker to pin the request to,
+/// Conditional-disagg decision: which decode worker to pin the request to,
 /// plus diagnostic counts for logging.
-pub(super) struct ConditionalPrefillDecodeDecision {
+pub(super) struct ConditionalDisaggDecodeDecision {
     pub worker: WorkerWithDpRank,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
@@ -39,16 +39,16 @@ pub(super) struct PrefillCompletion {
 
 impl PrefillRouter {
     /// Peek the decode router to see which decode worker would be picked, then
-    /// consult the configured conditional-prefill policy. Returns
+    /// consult the configured conditional-disagg policy. Returns
     /// `Ok(Some(...))` to bypass remote prefill (run prefill+decode on that
     /// decode worker as AGG), `Ok(None)` to fall through to the normal
     /// disaggregated flow, or `Err(...)` if the peek itself failed (caller
     /// logs + falls through).
-    pub(super) async fn select_decode_worker_for_conditional_prefill(
+    pub(super) async fn select_decode_worker_for_conditional_disagg(
         &self,
         req: &PreprocessedRequest,
         request_id: &str,
-    ) -> Result<Option<ConditionalPrefillDecodeDecision>> {
+    ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
         if !self.router_mode.is_kv_routing() {
             return Ok(None);
         }
@@ -61,7 +61,7 @@ impl PrefillRouter {
         {
             tracing::debug!(
                 request_id,
-                "Skipping conditional prefill because request has a preselected prefill worker"
+                "Skipping conditional disagg because request has a preselected prefill worker"
             );
             return Ok(None);
         }
@@ -69,7 +69,7 @@ impl PrefillRouter {
         let Some(decode_router) = self.decode_router.as_ref() else {
             tracing::debug!(
                 request_id,
-                "Skipping conditional prefill because decode router is unavailable"
+                "Skipping conditional disagg because decode router is unavailable"
             );
             return Ok(None);
         };
@@ -134,13 +134,13 @@ impl PrefillRouter {
         let prompt_tokens = routing_token_ids.len();
 
         let mut input =
-            ConditionalPrefillDecisionInput::new(prompt_tokens, block_size, overlap_blocks);
-        if self.conditional_prefill_policy.needs_prefill_worker_busy() {
+            ConditionalDisaggDecisionInput::new(prompt_tokens, block_size, overlap_blocks);
+        if self.conditional_disagg_policy.needs_prefill_worker_busy() {
             let busy = self.peek_prefill_chosen_worker_busy(req).await;
             tracing::debug!(
                 request_id,
                 prefill_chosen_worker_busy = ?busy,
-                "Conditional prefill load gate peeked best prefill worker"
+                "Conditional disagg load gate peeked best prefill worker"
             );
             input = input.with_prefill_chosen_worker_busy(busy);
         }
@@ -148,11 +148,11 @@ impl PrefillRouter {
         let overlap_tokens = (overlap_blocks as usize) * block_size;
 
         if self
-            .conditional_prefill_policy
+            .conditional_disagg_policy
             .should_bypass_remote_prefill(input)
             .await
         {
-            return Ok(Some(ConditionalPrefillDecodeDecision {
+            return Ok(Some(ConditionalDisaggDecodeDecision {
                 worker,
                 overlap_tokens,
                 net_new_tokens,
@@ -165,7 +165,7 @@ impl PrefillRouter {
             dp_rank = worker.dp_rank,
             net_new_tokens,
             overlap_tokens,
-            "Conditional prefill policy declined bypass; falling through to disagg"
+            "Conditional disagg policy declined bypass; falling through to disagg"
         );
         Ok(None)
     }
@@ -563,7 +563,7 @@ impl PrefillRouter {
     /// the configured busy line. `None` when the signal is unavailable
     /// (no busy threshold resolved, peek failed, router is not the KV variant).
     async fn peek_prefill_chosen_worker_busy(&self, req: &PreprocessedRequest) -> Option<bool> {
-        let threshold = self.conditional_prefill_busy_threshold?;
+        let threshold = self.conditional_disagg_prefill_busy_threshold?;
         let prefill_router = self.prefill_router.get()?;
         let r = match prefill_router {
             InnerPrefillRouter::KvRouter(r) => r,

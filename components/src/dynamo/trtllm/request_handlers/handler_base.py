@@ -61,7 +61,7 @@ configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
 
-# Annotation set by the Rust conditional-prefill bypass path. Kept in sync with
+# Annotation set by the Rust conditional-disagg bypass path. Kept in sync with
 # `BYPASS_REMOTE_PREFILL_ANNOTATION` in
 # `lib/llm/src/kv_router/prefill_router/mod.rs`.
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
@@ -1007,13 +1007,13 @@ class HandlerBase(BaseGenerativeHandler):
             self.disaggregation_mode == DisaggregationMode.DECODE
             and disaggregated_params is None
         ):
-            # Conditional-prefill bypass: the Rust router decided to skip the
+            # Conditional-disagg bypass: the Rust router decided to skip the
             # remote prefill stage and run this request as AGG on a DECODE-mode
             # worker. Marker kept in sync with `BYPASS_REMOTE_PREFILL_ANNOTATION`
             # in `lib/llm/src/kv_router/prefill_router/mod.rs`.
             if BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or []):
                 logging.debug(
-                    "DECODE: conditional-prefill bypass annotation present; "
+                    "DECODE: conditional-disagg bypass annotation present; "
                     "running request as AGG (prefill+decode on this worker)."
                 )
             else:
