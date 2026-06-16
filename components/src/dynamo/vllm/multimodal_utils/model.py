@@ -38,11 +38,6 @@ class ModelFamily(str, Enum):
 
     QWEN_VL = "qwen-vl"
     LLAVA = "llava"
-    # Encoder worker produces a fully-spliced text+image embedding tensor and
-    # ships it over NIXL.  The PD handler routes it directly into the
-    # prompt_embeds path, bypassing vLLM's multimodal renderer.
-    # Enable by setting DYN_EXTERNAL_PROMPT_EMBEDS=1 at runtime.
-    EXTERNAL_PROMPT_EMBEDS = "external_prompt_embeds"
 
 
 # Per-family registries used by `resolve_model_family`. The encoder reaches
@@ -156,12 +151,6 @@ def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
     for family, patterns in _FAMILY_NAME_PATTERNS.items():
         if any(pattern in lowered for pattern in patterns):
             return family
-
-    # Allow opting text-only models into the spliced-embedding path.  Only
-    # activates when no other family matched (i.e., the model is text-only).
-    # VLM models (QWEN_VL, LLAVA) are unaffected.
-    if int(os.getenv("DYN_EXTERNAL_PROMPT_EMBEDS", "0")):
-        return ModelFamily.EXTERNAL_PROMPT_EMBEDS
 
     return None
 
