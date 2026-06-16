@@ -50,7 +50,7 @@ func NewDynamoComponentDeploymentHandler() *DynamoComponentDeploymentHandler {
 func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
 
-	if err := validateAdmissionKind(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
 		return nil, err
 	}
 
@@ -70,7 +70,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, o
 func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
 
-	if err := validateAdmissionKind(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
 		return nil, err
 	}
 
@@ -116,7 +116,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, o
 func (h *DynamoComponentDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
 
-	if err := validateAdmissionKind(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
 		return nil, err
 	}
 

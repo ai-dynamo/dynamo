@@ -71,10 +71,11 @@ func newTestCertManager(cl *fake.ClientBuilder, cfg *configv1alpha1.WebhookServe
 
 func newTestInjector(cl *fake.ClientBuilder, cfg *configv1alpha1.OperatorConfiguration) *CABundleInjector {
 	return &CABundleInjector{
-		client:    cl.Build(),
-		cfg:       cfg,
-		namespace: testNamespace,
-		logger:    logr.Discard(),
+		client:       cl.Build(),
+		cfg:          cfg,
+		namespace:    testNamespace,
+		logger:       logr.Discard(),
+		pollInterval: defaultCABundlePollInterval,
 	}
 }
 
@@ -272,10 +273,11 @@ func TestInjectIntoValidatingWebhooks_SkipsNonMatchingLabels(t *testing.T) {
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := &CABundleInjector{
-		client:    fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc).Build(),
-		cfg:       cfg,
-		namespace: "my-ns",
-		logger:    logr.Discard(),
+		client:       fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc).Build(),
+		cfg:          cfg,
+		namespace:    "my-ns",
+		logger:       logr.Discard(),
+		pollInterval: defaultCABundlePollInterval,
 	}
 	ctx := context.Background()
 
@@ -310,10 +312,11 @@ func TestInjectIntoValidatingWebhooks_SkipsDifferentNamespace(t *testing.T) {
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := &CABundleInjector{
-		client:    fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc).Build(),
-		cfg:       cfg,
-		namespace: "my-ns",
-		logger:    logr.Discard(),
+		client:       fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc).Build(),
+		cfg:          cfg,
+		namespace:    "my-ns",
+		logger:       logr.Discard(),
+		pollInterval: defaultCABundlePollInterval,
 	}
 	ctx := context.Background()
 
@@ -467,6 +470,69 @@ func TestEnsureCRDConversionWithoutCABundle(t *testing.T) {
 	}
 }
 
+func TestEnsureCRDConversionPreservesExistingCABundle(t *testing.T) {
+	path := "/old-convert"
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dgdCRDName,
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "nvidia.com",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "dynamographdeployments",
+				Singular: "dynamographdeployment",
+				Kind:     "DynamoGraphDeployment",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{Name: "v1alpha1", Served: true, Storage: true},
+				{Name: "v1beta1", Served: true, Storage: false},
+			},
+			Conversion: &apiextensionsv1.CustomResourceConversion{
+				Strategy: apiextensionsv1.WebhookConverter,
+				Webhook: &apiextensionsv1.WebhookConversion{
+					ClientConfig: &apiextensionsv1.WebhookClientConfig{
+						Service: &apiextensionsv1.ServiceReference{
+							Name:      "old-service",
+							Namespace: "old-namespace",
+							Path:      &path,
+						},
+						CABundle: []byte("existing-ca"),
+					},
+				},
+			},
+		},
+	}
+
+	cfg := &configv1alpha1.OperatorConfiguration{}
+	cfg.Server.Webhook.ServiceName = testServiceName
+	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
+	ctx := context.Background()
+
+	if err := injector.EnsureCRDConversion(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &apiextensionsv1.CustomResourceDefinition{}
+	if err := injector.client.Get(ctx, types.NamespacedName{Name: dgdCRDName}, updated); err != nil {
+		t.Fatalf("failed to get CRD: %v", err)
+	}
+	if string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle) != "existing-ca" {
+		t.Errorf("expected existing CA bundle to be preserved, got %q",
+			string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle))
+	}
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != testServiceName {
+		t.Errorf("expected service name %s, got %s",
+			testServiceName,
+			updated.Spec.Conversion.Webhook.ClientConfig.Service.Name)
+	}
+	if *updated.Spec.Conversion.Webhook.ClientConfig.Service.Path != conversionWebhookPath {
+		t.Errorf("expected service path %s, got %s",
+			conversionWebhookPath,
+			*updated.Spec.Conversion.Webhook.ClientConfig.Service.Path)
+	}
+}
+
 func TestInjectCRDConversionCA_ReadsCABundleAndPatchesDGD(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -541,16 +607,11 @@ func TestInjectCRDConversionCA_ReadsCABundleAndPatchesDGD(t *testing.T) {
 }
 
 func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
-	oldPollInterval := caBundlePollInterval
-	caBundlePollInterval = 10 * time.Millisecond
-	defer func() {
-		caBundlePollInterval = oldPollInterval
-	}()
-
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	cfg.Server.Webhook.SecretName = testSecretName
 	cfg.Server.Webhook.ServiceName = testServiceName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	injector.pollInterval = 10 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 

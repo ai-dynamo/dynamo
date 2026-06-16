@@ -36,15 +36,13 @@ const (
 	dcdCRDName                       = "dynamocomponentdeployments.nvidia.com"
 	dgdsaCRDName                     = "dynamographdeploymentscalingadapters.nvidia.com"
 	conversionWebhookPath            = "/convert"
+	defaultCABundlePollInterval      = 5 * time.Second
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
 )
 
-var (
-	errCABundleMissing   = errors.New("ca.crt not found or empty")
-	caBundlePollInterval = 5 * time.Second
-)
+var errCABundleMissing = errors.New("ca.crt not found or empty")
 
 // convertibleCRDs is the list of CRDs whose conversion webhook this operator
 // patches at startup. Each of these resources has at least two API versions
@@ -205,25 +203,41 @@ func (cm *CertManager) createPlaceholderSecretIfNotExists(ctx context.Context) e
 // CABundleInjector discovers webhook configurations owned by this operator
 // instance and patches them with the CA bundle from the cert secret.
 type CABundleInjector struct {
-	client    client.Client
-	cfg       *configv1alpha1.OperatorConfiguration
-	namespace string
-	logger    logr.Logger
+	client       client.Client
+	cfg          *configv1alpha1.OperatorConfiguration
+	namespace    string
+	logger       logr.Logger
+	pollInterval time.Duration
+}
+
+// CABundleInjectorOption configures optional CABundleInjector behavior.
+type CABundleInjectorOption func(*CABundleInjector)
+
+// WithCABundlePollInterval overrides the CA bundle polling interval.
+func WithCABundlePollInterval(interval time.Duration) CABundleInjectorOption {
+	return func(i *CABundleInjector) {
+		i.pollInterval = interval
+	}
 }
 
 // NewCABundleInjector creates a CABundleInjector. The client should be the
 // manager's cached client (available after mgr.Start).
-func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfiguration) (*CABundleInjector, error) {
+func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfiguration, opts ...CABundleInjectorOption) (*CABundleInjector, error) {
 	ns, err := getOperatorNamespace()
 	if err != nil {
 		return nil, fmt.Errorf("reading operator namespace: %w", err)
 	}
-	return &CABundleInjector{
-		client:    cl,
-		cfg:       cfg,
-		namespace: ns,
-		logger:    ctrl.Log.WithName("ca-bundle-injector"),
-	}, nil
+	injector := &CABundleInjector{
+		client:       cl,
+		cfg:          cfg,
+		namespace:    ns,
+		logger:       ctrl.Log.WithName("ca-bundle-injector"),
+		pollInterval: defaultCABundlePollInterval,
+	}
+	for _, opt := range opts {
+		opt(injector)
+	}
+	return injector, nil
 }
 
 // InjectAll reads the CA bundle from the cert secret and injects it into all
@@ -249,9 +263,10 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 	return nil
 }
 
-// EnsureCRDConversion patches the CRD conversion webhook endpoint without a
-// CA bundle. This is used when certificates are externally provisioned and may
-// not be present yet; conversion then fails closed until the CA is injected.
+// EnsureCRDConversion patches the CRD conversion webhook endpoint. Fresh CRDs
+// get no CA bundle, so conversion fails closed until the CA is injected. If a
+// previous CA bundle already exists, it is preserved to avoid breaking
+// conversion during operator restarts.
 func (i *CABundleInjector) EnsureCRDConversion(ctx context.Context) error {
 	if err := i.ensureCRDConversion(ctx, nil); err != nil {
 		return err
@@ -276,7 +291,7 @@ func (i *CABundleInjector) InjectCRDConversionCA(ctx context.Context) error {
 
 func (i *CABundleInjector) waitForCABundle(ctx context.Context) ([]byte, error) {
 	var caBundle []byte
-	err := wait.PollUntilContextCancel(ctx, caBundlePollInterval, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextCancel(ctx, i.pollInterval, true, func(ctx context.Context) (bool, error) {
 		var err error
 		caBundle, err = i.readCABundle(ctx)
 		if err == nil {
@@ -380,6 +395,9 @@ func (i *CABundleInjector) patchConversion(ctx context.Context, crdName string, 
 
 	original := crd.DeepCopy()
 	path := conversionWebhookPath
+	if caBundle == nil {
+		caBundle = existingConversionCABundle(crd)
+	}
 	crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
 		Strategy: apiextensionsv1.WebhookConverter,
 		Webhook: &apiextensionsv1.WebhookConversion{
@@ -400,6 +418,15 @@ func (i *CABundleInjector) patchConversion(ctx context.Context, crdName string, 
 	}
 	i.logger.Info("Configured CRD conversion webhook", "crd", crdName)
 	return nil
+}
+
+func existingConversionCABundle(crd *apiextensionsv1.CustomResourceDefinition) []byte {
+	if crd.Spec.Conversion == nil ||
+		crd.Spec.Conversion.Webhook == nil ||
+		crd.Spec.Conversion.Webhook.ClientConfig == nil {
+		return nil
+	}
+	return crd.Spec.Conversion.Webhook.ClientConfig.CABundle
 }
 
 func getOperatorNamespace() (string, error) {

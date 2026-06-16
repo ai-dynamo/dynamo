@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package validation
+package webhook
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-func TestValidateAdmissionKind(t *testing.T) {
+func TestValidateAdmissionGVK(t *testing.T) {
 	tests := []struct {
 		name        string
 		expected    schema.GroupVersionKind
@@ -84,29 +84,29 @@ func TestValidateAdmissionKind(t *testing.T) {
 				},
 			})
 
-			err := validateAdmissionKind(ctx, tt.expected)
+			err := ValidateAdmissionGVK(ctx, tt.expected)
 			if tt.wantErrText == "" {
 				if err != nil {
-					t.Fatalf("validateAdmissionKind() error = %v", err)
+					t.Fatalf("ValidateAdmissionGVK() error = %v", err)
 				}
 				return
 			}
 			if err == nil {
-				t.Fatal("validateAdmissionKind() expected error but got nil")
+				t.Fatal("ValidateAdmissionGVK() expected error but got nil")
 			}
 			if !strings.Contains(err.Error(), tt.wantErrText) {
-				t.Fatalf("validateAdmissionKind() error = %q, want to contain %q", err.Error(), tt.wantErrText)
+				t.Fatalf("ValidateAdmissionGVK() error = %q, want to contain %q", err.Error(), tt.wantErrText)
 			}
 		})
 	}
 }
 
-func TestValidateAdmissionKindRejectsMissingAdmissionRequest(t *testing.T) {
-	err := validateAdmissionKind(context.Background(), nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
+func TestValidateAdmissionGVKRejectsMissingAdmissionRequest(t *testing.T) {
+	err := ValidateAdmissionGVK(context.Background(), nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
 	if err == nil {
-		t.Fatal("validateAdmissionKind() expected error but got nil")
+		t.Fatal("ValidateAdmissionGVK() expected error but got nil")
 	}
 	if !strings.Contains(err.Error(), "admission request missing from context") {
-		t.Fatalf("validateAdmissionKind() error = %q, want missing request error", err.Error())
+		t.Fatalf("ValidateAdmissionGVK() error = %q, want missing request error", err.Error())
 	}
 }

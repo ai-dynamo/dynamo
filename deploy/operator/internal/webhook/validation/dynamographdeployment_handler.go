@@ -62,7 +62,7 @@ func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal stri
 func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
 
-	if err := validateAdmissionKind(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
 		return nil, err
 	}
 
@@ -82,7 +82,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
 
-	if err := validateAdmissionKind(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
 		return nil, err
 	}
 
@@ -141,7 +141,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
 
-	if err := validateAdmissionKind(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
 		return nil, err
 	}
 
