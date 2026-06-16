@@ -60,7 +60,8 @@ impl OfflineDisaggReplayConfig {
 }
 
 pub use entrypoints::{
-    generate_trace_worker_artifacts_offline, simulate_concurrency_file,
+    ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
+    generate_trace_worker_artifacts_offline_with_kv_event_visibility, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
     simulate_concurrency_file_disagg_with_router_mode_and_format,
     simulate_concurrency_file_with_router_mode,

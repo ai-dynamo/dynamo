@@ -143,6 +143,8 @@ navigation:
                 path: kubernetes/deployment/dynamomodel-guide.md
               - page: DGDR Reference
                 path: kubernetes/dgdr.md
+              - page: DGDR Examples
+                path: kubernetes/dgdr-examples.md
           - section: Model Loading
             contents:
               - page: Model Caching
@@ -420,6 +422,8 @@ navigation:
                 path: components/router/router-examples.md
               - page: Standalone Indexer
                 path: components/router/standalone-indexer.md
+              - page: Standalone Selection Service
+                path: components/router/standalone-selection.md
               - page: Standalone Slot Tracker
                 path: components/router/standalone-slot-tracker.md
               - page: KV Event Replay — Dynamo vs vLLM

@@ -212,10 +212,11 @@ Resumed program <program_id> -> worker=<id> (tokens=<n>)
 Enable these by lowering the log level for `dynamo.thunderagent_router`. They
 give the exact program identities behind each INFO summary count.
 
-For per-request tracing (token counts, cache hits, worker placement, tool-event
-timelines), the router also integrates with [Agent Tracing](agent-tracing.md):
-set `DYN_AGENT_TRACE=1` on the frontend to land a `request_end` record per LLM
-call plus the harness tool-event timeline.
+For per-request tracing (token counts, cache hits, worker placement), the router
+also integrates with [Agent Tracing](agent-tracing.md): set
+`DYN_REQUEST_TRACE=1` on the frontend to land a `request_end` record per LLM
+call. Harness tool-event spans are separate: they require
+`DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` plus a configured publisher.
 
 ## Reproducing the MiniMax-M2 Results
 

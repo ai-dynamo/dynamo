@@ -375,12 +375,7 @@ pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
             tool.status.clone()
         };
         *summary.by_status.entry(status_key).or_insert(0) += 1;
-        let class_key = if tool.tool_class.is_empty() {
-            "(unlabeled)".to_string()
-        } else {
-            tool.tool_class.clone()
-        };
-        *summary.by_class.entry(class_key).or_insert(0) += 1;
+        *summary.by_class.entry(tool.tool_class.clone()).or_insert(0) += 1;
         summary.total_wall_ms += tool.duration_ms;
         trajectories.insert(tool.trajectory_id.as_str());
     }
@@ -391,8 +386,9 @@ pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_trace::load::{
-        AgentContextFields, AgentReplayMetrics, AgentRequestMetrics, RequestEntry, ToolEntry,
+    use crate::request_trace::load::{
+        AgentContextFields, RequestEntry, RequestTraceReplayMetrics, RequestTraceRequestMetrics,
+        ToolEntry,
     };
 
     fn request(
@@ -405,14 +401,14 @@ mod tests {
             start_ms,
             end_ms,
             agent_context: None,
-            request: AgentRequestMetrics {
+            request: RequestTraceRequestMetrics {
                 request_id: request_id.to_string(),
                 output_tokens: Some(5),
                 request_received_ms: Some(start_ms as u64),
                 total_time_ms: Some((end_ms - start_ms) as f64),
                 replay: None,
             },
-            replay: AgentReplayMetrics {
+            replay: RequestTraceReplayMetrics {
                 trace_block_size: 2,
                 input_length: sequence_hashes.len() * 2,
                 input_sequence_hashes: sequence_hashes,
@@ -466,7 +462,6 @@ mod tests {
                 contextual_request("r2", "root", None, 1_300, 1_400, vec![11, 22]),
             ],
             tools: vec![tool("root", "call-1", "ls", 1_150, 1_250)],
-            contains_request_trace: false,
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
@@ -487,18 +482,17 @@ mod tests {
     }
 
     #[test]
-    fn agentic_converter_rejects_request_trace_schema() {
+    fn agentic_converter_rejects_context_free_request_trace() {
         let loaded = LoadedAgentTrace {
             requests: vec![request("r1", 1_000, 1_100, vec![11])],
             tools: Vec::new(),
-            contains_request_trace: true,
         };
 
         let error = build_agentic_mooncake_rows(loaded).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("cannot be converted with --agentic")
+                .contains("without agent_context cannot be converted with --agentic")
         );
     }
 
@@ -516,7 +510,6 @@ mod tests {
                 tool("root", "call-2", "read", 1_150, 1_250),
                 tool("root", "call-3", "find", 1_200, 1_250),
             ],
-            contains_request_trace: false,
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
@@ -541,7 +534,6 @@ mod tests {
                 contextual_request("parent-2", "root", None, 1_500, 1_600, vec![11, 22]),
             ],
             tools: Vec::new(),
-            contains_request_trace: false,
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
@@ -564,7 +556,6 @@ mod tests {
                 contextual_request("child-2", "child", Some("root-b"), 1_200, 1_300, vec![22]),
             ],
             tools: Vec::new(),
-            contains_request_trace: false,
         };
 
         let err = build_agentic_mooncake_rows(loaded).unwrap_err();
@@ -582,7 +573,6 @@ mod tests {
                 contextual_request("parent-3", "root", None, 2_000, 2_100, vec![11, 22, 33]),
             ],
             tools: Vec::new(),
-            contains_request_trace: false,
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();

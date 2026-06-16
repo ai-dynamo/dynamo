@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert Dynamo agent trace JSONL files to Perfetto-compatible JSON.
+"""Convert Dynamo request trace JSONL files to Perfetto-compatible JSON.
 
 The output uses Chrome Trace Event JSON, which can be opened directly in
 Perfetto UI. Inputs can be uncompressed `.jsonl`, compressed `.jsonl.gz`,
@@ -57,13 +57,14 @@ def _iter_records(paths: list[Path]) -> Iterable[dict[str, Any]]:
 
 _TOOL_EVENT_TYPES = {"tool_start", "tool_end", "tool_error"}
 _SYNTHETIC_TOOL_DURATION_US = 1_000
+_SUPPORTED_SCHEMA = "dynamo.request.trace.v1"
 
 
 def _event_from_record(record: dict[str, Any]) -> dict[str, Any] | None:
     event = record.get("event", record)
     if not isinstance(event, dict):
         return None
-    if event.get("schema") != "dynamo.agent.trace.v1":
+    if event.get("schema") != _SUPPORTED_SCHEMA:
         return None
     return event
 
@@ -220,7 +221,6 @@ class TrackTable:
         self._session_pids: dict[str, int] = {}
         self._track_tids: dict[tuple[str, str, int, str], int] = {}
         self._active_lanes: dict[tuple[str, str], list[tuple[int, int]]] = {}
-        self._next_lane: dict[tuple[str, str], int] = {}
         self._max_lanes: dict[tuple[str, str], int] = {}
 
     def lane_for(
@@ -243,8 +243,6 @@ class TrackTable:
         lane = 0
         while lane in active_lanes:
             lane += 1
-        if lane >= self._next_lane.get(trajectory_key, 0):
-            self._next_lane[trajectory_key] = lane + 1
         self._max_lanes[trajectory_key] = max(
             self._max_lanes.get(trajectory_key, 0), lane + 1
         )
@@ -453,19 +451,19 @@ def convert_records(
             continue
 
         agent_context = event.get("agent_context")
-        if not isinstance(agent_context, dict):
-            continue
+        has_agent_context = isinstance(agent_context, dict)
+        agent_context = agent_context if has_agent_context else {}
 
         event_type = event.get("event_type")
-        session_id = _safe_label(agent_context.get("session_id"), "unknown-session")
-        trajectory_id = _safe_label(
-            agent_context.get("trajectory_id"), "unknown-trajectory"
-        )
 
         if event_type == "request_end":
             request = event.get("request")
             if not isinstance(request, dict):
                 continue
+            session_id = _safe_label(agent_context.get("session_id"), "request-trace")
+            trajectory_id = _safe_label(
+                agent_context.get("trajectory_id"), "request-only"
+            )
 
             start_ms = _request_start_ms(event, request)
             if start_ms is None:
@@ -490,10 +488,16 @@ def convert_records(
             continue
 
         if event_type in _TOOL_EVENT_TYPES:
+            if not has_agent_context:
+                continue
             tool = event.get("tool")
             event_time_us = _ms_to_trace_us(event.get("event_time_unix_ms"))
             if not isinstance(tool, dict) or event_time_us is None:
                 continue
+            session_id = _safe_label(agent_context.get("session_id"), "unknown-session")
+            trajectory_id = _safe_label(
+                agent_context.get("trajectory_id"), "unknown-trajectory"
+            )
 
             tool_records.append(
                 {
@@ -588,8 +592,7 @@ def convert_records(
         trace_events.append(
             _make_complete_event(
                 name=(
-                    "LLM request: "
-                    f"{_safe_label(request.get('model'), 'unknown-model')}"
+                    f"LLM request: {_safe_label(request.get('model'), 'unknown-model')}"
                 ),
                 category="dynamo.llm",
                 pid=request_pid,
@@ -702,7 +705,7 @@ def convert_records(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert Dynamo agent trace JSONL/JSONL.GZ files to Perfetto JSON.",
+        description="Convert Dynamo request trace JSONL/JSONL.GZ files to Perfetto JSON.",
     )
     parser.add_argument(
         "inputs",
@@ -714,15 +717,6 @@ def parse_args() -> argparse.Namespace:
         "--output",
         required=True,
         help="Output Chrome Trace JSON path for Perfetto UI.",
-    )
-    parser.add_argument(
-        "--include-stages",
-        action="store_true",
-        default=True,
-        help=(
-            "Emit prefill wait, prefill, and decode stage slices. This is the "
-            "default; kept for compatibility."
-        ),
     )
     parser.add_argument(
         "--no-stages",

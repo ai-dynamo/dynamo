@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Agent tool-event relay.
+//! Request trace tool-event relay.
 //!
 //! Dynamo binds a local PULL socket so any number of external harness processes
 //! can connect with PUSH sockets, validate domain records, then publish them to
 //! the Dynamo event plane. The ZMQ wire format is multipart:
-//! `[topic, seq_be_u64, msgpack(AgentTraceRecord)]`.
+//! `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`.
 
 use anyhow::Result;
 use dynamo_runtime::component::Component;
@@ -17,14 +17,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::utils::zmq::{PullSocket, bind_pull_socket, multipart_message};
 
-use super::{AgentTraceRecord, DEFAULT_TOOL_EVENTS_TOPIC};
+use super::DEFAULT_TOOL_EVENTS_TOPIC;
+use crate::request_trace::RequestTraceRecord;
 
-/// Relay from local agent tool-event ZMQ PUSH producers to the Dynamo event plane.
-pub struct AgentToolEventRelay {
+/// Relay from local tool-event ZMQ PUSH producers to the Dynamo event plane.
+pub struct ToolEventRelay {
     cancel: CancellationToken,
 }
 
-impl AgentToolEventRelay {
+impl ToolEventRelay {
     pub async fn start(
         component: Component,
         zmq_endpoint: String,
@@ -42,7 +43,7 @@ impl AgentToolEventRelay {
         let cancel_clone = cancel.clone();
 
         let socket = bind_pull_socket(&zmq_endpoint).await?;
-        tracing::info!(endpoint = %zmq_endpoint, "agent tool relay: bound");
+        tracing::info!(endpoint = %zmq_endpoint, "request trace tool relay: bound");
 
         let publisher = EventPublisher::for_namespace(&namespace, topic).await?;
 
@@ -67,7 +68,7 @@ impl AgentToolEventRelay {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    tracing::info!("agent tool relay: shutting down");
+                    tracing::info!("request trace tool relay: shutting down");
                     break;
                 }
                 result = socket.next() => {
@@ -76,7 +77,7 @@ impl AgentToolEventRelay {
                             let mut frames = multipart_message(frames);
                             if frames.len() != 3 {
                                 tracing::warn!(
-                                    "agent tool relay: unexpected ZMQ frame count: expected 3, got {}",
+                                    "request trace tool relay: unexpected ZMQ frame count: expected 3, got {}",
                                     frames.len()
                                 );
                                 continue;
@@ -88,35 +89,35 @@ impl AgentToolEventRelay {
                                 tracing::debug!(
                                     expected_topic = expected_topic,
                                     topic = %String::from_utf8_lossy(&frames[0]),
-                                    "agent tool relay: dropping record for unexpected topic"
+                                    "request trace tool relay: dropping record for unexpected topic"
                                 );
                                 continue;
                             }
 
                             let payload = frames.swap_remove(2);
-                            let record = match rmp_serde::from_slice::<AgentTraceRecord>(&payload) {
+                            let record = match rmp_serde::from_slice::<RequestTraceRecord>(&payload) {
                                 Ok(record) => record,
                                 Err(error) => {
-                                    tracing::warn!(%error, bytes = payload.len(), "agent tool relay: failed to decode record");
+                                    tracing::warn!(%error, bytes = payload.len(), "request trace tool relay: failed to decode record");
                                     continue;
                                 }
                             };
 
-                            if let Err(error) = super::validate_tool_record(&record) {
-                                tracing::warn!(%error, "agent tool relay: dropping invalid record");
+                            if let Err(error) = crate::request_trace::validate_tool_record(&record) {
+                                tracing::warn!(%error, "request trace tool relay: dropping invalid record");
                                 continue;
                             }
 
                             if let Err(error) = publisher.publish(&record).await {
-                                tracing::warn!(%error, "agent tool relay: event plane publish failed");
+                                tracing::warn!(%error, "request trace tool relay: event plane publish failed");
                             }
                         }
                         Some(Err(error)) => {
-                            tracing::error!(%error, "agent tool relay: ZMQ recv failed");
+                            tracing::error!(%error, "request trace tool relay: ZMQ recv failed");
                             break;
                         }
                         None => {
-                            tracing::error!("agent tool relay: ZMQ stream ended");
+                            tracing::error!("request trace tool relay: ZMQ stream ended");
                             break;
                         }
                     }
@@ -126,7 +127,7 @@ impl AgentToolEventRelay {
     }
 }
 
-impl Drop for AgentToolEventRelay {
+impl Drop for ToolEventRelay {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
@@ -144,10 +145,11 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::agents::context::AgentContext;
-    use crate::agents::trace::{
-        AgentToolEvent, AgentToolStatus, TraceEventSource, TraceEventType, TraceSchema,
+    use crate::protocols::openai::nvext::AgentContext;
+    use crate::request_trace::{
+        RequestTraceEventSource, RequestTraceToolEvent, RequestTraceToolStatus,
     };
+    use crate::request_trace::{RequestTraceEventType, RequestTraceSchema};
     use crate::utils::zmq::{connect_push_socket, send_multipart_direct};
 
     fn reserve_open_port() -> TcpListener {
@@ -164,26 +166,26 @@ mod tests {
         )
     }
 
-    fn valid_record() -> AgentTraceRecord {
-        AgentTraceRecord {
-            schema: TraceSchema::V1,
-            event_type: TraceEventType::ToolEnd,
+    fn valid_record() -> RequestTraceRecord {
+        RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::ToolEnd,
             event_time_unix_ms: 1,
-            event_source: TraceEventSource::Harness,
-            agent_context: AgentContext {
-                session_type_id: "ms_agent".to_string(),
+            event_source: Some(RequestTraceEventSource::Harness),
+            agent_context: Some(AgentContext {
+                session_type_id: "agent_harness".to_string(),
                 session_id: "run-1".to_string(),
                 trajectory_id: "run-1:agent".to_string(),
                 parent_trajectory_id: None,
                 trajectory_final: None,
-            },
+            }),
             request: None,
-            tool: Some(AgentToolEvent {
+            tool: Some(RequestTraceToolEvent {
                 tool_call_id: "tool-123".to_string(),
                 tool_class: "web_search".to_string(),
                 started_at_unix_ms: None,
                 ended_at_unix_ms: None,
-                status: Some(AgentToolStatus::Succeeded),
+                status: Some(RequestTraceToolStatus::Succeeded),
                 duration_ms: Some(12.5),
                 output_tokens: Some(9),
                 output_bytes: Some(64),
@@ -193,7 +195,7 @@ mod tests {
         }
     }
 
-    fn valid_record_with_tool_call_id(tool_call_id: &str) -> AgentTraceRecord {
+    fn valid_record_with_tool_call_id(tool_call_id: &str) -> RequestTraceRecord {
         let mut record = valid_record();
         record.tool.as_mut().expect("tool event").tool_call_id = tool_call_id.to_string();
         record
@@ -218,13 +220,12 @@ mod tests {
                     drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
                 let component = namespace.component("worker")?;
                 let relay =
-                    AgentToolEventRelay::start(component, endpoint.clone(), None, None, None)
-                        .await?;
+                    ToolEventRelay::start(component, endpoint.clone(), None, None, None).await?;
                 let mut push_socket = connect_push_socket(&endpoint).await?;
                 let mut subscriber =
                     EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
                         .await?
-                        .typed::<AgentTraceRecord>();
+                        .typed::<RequestTraceRecord>();
 
                 tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -242,9 +243,12 @@ mod tests {
                     .await?
                     .expect("event stream should stay open")?;
 
-                assert_eq!(record.event_type, TraceEventType::ToolEnd);
-                assert_eq!(record.event_source, TraceEventSource::Harness);
-                assert_eq!(record.agent_context.session_id, "run-1");
+                assert_eq!(record.event_type, RequestTraceEventType::ToolEnd);
+                assert_eq!(record.event_source, Some(RequestTraceEventSource::Harness));
+                assert_eq!(
+                    record.agent_context.expect("agent context").session_id,
+                    "run-1"
+                );
                 assert_eq!(record.tool.unwrap().tool_call_id, "tool-123");
 
                 relay.shutdown();
@@ -274,14 +278,13 @@ mod tests {
                     drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
                 let component = namespace.component("worker")?;
                 let relay =
-                    AgentToolEventRelay::start(component, endpoint.clone(), None, None, None)
-                        .await?;
+                    ToolEventRelay::start(component, endpoint.clone(), None, None, None).await?;
                 let mut first_push = connect_push_socket(&endpoint).await?;
                 let mut second_push = connect_push_socket(&endpoint).await?;
                 let mut subscriber =
                     EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
                         .await?
-                        .typed::<AgentTraceRecord>();
+                        .typed::<RequestTraceRecord>();
 
                 tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -337,8 +340,7 @@ mod tests {
                     drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
                 let component = namespace.component("worker")?;
 
-                let result =
-                    AgentToolEventRelay::start(component, endpoint, None, None, None).await;
+                let result = ToolEventRelay::start(component, endpoint, None, None, None).await;
 
                 assert!(result.is_err());
 
@@ -367,7 +369,7 @@ mod tests {
                 let namespace =
                     drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
                 let component = namespace.component("worker")?;
-                let relay = AgentToolEventRelay::start(
+                let relay = ToolEventRelay::start(
                     component,
                     endpoint.clone(),
                     Some("matching-tools".to_string()),
@@ -379,7 +381,7 @@ mod tests {
                 let mut subscriber =
                     EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
                         .await?
-                        .typed::<AgentTraceRecord>();
+                        .typed::<RequestTraceRecord>();
 
                 tokio::time::sleep(Duration::from_millis(150)).await;
 

@@ -6,19 +6,19 @@
 
 use std::path::PathBuf;
 
-use dynamo_bench::agent_trace::agentic::{build_agentic_mooncake_rows, summarize_tools};
-use dynamo_bench::agent_trace::load::load_agent_trace_records;
+use dynamo_bench::request_trace::agentic::{build_agentic_mooncake_rows, summarize_tools};
+use dynamo_bench::request_trace::load::load_request_trace_records;
 
 mod support;
 
 fn pi_trace_path() -> PathBuf {
-    PathBuf::from(support::fixture_path("pi_agent_trace.jsonl.gz").expect("fixture path"))
+    PathBuf::from(support::fixture_path("pi_request_trace.jsonl.gz").expect("fixture path"))
 }
 
 #[test]
 fn pi_trace_summary_has_expected_counts() {
     let loaded =
-        load_agent_trace_records(&[pi_trace_path()]).expect("Pi trace fixture should load");
+        load_request_trace_records(&[pi_trace_path()]).expect("Pi trace fixture should load");
 
     assert_eq!(loaded.requests.len(), 17, "request_end row count");
     assert_eq!(loaded.tools.len(), 22, "terminal tool event count");
@@ -39,7 +39,7 @@ fn pi_trace_summary_has_expected_counts() {
 #[test]
 fn pi_trace_agentic_rows_preserve_tool_events() {
     let loaded =
-        load_agent_trace_records(&[pi_trace_path()]).expect("Pi trace fixture should load");
+        load_request_trace_records(&[pi_trace_path()]).expect("Pi trace fixture should load");
     let (trace_block_size, rows) =
         build_agentic_mooncake_rows(loaded).expect("agentic lowering should succeed");
 

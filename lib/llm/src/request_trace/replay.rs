@@ -12,17 +12,17 @@ use dynamo_tokens::compute_hash_v2;
 
 use crate::protocols::TokenIdType;
 
-use super::AgentReplayMetrics;
+use super::RequestReplayMetrics;
 
 pub(crate) fn replay_metrics(
     token_ids: &[TokenIdType],
     trace_block_size: usize,
-) -> Option<AgentReplayMetrics> {
+) -> Option<RequestReplayMetrics> {
     if trace_block_size == 0 {
         return None;
     }
 
-    Some(AgentReplayMetrics {
+    Some(RequestReplayMetrics {
         trace_block_size,
         input_length: token_ids.len(),
         input_sequence_hashes: input_sequence_hashes(token_ids, trace_block_size),
@@ -35,7 +35,7 @@ pub(crate) fn input_sequence_hashes(
 ) -> Vec<u64> {
     assert!(
         trace_block_size > 0,
-        "agent trace replay block size must be positive"
+        "request trace replay block size must be positive"
     );
 
     // Keep this identical to the router/mocker sequence-aware hashing path so

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +182,38 @@ class AicSession:
             tp_size,
         )
 
+        # Phase 1.5: compile the model's op list to a Rust Engine ONCE, so each
+        # predict call is a single Rust dispatch instead of a per-call Python
+        # walk over model.context_ops / generation_ops. Falls back to the
+        # Python op-walk if aiconfigurator predates Phase 1.5 or the build fails.
+        self._engine = self._build_compiled_engine()
+
+    def _build_compiled_engine(self):
+        """Build a cached aiconfigurator_core EngineHandle from the already-built
+        model, or return None to fall back to the Python op-walk."""
+        if os.environ.get("DYNAMO_AIC_DISABLE_COMPILED_ENGINE"):
+            logger.info(
+                "AIC compiled-engine path disabled via env; using Python op-walk."
+            )
+            return None
+        try:
+            from aiconfigurator.sdk.rust_engine_step import _cached_engine_handle
+        except Exception as exc:  # aiconfigurator without the Phase 1.5 engine
+            logger.info(
+                "AIC compiled-engine path unavailable (%s); using Python op-walk.",
+                exc,
+            )
+            return None
+        try:
+            handle = _cached_engine_handle(self._model, self._database)
+            logger.info("AIC compiled-engine path active (Phase 1.5 Rust engine).")
+            return handle
+        except Exception as exc:
+            logger.warning(
+                "AIC compiled-engine build failed (%s); using Python op-walk.", exc
+            )
+            return None
+
     def _predict_context_latency(
         self, batch_size: int, effective_isl: int, prefix: int
     ) -> float:
@@ -237,10 +270,21 @@ class AicSession:
         self, batch_size: int, effective_isl: int, prefix: int
     ) -> float:
         """Predict prefill latency in ms from uncached tokens and cached prefix."""
+        if self._engine is not None:
+            # The engine's predict_prefill_latency takes the FULL isl and
+            # subtracts `prefix` internally, whereas the caller already gives us
+            # the post-prefix `effective_isl`. Pass effective_isl + prefix so the
+            # engine recovers the same effective length (and keeps prefix for the
+            # KV-cache-aware context-attention cost).
+            return self._engine.predict_prefill_latency(
+                batch_size, effective_isl + prefix, prefix
+            )
         return self._predict_context_latency(batch_size, effective_isl, prefix)
 
     def predict_decode(self, batch_size: int, isl: int, osl: int) -> float:
         """Predict decode (generation) latency in ms."""
+        if self._engine is not None:
+            return self._engine.predict_decode_latency(batch_size, isl, osl)
         return self._predict_generation_latency(batch_size, isl, osl)
 
 

@@ -15,6 +15,7 @@
 //! purely a routing-layer decision -- no RPC is sent to the worker.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -22,6 +23,7 @@ use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 /// Interval between sweeps of the background reaper that removes expired entries.
 const REAPER_INTERVAL: Duration = Duration::from_secs(30);
+static NEXT_AFFINITY_REVISION: AtomicU64 = AtomicU64::new(1);
 
 type ExpiryHandler = Arc<dyn Fn(String, u64) + Send + Sync>;
 
@@ -35,6 +37,12 @@ pub enum AffinityKind {
 pub struct AffinityBinding {
     pub worker: WorkerWithDpRank,
     pub kind: AffinityKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AffinityBindingToken {
+    pub binding: AffinityBinding,
+    pub revision: u64,
 }
 
 /// Trait for session affinity storage backends.
@@ -51,10 +59,19 @@ pub trait AffinityStore: Send + Sync {
     fn peek(&self, session_id: &str) -> Option<WorkerWithDpRank>;
 
     /// Bind a session to a `(worker, dp_rank)` with the given TTL and kind.
-    fn put(&self, session_id: &str, worker: WorkerWithDpRank, ttl: Duration, kind: AffinityKind);
+    fn put(
+        &self,
+        session_id: &str,
+        worker: WorkerWithDpRank,
+        ttl: Duration,
+        kind: AffinityKind,
+    ) -> AffinityBindingToken;
 
     /// Remove a session binding and return its metadata.
     fn remove(&self, session_id: &str) -> Option<AffinityBinding>;
+
+    /// Remove a binding only if it is still the binding created by this attempt.
+    fn remove_if_token(&self, session_id: &str, token: AffinityBindingToken) -> bool;
 }
 
 /// In-memory affinity entry with sliding-window TTL.
@@ -63,6 +80,7 @@ struct AffinityEntry {
     ttl: Duration,
     expires_at: Instant,
     kind: AffinityKind,
+    revision: u64,
 }
 
 impl AffinityEntry {
@@ -185,7 +203,15 @@ impl AffinityStore for InMemoryAffinityStore {
         self.lookup(session_id, false)
     }
 
-    fn put(&self, session_id: &str, worker: WorkerWithDpRank, ttl: Duration, kind: AffinityKind) {
+    fn put(
+        &self,
+        session_id: &str,
+        worker: WorkerWithDpRank,
+        ttl: Duration,
+        kind: AffinityKind,
+    ) -> AffinityBindingToken {
+        let revision = NEXT_AFFINITY_REVISION.fetch_add(1, Ordering::Relaxed);
+        let binding = AffinityBinding { worker, kind };
         self.map.insert(
             session_id.to_owned(),
             AffinityEntry {
@@ -193,14 +219,24 @@ impl AffinityStore for InMemoryAffinityStore {
                 ttl,
                 expires_at: Instant::now() + ttl,
                 kind,
+                revision,
             },
         );
+        AffinityBindingToken { binding, revision }
     }
 
     fn remove(&self, session_id: &str) -> Option<AffinityBinding> {
         self.map
             .remove(session_id)
             .map(|(_, entry)| entry.binding())
+    }
+
+    fn remove_if_token(&self, session_id: &str, token: AffinityBindingToken) -> bool {
+        self.map
+            .remove_if(session_id, |_, entry| {
+                entry.revision == token.revision && entry.binding() == token.binding
+            })
+            .is_some()
     }
 }
 
@@ -229,23 +265,14 @@ impl StickySessionRouter {
         self.store.peek(session_id)
     }
 
-    /// Bind a router-only session to a `(worker, dp_rank)` with the given TTL.
-    pub fn bind_router_only(&self, session_id: &str, worker: WorkerWithDpRank, ttl: Duration) {
-        self.bind_with_kind(session_id, worker, ttl, AffinityKind::RouterOnly);
-    }
-
-    /// Bind an engine-backed session to a `(worker, dp_rank)` with the given TTL.
-    pub fn bind_engine_session(&self, session_id: &str, worker: WorkerWithDpRank, ttl: Duration) {
-        self.bind_with_kind(session_id, worker, ttl, AffinityKind::EngineBacked);
-    }
-
-    fn bind_with_kind(
+    /// Bind a session to a `(worker, dp_rank)` with the given TTL and kind.
+    pub fn bind(
         &self,
         session_id: &str,
         worker: WorkerWithDpRank,
         ttl: Duration,
         kind: AffinityKind,
-    ) {
+    ) -> AffinityBindingToken {
         tracing::info!(
             %session_id,
             worker_id = worker.worker_id,
@@ -254,13 +281,17 @@ impl StickySessionRouter {
             kind = ?kind,
             "Binding session affinity"
         );
-        self.store.put(session_id, worker, ttl, kind);
+        self.store.put(session_id, worker, ttl, kind)
     }
 
     /// Remove a session binding.
     pub fn unbind(&self, session_id: &str) -> Option<AffinityBinding> {
         tracing::info!(%session_id, "Removing session affinity");
         self.store.remove(session_id)
+    }
+
+    pub(super) fn unbind_if_token(&self, session_id: &str, token: AffinityBindingToken) -> bool {
+        self.store.remove_if_token(session_id, token)
     }
 }
 
@@ -291,7 +322,12 @@ mod tests {
             on_expire: None,
         };
         let router = StickySessionRouter::new(store);
-        router.bind_engine_session("sess-1", worker(42, 3), Duration::from_secs(300));
+        router.bind(
+            "sess-1",
+            worker(42, 3),
+            Duration::from_secs(300),
+            AffinityKind::EngineBacked,
+        );
 
         assert_eq!(router.resolve_session("sess-1"), Some(worker(42, 3)));
     }
@@ -308,6 +344,7 @@ mod tests {
                 ttl,
                 expires_at,
                 kind: AffinityKind::EngineBacked,
+                revision: 1,
             },
         );
         let store = InMemoryAffinityStore {
@@ -330,8 +367,18 @@ mod tests {
             on_expire: None,
         };
         let router = StickySessionRouter::new(store);
-        router.bind_engine_session("sess-1", worker(1, 0), Duration::from_secs(10));
-        router.bind_router_only("sess-1", worker(2, 3), Duration::from_secs(90));
+        router.bind(
+            "sess-1",
+            worker(1, 0),
+            Duration::from_secs(10),
+            AffinityKind::EngineBacked,
+        );
+        router.bind(
+            "sess-1",
+            worker(2, 3),
+            Duration::from_secs(90),
+            AffinityKind::RouterOnly,
+        );
 
         assert_eq!(router.peek_session("sess-1"), Some(worker(2, 3)));
 
@@ -343,13 +390,60 @@ mod tests {
     }
 
     #[test]
+    fn rollback_token_does_not_remove_newer_binding() {
+        let store = InMemoryAffinityStore {
+            map: Arc::new(DashMap::new()),
+            on_expire: None,
+        };
+        let router = StickySessionRouter::new(store);
+        let stale = router.bind(
+            "sess-1",
+            worker(1, 0),
+            Duration::from_secs(30),
+            AffinityKind::RouterOnly,
+        );
+        router.bind(
+            "sess-1",
+            worker(2, 0),
+            Duration::from_secs(30),
+            AffinityKind::RouterOnly,
+        );
+
+        assert!(!router.unbind_if_token("sess-1", stale));
+        assert_eq!(router.peek_session("sess-1"), Some(worker(2, 0)));
+    }
+
+    #[test]
+    fn rollback_token_removes_its_own_binding() {
+        let store = InMemoryAffinityStore {
+            map: Arc::new(DashMap::new()),
+            on_expire: None,
+        };
+        let router = StickySessionRouter::new(store);
+        let token = router.bind(
+            "sess-1",
+            worker(1, 0),
+            Duration::from_secs(30),
+            AffinityKind::RouterOnly,
+        );
+
+        assert!(router.unbind_if_token("sess-1", token));
+        assert_eq!(router.peek_session("sess-1"), None);
+    }
+
+    #[test]
     fn unbind_removes_affinity() {
         let store = InMemoryAffinityStore {
             map: Arc::new(DashMap::new()),
             on_expire: None,
         };
         let router = StickySessionRouter::new(store);
-        router.bind_engine_session("sess-1", worker(42, 1), Duration::from_secs(300));
+        router.bind(
+            "sess-1",
+            worker(42, 1),
+            Duration::from_secs(300),
+            AffinityKind::EngineBacked,
+        );
         assert_eq!(
             router.unbind("sess-1"),
             Some(AffinityBinding {
@@ -375,6 +469,7 @@ mod tests {
                 ttl: Duration::from_secs(0),
                 expires_at: Instant::now() - Duration::from_secs(1),
                 kind: AffinityKind::EngineBacked,
+                revision: 1,
             },
         );
         let router = StickySessionRouter::new(store);
@@ -396,6 +491,7 @@ mod tests {
                 // Expires in 5 seconds (simulating time passing since bind)
                 expires_at: Instant::now() + Duration::from_secs(5),
                 kind: AffinityKind::EngineBacked,
+                revision: 1,
             },
         );
         let store = InMemoryAffinityStore {
@@ -439,6 +535,7 @@ mod tests {
                 ttl: Duration::from_secs(0),
                 expires_at: Instant::now() - Duration::from_secs(1),
                 kind: AffinityKind::EngineBacked,
+                revision: 1,
             },
         );
         let router = StickySessionRouter::new(store);
@@ -473,6 +570,7 @@ mod tests {
                 ttl: Duration::from_secs(0),
                 expires_at: Instant::now() - Duration::from_secs(1),
                 kind: AffinityKind::RouterOnly,
+                revision: 1,
             },
         );
         let router = StickySessionRouter::new(store);
@@ -504,6 +602,7 @@ mod tests {
                 ttl: Duration::from_secs(1),
                 expires_at: Instant::now() - Duration::from_secs(1),
                 kind: AffinityKind::EngineBacked,
+                revision: 1,
             },
         );
 
@@ -547,6 +646,7 @@ mod tests {
                 ttl: Duration::from_secs(30),
                 expires_at: Instant::now() - Duration::from_secs(1),
                 kind: AffinityKind::EngineBacked,
+                revision: 1,
             },
         );
 
@@ -582,6 +682,7 @@ mod tests {
                 ttl: Duration::from_secs(30),
                 expires_at: Instant::now() - Duration::from_secs(1),
                 kind: AffinityKind::RouterOnly,
+                revision: 1,
             },
         );
 
