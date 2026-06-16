@@ -34,10 +34,12 @@ policy orders requests within a tier.
 
 ### Policy-Class Queues
 
-Clients select a class with `x-dynamo-meta-policy-class`. Dynamo carries the
-header as request context metadata; it does not infer cached versus uncached
-work from the prompt. Missing and unknown class names use
-`default_policy_class`.
+Clients can select a class with `x-dynamo-meta-policy-class`. A recognized
+header is a trusted explicit override. When
+`uncached_isl_policy_class_tiers` is configured and the header is missing or
+unknown, the router selects the highest matching tier from the request's
+uncached ISL (`raw ISL - best cached tokens across eligible workers`). Without
+that mapping, missing and unknown class names use `default_policy_class`.
 
 Each class owns its FCFS or WSPT heap, busy thresholds, queue limits, quantum,
 deficit, and counters. Absolute and fractional busy thresholds use OR
@@ -63,12 +65,18 @@ python -m dynamo.frontend \
     --router-policy-config examples/router/policy-class-queues.yaml
 ```
 
-The previous missing-ISL tier configuration is removed. Mapping those tiers to
-client-selected classes is intentionally not behavior preserving: external
-cache-state identification must happen before the request reaches Dynamo, and
-weighted DRR replaces the previous shared-queue credit-gap behavior. A
-`cached` WSPT class and an `uncached` FCFS class, as shown in the sample, are a
-starting point rather than an exact compatibility profile.
+The previous missing-ISL global admission cap is removed. Automatic
+uncached-ISL mapping now selects an ordinary policy class, and that class owns
+the queue threshold, ordering, DRR weight, counters, and limits. There is no
+separate first-stage admission queue or global cross-class cap.
+
+This is intentionally not behavior preserving. Class limits are absolute and
+class-local rather than worker-scaled and global; rejection returns the
+structured policy-class HTTP 503 response rather than the previous overload
+429 path; and it does not exclude the entire router instance. A recognized
+explicit class header also bypasses automatic mapping. The sample is a
+Baseten-oriented continuing-session starting point, not a compatibility
+profile.
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
 

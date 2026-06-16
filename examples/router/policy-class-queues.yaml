@@ -1,21 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-default_policy_class: uncached
+default_policy_class: cached
+uncached_isl_policy_class_tiers:
+  - min_tokens: 0
+    policy_class: cached
+  - min_tokens: 3072
+    policy_class: uncached
 policy_classes:
-  - name: uncached
-    queue_policy: fcfs
-    quantum: 512
-    prefill_busy_threshold: 32768
-    prefill_busy_threshold_frac: 1.0
-    request_queue_limit: 4096
-    token_queue_limit: 8388608
   - name: cached
     queue_policy: wspt
     quantum: 2048
-    prefill_busy_threshold_frac: 2.0
     request_queue_limit: 8192
     cached_token_queue_limit: 16777216
+  - name: uncached
+    queue_policy: fcfs
+    quantum: 512
+    request_queue_limit: 4096
+    token_queue_limit: 8388608
+  - name: latency
+    queue_policy: wspt
+    quantum: 4096
+    request_queue_limit: 2048
 
 models:
   example/large-model:
@@ -24,10 +30,8 @@ models:
       - name: latency
         queue_policy: wspt
         quantum: 4096
-        prefill_busy_threshold: 16384
         request_queue_limit: 2048
       - name: batch
         queue_policy: fcfs
         quantum: 1024
-        prefill_busy_threshold_frac: 0.75
         token_queue_limit: 4194304
