@@ -441,6 +441,8 @@ navigation:
             path: design-docs/event-plane.md
       - section: Component Design
         contents:
+          - page: Kubernetes REST Proxy
+            path: design-docs/kube-rest-proxy.md
           - page: Router Design
             path: design-docs/router-design.md
           - page: KVBM Design
