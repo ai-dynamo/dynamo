@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 — a 235B-parameter Mixture-of-Experts model with ~22B active parameters per token — on 16 GPUs with KV-aware routing, benchmarked at 4K ISL / 200 OSL. Hopper and Blackwell need different MoE backends, and you can serve aggregated or with prefill/decode disaggregation. Pick your GPU architecture and serving topology; every command on this page updates to match.
+Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 — a 235B-parameter Mixture-of-Experts model with ~22B active parameters per token — on 16 GPUs with KV-aware routing, benchmarked at 4K ISL / 200 OSL. Hopper and Blackwell need different MoE backends, and you can serve aggregated or with prefill/decode disaggregation. Pick your GPU architecture, serving topology, and (on the disaggregated topology) cloud provider; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -26,6 +26,21 @@ Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 
 <label htmlFor="recipe-variant-agg">Aggregated</label>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Provider</span>
+<input type="radio" id="recipe-provider-generic" name="recipe-provider" value="generic" defaultChecked />
+<label htmlFor="recipe-provider-generic">Generic</label>
+<input type="radio" id="recipe-provider-aws" name="recipe-provider" value="aws" />
+<label htmlFor="recipe-provider-aws">AWS · EFA</label>
+<input type="radio" id="recipe-provider-gke" name="recipe-provider" value="gke" />
+<label htmlFor="recipe-provider-gke">GCP · RoCE</label>
+<input type="radio" id="recipe-provider-aks" name="recipe-provider" value="aks" />
+<label htmlFor="recipe-provider-aks">Azure · IB</label>
+<input type="radio" id="recipe-provider-nebius" name="recipe-provider" value="nebius" />
+<label htmlFor="recipe-provider-nebius">Nebius · IB</label>
+<input type="radio" id="recipe-provider-nscale" name="recipe-provider" value="nscale" />
+<label htmlFor="recipe-provider-nscale">Nscale · IB</label>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="blackwell" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
@@ -133,6 +148,149 @@ kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml -n ${
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}
 ```
+
+</div>
+
+## Provider-specific setup
+
+<div data-provider="generic">
+
+Select a cloud provider in the picker above for fabric-specific networking setup. These overlays apply to the **disaggregated** topology, where KV transfer crosses the cluster network.
+
+</div>
+
+<div className="dynamo-provider-agg-note">
+
+Provider overlays apply to the **disaggregated** topology only — aggregated serving keeps KV transfer on-node, so no fabric overrides are needed. Switch **Topology** to **Disaggregated** to see the provider setup.
+
+</div>
+
+<div data-provider="aws" data-variant="disagg">
+
+**AWS · EFA** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+
+```yaml
+# provider-overlay: aws-efa
+status: unverified            # validated on qwen3-32b, not this model
+applies_to: topology=disaggregated
+apply:                        # add to prefill + decode worker spec
+  resources.limits:
+    vpc.amazonaws.com/efa: "32"
+  env:
+    DYN_KVBM_NIXL_BACKEND_LIBFABRIC: "true"
+    DYN_KVBM_NIXL_BACKEND_UCX: "false"
+    FI_PROVIDER: efa
+    FI_EFA_USE_DEVICE_RDMA: "1"
+    FI_EFA_ENABLE_SHM_TRANSFER: "0"
+  libraries: in-image (/opt/amazon/efa/lib*)   # no extra mounts
+derive_per_cluster: none      # EFA does not use UCX_NET_DEVICES
+caveats: []
+reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-aws-efa/deploy.yaml
+```
+
+[Reference deploy.yaml — disagg-1p1d-aws-efa](https://github.com/ai-dynamo/dynamo/pull/10202)
+
+</div>
+
+<div data-provider="gke" data-variant="disagg">
+
+**GCP GKE · RoCE** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+
+```yaml
+# provider-overlay: gke-roce
+status: unverified            # validated on qwen3-32b, not this model
+applies_to: topology=disaggregated
+apply:                        # add to prefill + decode worker spec
+  metadata.annotations:
+    networking.gke.io/networks: [rdma-0 ... rdma-3]   # + .IP, interfaces, per-net tolerations
+  volumes:                    # hostPath
+    /usr/local/gib: gib
+    /nvidia: nvidia
+  nixl_backend: ucx           # default
+derive_per_cluster:
+  UCX_NET_DEVICES:
+    from: ibv_devinfo         # tested: mlx5_0:1..3
+caveats: []
+reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-gke-roce/deploy.yaml
+```
+
+[Reference deploy.yaml — disagg-1p1d-gke-roce](https://github.com/ai-dynamo/dynamo/pull/10202)
+
+</div>
+
+<div data-provider="aks" data-variant="disagg">
+
+**Azure AKS · IB** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+
+```yaml
+# provider-overlay: aks-ib
+status: unverified            # validated on qwen3-32b, not this model
+applies_to: topology=disaggregated
+apply:
+  resources.limits:
+    rdma/shared_ib: "1"       # NOT rdma/ib
+  volumes:
+    - /dev/infiniband
+derive_per_cluster:
+  UCX_NET_DEVICES:
+    from: ibv_devinfo
+caveats:
+  - "rdma/shared_ib, not rdma/ib -- wrong key => pod gets no RDMA resource"
+reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-aks-ib/deploy.yaml
+```
+
+[Reference deploy.yaml — disagg-1p1d-aks-ib](https://github.com/ai-dynamo/dynamo/pull/10202)
+
+</div>
+
+<div data-provider="nebius" data-variant="disagg">
+
+**Nebius · IB** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+
+```yaml
+# provider-overlay: nebius-ib
+status: unverified            # validated on qwen3-32b, not this model
+applies_to: topology=disaggregated
+apply:
+  resources.limits:
+    rdma/ib: "1"
+  volumes:
+    - /dev/infiniband
+    - /dev/shm
+derive_per_cluster:
+  UCX_NET_DEVICES:
+    from: ibv_devinfo         # tested: mlx5_0:1..7 (8 ports)
+caveats: []
+reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-nebius-ib/deploy.yaml
+```
+
+[Reference deploy.yaml — disagg-1p1d-nebius-ib](https://github.com/ai-dynamo/dynamo/pull/10202)
+
+</div>
+
+<div data-provider="nscale" data-variant="disagg">
+
+**Nscale · IB** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+
+```yaml
+# provider-overlay: nscale-ib
+status: unverified            # validated on qwen3-32b, not this model
+applies_to: topology=disaggregated
+apply:
+  resources.limits:
+    rdma/ib: "1"
+  volumes:
+    - /dev/infiniband
+    - /dev/shm
+derive_per_cluster:
+  UCX_NET_DEVICES:
+    from: ibv_devinfo         # tested: mlx5_0..5,10,11 (non-contiguous subset)
+caveats:
+  - "non-contiguous subset; mlx5_0..7 hits the side fabric and breaks the cross-rank handshake"
+reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-nscale-ib/deploy.yaml
+```
+
+[Reference deploy.yaml — disagg-1p1d-nscale-ib](https://github.com/ai-dynamo/dynamo/pull/10202)
 
 </div>
 
