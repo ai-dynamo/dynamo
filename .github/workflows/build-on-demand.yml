@@ -61,6 +61,17 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
+      extra_tags: |
+        ${{ needs.init.outputs.sanitized_ref_name }}-vllm-runtime
+        ${{ needs.init.outputs.sanitized_ref_name }}-vllm-runtime-cuda13
+      extra_build_args: |
+        FLASHINFER_GIT_URL=https://github.com/galletas1712/flashinfer.git
+        FLASHINFER_GIT_REF=schwinns/cuda-graph-stable-mnnvl-cr
+        FLASHINFER_GIT_SHA=649ebe8d06b5af1d58be3d043a9f156059dd7386
+        VLLM_GIT_URL=https://github.com/galletas1712/vllm.git
+        VLLM_GIT_REF=schwinns/cuda-graph-stable-flashinfer-pause-resume
+        VLLM_GIT_SHA=84632d1981c917f2e8dae5080783b7ef55ca425c
+        VLLM_PRECOMPILED_WHEEL_COMMIT=7021be66e8c351fa819fd07b4053e946f11c1147
     secrets: inherit
 
   sglang-build:

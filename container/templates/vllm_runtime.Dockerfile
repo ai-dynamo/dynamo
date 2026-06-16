@@ -24,11 +24,19 @@ ARG NIXL_REF
 ARG CUDA_MAJOR
 {% endif %}
 ARG MODELEXPRESS_VERSION
+ARG FLASHINFER_GIT_URL
+ARG FLASHINFER_GIT_REF
+ARG FLASHINFER_GIT_SHA
+ARG VLLM_GIT_URL
+ARG VLLM_GIT_REF
+ARG VLLM_GIT_SHA
+ARG VLLM_PRECOMPILED_WHEEL_COMMIT
 
 WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
+ENV FLASHINFER_DISABLE_VERSION_CHECK=1
 {% if device != "cuda" %}
 ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
 {% else %}
@@ -167,6 +175,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git \
         jq \
         sox \
         libsox-fmt-all; \
@@ -223,6 +232,65 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt
+
+{% if device == "cuda" %}
+# Optional source overrides for build-on-demand validation images.
+# FlashInfer is installed first so the custom vLLM source install sees the
+# checkpoint-safe communication hooks at runtime. vLLM uses precompiled native
+# artifacts from VLLM_PRECOMPILED_WHEEL_COMMIT, so this only layers Python
+# changes from the source branch over the upstream runtime stack.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    if [ -n "${FLASHINFER_GIT_URL}" ]; then \
+        test -n "${FLASHINFER_GIT_REF}"; \
+        FLASHINFER_SRC="$(mktemp -d)"; \
+        git clone --filter=blob:none --depth=1 \
+            --branch "${FLASHINFER_GIT_REF}" \
+            "${FLASHINFER_GIT_URL}" "${FLASHINFER_SRC}"; \
+        git -C "${FLASHINFER_SRC}" submodule update --init --recursive \
+            --depth=1 3rdparty/cccl 3rdparty/cutlass 3rdparty/spdlog; \
+        if [ -n "${FLASHINFER_GIT_SHA}" ]; then \
+            test "$(git -C "${FLASHINFER_SRC}" rev-parse HEAD)" = "${FLASHINFER_GIT_SHA}"; \
+        fi; \
+        FLASHINFER_LOCAL_VERSION="$(git -C "${FLASHINFER_SRC}" rev-parse --short=12 HEAD)"; \
+        FLASHINFER_DISABLE_VERSION_CHECK=1 \
+        FLASHINFER_LOCAL_VERSION="${FLASHINFER_LOCAL_VERSION}" \
+            uv pip install {{ pip_target }} --no-deps "${FLASHINFER_SRC}"; \
+        rm -rf "${FLASHINFER_SRC}"; \
+    fi; \
+    if [ -n "${VLLM_GIT_URL}" ]; then \
+        test -n "${VLLM_GIT_REF}"; \
+        test -n "${VLLM_PRECOMPILED_WHEEL_COMMIT}"; \
+        uv pip install {{ pip_target }} \
+            "setuptools>=77.0.3,<81.0.0" \
+            "setuptools-scm>=8.0" \
+            "setuptools-rust>=1.9.0" \
+            "cmake>=3.26.1" \
+            ninja \
+            wheel \
+            jinja2 \
+            packaging; \
+        VLLM_SRC="$(mktemp -d)"; \
+        git clone --filter=blob:none --depth=1 \
+            --branch "${VLLM_GIT_REF}" \
+            "${VLLM_GIT_URL}" "${VLLM_SRC}"; \
+        if [ -n "${VLLM_GIT_SHA}" ]; then \
+            test "$(git -C "${VLLM_SRC}" rev-parse HEAD)" = "${VLLM_GIT_SHA}"; \
+        fi; \
+        VLLM_LOCAL_VERSION="$(git -C "${VLLM_SRC}" rev-parse --short=12 HEAD)"; \
+        VLLM_VERSION="$(python3 -c 'from importlib import metadata; base = metadata.version("vllm").split("+", 1)[0]; print(f"{base}+precompiled")')"; \
+        echo "Installing vLLM source commit ${VLLM_LOCAL_VERSION} as ${VLLM_VERSION}"; \
+        VLLM_USE_PRECOMPILED=1 \
+        VLLM_DOCKER_BUILD_CONTEXT=1 \
+        VLLM_PRECOMPILED_WHEEL_VARIANT=cu130 \
+        VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT}" \
+        VLLM_VERSION_OVERRIDE="${VLLM_VERSION}" \
+            uv pip install {{ pip_target }} --no-deps --no-build-isolation \
+            "${VLLM_SRC}"; \
+        rm -rf "${VLLM_SRC}"; \
+    fi
+{% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
