@@ -580,6 +580,16 @@ impl RouterHandles {
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
+            dynamo_llm::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                tracing::warn!(
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Decode query rejected by policy-class queue limit"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
         }
     }
 }
