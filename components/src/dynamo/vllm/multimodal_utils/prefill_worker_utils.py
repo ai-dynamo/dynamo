@@ -306,16 +306,21 @@ class MultiModalEmbeddingLoader:
         *,
         model: str,
         context=None,
-    ) -> Dict[str, Any]:
+    ) -> tuple[Dict[str, Any], torch.Tensor | None]:
         """Fetch embeddings and build engine-ready ``multi_modal_data``.
 
         Full pipeline:
         cache check → remote fetch → cache update → accumulate → release NIXL buffers.
 
-        Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
+        Returns ``(multi_modal_data, full_prompt_tensor)`` where:
+        - Standard VLM encoder path: ``full_prompt_tensor`` is ``None`` and
+          ``multi_modal_data`` is a dict suitable for ``TokensPrompt(multi_modal_data=...)``.
+        - FullPromptEncoder path (``is_full_prompt=True``): ``full_prompt_tensor`` is the
+          ``(seq_len, hidden)`` tensor to submit as ``EmbedsPrompt``, and
+          ``multi_modal_data`` is empty.
         """
         if self._encode_worker_client is None or not image_urls:
-            return {}
+            return {}, None
 
         groups, pending = await _fetch_embeddings(
             self._encode_worker_client,
@@ -326,6 +331,16 @@ class MultiModalEmbeddingLoader:
             context=context,
         )
 
+        # FullPromptEncoder path: encoder ships a fully-spliced text+image tensor.
+        if groups and groups[0].is_full_prompt:
+            spliced = groups[0].loaded_embedding
+            assert spliced is not None, "FullPromptEncoder returned None embedding"
+            spliced = spliced.detach().clone().to("cpu")
+            if pending is not None:
+                pending.release_all()
+            return {}, spliced
+
+        # Standard VLM encoder path: accumulate per-image embeddings.
         multi_modal_data: Dict[str, Any] = {}
         with time_and_log_code_section(
             f"[PREFILL] request: {request_id} accumulate embeddings"
@@ -348,4 +363,4 @@ class MultiModalEmbeddingLoader:
                 _ensure_owned_tensors(multi_modal_data)
             pending.release_all()
 
-        return multi_modal_data
+        return multi_modal_data, None

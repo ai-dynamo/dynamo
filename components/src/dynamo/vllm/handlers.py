@@ -107,10 +107,7 @@ from .multimodal_utils.models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
 )
-from .multimodal_utils.prefill_worker_utils import (
-    MultiModalEmbeddingLoader,
-    _fetch_embeddings,
-)
+from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -2601,68 +2598,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     image_urls.append(item["Url"])
                 elif isinstance(item, dict) and "Decoded" in item:
                     supported = False
-            if supported and image_urls:
-                groups, pending = await _fetch_embeddings(
-                    self.embedding_loader._encode_worker_client,
-                    image_urls,
-                    request_id,
-                    self.embedding_loader._receiver,
-                    cache=self.embedding_loader._embedding_cache_manager,
-                    context=context,
+            if supported:
+                (
+                    vllm_mm_data,
+                    full_prompt_tensor,
+                ) = await self.embedding_loader.load_multimodal_embeddings(
+                    image_urls, request_id, model=self.config.model, context=context
                 )
-                # FullPromptEncoder path: encoder ships a fully-spliced
-                # text+image tensor (is_full_prompt=True). Route directly to
-                # EmbedsPrompt — works for both text-only and VLM PDs.
-                if groups and groups[0].is_full_prompt:
-                    spliced = groups[0].loaded_embedding
-                    if spliced is None:
-                        raise RuntimeError(
-                            "FullPromptEncoder returned None for loaded_embedding"
-                        )
-                    if spliced.dim() != 2:
-                        raise RuntimeError(
-                            f"Expected 2D tensor (seq_len, hidden) from encoder, "
-                            f"got shape {tuple(spliced.shape)}"
-                        )
-                    spliced = spliced.detach().clone()
-                    if pending is not None:
-                        pending.release_all()
-                    request["__full_prompt_tensor__"] = spliced.to("cpu")
+                if full_prompt_tensor is not None:
+                    request["__full_prompt_tensor__"] = full_prompt_tensor
                     request["multi_modal_data"] = None
                     logger.debug(
                         "FullPromptEncoder: spliced tensor shape=%s dtype=%s",
-                        tuple(spliced.shape),
-                        spliced.dtype,
+                        tuple(full_prompt_tensor.shape),
+                        full_prompt_tensor.dtype,
                     )
                     _nvtx.end_range(rng)
                     return None
-                else:
-                    # Standard VLM encoder path: build multi_modal_data from
-                    # image embeddings received from the encode worker.
-                    for group in groups:
-                        if group.loaded_embedding is not None:
-                            from dynamo.vllm.multimodal_utils.prefill_worker_utils import (
-                                _accumulate_embeddings,
-                                _ensure_owned_tensors,
-                            )
-
-                            _accumulate_embeddings(
-                                vllm_mm_data,
-                                self.config.model,
-                                group.loaded_embedding.dtype,
-                                group.loaded_embedding,
-                                group.image_grid_thw,
-                            )
-                    if pending is not None:
-                        if len(groups) == 1:
-                            _ensure_owned_tensors(vllm_mm_data)
-                        pending.release_all()
-                    logger.debug(
-                        f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
-                    )
-            elif supported and not image_urls:
-                vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
-                    image_urls, request_id, model=self.config.model, context=context
+                logger.debug(
+                    f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
                 )
 
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
