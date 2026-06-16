@@ -20175,3 +20175,13 @@ spec:
       storage: false
       subresources:
         status: {}
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          namespace: system
+          name: webhook-service
+          path: /convert
+      conversionReviewVersions:
+        - v1

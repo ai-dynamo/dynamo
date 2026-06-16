@@ -591,9 +591,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Registering handlers only changes local manager state. Patch the API
-	// server webhook configs before mgr.Start so admission cannot run without
-	// conversion while the operator is alive.
+	// CRD manifests and crd-apply own the conversion webhook service refs. Patch
+	// CA bundles before mgr.Start so the configured webhooks can authenticate
+	// the operator as soon as the manager starts serving.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
@@ -605,14 +605,8 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		// Manual mode gets webhook CA material out-of-band, but CRD conversion
-		// CA bundles are patched here. Register conversion endpoints before
-		// waiting for ca.crt so fresh CRDs fail conversion closed instead of
-		// admitting unconverted objects; existing CA bundles are preserved.
-		if err := caInjector.EnsureCRDConversionWebhooks(mainCtx); err != nil {
-			setupLog.Error(err, "failed to configure CRD conversion webhooks")
-			os.Exit(1)
-		}
+		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
+		// blocks startup instead of running with unauthenticated conversion.
 		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
 			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
 			os.Exit(1)
