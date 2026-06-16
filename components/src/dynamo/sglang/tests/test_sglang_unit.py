@@ -27,6 +27,9 @@ from dynamo.sglang.health_check import (
     SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.request_handlers.video_generation.video_generation_handler import (
+    VideoGenerationWorkerHandler,
+)
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 try:
@@ -122,6 +125,44 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     kwargs = {"return_routed_experts": True}
 
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+@pytest.mark.asyncio
+async def test_video_generation_falls_back_when_nvenc_is_unavailable(monkeypatch):
+    import imageio
+    import numpy as np
+
+    calls = []
+
+    class FakeWriter:
+        def __init__(self, output_buffer, codec):
+            self.output_buffer = output_buffer
+            self.codec = codec
+
+        def __enter__(self):
+            if self.codec == "h264_nvenc":
+                raise OSError("ffmpeg failed")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def append_data(self, frame):
+            self.output_buffer.write(b"mp4")
+
+    def fake_get_writer(output_buffer, **kwargs):
+        calls.append(kwargs["codec"])
+        return FakeWriter(output_buffer, kwargs["codec"])
+
+    monkeypatch.setattr(imageio, "get_writer", fake_get_writer)
+
+    handler = VideoGenerationWorkerHandler.__new__(VideoGenerationWorkerHandler)
+    video_bytes = await handler._frames_to_video(
+        [np.zeros((2, 2, 3), dtype=np.uint8)], fps=1
+    )
+
+    assert video_bytes == b"mp4"
+    assert calls == ["h264_nvenc", "libx264"]
 
 
 def test_routed_experts_kwarg_omitted_when_flag_off():
