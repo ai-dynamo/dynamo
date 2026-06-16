@@ -5,30 +5,30 @@ use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;
 use once_cell::sync::OnceCell;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::ffi::CStr;
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_kv_router::{
     config::{RouterConfigOverride, kv_router_config_from_dynamo_env},
     protocols::*,
 };
-use dynamo_llm::kv_router::publisher::KvEventPublisher;
-use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
-use dynamo_runtime::{DistributedRuntime, Worker};
-
-use dynamo_runtime::Runtime;
-
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::openai::nvext::NvExt;
+use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
+use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
-
-use std::collections::HashSet;
+use dynamo_runtime::Runtime;
+use dynamo_runtime::{DistributedRuntime, Worker};
 
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
@@ -582,23 +582,25 @@ impl RouterHandles {
     }
 }
 
-/// Extract the router queue `priority_jump` from a chat completion request's
+/// Extract the router queue `priority_jump` from an OpenAI request's
 /// `nvext.agent_hints.priority`.
 ///
 /// Negative values from either `priority` or the deprecated
 /// `latency_sensitivity` alias are clamped to `0.0` so a low-priority hint
 /// never pushes a request behind FCFS arrivals. Returns `0.0` when `nvext`
 /// or `agent_hints` is absent.
-fn extract_priority_jump(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> f64 {
-    request
-        .nvext
-        .as_ref()
+fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
+    nvext
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
         .map(|v| v.max(0.0))
         .unwrap_or(0.0)
+}
+
+fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
+    nvext
+        .and_then(|nvext| nvext.routing_constraints.clone())
+        .unwrap_or_default()
 }
 
 /// Opaque handle for the router pair
@@ -1093,8 +1095,9 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     }
 }
 
-/// Parse a JSON request string, apply the chat template, tokenize, and lift
-/// the router-relevant `priority_jump` out of `nvext.agent_hints.priority`.
+/// Parse a JSON request string, collect completion token-id prompts directly
+/// or apply the chat template and tokenize, then lift the router-relevant
+/// `priority_jump` out of `nvext.agent_hints.priority`.
 ///
 /// Returns `(token_ids, priority_jump, routing_constraints)` on success, or a `QueryRouterResult`
 /// error code. `priority_jump` is `0.0` when no hint is present. This mirrors
@@ -1118,21 +1121,52 @@ unsafe fn preprocess_request(
         Err(_) => return Err(QueryRouterResult::ErrInvalidParam),
     };
 
-    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-        match serde_json::from_str(json_str) {
+    let request_json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to parse request JSON");
+            return Err(QueryRouterResult::ErrInvalidParam);
+        }
+    };
+
+    if request_json.get("prompt").is_some() {
+        let request: NvCreateCompletionRequest = match serde_json::from_value(request_json) {
             Ok(req) => req,
             Err(e) => {
-                tracing::error!(error = ?e, "Failed to parse request JSON");
+                tracing::error!(error = ?e, "Failed to parse completion request JSON");
                 return Err(QueryRouterResult::ErrInvalidParam);
             }
         };
+        let priority_jump = extract_priority_jump(request.nvext.as_ref());
+        let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
+        let (token_ids, _) = match preprocessor.gather_tokens(&request, None, None) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to collect completion prompt tokens");
+                return Err(QueryRouterResult::ErrQueryFailed);
+            }
+        };
 
-    let priority_jump = extract_priority_jump(&request);
-    let routing_constraints = request
-        .nvext
-        .as_ref()
-        .and_then(|nvext| nvext.routing_constraints.clone())
-        .unwrap_or_default();
+        tracing::info!(
+            token_count = token_ids.len(),
+            first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+            priority_jump,
+            "[EPP-TOKENIZE] Collected completion prompt tokens in C bindings"
+        );
+
+        return Ok((token_ids, priority_jump, routing_constraints));
+    }
+
+    let request: NvCreateChatCompletionRequest = match serde_json::from_value(request_json) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to parse chat completion request JSON");
+            return Err(QueryRouterResult::ErrInvalidParam);
+        }
+    };
+
+    let priority_jump = extract_priority_jump(request.nvext.as_ref());
+    let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
         Ok(Some(prompt)) => prompt,
@@ -1579,6 +1613,20 @@ mod tests {
             }"#,
             )
             .expect("test request must parse as chat completion");
-        assert_eq!(extract_priority_jump(&req), 5.0);
+        assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
+    }
+
+    #[test]
+    fn priority_jump_lifted_from_completion_agent_hints_priority() {
+        let req: dynamo_llm::types::openai::completions::NvCreateCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "prompt": [101, 102, 103],
+                "nvext": {"agent_hints": {"priority": 5}}
+            }"#,
+            )
+            .expect("test request must parse as completion");
+        assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
     }
 }
