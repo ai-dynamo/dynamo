@@ -21,7 +21,8 @@ from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.snapshot import fetch_model_in_subprocess, is_checkpoint_enabled
+from dynamo.common.snapshot.lifecycle import is_checkpoint_enabled
+from dynamo.common.snapshot.model_fetch import fetch_model_in_subprocess
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
