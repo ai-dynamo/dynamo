@@ -175,6 +175,7 @@ def load_vision_model(
         vllm_model = LLM(
             model=model_id,
             enforce_eager=enforce_eager,
+            trust_remote_code=trust_remote_code,
             # vLLM's free-memory precheck runs before kv_cache_memory_bytes applies;
             # default 0.9 fails on <=24 GiB GPUs when another worker shares the device.
             gpu_memory_utilization=0.2,
