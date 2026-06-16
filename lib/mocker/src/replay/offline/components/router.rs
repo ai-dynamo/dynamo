@@ -542,7 +542,7 @@ impl OfflineReplayRouter {
             }) else {
                 break;
             };
-            let request = popped.into_entry().into_payload();
+            let request = popped.into_payload();
             let uuid = request.uuid;
             let outcome = self.admit_request(request, decay_now)?;
             admissions.push(WorkerAdmission {

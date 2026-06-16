@@ -584,16 +584,12 @@ impl<
             return;
         }
 
-        let mut refresh_blocked = std::collections::HashSet::new();
         loop {
             let decay_now = Instant::now();
             let active_tokens = self.slots.active_tokens(decay_now);
             let popped = {
                 let configs = self.workers_with_configs.borrow();
-                self.pending.pop_next(|class_index, class, queued| {
-                    if refresh_blocked.contains(&class_index) {
-                        return false;
-                    }
+                self.pending.pop_next(|_, class, queued| {
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL strategy is introduced.
@@ -608,7 +604,7 @@ impl<
             let Some(mut popped) = popped else {
                 break;
             };
-            let snapshot = popped.entry().snapshot();
+            let snapshot = popped.snapshot();
             let current_pending_count = self.pending_count.load(AtomicOrdering::Relaxed);
             debug_assert!(
                 current_pending_count > 0,
@@ -624,8 +620,12 @@ impl<
             );
             self.pending_isl_tokens
                 .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-            self.subtract_class_counters(popped.entry().class_index(), snapshot);
-            let queued = popped.entry_mut().payload_mut();
+            self.subtract_class_counters(popped.class_index(), snapshot);
+            let queued = popped.payload_mut();
+            // NOTE: Overlap refresh is expected to be very short. We intentionally
+            // accept load crossing the class threshold during this await: busy
+            // thresholds guide admission, not reservation. This differs from main
+            // to avoid reversing counters, heap state, and charged DRR credit.
             let refreshed = refresh_overlap(
                 self.overlap_scores_refresh.as_deref(),
                 self.overlap_refresh_after,
@@ -655,22 +655,9 @@ impl<
                 queued.request.effective_cached_tokens = effective_cached_tokens;
             }
             let admit_now = Instant::now();
-            let class_index = popped.entry().class_index();
+            let class_index = popped.class_index();
             let class = self.profile.class(class_index);
-            if self.all_workers_prefill_busy(
-                class,
-                popped.entry().payload().request.eligibility(),
-                admit_now,
-            ) {
-                refresh_blocked.insert(class_index);
-                self.pending.restore(popped);
-                self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
-                self.pending_isl_tokens
-                    .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-                self.add_class_counters(class_index, snapshot);
-                continue;
-            }
-            let request = popped.into_entry().into_payload().request;
+            let request = popped.into_payload().request;
             tracing::debug!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
@@ -2443,10 +2430,15 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn update_requeues_head_if_workers_become_busy_during_refresh() {
+    async fn selected_request_dispatches_after_refresh_if_worker_becomes_busy() {
         let block_size = 16u32;
         let isl = 64usize;
-        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let worker = WorkerWithDpRank::new(0, 0);
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap {
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::from([(worker, 7.0)]),
+            effective_cached_tokens: HashMap::from([(worker, 56)]),
+        }));
         let (queue, slots) = make_queue_with_blocking_refresher(
             1,
             block_size,
@@ -2460,7 +2452,7 @@ policy_classes:
         queue.enqueue(req1).await;
         let _ = rx1.await.expect("rx1 dropped").expect("req-1 failed");
 
-        let (mut req2, mut rx2) = make_request("req-2", isl);
+        let (mut req2, rx2) = make_request("req-2", isl);
         req2.effective_overlap_blocks
             .insert(WorkerWithDpRank::new(0, 0), 4.0);
         req2.effective_cached_tokens
@@ -2485,6 +2477,16 @@ policy_classes:
             })
         };
         refresher.wait_for_calls(1).await;
+        assert_eq!(
+            queue.pending_count(),
+            0,
+            "DRR-selected request must be removed before refresh"
+        );
+        assert_eq!(
+            queue.class_queue_stats()[0].pending_cached_tokens,
+            0,
+            "queue counters must reflect the irrevocable dequeue"
+        );
 
         slots
             .add_request(
@@ -2497,7 +2499,7 @@ policy_classes:
                         initial_effective_prefill_tokens: isl,
                         expected_prefill_duration: None,
                     }),
-                    worker: WorkerWithDpRank::new(0, 0),
+                    worker,
                     lora_name: None,
                 },
                 decay_now(),
@@ -2507,38 +2509,19 @@ policy_classes:
         refresher.release_one();
         update.await.unwrap();
 
-        assert_eq!(queue.pending_count(), 1, "request should be requeued");
-        assert_eq!(
-            queue.class_queue_stats()[0].pending_cached_tokens,
-            64,
-            "refresh must not mutate the enqueue snapshot"
-        );
-        assert!(
-            rx2.try_recv().is_err(),
-            "request must remain queued while worker became busy again"
-        );
-
-        slots
-            .mark_prefill_completed(&"occupy-during-refresh".to_string(), decay_now())
-            .unwrap();
-        slots
-            .free(&"occupy-during-refresh".to_string(), decay_now())
-            .unwrap();
-
-        let update = {
-            let queue = Arc::clone(&queue);
-            tokio::spawn(async move {
-                queue.update().await;
-            })
-        };
-        refresher.wait_for_calls(2).await;
-        refresher.release_one();
-        update.await.unwrap();
-
         let resp2 = rx2.await.expect("rx2 dropped").expect("req-2 failed");
-        assert_eq!(refresher.calls.load(Ordering::Relaxed), 2);
-        assert_eq!(resp2.best_worker, WorkerWithDpRank::new(0, 0));
+        assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(resp2.best_worker, worker);
+        assert_eq!(resp2.effective_overlap_blocks, 7.0);
+        assert_eq!(resp2.cached_tokens, 56);
         assert_eq!(queue.pending_count(), 0);
+
+        for request_id in ["occupy-during-refresh", "req-2"] {
+            slots
+                .mark_prefill_completed(&request_id.to_string(), decay_now())
+                .unwrap();
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
+        }
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

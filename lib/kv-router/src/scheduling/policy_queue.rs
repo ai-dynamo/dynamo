@@ -132,25 +132,6 @@ struct PolicyClassQueue<T> {
     deficit: usize,
 }
 
-pub struct PoppedPolicyQueueEntry<T> {
-    entry: PolicyQueueEntry<T>,
-    deficit_after_charge: usize,
-}
-
-impl<T> PoppedPolicyQueueEntry<T> {
-    pub fn entry(&self) -> &PolicyQueueEntry<T> {
-        &self.entry
-    }
-
-    pub fn entry_mut(&mut self) -> &mut PolicyQueueEntry<T> {
-        &mut self.entry
-    }
-
-    pub fn into_entry(self) -> PolicyQueueEntry<T> {
-        self.entry
-    }
-}
-
 pub struct PolicyQueue<T> {
     classes: Vec<PolicyClassQueue<T>>,
     next_class: usize,
@@ -246,7 +227,7 @@ impl<T> PolicyQueue<T> {
     pub fn pop_next(
         &mut self,
         mut is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
-    ) -> Option<PoppedPolicyQueueEntry<T>> {
+    ) -> Option<PolicyQueueEntry<T>> {
         if self.pending_count == 0 {
             return None;
         }
@@ -315,28 +296,16 @@ impl<T> PolicyQueue<T> {
         None
     }
 
-    pub fn restore(&mut self, popped: PoppedPolicyQueueEntry<T>) {
-        let class_index = popped.entry.class_index;
-        let class = &mut self.classes[class_index];
-        class.deficit = popped
-            .deficit_after_charge
-            .saturating_add(popped.entry.snapshot.uncached_tokens);
-        add_stats(&mut class.stats, popped.entry.snapshot);
-        class.pending.push(popped.entry);
-        self.pending_count += 1;
-    }
-
     pub fn drain(self) -> impl Iterator<Item = PolicyQueueEntry<T>> {
         self.classes
             .into_iter()
             .flat_map(|class| class.pending.into_iter())
     }
 
-    fn pop_class(&mut self, class_index: usize) -> PoppedPolicyQueueEntry<T> {
+    fn pop_class(&mut self, class_index: usize) -> PolicyQueueEntry<T> {
         let class = &mut self.classes[class_index];
         let entry = class.pending.pop().expect("policy class front vanished");
         class.deficit = class.deficit.saturating_sub(entry.snapshot.uncached_tokens);
-        let deficit_after_charge = class.deficit;
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
         if class.pending.is_empty() {
@@ -351,10 +320,7 @@ impl<T> PolicyQueue<T> {
         } else {
             self.next_class = (class_index + 1) % self.classes.len();
         }
-        PoppedPolicyQueueEntry {
-            entry,
-            deficit_after_charge,
-        }
+        entry
     }
 }
 
@@ -501,8 +467,8 @@ policy_classes:
             .enqueue(1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "wspt-short")
             .unwrap();
 
-        let first = queue.pop_next(|_, _, _| true).unwrap().into_entry();
-        let second = queue.pop_next(|_, _, _| true).unwrap().into_entry();
+        let first = queue.pop_next(|_, _, _| true).unwrap();
+        let second = queue.pop_next(|_, _, _| true).unwrap();
         assert_eq!(first.into_payload(), "fcfs-long");
         assert_eq!(second.into_payload(), "wspt-short");
     }
@@ -530,21 +496,14 @@ policy_classes:
 
         let mut first_six = Vec::new();
         for _ in 0..6 {
-            first_six.push(
-                queue
-                    .pop_next(|_, _, _| true)
-                    .unwrap()
-                    .into_entry()
-                    .into_payload(),
-            );
+            first_six.push(queue.pop_next(|_, _, _| true).unwrap().into_payload());
         }
         assert!(first_six.iter().filter(|value| **value == "fast").count() >= 3);
 
-        let blocked = queue.pop_next(|class, _, _| class == 0).unwrap();
-        assert_eq!(blocked.entry().payload(), &"slow");
-        queue.restore(blocked);
-        let restored = queue.pop_next(|class, _, _| class == 0).unwrap();
-        assert_eq!(restored.into_entry().into_payload(), "slow");
+        let blocked_deficit = queue.classes[1].deficit;
+        let slow = queue.pop_next(|class, _, _| class == 0).unwrap();
+        assert_eq!(slow.into_payload(), "slow");
+        assert_eq!(queue.classes[1].deficit, blocked_deficit);
     }
 
     #[test]
@@ -571,13 +530,7 @@ policy_classes:
         }
 
         let dispatches = (0..80)
-            .map(|_| {
-                queue
-                    .pop_next(|_, _, _| true)
-                    .unwrap()
-                    .into_entry()
-                    .into_payload()
-            })
+            .map(|_| queue.pop_next(|_, _, _| true).unwrap().into_payload())
             .collect::<Vec<_>>();
         for round in dispatches.chunks_exact(4) {
             assert_eq!(round, ["one", "three", "three", "three"]);
@@ -632,7 +585,7 @@ policy_classes:
         let popped = queue
             .pop_next(|class, _, _| class == 0)
             .expect("oversized request should make bounded progress");
-        assert_eq!(popped.into_entry().into_payload(), "large");
+        assert_eq!(popped.into_payload(), "large");
         assert_eq!(queue.pending_count(), 1);
     }
 }
