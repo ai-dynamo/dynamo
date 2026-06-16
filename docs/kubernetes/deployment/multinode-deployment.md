@@ -84,8 +84,9 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
 - The installed orchestrator (Grove or LWS) is automatically selected
 
 #### Scheduler Integration:
-- **With Grove**: Automatically integrates with [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) when available, providing:
+- **With Grove**: Integrates with [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) or Volcano depending on the configured scheduler profile, providing:
   - Advanced queue management via `nvidia.com/kai-scheduler-queue` annotation
+  - Volcano queue selection via `nvidia.com/volcano-queue` annotation
   - AI-optimized scheduling policies
   - Resource-aware workload placement
 - **With LWS**: Uses Volcano scheduler for gang scheduling and resource coordination
@@ -94,7 +95,7 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
 
 **Default (Grove with KAI-Scheduler):**
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: my-multinode-deployment
@@ -106,9 +107,23 @@ spec:
 
 > **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
 
+**Grove with Volcano:**
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-multinode-deployment
+  annotations:
+    nvidia.com/volcano-queue: "gpu-training"
+spec:
+  # ... your deployment spec
+```
+
+> **Note:** The `nvidia.com/volcano-queue` annotation is propagated to Grove as `scheduling.grove.io/volcano-queue`. If you specify a custom queue name, ensure the Volcano queue exists and is open before deploying. You can verify available queues with `kubectl get queues`.
+
 **Force LWS usage:**
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: my-multinode-deployment
