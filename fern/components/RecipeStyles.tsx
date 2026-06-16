@@ -1145,6 +1145,7 @@ const RECIPE_CSS = `
 }
 
 .dynamo-benchmark-row {
+    position: relative;
     min-height: 108px;
     padding: 13px 14px;
     color: var(--pst-color-text-base);
