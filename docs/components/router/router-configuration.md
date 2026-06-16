@@ -20,6 +20,7 @@ This page collects the main router flags for frontend-embedded and standalone de
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 - `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 16.0). The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../agents/priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`).
+- `--router-policy-config`: Startup-only policy-class YAML path. When omitted, `--router-queue-threshold` and `--router-queue-policy` retain the single default queue. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](router-filtering.md).
 
@@ -30,6 +31,44 @@ For how queue backpressure differs from candidate filtering and busy-threshold o
 For all three policies, the complete pending-queue key is
 `(strict_priority, policy_key)`. Higher strict tiers always win; the selected
 policy orders requests within a tier.
+
+### Policy-Class Queues
+
+Clients select a class with `x-dynamo-meta-policy-class`. Dynamo carries the
+header as request context metadata; it does not infer cached versus uncached
+work from the prompt. Missing and unknown class names use
+`default_policy_class`.
+
+Each class owns its FCFS or WSPT heap, busy thresholds, queue limits, quantum,
+deficit, and counters. Absolute and fractional busy thresholds use OR
+semantics. When neither is specified, the fractional threshold defaults to
+`16.0`. A class queues only when every eligible worker is busy for that class,
+but a new arrival cannot bypass an existing backlog in the same class.
+
+Queue limits are checked against the current class-local usage before adding
+the incoming request. The request that crosses a limit is accepted; the next
+queued request is rejected with HTTP 503 and structured limit details. DRR
+charges the uncached-token snapshot captured at enqueue, while raw, cached,
+and uncached snapshots remain unchanged for limits, WSPT, counters, and later
+dispatch.
+
+Profiles resolve in this order: exact model profile, root profile, then the
+synthetic single-class fallback. A model profile completely replaces the root
+profile; fields and classes are not inherited. See the tested
+[sample policy](../../../examples/router/policy-class-queues.yaml).
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-policy-config examples/router/policy-class-queues.yaml
+```
+
+The previous missing-ISL tier configuration is removed. Mapping those tiers to
+client-selected classes is intentionally not behavior preserving: external
+cache-state identification must happen before the request reaches Dynamo, and
+weighted DRR replaces the previous shared-queue credit-gap behavior. A
+`cached` WSPT class and an `uncached` FCFS class, as shown in the sample, are a
+starting point rather than an exact compatibility profile.
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
 
