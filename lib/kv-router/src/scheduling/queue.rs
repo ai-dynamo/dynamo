@@ -523,8 +523,10 @@ impl<
             enqueue_at: decay_now,
             block_hashes,
         };
+        let worker_count = self.workers_with_configs.borrow().len();
         if let Err((rejection, queued)) = self.pending.enqueue(
             class_index,
+            worker_count,
             snapshot,
             arrival_offset,
             priority_jump,
@@ -1128,6 +1130,26 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
+        let (queue, slots, _cfg_tx) = make_queue_with_profile_and_sender(
+            num_workers,
+            block_size,
+            max_num_batched_tokens,
+            profile,
+        );
+        (queue, slots)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_profile_and_sender(
+        num_workers: usize,
+        block_size: u32,
+        max_num_batched_tokens: usize,
+        profile: PolicyProfile,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
+    ) {
         let dp_range: HashMap<u64, (u32, u32)> =
             (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
@@ -1149,7 +1171,7 @@ mod tests {
                 )
             })
             .collect();
-        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+        let (cfg_tx, cfg_rx) = watch::channel(configs);
         let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
             Arc::clone(&slots),
             cfg_rx,
@@ -1160,7 +1182,7 @@ mod tests {
             None,
             None,
         ));
-        (queue, slots)
+        (queue, slots, cfg_tx)
     }
 
     fn make_queue_with_overload_provider(
@@ -1850,7 +1872,7 @@ policy_classes:
   - name: capped
     quantum: 1
     prefill_busy_threshold: 0
-    request_queue_limit: 1
+    request_queue_limit_per_worker: 1
 "#,
         );
         let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
@@ -1882,6 +1904,54 @@ policy_classes:
                 pending_cached_tokens: 0,
             })
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_worker_limit_tracks_discovered_worker_count_without_evicting() {
+        let profile = policy_profile(
+            r#"
+default_policy_class: capped
+policy_classes:
+  - name: capped
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 1
+"#,
+        );
+        let (queue, _slots, cfg_tx) = make_queue_with_profile_and_sender(1, 16, 64, profile);
+
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (first, _first_rx) = make_request("first", 64);
+        queue.enqueue(first).await;
+
+        cfg_tx.send_modify(|configs| {
+            configs.insert(
+                1,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    ..Default::default()
+                },
+            );
+        });
+        let (second, _second_rx) = make_request("second", 64);
+        queue.enqueue(second).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        cfg_tx.send_modify(|configs| {
+            configs.remove(&1);
+        });
+        let (rejected, rejected_rx) = make_request("rejected", 64);
+        queue.enqueue(rejected).await;
+        let error = rejected_rx.await.unwrap().unwrap_err();
+        let KvSchedulerError::QueueRejected(rejection) = error else {
+            panic!("expected queue rejection, got {error:?}");
+        };
+        assert_eq!(rejection.current, 2);
+        assert_eq!(rejection.limit, 1);
+        assert_eq!(queue.pending_count(), 2);
     }
 
     #[tokio::test(start_paused = true)]

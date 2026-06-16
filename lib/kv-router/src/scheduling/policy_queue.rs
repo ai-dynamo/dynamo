@@ -188,9 +188,11 @@ impl<T> PolicyQueue<T> {
         self.classes.iter().flat_map(|class| class.pending.iter())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &mut self,
         class_index: usize,
+        worker_count: usize,
         snapshot: QueueSnapshot,
         arrival_offset_secs: f64,
         priority_jump: f64,
@@ -198,7 +200,7 @@ impl<T> PolicyQueue<T> {
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
-        if let Some(rejection) = queue_rejection(class) {
+        if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
         }
 
@@ -328,24 +330,25 @@ impl<T> PolicyQueue<T> {
     }
 }
 
-fn queue_rejection<T>(class: &PolicyClassQueue<T>) -> Option<QueueRejection> {
-    for (limit_kind, current, limit) in [
+fn queue_rejection<T>(class: &PolicyClassQueue<T>, worker_count: usize) -> Option<QueueRejection> {
+    for (limit_kind, current, limit_per_worker) in [
         (
             QueueLimitKind::Requests,
             class.stats.requests,
-            class.config.request_queue_limit,
+            class.config.request_queue_limit_per_worker,
         ),
         (
             QueueLimitKind::RawIslTokens,
             class.stats.raw_isl_tokens,
-            class.config.token_queue_limit,
+            class.config.raw_isl_token_queue_limit_per_worker,
         ),
         (
             QueueLimitKind::CachedTokens,
             class.stats.cached_tokens,
-            class.config.cached_token_queue_limit,
+            class.config.cached_token_queue_limit_per_worker,
         ),
     ] {
+        let limit = limit_per_worker.map(|limit| limit.saturating_mul(worker_count));
         if limit.is_some_and(|limit| current >= limit) {
             return Some(QueueRejection {
                 policy_class: class.config.name.clone(),
@@ -383,65 +386,137 @@ mod tests {
     }
 
     #[test]
-    fn caps_are_pre_add_and_snapshots_do_not_change() {
+    fn per_worker_caps_scale_and_remain_pre_add() {
         let mut queue = PolicyQueue::new(profile(
             r#"
 default_policy_class: capped
 policy_classes:
   - name: capped
     quantum: 10
-    request_queue_limit: 2
-    token_queue_limit: 10
-    cached_token_queue_limit: 5
+    request_queue_limit_per_worker: 1
+    raw_isl_token_queue_limit_per_worker: 5
+    cached_token_queue_limit_per_worker: 3
 "#,
         ));
         queue
-            .enqueue(0, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, "first")
+            .enqueue(0, 2, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, "first")
             .unwrap();
         queue
-            .enqueue(0, QueueSnapshot::new(100, 100), 1.0, 0.0, 0, "overshoot")
+            .enqueue(0, 2, QueueSnapshot::new(100, 100), 1.0, 0.0, 0, "overshoot")
             .unwrap();
         let (rejection, payload) = queue
-            .enqueue(0, QueueSnapshot::new(1, 0), 2.0, 0.0, 0, "rejected")
+            .enqueue(0, 2, QueueSnapshot::new(1, 0), 2.0, 0.0, 0, "rejected")
             .unwrap_err();
         assert_eq!(payload, "rejected");
         assert_eq!(rejection.limit_kind, QueueLimitKind::Requests);
         assert_eq!(rejection.current, 2);
+        assert_eq!(rejection.limit, 2);
         assert_eq!(queue.class_stats(0).raw_isl_tokens, 108);
         assert_eq!(queue.class_stats(0).cached_tokens, 104);
     }
 
     #[test]
-    fn token_caps_reject_on_pre_add_state_after_allowing_overshoot() {
+    fn per_worker_token_caps_follow_capacity_without_evicting() {
         let mut queue = PolicyQueue::new(profile(
             r#"
 default_policy_class: raw
 policy_classes:
   - name: raw
     quantum: 1
-    token_queue_limit: 10
+    raw_isl_token_queue_limit_per_worker: 10
   - name: cached
     quantum: 1
-    cached_token_queue_limit: 5
+    cached_token_queue_limit_per_worker: 5
+  - name: zero
+    quantum: 1
+    request_queue_limit_per_worker: 0
+  - name: no-workers
+    quantum: 1
+    request_queue_limit_per_worker: 1
 "#,
         ));
         queue
-            .enqueue(0, QueueSnapshot::new(11, 0), 0.0, 0.0, 0, "raw-overshoot")
+            .enqueue(0, 2, QueueSnapshot::new(11, 0), 0.0, 0.0, 0, "raw-queued")
             .unwrap();
         let (raw_rejection, _) = queue
-            .enqueue(0, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "raw-rejected")
+            .enqueue(0, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "raw-rejected")
             .unwrap_err();
         assert_eq!(raw_rejection.limit_kind, QueueLimitKind::RawIslTokens);
         assert_eq!(raw_rejection.current, 11);
+        assert_eq!(raw_rejection.limit, 10);
+        assert_eq!(queue.class_stats(0).raw_isl_tokens, 11);
 
         queue
-            .enqueue(1, QueueSnapshot::new(8, 6), 0.0, 0.0, 0, "cached-overshoot")
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(10, 0),
+                2.0,
+                0.0,
+                0,
+                "raw-after-growth",
+            )
+            .unwrap();
+        let (grown_rejection, _) = queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                3.0,
+                0.0,
+                0,
+                "raw-at-grown-cap",
+            )
+            .unwrap_err();
+        assert_eq!(grown_rejection.current, 21);
+        assert_eq!(grown_rejection.limit, 20);
+
+        queue
+            .enqueue(1, 2, QueueSnapshot::new(8, 6), 0.0, 0.0, 0, "cached-queued")
             .unwrap();
         let (cached_rejection, _) = queue
-            .enqueue(1, QueueSnapshot::new(1, 1), 1.0, 0.0, 0, "cached-rejected")
+            .enqueue(
+                1,
+                1,
+                QueueSnapshot::new(1, 1),
+                1.0,
+                0.0,
+                0,
+                "cached-rejected",
+            )
             .unwrap_err();
         assert_eq!(cached_rejection.limit_kind, QueueLimitKind::CachedTokens);
         assert_eq!(cached_rejection.current, 6);
+        assert_eq!(cached_rejection.limit, 5);
+
+        let (zero_rejection, _) = queue
+            .enqueue(2, 4, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "zero")
+            .unwrap_err();
+        assert_eq!(zero_rejection.limit_kind, QueueLimitKind::Requests);
+        assert_eq!(zero_rejection.limit, 0);
+
+        let (no_workers_rejection, _) = queue
+            .enqueue(3, 0, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "no-workers")
+            .unwrap_err();
+        assert_eq!(no_workers_rejection.current, 0);
+        assert_eq!(no_workers_rejection.limit, 0);
+    }
+
+    #[test]
+    fn per_worker_limit_multiplication_saturates() {
+        let mut queue = PolicyQueue::new(profile(&format!(
+            r#"
+default_policy_class: capped
+policy_classes:
+  - name: capped
+    quantum: 1
+    request_queue_limit_per_worker: {}
+"#,
+            usize::MAX
+        )));
+        queue
+            .enqueue(0, 2, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "queued")
+            .unwrap();
     }
 
     #[test]
@@ -459,16 +534,16 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "fcfs-long")
+            .enqueue(0, 1, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "fcfs-long")
             .unwrap();
         queue
-            .enqueue(0, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "fcfs-short")
+            .enqueue(0, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "fcfs-short")
             .unwrap();
         queue
-            .enqueue(1, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "wspt-long")
+            .enqueue(1, 1, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "wspt-long")
             .unwrap();
         queue
-            .enqueue(1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "wspt-short")
+            .enqueue(1, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "wspt-short")
             .unwrap();
 
         let first = queue.pop_next(|_, _, _| true).unwrap();
@@ -491,10 +566,10 @@ policy_classes:
         ));
         for index in 0..6 {
             queue
-                .enqueue(0, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "slow")
+                .enqueue(0, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "slow")
                 .unwrap();
             queue
-                .enqueue(1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "fast")
+                .enqueue(1, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "fast")
                 .unwrap();
         }
 
@@ -524,12 +599,20 @@ policy_classes:
         ));
         for index in 0..20 {
             queue
-                .enqueue(0, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "one")
+                .enqueue(0, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "one")
                 .unwrap();
         }
         for index in 0..60 {
             queue
-                .enqueue(1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "three")
+                .enqueue(
+                    1,
+                    1,
+                    QueueSnapshot::new(1, 0),
+                    index as f64,
+                    0.0,
+                    0,
+                    "three",
+                )
                 .unwrap();
         }
 
@@ -554,10 +637,10 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "first")
+            .enqueue(0, 1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "first")
             .unwrap();
         queue
-            .enqueue(1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "second")
+            .enqueue(1, 1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "second")
             .unwrap();
 
         for _ in 0..10_000 {
@@ -580,10 +663,10 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, QueueSnapshot::new(101, 0), 0.0, 0.0, 0, "large")
+            .enqueue(0, 1, QueueSnapshot::new(101, 0), 0.0, 0.0, 0, "large")
             .unwrap();
         queue
-            .enqueue(1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "blocked")
+            .enqueue(1, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "blocked")
             .unwrap();
 
         let popped = queue

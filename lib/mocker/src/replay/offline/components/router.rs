@@ -259,6 +259,7 @@ impl OfflineReplayRouter {
             self.pending
                 .enqueue(
                     class_index,
+                    self.workers_with_configs.len(),
                     snapshot,
                     now_ms.max(0.0) / 1000.0,
                     priority_jump,
@@ -841,7 +842,7 @@ models:
       - name: latency
         quantum: 1
         prefill_busy_threshold: 0
-        request_queue_limit: 1
+        request_queue_limit_per_worker: 1
       - name: batch
         quantum: 4
         prefill_busy_threshold: 1024
@@ -911,6 +912,32 @@ models:
         assert_eq!(rejection.policy_class, "latency");
         assert_eq!(rejection.current, 1);
         assert_eq!(rejection.limit, 1);
+
+        router.add_worker(1).unwrap();
+        let mut scaled_latency = request(6, 6);
+        scaled_latency.policy_class = Some("latency".to_string());
+        assert!(
+            router
+                .on_request_arrival(&scaled_latency, None, 0.0)
+                .unwrap()
+                .admissions
+                .is_empty(),
+            "a second discovered worker should raise the effective queue limit"
+        );
+        assert_eq!(router.pending_count(), 2);
+
+        router.remove_worker(1).unwrap();
+        let mut rejected_after_shrink = request(7, 7);
+        rejected_after_shrink.policy_class = Some("latency".to_string());
+        let error = router
+            .on_request_arrival(&rejected_after_shrink, None, 0.0)
+            .unwrap_err();
+        let rejection = error
+            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .expect("worker removal should retain the typed queue rejection");
+        assert_eq!(rejection.current, 2);
+        assert_eq!(rejection.limit, 1);
+        assert_eq!(router.pending_count(), 2);
     }
 
     #[test]

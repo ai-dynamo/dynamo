@@ -47,10 +47,15 @@ semantics. When neither is specified, the fractional threshold defaults to
 `16.0`. A class queues only when every eligible worker is busy for that class,
 but a new arrival cannot bypass an existing backlog in the same class.
 
-Queue limits are checked against the current class-local usage before adding
-the incoming request. The request that crosses a limit is accepted; the next
-queued request is rejected with HTTP 503 and structured limit details. DRR
-charges the uncached-token snapshot captured at enqueue, while raw, cached,
+Queue limits are configured per discovered worker endpoint with
+`request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
+`cached_token_queue_limit_per_worker`. The effective class-local limit is the
+configured value multiplied by the current number of discovered endpoints.
+Limits are checked against current usage before adding the incoming request,
+so the request that crosses a limit is accepted and the next queued request is
+rejected with HTTP 503 and the effective total. Worker removal does not evict
+queued requests; new arrivals reject until usage drains or capacity returns.
+DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
 and uncached snapshots remain unchanged for limits, WSPT, counters, and later
 dispatch.
 
@@ -70,13 +75,12 @@ uncached-ISL mapping now selects an ordinary policy class, and that class owns
 the queue threshold, ordering, DRR weight, counters, and limits. There is no
 separate first-stage admission queue or global cross-class cap.
 
-This is intentionally not behavior preserving. Class limits are absolute and
-class-local rather than worker-scaled and global; rejection returns the
-structured policy-class HTTP 503 response rather than the previous overload
-429 path; and it does not exclude the entire router instance. A recognized
-explicit class header also bypasses automatic mapping. The sample is a
-Baseten-oriented continuing-session starting point, not a compatibility
-profile.
+This is intentionally not behavior preserving. Class limits are worker-scaled
+and class-local rather than global; rejection returns the structured
+policy-class HTTP 503 response rather than the previous overload 429 path; and
+it does not exclude the entire router instance. A recognized explicit class
+header also bypasses automatic mapping. The sample is a Baseten-oriented
+continuing-session starting point, not a compatibility profile.
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
 

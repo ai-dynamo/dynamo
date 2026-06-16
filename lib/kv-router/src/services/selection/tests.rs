@@ -396,7 +396,7 @@ policy_classes:
     queue_policy: fcfs
     quantum: 1
     prefill_busy_threshold: 0
-    request_queue_limit: 0
+    request_queue_limit_per_worker: 0
   - name: batch
     queue_policy: wspt
     quantum: 4

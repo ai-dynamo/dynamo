@@ -38,9 +38,9 @@ pub struct PolicyClassConfig {
     pub quantum: usize,
     pub prefill_busy_threshold: Option<usize>,
     pub prefill_busy_threshold_frac: Option<f64>,
-    pub request_queue_limit: Option<usize>,
-    pub token_queue_limit: Option<usize>,
-    pub cached_token_queue_limit: Option<usize>,
+    pub request_queue_limit_per_worker: Option<usize>,
+    pub raw_isl_token_queue_limit_per_worker: Option<usize>,
+    pub cached_token_queue_limit_per_worker: Option<usize>,
 }
 
 impl PolicyClassConfig {
@@ -84,9 +84,9 @@ impl PolicyProfile {
             quantum: 1,
             prefill_busy_threshold: None,
             prefill_busy_threshold_frac: router_queue_threshold,
-            request_queue_limit: None,
-            token_queue_limit: None,
-            cached_token_queue_limit: None,
+            request_queue_limit_per_worker: None,
+            raw_isl_token_queue_limit_per_worker: None,
+            cached_token_queue_limit_per_worker: None,
         };
         let class_indices = HashMap::from([(class.name.clone(), 0)]);
         Self {
@@ -266,11 +266,11 @@ struct RawPolicyClassConfig {
     #[serde(default)]
     prefill_busy_threshold_frac: Option<f64>,
     #[serde(default)]
-    request_queue_limit: Option<usize>,
+    request_queue_limit_per_worker: Option<usize>,
     #[serde(default)]
-    token_queue_limit: Option<usize>,
+    raw_isl_token_queue_limit_per_worker: Option<usize>,
     #[serde(default)]
-    cached_token_queue_limit: Option<usize>,
+    cached_token_queue_limit_per_worker: Option<usize>,
 }
 
 fn resolve_profile(
@@ -326,9 +326,9 @@ fn resolve_profile(
             quantum: raw.quantum,
             prefill_busy_threshold,
             prefill_busy_threshold_frac,
-            request_queue_limit: raw.request_queue_limit,
-            token_queue_limit: raw.token_queue_limit,
-            cached_token_queue_limit: raw.cached_token_queue_limit,
+            request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
+            raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
+            cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
         });
     }
 
@@ -439,7 +439,7 @@ models:
     policy_classes:
       - name: model-default
         quantum: 2
-        request_queue_limit: 0
+        request_queue_limit_per_worker: 0
 "#,
         )
         .unwrap();
@@ -452,7 +452,10 @@ models:
             Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)
         );
         assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
-        assert_eq!(exact.default_class().request_queue_limit, Some(0));
+        assert_eq!(
+            exact.default_class().request_queue_limit_per_worker,
+            Some(0)
+        );
         assert_eq!(
             exact
                 .class(exact.resolve_class_index(Some("unknown"), usize::MAX))
@@ -542,6 +545,27 @@ policy_classes:
   - name: valid
     quantum: 1
     typo_limit: 3
+"#,
+            r#"
+default_policy_class: valid
+policy_classes:
+  - name: valid
+    quantum: 1
+    request_queue_limit: 1
+"#,
+            r#"
+default_policy_class: valid
+policy_classes:
+  - name: valid
+    quantum: 1
+    token_queue_limit: 1
+"#,
+            r#"
+default_policy_class: valid
+policy_classes:
+  - name: valid
+    quantum: 1
+    cached_token_queue_limit: 1
 "#,
             r#"
 default_policy_class: valid
