@@ -50,6 +50,16 @@ pub struct ConditionalDisaggDecisionInput {
     /// workers, or the peek-selection failed); in that case the load-aware
     /// policies treat the worker as calm.
     pub prefill_chosen_worker_busy: Option<bool>,
+
+    /// Whether the decode worker the router would pick for this request is over
+    /// the decode-busy line (i.e.
+    /// `active_decode_blocks > conditional_disagg_decode_busy_threshold * total_kv_blocks`).
+    /// `None` when the decode gate is disabled, or the signal isn't available
+    /// (unknown worker / no `total_kv_blocks` reported). The v2 decode-side
+    /// circuit breaker is composed at the `PrefillRouter` call site (an AND
+    /// veto over the policy's verdict), not inside a policy — this field
+    /// carries the signal for logging and future use.
+    pub decode_chosen_worker_busy: Option<bool>,
 }
 
 impl ConditionalDisaggDecisionInput {
@@ -59,13 +69,21 @@ impl ConditionalDisaggDecisionInput {
             block_size,
             decode_chosen_overlap_blocks,
             prefill_chosen_worker_busy: None,
+            decode_chosen_worker_busy: None,
         }
     }
 
-    /// Set the chosen-worker busy signal. Chained from `new` at call sites
-    /// that have the signal (e.g. `PrefillRouter` after a peek).
+    /// Set the chosen prefill-worker busy signal. Chained from `new` at call
+    /// sites that have the signal (e.g. `PrefillRouter` after a peek).
     pub fn with_prefill_chosen_worker_busy(mut self, busy: Option<bool>) -> Self {
         self.prefill_chosen_worker_busy = busy;
+        self
+    }
+
+    /// Set the chosen decode-worker busy signal. Chained from `new` at the
+    /// `PrefillRouter` call site after the decode-busy peek.
+    pub fn with_decode_chosen_worker_busy(mut self, busy: Option<bool>) -> Self {
+        self.decode_chosen_worker_busy = busy;
         self
     }
 
@@ -620,8 +638,18 @@ mod tests {
     #[tokio::test]
     async fn decision_input_new_defaults_busy_to_none() {
         // Back-compat: existing call sites that build via `new` should default
-        // the new field to `None`.
+        // the new fields to `None`.
         let input = ConditionalDisaggDecisionInput::new(1000, 64, 0);
+        assert_eq!(input.prefill_chosen_worker_busy, None);
+        assert_eq!(input.decode_chosen_worker_busy, None);
+    }
+
+    #[tokio::test]
+    async fn decision_input_with_decode_chosen_worker_busy_round_trips() {
+        let input = ConditionalDisaggDecisionInput::new(1000, 64, 0)
+            .with_decode_chosen_worker_busy(Some(true));
+        assert_eq!(input.decode_chosen_worker_busy, Some(true));
+        // Independent of the prefill-side field.
         assert_eq!(input.prefill_chosen_worker_busy, None);
     }
 }

@@ -496,6 +496,8 @@ struct KvRouterConfigSerde {
     conditional_disagg_eff_isl_ratio_threshold: f64,
     #[serde(default)]
     conditional_disagg_prefill_busy_threshold: Option<f64>,
+    #[serde(default)]
+    conditional_disagg_decode_busy_threshold: Option<f64>,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -536,6 +538,8 @@ impl Default for KvRouterConfigSerde {
                 .conditional_disagg_eff_isl_ratio_threshold,
             conditional_disagg_prefill_busy_threshold: config
                 .conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold: config
+                .conditional_disagg_decode_busy_threshold,
         }
     }
 }
@@ -718,6 +722,15 @@ pub struct KvRouterConfig {
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub conditional_disagg_prefill_busy_threshold: Option<f64>,
+
+    /// v2 decode-side circuit-breaker knob: busy-line fraction for the chosen
+    /// decode worker. When `Some(frac)`, conditional-disagg denies bypass if
+    /// `active_decode_blocks(W) > frac * total_kv_blocks(W)` for the decode
+    /// worker the router would pick. When `None` (default), the decode gate is
+    /// disabled — existing behavior is preserved and no fallback applies.
+    #[serde(default)]
+    #[validate(range(min = 0.0))]
+    pub conditional_disagg_decode_busy_threshold: Option<f64>,
 }
 
 fn default_conditional_disagg_eff_isl_threshold() -> usize {
@@ -763,6 +776,7 @@ impl Default for KvRouterConfig {
             conditional_disagg_eff_isl_ratio_threshold:
                 default_conditional_disagg_eff_isl_ratio_threshold(),
             conditional_disagg_prefill_busy_threshold: None,
+            conditional_disagg_decode_busy_threshold: None,
         }
     }
 }
@@ -816,6 +830,8 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
                 .conditional_disagg_eff_isl_ratio_threshold,
             conditional_disagg_prefill_busy_threshold: compat
                 .conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold: compat
+                .conditional_disagg_decode_busy_threshold,
         })
     }
 }
@@ -899,6 +915,19 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
                 );
             }
         }
+    }
+
+    // v2 decode-side circuit breaker: orthogonal to the policy choice, so it
+    // applies to any enabled conditional-disagg policy. No fallback — surface
+    // an INFO only when the operator explicitly set the knob.
+    if config.conditional_disagg_enabled
+        && let Some(threshold) = config.conditional_disagg_decode_busy_threshold
+    {
+        tracing::info!(
+            decode_busy_threshold = threshold,
+            "conditional_disagg decode circuit breaker enabled via \
+             --router-conditional-disagg-decode-busy-threshold"
+        );
     }
     // Validation for router_queue_by_incoming_missing_isl is handled by RouterQueueDepthTiers::try_from
     Ok(())

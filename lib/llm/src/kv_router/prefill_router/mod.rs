@@ -69,6 +69,10 @@ pub struct PrefillRouter {
     /// `KvRouterConfig::router_queue_threshold`. `None` ⇒ load gate is a
     /// no-op (matches startup warning in `validate_kv_router_config`).
     conditional_disagg_prefill_busy_threshold: Option<f64>,
+    /// v2 decode-side circuit-breaker threshold, from
+    /// `KvRouterConfig::conditional_disagg_decode_busy_threshold`. No fallback —
+    /// `None` ⇒ decode gate disabled (existing behavior preserved).
+    conditional_disagg_decode_busy_threshold: Option<f64>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,

@@ -37,6 +37,16 @@ pub(super) struct PrefillCompletion {
     pub worker_link: Option<TraceLink>,
 }
 
+/// v2 decode-side circuit breaker composition (G2 — orthogonal AND veto).
+///
+/// Bypass only if the conditional-disagg policy wants it AND the chosen decode
+/// worker is not over the decode-busy line. `decode_busy` is the v2 signal:
+/// `Some(true)` vetoes the bypass; `Some(false)` (calm) and `None` (gate
+/// disabled or signal unavailable) both allow the policy's verdict to stand.
+fn decode_gate_allows_bypass(policy_says_bypass: bool, decode_busy: Option<bool>) -> bool {
+    policy_says_bypass && decode_busy != Some(true)
+}
+
 impl PrefillRouter {
     /// Peek the decode router to see which decode worker would be picked, then
     /// consult the configured conditional-disagg policy. Returns
@@ -147,11 +157,60 @@ impl PrefillRouter {
         let net_new_tokens = input.net_new_tokens();
         let overlap_tokens = (overlap_blocks as usize) * block_size;
 
-        if self
+        let policy_says_bypass = self
             .conditional_disagg_policy
             .should_bypass_remote_prefill(input)
-            .await
-        {
+            .await;
+
+        // v2 decode-side circuit breaker (AND veto). Only relevant when the
+        // policy wants to bypass — peek the chosen decode worker's KV headroom
+        // and deny bypass if it's over the busy line. `None` threshold ⇒ gate
+        // disabled; `None` signal ⇒ don't block (worker unknown / no
+        // total_kv_blocks reported). `worker` is already the chosen decode
+        // worker, so this is a direct scheduler read with no extra selection.
+        let decode_busy = if policy_says_bypass {
+            self.conditional_disagg_decode_busy_threshold
+                .and_then(|threshold| decode_router.worker_is_decode_busy(worker, threshold))
+        } else {
+            None
+        };
+        input = input.with_decode_chosen_worker_busy(decode_busy);
+
+        let bypass = decode_gate_allows_bypass(policy_says_bypass, decode_busy);
+
+        // NOTE (observability): the decode-side reality-check signals from the
+        // plan — worker-reported `kv_used_blocks` ratio and its staleness
+        // (Option B) — are deferred; they need KvWorkerMonitor plumbing not in
+        // this MVP. The control signal (`decode_chosen_worker_busy`) and the
+        // gate decision below are sufficient to see when the gate fires.
+        let decode_gate_decision = if !policy_says_bypass {
+            "declined_by_policy"
+        } else if self.conditional_disagg_decode_busy_threshold.is_none() {
+            "allow_bypass_gate_disabled"
+        } else if decode_busy.is_none() {
+            "allow_bypass_signal_unavailable"
+        } else if decode_busy == Some(true) {
+            "deny_bypass_decode_busy"
+        } else {
+            "allow_bypass_decode_calm"
+        };
+
+        tracing::debug!(
+            request_id,
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            prompt_tokens,
+            net_new_tokens,
+            overlap_tokens,
+            prefill_chosen_worker_busy = ?input.prefill_chosen_worker_busy,
+            decode_chosen_worker_busy = ?decode_busy,
+            decode_busy_threshold = ?self.conditional_disagg_decode_busy_threshold,
+            decode_gate_decision,
+            bypass,
+            "Conditional disagg decision"
+        );
+
+        if bypass {
             return Ok(Some(ConditionalDisaggDecodeDecision {
                 worker,
                 overlap_tokens,
@@ -159,14 +218,6 @@ impl PrefillRouter {
             }));
         }
 
-        tracing::debug!(
-            request_id,
-            worker_id = worker.worker_id,
-            dp_rank = worker.dp_rank,
-            net_new_tokens,
-            overlap_tokens,
-            "Conditional disagg policy declined bypass; falling through to disagg"
-        );
         Ok(None)
     }
 
@@ -694,6 +745,38 @@ mod tests {
     use serde_json::json;
 
     const MAX_ROOM: u64 = i64::MAX as u64;
+
+    // --- v2 decode-side circuit breaker composition (truth table) ---------
+    // The signal computation (`worker_is_decode_busy`) and the config knob are
+    // covered by tests in lib/kv-router. These cover the AND-veto composition
+    // at the PrefillRouter call site.
+
+    #[test]
+    fn decode_gate_calm_and_policy_bypass_allows_bypass() {
+        // decode calm + policy says bypass → bypass.
+        assert!(decode_gate_allows_bypass(true, Some(false)));
+    }
+
+    #[test]
+    fn decode_gate_busy_vetoes_policy_bypass() {
+        // decode busy + policy says bypass → NO bypass (the veto).
+        assert!(!decode_gate_allows_bypass(true, Some(true)));
+    }
+
+    #[test]
+    fn decode_gate_does_not_bypass_when_policy_declines() {
+        // policy says no bypass → no bypass regardless of decode state.
+        assert!(!decode_gate_allows_bypass(false, Some(false)));
+        assert!(!decode_gate_allows_bypass(false, Some(true)));
+        assert!(!decode_gate_allows_bypass(false, None));
+    }
+
+    #[test]
+    fn decode_gate_signal_unavailable_does_not_block_bypass() {
+        // None (gate disabled or signal unavailable) must not block a bypass
+        // the policy wanted — fail open, don't veto on a missing signal.
+        assert!(decode_gate_allows_bypass(true, None));
+    }
 
     #[test]
     fn prefill_worker_info_prefers_tracker_over_payload_and_direct_target() {

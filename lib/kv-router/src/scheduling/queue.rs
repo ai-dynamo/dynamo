@@ -394,6 +394,47 @@ impl<
         Some((tokens as f64) > threshold * (max_batched as f64))
     }
 
+    /// Per-worker decode-busy check — the decode-side analog of
+    /// [`worker_is_prefill_busy`](Self::worker_is_prefill_busy). Used by the
+    /// conditional-disagg v2 decode-side circuit breaker to deny bypass when
+    /// the chosen decode worker has too little KV headroom to absorb local
+    /// prefill+decode work.
+    ///
+    /// Predicate: `active_blocks > threshold * total_kv_blocks`. The numerator
+    /// is the router's per-worker projection of dispatched decode blocks
+    /// (`slots.active_blocks()`, the same quantity the worker monitor reports
+    /// as `active_decode_blocks`); the denominator is the worker's KV-cache
+    /// capacity from its config.
+    ///
+    /// Unlike the prefill side, decode blocks are not time-decayed, so this
+    /// takes no `decay_now` — `active_blocks()` is a direct snapshot.
+    ///
+    /// NB: `threshold` here is a fraction of *total KV capacity* (so ~0.85-0.95
+    /// is typical), whereas the prefill-busy `threshold` is a multiple of the
+    /// per-iteration batch budget (`max_num_batched_tokens`, default line 16.0).
+    /// The two knobs are not on the same scale — don't assume a shared value.
+    ///
+    /// Returns:
+    /// - `Some(true)` when `active_blocks > threshold * total_kv_blocks`.
+    /// - `Some(false)` when active blocks are at or below the busy line.
+    /// - `None` when the worker has no registered config, or its config did not
+    ///   report `total_kv_blocks` (or reported 0) — i.e. the signal can't be
+    ///   computed. Callers treat `None` as "don't block bypass".
+    ///
+    /// Pure read of `slots.active_blocks()` + worker config; no mutation, no
+    /// booking.
+    pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker.worker_id)?;
+        let total_kv_blocks = config.total_kv_blocks()?;
+        if total_kv_blocks == 0 {
+            return None;
+        }
+        let active_blocks = self.slots.active_blocks();
+        let blocks = active_blocks.get(&worker).copied().unwrap_or(0);
+        Some((blocks as f64) > threshold * (total_kv_blocks as f64))
+    }
+
     pub fn supports_overlap_refresh(&self) -> bool {
         self.supports_overlap_refresh
     }
@@ -2136,6 +2177,183 @@ mod tests {
 
         let _ = slots.mark_prefill_completed(&"req-mix".to_string(), decay_now());
         let _ = slots.free(&"req-mix".to_string(), decay_now());
+    }
+
+    // --- v2: tests for `SchedulerQueue::worker_is_decode_busy` -------------
+    //
+    // The decode-side analog of the prefill-busy peek. Predicate:
+    // `active_blocks > threshold * total_kv_blocks`. Numerator from
+    // `slots.active_blocks()`, denominator from the worker's config.
+    //
+    // Contract under test:
+    //   - None for an unknown worker
+    //   - None when the worker config did not report `total_kv_blocks`
+    //   - Some(false) when active_blocks <= threshold * total_kv_blocks
+    //   - Some(true)  when active_blocks >  threshold * total_kv_blocks (strict >)
+    //   - Per-worker normalization against each worker's own `total_kv_blocks`
+    //   - Caller-supplied threshold drives the decision
+    //   - Independent of the prefill queueing threshold (`threshold_frac`)
+
+    /// Build a queue whose workers carry an explicit `total_kv_blocks`, with
+    /// prefill queueing disabled — so the decode-busy peek is exercised in
+    /// isolation. Block size is irrelevant here (decode active-blocks are
+    /// populated directly via `add_decode_blocks`, which works at block
+    /// granularity), so we use 16.
+    #[allow(clippy::type_complexity)]
+    fn make_decode_queue(
+        workers: &[(u64, Option<u64>)],
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let block_size = 16u32;
+        let dp_range: HashMap<u64, (u32, u32)> =
+            workers.iter().map(|(id, _)| (*id, (0, 1))).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+        let configs: HashMap<u64, SimpleWorkerConfig> = workers
+            .iter()
+            .map(|(id, kv)| {
+                (
+                    *id,
+                    SimpleWorkerConfig {
+                        total_kv_blocks: *kv,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            None,
+            RouterQueueDepthTiers::unbounded_cap(),
+            block_size,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+        ));
+        (queue, slots)
+    }
+
+    /// Book `num_blocks` decode blocks on `worker` by adding a sequence whose
+    /// token-hash vec has one entry per block. `active_blocks()` for the worker
+    /// then equals `num_blocks`. `base_hash` keeps block hashes distinct across
+    /// workers so per-worker counts don't collide on shared blocks.
+    fn add_decode_blocks(
+        slots: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        num_blocks: u64,
+        base_hash: u64,
+    ) {
+        let token_sequence: Vec<dynamo_tokens::SequenceHash> =
+            (base_hash..base_hash + num_blocks).collect();
+        slots
+            .add_request(
+                crate::sequences::SequenceRequest {
+                    request_id: request_id.to_string(),
+                    token_sequence: Some(token_sequence),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                decay_now(),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_decode_busy_returns_none_for_unknown_worker() {
+        let (queue, _slots) = make_decode_queue(&[(0, Some(100))]);
+        assert_eq!(
+            queue.worker_is_decode_busy(WorkerWithDpRank::new(99, 0), 0.5),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_decode_busy_returns_none_without_total_kv_blocks() {
+        // Worker is known but never reported total_kv_blocks → signal can't be
+        // computed → None (callers treat as "don't block bypass").
+        let (queue, _slots) = make_decode_queue(&[(0, None)]);
+        assert_eq!(
+            queue.worker_is_decode_busy(WorkerWithDpRank::new(0, 0), 0.5),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_decode_busy_false_at_zero_active_blocks() {
+        let (queue, _slots) = make_decode_queue(&[(0, Some(100))]);
+        assert_eq!(
+            queue.worker_is_decode_busy(WorkerWithDpRank::new(0, 0), 0.5),
+            Some(false)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_decode_busy_strict_gt_boundary() {
+        // total_kv_blocks 10, threshold 0.5 → busy line 5 blocks.
+        // 5 active blocks; strict `>` ⇒ exactly at the line is NOT busy.
+        let (queue, slots) = make_decode_queue(&[(0, Some(10))]);
+        let worker = WorkerWithDpRank::new(0, 0);
+        add_decode_blocks(&slots, "req-d-boundary", worker, 5, 1);
+
+        assert_eq!(slots.active_blocks().get(&worker).copied(), Some(5));
+        assert_eq!(queue.worker_is_decode_busy(worker, 0.5), Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_decode_busy_true_above_boundary() {
+        // total_kv_blocks 10, threshold 0.5 → busy line 5 blocks.
+        // 6 active blocks; 6 > 5 ⇒ busy.
+        let (queue, slots) = make_decode_queue(&[(0, Some(10))]);
+        let worker = WorkerWithDpRank::new(0, 0);
+        add_decode_blocks(&slots, "req-d-busy", worker, 6, 1);
+
+        assert_eq!(slots.active_blocks().get(&worker).copied(), Some(6));
+        assert_eq!(queue.worker_is_decode_busy(worker, 0.5), Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_decode_busy_threshold_is_caller_supplied() {
+        // 6 active blocks against total_kv_blocks=10: threshold 0.5 → line 5 →
+        // busy; threshold 0.7 → line 7 → not busy.
+        let (queue, slots) = make_decode_queue(&[(0, Some(10))]);
+        let worker = WorkerWithDpRank::new(0, 0);
+        add_decode_blocks(&slots, "req-d-thresh", worker, 6, 1);
+
+        assert_eq!(queue.worker_is_decode_busy(worker, 0.5), Some(true));
+        assert_eq!(queue.worker_is_decode_busy(worker, 0.7), Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_decode_busy_per_worker_normalization() {
+        // Worker 0: total_kv_blocks 10 → busy line 5. Worker 1: total_kv_blocks
+        // 1000 → busy line 500. 6 active blocks on worker 0 crosses its line
+        // but the same count would not cross worker 1's.
+        let (queue, slots) = make_decode_queue(&[(0, Some(10)), (1, Some(1000))]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        add_decode_blocks(&slots, "req-d-w0", worker0, 6, 1);
+        add_decode_blocks(&slots, "req-d-w1", worker1, 6, 1000);
+
+        assert_eq!(queue.worker_is_decode_busy(worker0, 0.5), Some(true));
+        assert_eq!(
+            queue.worker_is_decode_busy(worker1, 0.5),
+            Some(false),
+            "worker 1 has far more KV blocks; the same active-block count shouldn't mark it busy"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

@@ -679,6 +679,19 @@ where
             .worker_is_prefill_busy(worker, decay_now, threshold)
     }
 
+    /// Per-worker decode-busy peek for the conditional-disagg v2 decode-side
+    /// circuit breaker. Forwards `SchedulerQueue::worker_is_decode_busy`;
+    /// `None` means the worker is unknown, has no config, or did not report
+    /// `total_kv_blocks` — callers treat `None` as "don't block bypass". Caller
+    /// provides the busy threshold (from `conditional_disagg_decode_busy_threshold`).
+    pub fn worker_is_decode_busy(
+        &self,
+        worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.scheduler.worker_is_decode_busy(worker, threshold)
+    }
+
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,

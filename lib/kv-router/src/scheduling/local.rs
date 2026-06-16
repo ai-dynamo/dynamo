@@ -326,6 +326,16 @@ where
             .worker_is_prefill_busy(worker, decay_now, threshold)
     }
 
+    /// Per-worker decode-busy peek. Forwards to
+    /// `SchedulerQueue::worker_is_decode_busy`; see there for semantics.
+    pub fn worker_is_decode_busy(
+        &self,
+        worker: crate::protocols::WorkerWithDpRank,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.queue.worker_is_decode_busy(worker, threshold)
+    }
+
     pub fn supports_overlap_refresh(&self) -> bool {
         self.queue.supports_overlap_refresh()
     }

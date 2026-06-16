@@ -54,6 +54,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "conditional_disagg_eff_isl_threshold",
     "conditional_disagg_eff_isl_ratio_threshold",
     "conditional_disagg_prefill_busy_threshold",
+    "conditional_disagg_decode_busy_threshold",
     "router_predicted_ttl_secs",
 )
 
@@ -196,6 +197,7 @@ class KvRouterConfigBase(ConfigBase):
     conditional_disagg_eff_isl_threshold: int = 2048
     conditional_disagg_eff_isl_ratio_threshold: float = 0.7
     conditional_disagg_prefill_busy_threshold: Optional[float] = None
+    conditional_disagg_decode_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
 
@@ -523,6 +525,23 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="conditional_disagg_prefill_busy_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-disagg-decode-busy-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
+            default=None,
+            help=(
+                "KV Router: Decode-side circuit breaker for conditional disagg. "
+                "Denies bypass when the chosen decode worker lacks KV headroom: a "
+                "decode worker W is considered busy when "
+                "`active_decode_blocks(W) > this * total_kv_blocks(W)`. Applies on "
+                "top of any policy (it is an AND veto over the policy's verdict). "
+                "If unset (default), the decode gate is disabled and existing "
+                "behavior is preserved. Suggested starting value: 0.85-0.95."
+            ),
+            arg_type=float,
+            dest="conditional_disagg_decode_busy_threshold",
         )
         add_negatable_bool_argument(
             g,
