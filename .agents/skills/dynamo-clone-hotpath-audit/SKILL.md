@@ -48,7 +48,7 @@ MR/PR. A skill invocation such as `$dynamo-clone-hotpath-audit`, "audit",
 Run the read-only scanner from the repository root:
 
 ```bash
-python3 .agents/contributor-skills/dynamo-clone-hotpath-audit/scripts/clone_inventory.py \
+python3 .agents/skills/dynamo-clone-hotpath-audit/scripts/clone_inventory.py \
   --only-actionable \
   --limit 80
 ```
@@ -56,7 +56,7 @@ python3 .agents/contributor-skills/dynamo-clone-hotpath-audit/scripts/clone_inve
 Use narrower paths when the user names a subsystem:
 
 ```bash
-python3 .agents/contributor-skills/dynamo-clone-hotpath-audit/scripts/clone_inventory.py \
+python3 .agents/skills/dynamo-clone-hotpath-audit/scripts/clone_inventory.py \
   --paths lib/kv-router/src/scheduling lib/llm/src/backend \
   --only-actionable
 ```
