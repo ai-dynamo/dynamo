@@ -333,22 +333,13 @@ impl DisaggRuntime {
         Ok(())
     }
 
-    /// Dispatch a request's decode stage onto a specific decode worker.
-    ///
-    /// This is the in-process point at which the matching decode is scheduled,
-    /// so it is also where the stranded prefill's pin is released (event-driven,
-    /// load-dependent strand duration): the prefill held its KV from completion
-    /// until exactly here.
+    /// Route a request's decode stage onto a specific decode worker — i.e. enqueue
+    /// it into that decode engine. This is the router's worker *pick*, NOT the
+    /// decode engine's slot admission, so the prefill pin is deliberately NOT
+    /// released here: the strand must persist until the decode actually secures a
+    /// seq-slot + KV blocks (see [`Self::release_prefill_pin_for`]). Releasing at
+    /// the pick would model only rendezvous latency, not slot-limited stranding.
     fn dispatch_decode(&mut self, uuid: Uuid, worker_idx: usize) -> Result<()> {
-        // Release the matching prefill's pinned KV (the strand ends as the decode
-        // is scheduled to pull the transfer). Idempotent: a prefill that did not
-        // pin (e.g. no transfer assigned) is a no-op.
-        let transfer_id = self.state(uuid)?.transfer_id();
-        if let Some(prefill_worker_idx) = self.state(uuid)?.prefill_worker_idx() {
-            self.prefill_engine
-                .release_pinned(prefill_worker_idx, uuid)?;
-        }
-        self.transfer_correlator.remove(&transfer_id);
         let request = self.state(uuid)?.original_request()?.clone();
         self.decode_engine.dispatch(worker_idx, request)?;
         self.state_mut(uuid)?.start_decode(worker_idx);
@@ -357,6 +348,23 @@ impl DisaggRuntime {
         {
             self.stats.decode_assignments.insert(uuid, worker_idx);
         }
+        Ok(())
+    }
+
+    /// Release the matching prefill's pinned KV. Called when the decode engine
+    /// *admits* `uuid` (secures a seq-slot + KV blocks and pulls the transfer) —
+    /// the strand ends here, gated on real decode slot availability rather than on
+    /// routing. Under decode saturation the admission (and thus this release) is
+    /// delayed, so the prefill's KV stays pinned and pressures the prefill pool —
+    /// the cascade. Idempotent: a request that did not pin, or whose pin was
+    /// already released, is a no-op.
+    fn release_prefill_pin_for(&mut self, uuid: Uuid) -> Result<()> {
+        let transfer_id = self.state(uuid)?.transfer_id();
+        if let Some(prefill_worker_idx) = self.state(uuid)?.prefill_worker_idx() {
+            self.prefill_engine
+                .release_pinned(prefill_worker_idx, uuid)?;
+        }
+        self.transfer_correlator.remove(&transfer_id);
         Ok(())
     }
 
@@ -616,6 +624,11 @@ impl DisaggRuntime {
         if !signal.completed {
             return Ok(());
         }
+        // Safety net: a decode that completed or was rejected without ever being
+        // admitted (e.g. its footprint exceeds the decode pool) still ends the
+        // strand — release the prefill pin here. Idempotent if admission already
+        // released it.
+        self.release_prefill_pin_for(signal.uuid)?;
 
         let admissions = if let Some(decode_router) = self.decode_router.as_mut() {
             let admissions = decode_router
@@ -846,6 +859,14 @@ impl DisaggRuntime {
 
     fn handle_decode_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
         self.decode_fpm_buffer.extend(effects.fpm_snapshots);
+        // The decode engine just admitted these requests (each secured a seq-slot
+        // + KV blocks); that is the in-process point at which the matching decode
+        // pulls the transfer, so release the prefill pin now. Gating the release
+        // here — not at routing — is what makes a slot-saturated decode hold the
+        // prefill's KV (the strand) and pressure the prefill pool (the cascade).
+        for admission in &effects.admissions {
+            self.release_prefill_pin_for(admission.uuid)?;
+        }
         for payload in effects.immediate_completions {
             let payload = self.decode_engine.on_scheduled_completion(payload)?;
             self.process_decode_pass(
