@@ -2372,7 +2372,7 @@ func GenerateGrovePodCliqueSet(
 
 		if usesPCSG {
 			replicas := component.Replicas
-			minAvailable := ptr.To(int32(1))
+			minAvailable := pcsgMinAvailable(component)
 			if checkpointInfo != nil &&
 				checkpointInfo.Enabled &&
 				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
