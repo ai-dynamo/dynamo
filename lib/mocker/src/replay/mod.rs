@@ -23,8 +23,8 @@ pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{
-    TraceDistributionStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
-    TraceSimulationReport, TraceThroughputStats,
+    PerRequestRecord, TraceDistributionStats, TraceInterTokenLatencyStats, TraceLatencyStats,
+    TraceRequestCounts, TraceSimulationReport, TraceThroughputStats,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
@@ -60,7 +60,8 @@ impl OfflineDisaggReplayConfig {
 }
 
 pub use entrypoints::{
-    generate_trace_worker_artifacts_offline, simulate_concurrency_file,
+    ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
+    generate_trace_worker_artifacts_offline_with_kv_event_visibility, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
     simulate_concurrency_file_disagg_with_router_mode_and_format,
     simulate_concurrency_file_with_router_mode,
@@ -175,6 +176,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![2; 4],
@@ -182,6 +184,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(2)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(200.0),
+                ..Default::default()
             },
         ];
 

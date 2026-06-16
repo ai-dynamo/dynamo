@@ -57,11 +57,20 @@ impl AuditHandle {
 
 pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> Option<AuditHandle> {
     let policy = config::policy();
-    if !policy.enabled {
+    create_handle_with_config(req, request_id, policy.enabled, policy.force_logging)
+}
+
+fn create_handle_with_config(
+    req: &NvCreateChatCompletionRequest,
+    request_id: &str,
+    enabled: bool,
+    force_logging: bool,
+) -> Option<AuditHandle> {
+    if !enabled {
         return None;
     }
     // If force_logging is enabled, ignore the store flag
-    if !policy.force_logging && !req.inner.store.unwrap_or(false) {
+    if !force_logging && !req.inner.store.unwrap_or(false) {
         return None;
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
@@ -80,7 +89,6 @@ pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> O
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use temp_env::with_vars;
 
     fn create_test_request(model: &str, store: bool) -> NvCreateChatCompletionRequest {
         let json = serde_json::json!({
@@ -130,21 +138,12 @@ mod tests {
     /// When force logging is enabled, audit handle should be created even when store=false
     #[test]
     fn test_force_logging_bypasses_store() {
-        with_vars(
-            [
-                ("DYN_AUDIT_SINKS", Some("stderr")),
-                ("DYN_AUDIT_FORCE_LOGGING", Some("true")),
-            ],
-            || {
-                // Create request with store=false
-                let request = create_test_request("test-model", false);
-                let handle = create_handle(&request, "test-id");
+        let request = create_test_request("test-model", false);
+        let handle = create_handle_with_config(&request, "test-id", true, true);
 
-                assert!(
-                    handle.is_some(),
-                    "When DYN_AUDIT_FORCE_LOGGING=true, handle should be created even with store=false"
-                );
-            },
+        assert!(
+            handle.is_some(),
+            "force logging should create a handle even with store=false"
         );
     }
 

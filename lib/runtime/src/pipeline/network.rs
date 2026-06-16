@@ -28,10 +28,12 @@ use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Respons
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
-    ServiceBackend, ServiceEngine, SingleIn, Source, context,
+    AsyncTransportEngine, Context, Data, Error, ManyIn, ManyOut, PipelineError, PipelineIO,
+    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
 use crate::metrics::MetricsHierarchy;
+use crate::metrics::prometheus_names::work_handler;
+use crate::protocols::maybe_error::MaybeError;
 use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
@@ -60,11 +62,45 @@ pub trait WorkQueueConsumer {
     async fn dequeue(&self) -> Result<Bytes, String>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     Request,
     Response,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RequestType {
+    SingleIn,
+    ManyIn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ResponseType {
+    SingleOut,
+    ManyOut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RequestControlMessage {
+    pub(crate) id: String,
+    pub(crate) request_type: RequestType,
+    pub(crate) response_type: ResponseType,
+    pub(crate) connection_info: ConnectionInfo,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
+    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
+    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
+    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) frontend_send_ts_ns: Option<u64>,
+    /// For bidirectional dispatch (`request_type == ManyIn`): connection info the
+    /// worker dials back to in order to receive subsequent request frames. `None`
+    /// for the unary path, which is the wire-compatible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_stream_connection_info: Option<ConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -333,9 +369,9 @@ pub struct StreamOptions {
     pub context: Arc<dyn AsyncEngineContext>,
 
     /// Register with the server that this connection will have a server-side Sender
-    /// that can be picked up by the Request/Forward pipeline
-    ///
-    /// TODO - note, this option is currently not implemented and will cause a panic
+    /// that can be picked up by the Request/Forward pipeline. The downstream side
+    /// dials in via [`crate::pipeline::network::tcp::client::TcpClient::create_request_stream`]
+    /// to receive the frames the server pushes.
     pub enable_request_stream: bool,
 
     /// Register with the server that this connection will have a server-side Receiver
@@ -361,6 +397,35 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
     transport_engine: Arc<dyn AsyncTransportEngine<Req, Resp>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{RequestControlMessage, RequestType, ResponseType};
+
+    #[test]
+    fn request_control_message_defaults_missing_metadata() {
+        let json = r#"{
+            "id": "request-123",
+            "request_type": "single_in",
+            "response_type": "many_out",
+            "connection_info": {
+                "transport": "tcp",
+                "info": "{}"
+            }
+        }"#;
+
+        let message: RequestControlMessage =
+            serde_json::from_str(json).expect("control message should deserialize");
+
+        assert_eq!(message.id, "request-123");
+        assert!(matches!(message.request_type, RequestType::SingleIn));
+        assert!(matches!(message.response_type, ResponseType::ManyOut));
+        assert_eq!(message.connection_info.transport, "tcp");
+        assert_eq!(message.connection_info.info, "{}");
+        assert!(message.metadata.is_empty());
+        assert!(message.frontend_send_ts_ns.is_none());
+    }
+}
+
 #[async_trait]
 impl<T: Data, U: Data> AsyncEngine<SingleIn<T>, ManyOut<U>, Error>
     for Egress<SingleIn<T>, ManyOut<U>>
@@ -371,33 +436,6 @@ where
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         self.transport_engine.generate(request).await
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RequestType {
-    SingleIn,
-    ManyIn,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ResponseType {
-    SingleOut,
-    ManyOut,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RequestControlMessage {
-    id: String,
-    request_type: RequestType,
-    response_type: ResponseType,
-    connection_info: ConnectionInfo,
-    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    frontend_send_ts_ns: Option<u64>,
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {

@@ -4,8 +4,6 @@
 title: vLLM
 ---
 
-# LLM Deployment using vLLM
-
 Dynamo vLLM integrates [vLLM](https://github.com/vllm-project/vllm) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with vLLM's native engine arguments. Dynamo leverages vLLM's native KV cache events, NIXL-based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
 ## Installation
@@ -57,7 +55,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
-| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | |
+| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
 | [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
 | [**Multimodal Support**](vllm-omni.md) | ✅ | Via vLLM-Omni integration |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
@@ -71,7 +69,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 Start infrastructure services for local development:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 Launch an aggregated serving deployment:
@@ -80,6 +78,14 @@ Launch an aggregated serving deployment:
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh
 ```
+
+> **Running launch scripts standalone.** The `launch/*.sh` scripts expect etcd and NATS to be reachable on localhost. Bring them up first (run from the repo root, or use the absolute path shown):
+>
+> ```bash
+> docker compose -f "$DYNAMO_HOME/dev/docker-compose.yml" up -d
+> ```
+>
+> Then run the launch script. Without these, workers register but the frontend cannot discover them and requests hang.
 
 ## Next Steps
 

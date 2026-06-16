@@ -301,7 +301,7 @@ async fn apply_entry(
             isl,
             output_length,
         } => {
-            let _ = multi.potential_blocks_and_tokens(
+            let _ = multi.potential_blocks_and_tokens::<false>(
                 Some(&block_hashes),
                 &PrefillTokenDeltas::uniform(isl),
             );

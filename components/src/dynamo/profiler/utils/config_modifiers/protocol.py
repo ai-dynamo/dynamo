@@ -259,6 +259,29 @@ class BaseConfigModifier:
         volume_mounts.append({"name": pvc_name, "mountPoint": mount_path})
         setattr(service, "volumeMounts", volume_mounts)
 
+    @staticmethod
+    def _ensure_service_hf_home_env(service: Any, hf_home: str) -> None:
+        eps = getattr(service, "extraPodSpec", None)
+        if eps is None:
+            return
+        mc = getattr(eps, "mainContainer", None)
+        if mc is None:
+            return
+
+        env_list = getattr(mc, "env", None)
+        if env_list is None:
+            env_list = []
+        if not isinstance(env_list, list):
+            env_list = []
+
+        env_list[:] = [
+            e
+            for e in env_list
+            if not (isinstance(e, dict) and e.get("name") == "HF_HOME")
+        ]
+        env_list.append({"name": "HF_HOME", "value": hf_home})
+        setattr(mc, "env", env_list)
+
     @classmethod
     def _update_container_args_preserving_shell_form(
         cls, container: Container, update_fn
@@ -548,22 +571,34 @@ class BaseConfigModifier:
             # known path inside the PVC.  Let update_model_from_pvc handle
             # volume mount + CLI patching.
             pvc_path = ""
-            if effective_model_path and effective_model_path.startswith(pvc_mount_path):
+            if effective_model_path and (
+                effective_model_path == pvc_mount_path
+                or effective_model_path.startswith(pvc_mount_path + "/")
+            ):
                 pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
-            result = cls.update_model_from_pvc(
-                cfg.model_dump(),
-                model_name=model_name,
-                pvc_name=pvc_name,
-                pvc_mount_path=pvc_mount_path,
-                pvc_path=pvc_path,
-            )
+            if pvc_path:
+                result = cls.update_model_from_pvc(
+                    cfg.model_dump(),
+                    model_name=model_name,
+                    pvc_name=pvc_name,
+                    pvc_mount_path=pvc_mount_path,
+                    pvc_path=pvc_path,
+                )
+            else:
+                cls._ensure_spec_pvc(cfg, pvc_name)
+                for _svc_name, svc in cfg.spec.services.items():
+                    cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+                    cls._ensure_service_hf_home_env(svc, pvc_mount_path)
+                result = cls.update_model(
+                    cfg.model_dump(),
+                    model_name=model_name,
+                    model_path=effective_model_path,
+                )
         elif pvc_name and pvc_mount_path:
-            # PVC configured as an HF cache directory (no explicit model path
-            # within it).  Mount the PVC so workers can find cached weights,
-            # but keep the HF model ID as the worker model argument.
             cls._ensure_spec_pvc(cfg, pvc_name)
             for _svc_name, svc in cfg.spec.services.items():
                 cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+                cls._ensure_service_hf_home_env(svc, pvc_mount_path)
             result = cls.update_model(
                 cfg.model_dump(),
                 model_name=model_name,

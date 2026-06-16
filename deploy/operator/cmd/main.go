@@ -79,6 +79,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
+	webhookmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/mutation"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
@@ -378,9 +379,15 @@ func main() {
 		runtimeConfig.ExcludedNamespaces = leaseWatcher
 	}
 
-	// Start resource counter background goroutine (after ExcludedNamespaces is set)
-	setupLog.Info("Starting resource counter")
-	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), runtimeConfig.ExcludedNamespaces)
+	// Register after ExcludedNamespaces is set so cluster-wide metrics skip restricted namespaces.
+	setupLog.Info("Registering resource counter")
+	if err := mgr.Add(observability.NewResourceCounter(
+		mgr.GetClient(),
+		runtimeConfig.ExcludedNamespaces,
+	)); err != nil {
+		setupLog.Error(err, "unable to register resource counter")
+		os.Exit(1)
+	}
 
 	// Detect orchestrators availability using discovery client.
 	// Config overrides (*bool) take precedence over auto-detection:
@@ -453,8 +460,8 @@ func main() {
 	case *operatorCfg.DRA.Enabled:
 		if !draDetected {
 			setupLog.Error(nil,
-				"DRA is explicitly enabled in config but the resource.k8s.io API group"+
-					" was not detected in the cluster (requires Kubernetes 1.32+)",
+				"DRA is explicitly enabled in config but the resource.k8s.io/v1 API"+
+					" was not detected in the cluster (requires Kubernetes 1.34+)",
 			)
 			os.Exit(1)
 		}
@@ -476,7 +483,7 @@ func main() {
 		"istio", runtimeConfig.IstioAvailable,
 	)
 
-	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
+	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
 	// refresh whenever a secret is created/deleted/updated
 	// Set up informer
 	var factory informers.SharedInformerFactory
@@ -541,12 +548,13 @@ func main() {
 		setupLog.Error(err, "unable to add event handler to secret informer")
 		os.Exit(1)
 	}
+	if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
+		setupLog.Error(err, "initial docker secrets index refresh failed")
+		os.Exit(1)
+	}
+	setupLog.Info("initial docker secrets index refreshed")
 	// launch a goroutine to refresh the docker secret indexer in any case every minute
 	go func() {
-		// Initial refresh
-		if err := dockerSecretRetriever.RefreshIndex(context.Background()); err != nil {
-			setupLog.Error(err, "initial docker secrets index refresh failed")
-		}
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -711,6 +719,16 @@ func registerControllers(
 		}
 	}
 
+	if err = (&controller.TopologyLabelReconciler{
+		Client:        mgr.GetClient(),
+		NodeReader:    mgr.GetAPIReader(),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		Recorder:      mgr.GetEventRecorderFor("topology-label"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create TopologyLabel controller: %w", err)
+	}
+
 	setupLog.Info("Controllers registered successfully")
 	return nil
 }
@@ -815,6 +833,13 @@ func registerWebhooks(
 	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(operatorVersion)
 	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
+	}
+
+	setupLog.Info("Registering mutation webhooks")
+
+	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetClient(), operatorCfg)
+	if err := podCheckpointRestoreMutator.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register Pod checkpoint restore mutating webhook: %w", err)
 	}
 
 	setupLog.Info("Webhooks registered successfully")

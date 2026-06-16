@@ -134,26 +134,19 @@ pub mod generic {
     pub mod realtime {
         use super::*;
 
-        pub use protocols::openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-        };
+        pub use dynamo_protocols::types::realtime::{RealtimeClientEvent, RealtimeServerEvent};
 
-        /// TODO (#9175): reuses chat-completion request/response for now, as
-        /// the request can carry audio data on the request side and text data
-        /// on the response side. Will move to a dedicated realtime-API
-        /// protocol type.
+        /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI
+        /// Realtime API.
         ///
-        /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI Chat
-        /// Completions API.
-        ///
-        /// Many-in / many-out: the client streams a sequence of `NvCreateChatCompletionRequest`
-        /// chunks for the same logical session and receives a stream of
-        /// `NvCreateChatCompletionStreamResponse` chunks back. Used by the experimental
+        /// Many-in / many-out: the client streams a sequence of [`RealtimeClientEvent`]
+        /// frames over the lifetime of one session and receives a stream of
+        /// [`RealtimeServerEvent`] frames back. Used by the experimental
         /// `/v1/realtime` WebSocket endpoint. The canonical concrete implementor of
         /// the input side is [`dynamo_runtime::pipeline::RequestStream`].
-        pub type RealtimeBidirectionalEngine = BidirectionalStreamingEngine<
-            NvCreateChatCompletionRequest,
-            Annotated<NvCreateChatCompletionStreamResponse>,
-        >;
+        pub type RealtimeBidirectionalEngine =
+            BidirectionalStreamingEngine<RealtimeClientEvent, Annotated<RealtimeServerEvent>>;
     }
 }
+
+pub use generic::realtime::RealtimeBidirectionalEngine;

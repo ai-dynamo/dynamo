@@ -8,11 +8,12 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import build_disagg_mm_kwargs
 
 # Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
 # This remains as a compatibility fallback for older callers that still encode
@@ -84,11 +85,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
             sampling_params = {
-                "temperature": sampling_opts.get("temperature"),
-                "top_p": sampling_opts.get("top_p"),
-                "top_k": sampling_opts.get("top_k"),
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
+                **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")
                 ),
@@ -131,6 +130,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+
+        # Prefill encodes the media so the KV it transfers carries the vision
+        # context; decode extracts the same URLs to match the token layout.
+        mm_kwargs = build_disagg_mm_kwargs(inner_request)
+
         routing = inner_request.get("routing") or {}
         priority = routing.get("priority")
         dp_rank = routing.get("dp_rank")
@@ -138,7 +142,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
             dp_rank = None
 
-        trace_header = build_trace_headers(context) if self.enable_trace else None
+        trace_header = context.trace_headers() if self.enable_trace else None
 
         lora_path = self._resolve_lora(inner_request)
         if lora_path:
@@ -148,6 +152,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         results = await self.engine.async_generate(
             **input_param,
+            **mm_kwargs,
             sampling_params=sampling_params,
             stream=True,
             bootstrap_host=bootstrap_host,

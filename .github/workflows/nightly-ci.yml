@@ -12,7 +12,7 @@ on:
         description: 'Stage NGC images, Artifactory wheels, and trigger the GitLab release pipeline. Schedule always sets release=true.'
         required: false
         type: boolean
-        default: true
+        default: false
       run_tests:
         description: 'Run vllm/sglang/trtllm tests + dynamo-pipeline checks. Schedule always runs them.'
         required: false
@@ -145,6 +145,99 @@ jobs:
               ;;
           esac
 
+  # Seeds the nightly Slack thread; exposes ts so downstream jobs (and the
+  # GitLab pipeline) can reply. continue-on-error so a Slack outage doesn't
+  # block the nightly — downstream jobs skip on empty outputs.
+  notify-slack-start:
+    name: Notify Slack — nightly started
+    runs-on: prod-default-v2
+    needs: [compute-release-mode, resolve-source-sha, compute-dev-version]
+    if: ${{ needs.compute-release-mode.outputs.release == 'true' }}
+    permissions:
+      contents: read
+    outputs:
+      thread_ts:  ${{ steps.post.outputs.thread_ts }}
+    steps:
+      - name: Post start message
+        id: post
+        continue-on-error: true
+        env:
+          SLACK_BOT_TOKEN:  ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
+          SOURCE_SHA:       ${{ needs.resolve-source-sha.outputs.source_sha }}
+          DEV_SUFFIX:       ${{ needs.compute-dev-version.outputs.dev_suffix }}
+          RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATE_UTC=$(date -u +%Y-%m-%d)
+          SHORT_SHA="${SOURCE_SHA:0:7}"
+
+          PAYLOAD=$(jq -n \
+            --arg channel "${SLACK_CHANNEL_ID}" \
+            --arg date    "${DATE_UTC}" \
+            --arg sha     "${SHORT_SHA}" \
+            --arg run_url "${RUN_URL}" \
+            --arg dev     "${DEV_SUFFIX}" \
+            '{
+              channel: $channel,
+              text: ("Dynamo Nightly build started — " + $date),
+              blocks: [
+                { type: "header",
+                  text: { type: "plain_text", text: (":crescent_moon: Dynamo Nightly build started — " + $date) } },
+                { type: "section",
+                  fields: [
+                    { type: "mrkdwn", text: ("*Commit:*\n`" + $sha + "`") },
+                    { type: "mrkdwn", text: ("*Dev version suffix:*\n`" + $dev + "`") }
+                  ] },
+                { type: "context",
+                  elements: [ { type: "mrkdwn", text: ("<" + $run_url + "|GitHub Actions run>") } ] }
+              ]
+            }')
+
+          RESPONSE=$(curl -fsSL -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "${PAYLOAD}")
+
+          OK=$(echo "${RESPONSE}" | jq -r '.ok')
+          if [ "${OK}" != "true" ]; then
+            # RESPONSE may carry channel/ts/warning fields; surface only .error.
+            ERR=$(echo "${RESPONSE}" | jq -r '.error // "unknown"')
+            echo "::error::Slack chat.postMessage failed: ${ERR}"
+            exit 1
+          fi
+          TS=$(echo "${RESPONSE}" | jq -r '.ts')
+          # ts is a runtime per-message identifier (not a secret) and is the only
+          # value other jobs need; channel ID is read by every downstream Slack
+          # step directly from secrets.SLACK_RELEASE_CHANNEL_ID so it stays
+          # auto-masked. Do NOT ::add-mask:: the ts — masking it before writing
+          # GITHUB_OUTPUT caused the value to arrive empty across the
+          # workflow_call boundary, silently skipping downstream reply steps.
+          echo "thread_ts=${TS}" >> "${GITHUB_OUTPUT}"
+          echo "Posted nightly start message"
+
+  # ============================================================================
+  # MANUAL RELEASE APPROVAL GATE
+  # ============================================================================
+  # Manual workflow_dispatch that would publish (release=true) must be approved
+  # by a reviewer of the `manual-release-approval` environment before the
+  # `release` job runs release.yml. Scheduled runs skip this job; the `release`
+  # job below accepts `skipped` as success.
+  manual-release-approval:
+    name: Manual release approval gate
+    needs: [compute-release-mode]
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.compute-release-mode.outputs.release == 'true' }}
+    runs-on: prod-default-small-v2
+    environment: manual-release-approval
+    permissions:
+      contents: read
+    steps:
+      - name: Record approval
+        run: |
+          echo "Manual nightly release approved by ${{ github.actor }}"
+          echo "Run: ${{ github.run_id }} attempt ${{ github.run_attempt }}"
+
   # ============================================================================
   # BUILD JOBS
   # ============================================================================
@@ -156,11 +249,12 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-build:
@@ -170,11 +264,12 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-build:
@@ -186,9 +281,10 @@ jobs:
       target: runtime
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   # ============================================================================
@@ -201,57 +297,25 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
-      cpu_only_test_markers: vllm and gpu_0 and not unified
-      gpu_test_markers: vllm and gpu_1 and not unified
+      cpu_only_test_markers: vllm and gpu_0
+      gpu_test_markers: vllm and gpu_1
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-    secrets: inherit
-
-  vllm-unified-test:
-    name: vllm-runtime # Share UI group with other vllm jobs
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: vllm
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: vllm and gpu_1 and unified
-      gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  sample-unified-test:
-    name: sample-runtime # New UI group for sample-backend jobs
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sample
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-v2
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Sample is image-agnostic; one entry is enough
-      platform: '["amd64"]'
-      run_sanity_check: false
-      run_cpu_only_tests: true
-      cpu_only_test_markers: gpu_0 and unified
-      cpu_only_test_timeout_minutes: 30
-      run_gpu_tests: false
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -260,17 +324,20 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: vllm and (gpu_2 or gpu_4) and not unified
+      gpu_test_markers: vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-test:
@@ -279,16 +346,18 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
-      cpu_only_test_markers: sglang and gpu_0 and not unified
-      gpu_test_markers: sglang and gpu_1 and not unified
+      cpu_only_test_markers: sglang and gpu_0
+      gpu_test_markers: sglang and gpu_1
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
@@ -296,23 +365,7 @@ jobs:
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-    secrets: inherit
-
-  sglang-unified-test:
-    name: sglang-runtime # Share UI group with other sglang jobs
-    needs: [sglang-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sglang
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: sglang and gpu_1 and unified
-      gpu_test_timeout_minutes: 60
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -321,17 +374,20 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: sglang and (gpu_2 or gpu_4) and not unified
+      gpu_test_markers: sglang and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-test:
@@ -340,6 +396,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -348,8 +406,8 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
-      cpu_only_test_markers: trtllm and gpu_0 and not unified
-      gpu_test_markers: trtllm and gpu_1 and not unified
+      cpu_only_test_markers: trtllm and gpu_0
+      gpu_test_markers: trtllm and gpu_1
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
@@ -357,23 +415,7 @@ jobs:
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
-    secrets: inherit
-
-  trtllm-unified-test:
-    name: trtllm-runtime # Share UI group with other trtllm jobs
-    needs: [trtllm-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: trtllm
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: trtllm and gpu_1 and unified
-      gpu_test_timeout_minutes: 60
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -382,6 +424,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -390,10 +434,25 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: trtllm and (gpu_2 or gpu_4) and not unified
+      gpu_test_markers: trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
+
+  # ============================================================================
+  # XPU TEST JOBS
+  # ============================================================================
+
+  vllm-test-xpu:
+    name: vllm-xpu
+    needs: [resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/xpu-ci.yaml
+    with:
+      framework: vllm
+      pytest_markers: 'vllm and xpu_1'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
@@ -416,6 +475,7 @@ jobs:
       gpu_test_markers: 'pre_merge and none and gpu_1'
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   # ============================================================================
@@ -501,6 +561,8 @@ jobs:
     needs:
       - resolve-source-sha
       - compute-release-mode
+      - notify-slack-start
+      - manual-release-approval
       - vllm-test
       - vllm-multi-gpu-test
       - sglang-test
@@ -509,16 +571,20 @@ jobs:
       - trtllm-multi-gpu-test
       - dynamo-pipeline
       - rust-tests
-    # `!cancelled() && !failure()` lets test jobs be `skipped` (when
-    # run_tests=false) without blocking the release, while still gating on
-    # `success` when tests do run. dynamo-pipeline is unconditional so its
-    # status remains a real gate either way.
-    if: ${{ !cancelled() && !failure() && needs.compute-release-mode.outputs.release == 'true' }}
+    # !cancelled() lets framework/rust failures fall through; dynamo-pipeline
+    # is gated strictly because stage-wheels-artifactory extracts wheels from
+    # its image. manual-release-approval is `skipped` on cron, `success` on dispatch.
+    if: ${{ !cancelled()
+        && needs.compute-release-mode.outputs.release == 'true'
+        && needs.dynamo-pipeline.result == 'success'
+        && (needs.manual-release-approval.result == 'success'
+            || needs.manual-release-approval.result == 'skipped') }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
+      slack_thread_ts:  ${{ needs.notify-slack-start.outputs.thread_ts }}
     secrets: inherit
 
   # ============================================================================
@@ -527,7 +593,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [vllm-test, vllm-unified-test, vllm-multi-gpu-test, sample-unified-test, sglang-test, sglang-unified-test, sglang-multi-gpu-test, trtllm-test, trtllm-unified-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     if: always()
     permissions:
       contents: read
@@ -649,11 +715,15 @@ jobs:
               echo "" >> coverage-rust-report.txt
             done
 
-            # Extract line coverage % (3rd percentage on TOTAL line: Region%, Func%, Line%, Branch%)
-            FIRST=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | head -1)
-            RUST_TOTAL_COVERAGE=$(grep "^TOTAL" "$FIRST" | grep -oE '[0-9]+\.[0-9]+%' | sed -n '3p' || true)
+            # Aggregate line coverage across all crates by summing total/missed lines
+            # from every TOTAL row. Columns on a `cargo llvm-cov report` TOTAL line:
+            #   $2 regions  $3 missed_regions  $4 region%
+            #   $5 funcs    $6 missed_funcs    $7 func%
+            #   $8 lines    $9 missed_lines    $10 line%
+            RUST_TOTAL_COVERAGE=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" -exec grep -h "^TOTAL" {} + \
+              | awk '{ total += $8; missed += $9 } END { if (total > 0) printf "%.2f%%", (total - missed) * 100 / total; else print "N/A" }')
             RUST_TOTAL_COVERAGE="${RUST_TOTAL_COVERAGE:-N/A}"
-            echo "Rust line coverage: ${RUST_TOTAL_COVERAGE}"
+            echo "Rust line coverage (aggregated across $(find coverage-rust-artifacts/ -name "coverage-rust.txt" | wc -l | tr -d ' ') crates): ${RUST_TOTAL_COVERAGE}"
           else
             echo "ℹ️  No Rust coverage artifacts found"
           fi
@@ -751,14 +821,20 @@ jobs:
     name: Notify Slack
     runs-on: prod-default-v2
     if: always()
-    needs: [vllm-test, vllm-unified-test, vllm-multi-gpu-test, sample-unified-test, sglang-test, sglang-unified-test, sglang-multi-gpu-test, trtllm-test, trtllm-unified-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     permissions:
       contents: read
     steps:
       - name: Get Failed jobs
+        id: failed-jobs
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Jobs whose names contain any of these substrings are excluded from Slack failure reporting
+          # (see ops-support). Add one substring per line to silence additional jobs.
+          IGNORED_JOBS: |
+            build-xpu
+            test-xpu
         run: |
           JOBS_JSON=$(mktemp)
           curl -sSL \
@@ -767,14 +843,26 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
+          # Turn the newline-separated IGNORED_JOBS list into a trimmed, non-empty JSON array for jq.
+          IGNORED_JSON=$(printf '%s\n' "$IGNORED_JOBS" | jq -R 'gsub("^\\s+|\\s+$";"")' | jq -s 'map(select(length > 0))')
+
+          # Drop any failed job whose name contains one of the ignored substrings.
+          FAILED_JOBS=$(jq -r --argjson ignored "$IGNORED_JSON" '.jobs[] | select(.conclusion == "failure") | select(.name as $n | ($ignored | any(. as $i | $n | contains($i))) | not) | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"
             echo "$FAILED_JOBS"
             echo "EOF"
           } >> "$GITHUB_ENV"
+
+          # Skip the Slack alert when there are no reportable failures (e.g. only IGNORED_JOBS failed).
+          if [ -n "$(echo "$FAILED_JOBS" | tr -d '[:space:]')" ]; then
+            echo "has_failures=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_failures=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Notify Slack
+        if: steps.failed-jobs.outputs.has_failures == 'true'
         uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
         with:
           webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}

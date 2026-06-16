@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use core::panic;
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::{
     collections::{HashMap, HashSet},
@@ -134,8 +133,11 @@ struct State {
     /// subject UUID -> EndpointInstanceId. Full 4-field key isolates services
     /// that share an endpoint name across namespaces/components.
     subject_instance: HashMap<String, EndpointInstanceId>,
-    /// EndpointInstanceId -> subject UUIDs, for batch cancellation on removal.
-    instance_subjects: HashMap<EndpointInstanceId, HashSet<String>>,
+    /// EndpointInstanceId -> tagged subject UUIDs, for batch cancellation on
+    /// removal. The `StreamType` tag tells `cancel_instance_streams` which
+    /// of `rx_subjects` / `tx_subjects` holds the registration so both halves
+    /// of a bidirectional session get dropped together.
+    instance_subjects: HashMap<EndpointInstanceId, HashSet<(StreamType, String)>>,
     /// Tombstones (instance -> insertion time) close the
     /// `cancel_instance_streams` vs `associate_instance` race; entries expire
     /// after [`TOMBSTONE_TTL`].
@@ -220,36 +222,55 @@ impl TcpStreamServer {
         }))
     }
 
-    /// Associate a registered subject with a backend instance.
+    /// Associate one or both halves of a registration with a backend instance.
+    ///
+    /// `recv_subject` is the response-stream subject (always present on TCP);
+    /// `send_subject` is the request-stream subject, set only for
+    /// bidirectional sessions. Tracking the send half here is what lets
+    /// [`Self::cancel_instance_streams`] drop the request-stream
+    /// `tx_subjects` oneshot directly when discovery removes the worker,
+    /// instead of relying on the cascade from the recv-side cancellation.
     ///
     /// Returns `false` if the instance is already tombstoned, in which case
-    /// the subject is cancelled immediately and the caller should skip
+    /// both subjects are cancelled immediately and the caller should skip
     /// `send_request` and fail with a migratable `Disconnected` error.
-    pub async fn associate_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
+    pub async fn associate_instance(
+        &self,
+        recv_subject: &str,
+        send_subject: Option<&str>,
+        id: &EndpointInstanceId,
+    ) -> bool {
         let mut state = self.state.lock().await;
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
         if state.removed_instances.contains_key(id) {
             // Instance was already removed -- cancel immediately.
             tracing::warn!(
-                subject,
+                recv_subject,
+                send_subject,
                 namespace = %id.namespace,
                 component = %id.component,
                 endpoint = %id.endpoint,
                 instance_id = id.instance_id,
                 "Cancelling subject immediately: instance already removed (tombstoned)"
             );
-            state.rx_subjects.remove(subject);
+            state.rx_subjects.remove(recv_subject);
+            if let Some(s) = send_subject {
+                state.tx_subjects.remove(s);
+            }
             return false;
         }
         state
             .subject_instance
-            .insert(subject.to_string(), id.clone());
-        state
-            .instance_subjects
-            .entry(id.clone())
-            .or_default()
-            .insert(subject.to_string());
+            .insert(recv_subject.to_string(), id.clone());
+        if let Some(s) = send_subject {
+            state.subject_instance.insert(s.to_string(), id.clone());
+        }
+        let entry = state.instance_subjects.entry(id.clone()).or_default();
+        entry.insert((StreamType::Response, recv_subject.to_string()));
+        if let Some(s) = send_subject {
+            entry.insert((StreamType::Request, s.to_string()));
+        }
         true
     }
 
@@ -261,16 +282,35 @@ impl TcpStreamServer {
         if let Some(key) = state.subject_instance.remove(subject)
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
         {
-            subjects.remove(subject);
+            subjects.remove(&(StreamType::Response, subject.to_string()));
             if subjects.is_empty() {
                 state.instance_subjects.remove(&key);
             }
         }
     }
 
-    /// Cancel all pending response streams for an instance and tombstone it
-    /// so any racing `associate_instance()` for the same id cancels too.
-    /// Returns the number of streams cancelled.
+    /// Cancel one pending request-stream registration. Parallel to
+    /// [`Self::cancel_recv_stream`]: drops the `tx_subjects` entry and, if
+    /// the subject was associated with an instance, clears its
+    /// `(StreamType::Request, _)` tag from `instance_subjects` so the per-
+    /// instance bookkeeping stays consistent.
+    pub async fn cancel_send_stream(&self, subject: &str) {
+        let mut state = self.state.lock().await;
+        state.tx_subjects.remove(subject);
+        if let Some(key) = state.subject_instance.remove(subject)
+            && let Some(subjects) = state.instance_subjects.get_mut(&key)
+        {
+            subjects.remove(&(StreamType::Request, subject.to_string()));
+            if subjects.is_empty() {
+                state.instance_subjects.remove(&key);
+            }
+        }
+    }
+
+    /// Cancel all pending streams for an instance — both response-side and
+    /// request-side halves of any bidirectional sessions tracked by
+    /// `associate_instance` — and tombstone the id so any racing associate
+    /// for the same id cancels too. Returns the number of streams cancelled.
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let mut state = self.state.lock().await;
         let now = Instant::now();
@@ -281,8 +321,15 @@ impl TcpStreamServer {
             None => return 0,
         };
         let count = subjects.len();
-        for subject in &subjects {
-            state.rx_subjects.remove(subject);
+        for (kind, subject) in &subjects {
+            match kind {
+                StreamType::Response => {
+                    state.rx_subjects.remove(subject);
+                }
+                StreamType::Request => {
+                    state.tx_subjects.remove(subject);
+                }
+            }
             state.subject_instance.remove(subject);
         }
         count
@@ -373,6 +420,14 @@ impl ResponseService for TcpStreamServer {
                 tokio::spawn(async move {
                     let mut state = cleanup_state.lock().await;
                     state.tx_subjects.remove(&cleanup_subject);
+                    if let Some(key) = state.subject_instance.remove(&cleanup_subject)
+                        && let Some(subjects) = state.instance_subjects.get_mut(&key)
+                    {
+                        subjects.remove(&(StreamType::Request, cleanup_subject.clone()));
+                        if subjects.is_empty() {
+                            state.instance_subjects.remove(&key);
+                        }
+                    }
                 });
             });
 
@@ -415,7 +470,7 @@ impl ResponseService for TcpStreamServer {
                     if let Some(key) = state.subject_instance.remove(&cleanup_subject)
                         && let Some(subjects) = state.instance_subjects.get_mut(&key)
                     {
-                        subjects.remove(&cleanup_subject);
+                        subjects.remove(&(StreamType::Response, cleanup_subject.clone()));
                         if subjects.is_empty() {
                             state.instance_subjects.remove(&key);
                         }
@@ -548,7 +603,9 @@ async fn tcp_listener(
 
         // branch here to handle sender stream or receiver stream
         match handshake.stream_type {
-            StreamType::Request => process_request_stream().await,
+            StreamType::Request => {
+                process_request_stream(handshake.subject, state, framed_reader, framed_writer).await
+            }
             StreamType::Response => {
                 process_response_stream(handshake.subject, state, framed_reader, framed_writer)
                     .await
@@ -556,8 +613,133 @@ async fn tcp_listener(
         }
     }
 
-    async fn process_request_stream() -> Result<()> {
+    /// Symmetric to [`process_response_stream`] for the upstream→downstream
+    /// data direction: deliver the [`StreamSender`] half registered by the
+    /// upstream to whoever awaits it, then pump every frame the upstream pushes
+    /// into the now-connected TCP socket.
+    ///
+    /// One difference is that the request stream is **unidirectional**:
+    /// the upstream writes data + one closing control message, and the
+    /// downstream is not expected to reply: downstream response or inference
+    /// error should be returned through response stream. We therefore drop the
+    /// read half, on fatal error, downstream should drop the request stream.
+    async fn process_request_stream(
+        subject: String,
+        state: Arc<Mutex<State>>,
+        reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+    ) -> Result<()> {
+        // Request stream is unidirectional; we don't read from the downstream.
+        drop(reader);
+
+        let request_stream = {
+            let mut guard = state.lock().await;
+            let conn = guard.tx_subjects.remove(&subject).ok_or(error!(
+                "Subject not found: {}; downstream subscriber specified a subject unknown to the upstream publisher",
+                subject
+            ))?;
+            if let Some(key) = guard.subject_instance.remove(&subject)
+                && let Some(subjects) = guard.instance_subjects.get_mut(&key)
+            {
+                subjects.remove(&(StreamType::Request, subject.clone()));
+                if subjects.is_empty() {
+                    guard.instance_subjects.remove(&key);
+                }
+            }
+            conn
+        };
+
+        let RequestedSendConnection {
+            context,
+            connection,
+        } = request_stream;
+
+        // Buffer size matches `process_response_stream`; both should be driven
+        // by the registration options rather than hard-coded. See #10293.
+        let (request_tx, request_rx) = mpsc::channel(64);
+
+        if connection
+            .send(Ok(crate::pipeline::network::StreamSender {
+                tx: request_tx,
+                // Request streams don't carry a downstream-prologue today; the
+                // upstream may begin sending immediately.
+                prologue: None,
+            }))
+            .is_err()
+        {
+            return Err(error!(
+                "The requester of the request stream has been dropped before the connection was established"
+            ));
+        }
+
+        request_stream_send_handler(writer, request_rx, context).await;
         Ok(())
+    }
+
+    /// Pump frames the upstream queued on its `StreamSender` into the TCP socket.
+    /// The closing control message depends on why the loop exited:
+    /// - `context.killed()` → [`ControlMessage::Kill`] (hard cancel notification)
+    /// - `context.stopped()` → [`ControlMessage::Stop`] (graceful cancel notification)
+    /// - `request_rx` returns `None` → [`ControlMessage::Sentinel`] (clean EOS)
+    /// - write error → no control message, the socket is already broken
+    ///
+    /// The downstream `handle_request_reader` matches on the received variant
+    /// and reacts accordingly.
+    async fn request_stream_send_handler(
+        mut framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        mut request_rx: mpsc::Receiver<TwoPartMessage>,
+        context: Arc<dyn AsyncEngineContext>,
+    ) {
+        let closing_msg: Option<ControlMessage> = loop {
+            tokio::select! {
+                biased;
+
+                _ = context.killed() => {
+                    tracing::trace!("context kill received in request-stream send handler");
+                    break Some(ControlMessage::Kill);
+                }
+
+                _ = context.stopped() => {
+                    tracing::trace!("context stop received in request-stream send handler");
+                    break Some(ControlMessage::Stop);
+                }
+
+                msg = request_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            if let Err(e) = framed_writer.send(msg).await {
+                                tracing::trace!(
+                                    "failed to send request-stream frame to downstream: {:?}",
+                                    e
+                                );
+                                break None;
+                            }
+                        }
+                        None => {
+                            tracing::trace!("upstream request-stream sender closed; sending sentinel");
+                            break Some(ControlMessage::Sentinel);
+                        }
+                    }
+                }
+            }
+        };
+
+        if let Some(ctrl) = closing_msg
+            && let Ok(bytes) = serde_json::to_vec(&ctrl)
+            && let Err(err) = framed_writer
+                .send(TwoPartMessage::from_header(bytes.into()))
+                .await
+        {
+            tracing::trace!(?err, ?ctrl, "request-stream closing-frame send failed");
+        }
+
+        let mut inner = framed_writer.into_inner();
+        if let Err(err) = inner.flush().await {
+            tracing::trace!(?err, "request-stream socket flush failed");
+        }
+        if let Err(err) = inner.shutdown().await {
+            tracing::trace!(?err, "request-stream socket shutdown failed");
+        }
     }
 
     async fn process_response_stream(
@@ -575,7 +757,7 @@ async fn tcp_listener(
             if let Some(key) = guard.subject_instance.remove(&subject)
                 && let Some(subjects) = guard.instance_subjects.get_mut(&key)
             {
-                subjects.remove(&subject);
+                subjects.remove(&(StreamType::Response, subject.clone()));
                 if subjects.is_empty() {
                     guard.instance_subjects.remove(&key);
                 }
@@ -604,7 +786,13 @@ async fn tcp_listener(
                 prologue
             }
             _ => {
-                panic!("Expected HeaderOnly ControlMessage; internally logic error")
+                // Worker sent a non-HeaderOnly frame in the prologue slot
+                // (protocol violation, version skew, corruption). Notify the
+                // requester so the generate call chain fails cleanly, then
+                // return Err so the connection task ends without panicking.
+                let msg = "malformed prologue: expected HeaderOnly ControlMessage";
+                let _ = connection.send(Err(msg.to_string()));
+                return Err(error!(msg));
             }
         };
 
@@ -619,7 +807,8 @@ async fn tcp_listener(
             return Err(error!("Received error prologue: {}", error));
         }
 
-        // we need to know the buffer size from the registration options; add this to the RequestRecvConnection object
+        // Buffer size should be driven by the registration options rather than
+        // hard-coded; the same applies to `process_request_stream`. See #10293.
         let (response_tx, response_rx) = mpsc::channel(64);
 
         if connection
@@ -671,20 +860,20 @@ async fn tcp_listener(
 
                 _ = response_tx.closed() => {
                     tracing::trace!("response channel closed before the client finished writing data");
-                    control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                    let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
                 _ = context.killed() => {
                     tracing::trace!("context kill signal received; shutting down");
-                    control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                    let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
                 _ = context.stopped(), if can_stop => {
                     tracing::trace!("context stop signal received; shutting down");
                     can_stop = false;
-                    control_tx.send(ControlMessage::Stop).await.expect("the control channel should not be closed");
+                    let _ = control_tx.send(ControlMessage::Stop).await;
                 }
 
                 msg = framed_reader.next() => {
@@ -697,27 +886,43 @@ async fn tcp_listener(
                                 match process_control_message(header) {
                                     Ok(ControlAction::Continue) => {}
                                     Ok(ControlAction::Shutdown) => {
-                                        assert!(data.is_empty(), "received sentinel message with data; this should never happen");
+                                        if !data.is_empty() {
+                                            // Sentinel-with-data is a protocol
+                                            // violation; kill this stream, don't
+                                            // assert!() the process down.
+                                            tracing::warn!(
+                                                data_len = data.len(),
+                                                "client sent Sentinel with data (protocol violation); killing stream"
+                                            );
+                                            let _ = control_tx.send(ControlMessage::Kill).await;
+                                            break;
+                                        }
                                         tracing::trace!("received sentinel message; shutting down");
                                         break;
                                     }
                                     Err(e) => {
-                                        // TODO(#171) - address fatal errors
-                                        panic!("{:?}", e);
+                                        // Malformed control message — kill only
+                                        // this stream.
+                                        tracing::warn!(err = ?e, "malformed control message, closing connection");
+                                        let _ = control_tx.send(ControlMessage::Kill).await;
+                                        break;
                                     }
                                 }
                             }
 
                             if !data.is_empty()
                                 && let Err(err) = response_tx.send(data).await {
-                                    tracing::debug!("forwarding body/data message to response channel failed: {err}");
-                                    control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                                    tracing::debug!(?err, "forwarding body/data to response channel failed");
+                                    let _ = control_tx.send(ControlMessage::Kill).await;
                                     break;
                                 };
                         }
-                        Some(Err(_)) => {
-                            // TODO(#171) - address fatal errors
-                            panic!("invalid message issued over socket; this should never happen");
+                        Some(Err(e)) => {
+                            // TCP RST or decode error from worker — kill only
+                            // this stream.
+                            tracing::warn!(err = ?e, "tcp stream read error from worker, closing connection");
+                            let _ = control_tx.send(ControlMessage::Kill).await;
+                            break;
                         }
                         None => {
                             // this is allowed but we try to avoid it
@@ -743,18 +948,27 @@ async fn tcp_listener(
         let mut control_rx = control_rx;
 
         while let Some(control_msg) = control_rx.recv().await {
-            assert_ne!(
-                control_msg,
-                ControlMessage::Sentinel,
-                "received sentinel message; this should never happen"
-            );
-            let bytes =
-                serde_json::to_vec(&control_msg).expect("failed to serialize control message");
+            // Sentinel is a worker→frontend message; receiving one here means
+            // a producer is buggy. Skip rather than asserting — a stream-level
+            // bug must not panic the worker.
+            if matches!(control_msg, ControlMessage::Sentinel) {
+                tracing::warn!("received sentinel on send-side control channel; dropping");
+                continue;
+            }
+            let bytes = match serde_json::to_vec(&control_msg) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Closed enum of small variants; serialization shouldn't
+                    // fail. If it ever does, log and skip rather than panic.
+                    tracing::warn!(err = ?e, ?control_msg, "failed to serialize control message");
+                    continue;
+                }
+            };
             let message = TwoPartMessage::from_header(bytes.into());
             match socket_tx.send(message).await {
-                Ok(_) => tracing::debug!("issued control message {control_msg:?} to sender"),
-                Err(_) => {
-                    tracing::debug!("failed to send control message {control_msg:?} to sender")
+                Ok(_) => tracing::debug!(?control_msg, "issued control message"),
+                Err(e) => {
+                    tracing::debug!(err = ?e, ?control_msg, "failed to send control message")
                 }
             }
         }
@@ -783,10 +997,10 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
             Ok(ControlAction::Shutdown)
         }
         ControlMessage::Kill | ControlMessage::Stop => {
-            // TODO(#171) - address fatal errors
-            anyhow::bail!(
-                "fatal error - unexpected control message received - this should never happen"
-            );
+            // Worker→frontend control direction only carries Sentinel. Kill/Stop
+            // here is a protocol violation; the caller turns this Err into a
+            // stream-local Kill rather than a process-fatal event.
+            anyhow::bail!("unexpected control message on response stream");
         }
     }
 }
@@ -796,6 +1010,8 @@ mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
+    use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+    use tokio::net::TcpStream;
 
     // Mock resolver that always fails to simulate the fallback scenario
     struct FailingIpResolver;
@@ -962,6 +1178,93 @@ mod tests {
         }
     }
 
+    /// Helper: register a bidirectional pair (both request + response halves)
+    /// and return both subjects + their providers.
+    async fn register_and_get_bidi_subjects(
+        server: &TcpStreamServer,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<Result<super::StreamSender, String>>,
+        String,
+        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, String>>,
+    ) {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let send_stream = pending.send_stream.unwrap();
+        let recv_stream = pending.recv_stream.unwrap();
+        let (send_info, send_provider) = send_stream.into_parts();
+        let (recv_info, recv_provider) = recv_stream.into_parts();
+        let send_tcp_info: TcpStreamConnectionInfo = send_info.try_into().unwrap();
+        let recv_tcp_info: TcpStreamConnectionInfo = recv_info.try_into().unwrap();
+        (
+            send_tcp_info.subject,
+            send_provider,
+            recv_tcp_info.subject,
+            recv_provider,
+        )
+    }
+
+    /// `cancel_instance_streams` must drop the request-stream oneshot too,
+    /// not just the response-stream one. Without the tagged tracker this test
+    /// would hang on `send_provider.await` because the tx_subjects entry
+    /// would leak past instance removal.
+    #[tokio::test]
+    async fn test_cancel_instance_streams_drops_both_bidi_halves() {
+        let server = test_server().await;
+        let (send_subj, send_provider, recv_subj, recv_provider) =
+            register_and_get_bidi_subjects(&server).await;
+
+        let id = make_eid("ns", "comp", "generate", 7);
+        assert!(
+            server
+                .associate_instance(&recv_subj, Some(&send_subj), &id)
+                .await,
+            "fresh instance must not be tombstoned"
+        );
+
+        let cancelled = server.cancel_instance_streams(&id).await;
+        assert_eq!(cancelled, 2, "both request + response halves must count");
+
+        assert!(
+            recv_provider.await.is_err(),
+            "recv provider should resolve with RecvError"
+        );
+        assert!(
+            send_provider.await.is_err(),
+            "send provider should resolve with RecvError after instance cancellation"
+        );
+    }
+
+    /// Pre-tombstoning an instance must drop both halves of a later
+    /// `associate_instance(recv, Some(send), id)` call, not just the recv.
+    #[tokio::test]
+    async fn test_associate_instance_tombstone_cancels_both_bidi_halves() {
+        let server = test_server().await;
+        let id = make_eid("ns", "comp", "generate", 8);
+        // Pre-tombstone the instance.
+        server.cancel_instance_streams(&id).await;
+
+        let (send_subj, send_provider, recv_subj, recv_provider) =
+            register_and_get_bidi_subjects(&server).await;
+
+        assert!(
+            !server
+                .associate_instance(&recv_subj, Some(&send_subj), &id)
+                .await,
+            "tombstoned instance must reject association"
+        );
+
+        assert!(recv_provider.await.is_err());
+        assert!(send_provider.await.is_err());
+    }
+
     #[tokio::test]
     async fn test_cancel_instance_streams_unblocks_receiver() {
         let server = test_server().await;
@@ -969,7 +1272,7 @@ mod tests {
         let (subject, provider) = register_and_get_subject(&server).await;
 
         let id = make_eid("ns", "comp", "generate", 42);
-        assert!(server.associate_instance(&subject, &id).await);
+        assert!(server.associate_instance(&subject, None, &id).await);
 
         let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(cancelled, 1);
@@ -991,9 +1294,9 @@ mod tests {
         let id20 = make_eid("ns", "comp", "generate", 20);
 
         // Associate first two with instance 10, third with instance 20
-        assert!(server.associate_instance(&subj1, &id10).await);
-        assert!(server.associate_instance(&subj2, &id10).await);
-        assert!(server.associate_instance(&subj3, &id20).await);
+        assert!(server.associate_instance(&subj1, None, &id10).await);
+        assert!(server.associate_instance(&subj2, None, &id10).await);
+        assert!(server.associate_instance(&subj3, None, &id20).await);
 
         // Cancel instance 10 -- should cancel 2 subjects
         let cancelled = server.cancel_instance_streams(&id10).await;
@@ -1023,7 +1326,7 @@ mod tests {
 
         let (subject, _provider) = register_and_get_subject(&server).await;
         let id = make_eid("ns", "comp", "generate", 42);
-        assert!(server.associate_instance(&subject, &id).await);
+        assert!(server.associate_instance(&subject, None, &id).await);
 
         // Cancel the individual subject
         server.cancel_recv_stream(&subject).await;
@@ -1127,7 +1430,7 @@ mod tests {
 
         // Now register a subject and try to associate it with the tombstoned instance.
         let (subject, provider) = register_and_get_subject(&server).await;
-        let associated = server.associate_instance(&subject, &id).await;
+        let associated = server.associate_instance(&subject, None, &id).await;
 
         // associate_instance should return false when the instance is tombstoned.
         assert!(
@@ -1155,7 +1458,7 @@ mod tests {
 
         // Now associate should work normally (subject NOT cancelled).
         let (subject, _provider) = register_and_get_subject(&server).await;
-        assert!(server.associate_instance(&subject, &id).await);
+        assert!(server.associate_instance(&subject, None, &id).await);
 
         // Subject should be tracked, not cancelled.
         let cancelled = server.cancel_instance_streams(&id).await;
@@ -1177,8 +1480,8 @@ mod tests {
         let gen_id = make_eid("ns", "comp", "generate", 42);
         let pre_id = make_eid("ns", "comp", "prefill", 42);
 
-        assert!(server.associate_instance(&gen_subj, &gen_id).await);
-        assert!(server.associate_instance(&pre_subj, &pre_id).await);
+        assert!(server.associate_instance(&gen_subj, None, &gen_id).await);
+        assert!(server.associate_instance(&pre_subj, None, &pre_id).await);
 
         // Cancel only the "generate" endpoint's subjects.
         let cancelled = server.cancel_instance_streams(&gen_id).await;
@@ -1208,7 +1511,7 @@ mod tests {
         // A new subject for "generate" should be rejected.
         let (gen_subj, gen_prov) = register_and_get_subject(&server).await;
         assert!(
-            !server.associate_instance(&gen_subj, &gen_id).await,
+            !server.associate_instance(&gen_subj, None, &gen_id).await,
             "generate should be tombstoned"
         );
         assert!(gen_prov.await.is_err());
@@ -1216,7 +1519,7 @@ mod tests {
         // A new subject for "prefill" with the same instance_id should be accepted.
         let (pre_subj, _pre_prov) = register_and_get_subject(&server).await;
         assert!(
-            server.associate_instance(&pre_subj, &pre_id).await,
+            server.associate_instance(&pre_subj, None, &pre_id).await,
             "prefill tombstone is independent; subject should be tracked"
         );
         let count = server.cancel_instance_streams(&pre_id).await;
@@ -1237,8 +1540,8 @@ mod tests {
         let id_a = make_eid("ns-a", "comp-a", "generate", 42);
         let id_b = make_eid("ns-b", "comp-b", "generate", 42);
 
-        assert!(server.associate_instance(&subj_a, &id_a).await);
-        assert!(server.associate_instance(&subj_b, &id_b).await);
+        assert!(server.associate_instance(&subj_a, None, &id_a).await);
+        assert!(server.associate_instance(&subj_b, None, &id_b).await);
 
         // Cancel service A -- only subj_a should be affected.
         let cancelled = server.cancel_instance_streams(&id_a).await;
@@ -1274,7 +1577,7 @@ mod tests {
         // longer tombstoned). Any new subject must be tracked normally.
         let (subject, _provider) = register_and_get_subject(&server).await;
         assert!(
-            server.associate_instance(&subject, &id).await,
+            server.associate_instance(&subject, None, &id).await,
             "tombstone older than TTL should not block association"
         );
 
@@ -1303,7 +1606,7 @@ mod tests {
 
         let (subject, provider) = register_and_get_subject(&server).await;
         assert!(
-            !server.associate_instance(&subject, &id).await,
+            !server.associate_instance(&subject, None, &id).await,
             "tombstone within TTL must still block association"
         );
         assert!(provider.await.is_err());
@@ -1369,15 +1672,331 @@ mod tests {
 
         // Service A is tombstoned — new association is rejected.
         let (subj_a, prov_a) = register_and_get_subject(&server).await;
-        assert!(!server.associate_instance(&subj_a, &id_a).await);
+        assert!(!server.associate_instance(&subj_a, None, &id_a).await);
         assert!(prov_a.await.is_err());
 
         // Service B with same endpoint name + instance_id must be accepted.
         let (subj_b, _prov_b) = register_and_get_subject(&server).await;
         assert!(
-            server.associate_instance(&subj_b, &id_b).await,
+            server.associate_instance(&subj_b, None, &id_b).await,
             "Different namespace/component must not be tombstoned"
         );
         assert_eq!(server.cancel_instance_streams(&id_b).await, 1);
+    }
+
+    type TestFramedRead = FramedRead<ReadHalf<TcpStream>, TwoPartCodec>;
+    type TestFramedWrite = FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>;
+    type TestResponseStream = (TestFramedRead, TestFramedWrite, StreamReceiver);
+
+    /// Stand up a TcpStreamServer, register a response stream, connect a
+    /// client, drive the handshake + prologue, and return the client-side
+    /// framed reader/writer along with the receiver.
+    async fn open_registered_response_stream() -> TestResponseStream {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending_connection = server.register(stream_options).await;
+        let registered_stream = pending_connection.recv_stream.unwrap();
+        let (connection_info, stream_provider) = registered_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (read_half, write_half) = tokio::io::split(stream);
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = CallHomeHandshake {
+            subject: tcp_info.subject,
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&ResponseStreamPrologue { error: None })
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        // SAFETY (test-only): healthy localhost handshake always resolves all
+        // three layers; a panic here means the harness is broken.
+        let receiver = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
+            .await
+            .expect("server should establish response stream within timeout")
+            .expect("stream provider should not be dropped")
+            .expect("response stream should be accepted");
+
+        (framed_reader, framed_writer, receiver)
+    }
+
+    async fn recv_control_message(framed_reader: &mut TestFramedRead) -> ControlMessage {
+        // SAFETY (test-only): a misbehaving server in any of these layers is
+        // exactly the harness failure we want surfaced as a test panic.
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), framed_reader.next())
+            .await
+            .expect("server should send a control message within timeout")
+            .expect("server should not close before sending control")
+            .expect("control message should decode");
+        let (header, data) = message.optional_parts();
+        assert!(data.is_none(), "control message should not contain data");
+        serde_json::from_slice(header.expect("control header missing").as_ref()).unwrap()
+    }
+
+    /// Sending an unexpected control message (Stop or Kill from the data
+    /// direction) is a protocol violation. The server's
+    /// network_receive_handler must reply with ControlMessage::Kill on
+    /// that stream alone, not panic.
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_on_unexpected_control_message() {
+        let (mut framed_reader, mut framed_writer, _receiver) =
+            open_registered_response_stream().await;
+
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&ControlMessage::Stop).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "unexpected control message should kill only this stream"
+        );
+    }
+
+    /// A framing/decode error from the worker side is unrecoverable for
+    /// this stream but must not panic the worker. Server should send Kill
+    /// and tear down only this connection.
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_on_read_error() {
+        let (mut framed_reader, framed_writer, _receiver) = open_registered_response_stream().await;
+
+        let mut raw_writer = framed_writer.into_inner();
+        raw_writer.write_all(&[0u8; 8]).await.unwrap();
+        raw_writer.shutdown().await.unwrap();
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "framing read error should kill only this stream"
+        );
+    }
+
+    /// Sentinel is supposed to be header-only. A misbehaving client that
+    /// attaches a data payload must not panic the worker via assert!().
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_on_sentinel_with_data() {
+        let (mut framed_reader, mut framed_writer, _receiver) =
+            open_registered_response_stream().await;
+
+        let header = serde_json::to_vec(&ControlMessage::Sentinel)
+            .unwrap()
+            .into();
+        framed_writer
+            .send(TwoPartMessage::from_parts(
+                header,
+                Bytes::from_static(b"unexpected payload"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "Sentinel with data should kill only this stream"
+        );
+    }
+
+    /// The prologue must be a HeaderOnly frame. A non-HeaderOnly prologue
+    /// (data-only or mixed) must surface as Err to the requester rather
+    /// than panic the worker.
+    #[tokio::test]
+    async fn test_tcp_stream_server_returns_error_on_invalid_prologue() {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending_connection = server.register(stream_options).await;
+        let registered_stream = pending_connection.recv_stream.unwrap();
+        let (connection_info, stream_provider) = registered_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (_read_half, write_half) = tokio::io::split(stream);
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = CallHomeHandshake {
+            subject: tcp_info.subject,
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        // Send a data-only frame in the prologue slot.
+        framed_writer
+            .send(TwoPartMessage::from_data(Bytes::from_static(
+                b"not a prologue",
+            )))
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
+            .await
+            .expect("stream provider should resolve quickly")
+            .expect("stream provider channel should not be dropped");
+        // StreamReceiver doesn't impl Debug, so we can't use `.expect_err`.
+        match outcome {
+            Err(err) => assert!(
+                err.contains("malformed prologue"),
+                "expected malformed-prologue error, got: {err}"
+            ),
+            Ok(_) => panic!("invalid prologue should produce an error, but got Ok"),
+        }
+    }
+
+    // ==================== request_stream_send_handler integration tests ====================
+    //
+    // These exercise the closing-message contract of `request_stream_send_handler`
+    // end-to-end: register a request stream, dial it as a raw client (so we can
+    // inspect frames directly), then trigger each of the exit branches and
+    // assert which ControlMessage arrives on the wire.
+
+    use futures::SinkExt;
+
+    /// Register a request stream and dial it with a raw client. Returns the
+    /// framed reader on the raw client side, the StreamSender held by the
+    /// upstream, and the upstream's engine context (so the test can drive
+    /// kill / stop externally).
+    async fn register_and_dial_request_stream(
+        server: &TcpStreamServer,
+    ) -> (
+        FramedRead<tokio::io::ReadHalf<TcpStream>, TwoPartCodec>,
+        super::StreamSender,
+        Arc<dyn AsyncEngineContext>,
+    ) {
+        let upstream_ctx = Context::new(()).context();
+        let options = StreamOptions::builder()
+            .context(upstream_ctx.clone())
+            .enable_request_stream(true)
+            .enable_response_stream(false)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let send_stream = pending.send_stream.unwrap();
+        let (conn_info, send_provider) = send_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = conn_info.try_into().unwrap();
+
+        let raw = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (read_half, write_half) = tokio::io::split(raw);
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = super::CallHomeHandshake {
+            subject: tcp_info.subject.clone(),
+            stream_type: StreamType::Request,
+        };
+        let handshake_bytes = serde_json::to_vec(&handshake).unwrap();
+        framed_writer
+            .send(TwoPartMessage::from_header(handshake_bytes.into()))
+            .await
+            .unwrap();
+        drop(framed_writer);
+
+        let sender = send_provider.await.unwrap().unwrap();
+        (framed_reader, sender, upstream_ctx)
+    }
+
+    /// Pull frames off the raw client reader until the first `ControlMessage`
+    /// arrives, ignoring any DataOnly frames before it. Returns the variant.
+    async fn next_control_message(
+        reader: &mut FramedRead<tokio::io::ReadHalf<TcpStream>, TwoPartCodec>,
+    ) -> ControlMessage {
+        loop {
+            let frame = reader
+                .next()
+                .await
+                .expect("socket closed before control message arrived")
+                .expect("decode error");
+            if let Some(header) = frame.header() {
+                return serde_json::from_slice::<ControlMessage>(header)
+                    .expect("invalid control message bytes");
+            }
+            // DataOnly frame — skip and keep reading.
+        }
+    }
+
+    /// Dropping the upstream's StreamSender drains `request_rx` and the server
+    /// emits [`ControlMessage::Sentinel`] as the closing frame.
+    #[tokio::test]
+    async fn test_request_stream_sends_sentinel_on_clean_drop() {
+        let server = test_server().await;
+        let (mut reader, sender, _ctx) = register_and_dial_request_stream(&server).await;
+
+        drop(sender);
+
+        let ctrl = next_control_message(&mut reader).await;
+        assert!(
+            matches!(ctrl, ControlMessage::Sentinel),
+            "clean drain should emit Sentinel, got {ctrl:?}"
+        );
+    }
+
+    /// `context.kill()` makes the server emit [`ControlMessage::Kill`] before
+    /// shutting down the write half.
+    #[tokio::test]
+    async fn test_request_stream_sends_kill_on_context_killed() {
+        let server = test_server().await;
+        let (mut reader, _sender, ctx) = register_and_dial_request_stream(&server).await;
+
+        ctx.kill();
+
+        let ctrl = next_control_message(&mut reader).await;
+        assert!(
+            matches!(ctrl, ControlMessage::Kill),
+            "context.kill() should emit Kill, got {ctrl:?}"
+        );
+    }
+
+    /// `context.stop()` makes the server emit [`ControlMessage::Stop`] before
+    /// shutting down the write half.
+    #[tokio::test]
+    async fn test_request_stream_sends_stop_on_context_stopped() {
+        let server = test_server().await;
+        let (mut reader, _sender, ctx) = register_and_dial_request_stream(&server).await;
+
+        ctx.stop();
+
+        let ctrl = next_control_message(&mut reader).await;
+        assert!(
+            matches!(ctrl, ControlMessage::Stop),
+            "context.stop() should emit Stop, got {ctrl:?}"
+        );
     }
 }

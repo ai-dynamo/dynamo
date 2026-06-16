@@ -61,6 +61,20 @@ class Config:
             return DisaggregationMode.AGGREGATED
 
 
+def use_modelexpress_remote_instance(args: Any) -> bool:
+    return (
+        getattr(args, "load_format", None) == "remote_instance"
+        and getattr(args, "remote_instance_weight_loader_backend", None)
+        == "modelexpress"
+    )
+
+
+def should_fetch_model(args: Any, model_path: str) -> bool:
+    if os.path.exists(model_path):
+        return False
+    return not use_modelexpress_remote_instance(args)
+
+
 # Register SGLang-specific encoders with the shared system
 @register_encoder(Config)
 def _preprocess_for_encode_config(
@@ -269,7 +283,7 @@ async def parse_args(args: list[str]) -> Config:
         ):
             endpoint = f"dyn://{namespace}.prefill.generate"
         elif dynamo_config.multimodal_encode_worker:
-            endpoint = f"dyn://{namespace}.encoder.generate"
+            endpoint = f"dyn://{namespace}.encode.generate"
         elif (
             dynamo_config.multimodal_worker
             and parsed_args.disaggregation_mode == "prefill"
@@ -329,7 +343,7 @@ async def parse_args(args: list[str]) -> Config:
     # sglang will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
-    if not os.path.exists(model_path):
+    if should_fetch_model(parsed_args, model_path):
         await fetch_model(model_path)
 
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
@@ -412,6 +426,13 @@ async def parse_args(args: list[str]) -> Config:
     logging.info(
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
+
+    # Enable forward pass metrics from dynamo env var if configured
+    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT") and not getattr(
+        server_args, "enable_forward_pass_metrics", False
+    ):
+        server_args.enable_forward_pass_metrics = True
+        logging.info("Enabled forward_pass_metrics from DYN_FORWARDPASS_METRIC_PORT")
 
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None

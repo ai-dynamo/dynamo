@@ -37,6 +37,7 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 
@@ -98,7 +99,7 @@ def test_parse_args_returns_config_with_expected_attrs(monkeypatch):
     assert isinstance(config, Config)
     assert config.model == "Qwen/Qwen3-0.6B"
     assert config.namespace == "testns"
-    assert config.component == "tensorrt_llm"
+    assert config.component == "backend"
     assert config.endpoint == "generate"
 
 
@@ -112,6 +113,30 @@ def test_config_use_kv_events_derived_from_publish_events(monkeypatch):
     config_off = parse_args(["--no-publish-events"])
     assert config_off.publish_events_and_metrics is False
     assert config_off.use_kv_events is False
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_rejects_invalid_kv_cache_config_override(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--override-engine-args",
+            '{"kv_cache_config": []}',
+        ]
+    )
+
+    with pytest.raises(
+        TypeError, match="kv_cache_config must be a dict or KvCacheConfig, got list"
+    ):
+        await init_llm_worker(
+            runtime=mock.MagicMock(),
+            config=config,
+            shutdown_event=asyncio.Event(),
+        )
 
 
 def test_config_has_connector(monkeypatch):

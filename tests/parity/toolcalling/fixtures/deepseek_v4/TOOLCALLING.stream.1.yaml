@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+model_label: DeepSeek V4
+mode: stream
+cases:
+  TOOLCALLING.stream.1.a:
+    description: Complete tool-call payload delivered in one content chunk
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: |-
+        <｜DSML｜tool_calls>
+        <｜DSML｜invoke name="get_weather">
+        <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜tool_calls>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools: &id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+      vllm: *id001
+  TOOLCALLING.stream.1.b:
+    description: Complete tool call split across parser-significant boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: |
+        <｜DSML｜tool_calls>
+    - delta_text: |
+        <｜DSML｜invoke name="get_weather">
+    - delta_text: <｜DSML｜parameter name="location" string="true">
+    - delta_text: NYC
+    - delta_text: |
+        </｜DSML｜parameter>
+    - delta_text: |
+        </｜DSML｜invoke>
+    - delta_text: </｜DSML｜tool_calls>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools: *id002
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+      vllm: *id003
