@@ -392,7 +392,15 @@ impl DistributedRuntime {
                     );
                 }
 
-                let options = tcp::server::ServerOptions { port, interface };
+                let options = tcp::server::ServerOptions {
+                    port,
+                    interface,
+                    host: None,
+                    advertise_host: std::env::var("DYN_TCP_RESP_ADVERTISE_HOST").ok(),
+                    advertise_port: std::env::var("DYN_TCP_RESP_ADVERTISE_PORT")
+                        .ok()
+                        .and_then(|p| p.parse().ok()),
+                };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
