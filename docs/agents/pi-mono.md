@@ -51,6 +51,8 @@ Build from source and install it into Pi:
 ```bash
 git clone git@github.com:ai-dynamo/pi-dynamo-provider.git
 cd pi-dynamo-provider
+# Use provider main at 5c237a1 or newer for DYN_REQUEST_TRACE support.
+git checkout 5c237a1577b1e4bcfe3785c52b6a73d1aa4ee716
 npm install && npm run build
 pi install /absolute/path/to/pi-dynamo-provider
 ```
