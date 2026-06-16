@@ -240,6 +240,25 @@ _Appears in:_
 
 
 
+#### DeviceSpec
+
+
+
+
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations are added to the pod spec for device-specific node taints. |  |  |
+| `nodeSelector` _object (keys:string, values:string)_ | NodeSelector restricts pod scheduling to matching nodes (e.g. \{"gpu": "on"\} for HAMi). |  |  |
+| `schedulerName` _string_ | SchedulerName overrides the default Kubernetes scheduler (e.g. "hami-scheduler"). |  |  |
+
+
 #### DynamoCheckpoint
 
 
@@ -446,6 +465,7 @@ _Appears in:_
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
 | `failover` _[FailoverSpec](#failoverspec)_ | Failover configures GMS (GPU Memory Service) failover for this service.<br />For intraPod mode: the main container is cloned into two engine containers (active + standby).<br />For interPod mode: the operator creates a dedicated GMS weight server pod and<br />multiple engine pods per rank that share GPUs via DRA resource claims. |  | Optional: \{\} <br /> |
+| `device` _[DeviceSpec](#devicespec)_ | Device configures accelerator device requests in a vendor-agnostic way.<br />When set, the operator copies resources, tolerations, nodeSelector, and<br />schedulerName directly into the generated pod spec and skips all<br />NVIDIA-default injections (DRA claim replacement, nvidia.com/gpu<br />toleration). When absent, existing NVIDIA-default behavior is preserved. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -489,6 +509,7 @@ _Appears in:_
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
 | `failover` _[FailoverSpec](#failoverspec)_ | Failover configures GMS (GPU Memory Service) failover for this service.<br />For intraPod mode: the main container is cloned into two engine containers (active + standby).<br />For interPod mode: the operator creates a dedicated GMS weight server pod and<br />multiple engine pods per rank that share GPUs via DRA resource claims. |  | Optional: \{\} <br /> |
+| `device` _[DeviceSpec](#devicespec)_ | Device configures accelerator device requests in a vendor-agnostic way.<br />When set, the operator copies resources, tolerations, nodeSelector, and<br />schedulerName directly into the generated pod spec and skips all<br />NVIDIA-default injections (DRA claim replacement, nvidia.com/gpu<br />toleration). When absent, existing NVIDIA-default behavior is preserved. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -1809,6 +1830,25 @@ _Appears in:_
 | `availableReplicas` _integer_ | AvailableReplicas is the number of replicas that are available and ready. |  | Optional: \{\} <br /> |
 
 
+#### DeviceSpec
+
+
+
+
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations are added to the pod spec for device-specific node taints. |  |  |
+| `nodeSelector` _object (keys:string, values:string)_ | NodeSelector restricts pod scheduling to matching nodes (e.g. \{"gpu": "on"\} for HAMi). |  |  |
+| `schedulerName` _string_ | SchedulerName overrides the default Kubernetes scheduler (e.g. "hami-scheduler"). |  |  |
+
+
 #### DynamoCheckpointIdentity
 
 
@@ -1895,6 +1935,7 @@ _Appears in:_
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
 | `experimental` _[ExperimentalSpec](#experimentalspec)_ | experimental groups opt-in preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases,<br />including disappearing without a name-preserving graduation path.<br />In v1beta1 this block holds `gpuMemoryService` and `failover` (which<br />remain tightly coupled -- failover requires GMS -- and are expected to<br />evolve together as the DRA-based GPU sharing story matures), and<br />`checkpoint` (whose API shape is still settling). Fields here are<br />explicitly NOT covered by the normal v1beta1 deprecation policy; do not<br />depend on them for production workloads. |  | Optional: \{\} <br /> |
+| `device` _[DeviceSpec](#devicespec)_ | Device configures accelerator device requests in a vendor-agnostic way.<br />When set, the operator copies resources, tolerations, nodeSelector, and<br />schedulerName directly into the generated pod spec and skips all<br />NVIDIA-default injections (DRA claim replacement, nvidia.com/gpu<br />toleration). When absent, existing NVIDIA-default behavior is preserved. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -1925,6 +1966,7 @@ _Appears in:_
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
 | `experimental` _[ExperimentalSpec](#experimentalspec)_ | experimental groups opt-in preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases,<br />including disappearing without a name-preserving graduation path.<br />In v1beta1 this block holds `gpuMemoryService` and `failover` (which<br />remain tightly coupled -- failover requires GMS -- and are expected to<br />evolve together as the DRA-based GPU sharing story matures), and<br />`checkpoint` (whose API shape is still settling). Fields here are<br />explicitly NOT covered by the normal v1beta1 deprecation policy; do not<br />depend on them for production workloads. |  | Optional: \{\} <br /> |
+| `device` _[DeviceSpec](#devicespec)_ | Device configures accelerator device requests in a vendor-agnostic way.<br />When set, the operator copies resources, tolerations, nodeSelector, and<br />schedulerName directly into the generated pod spec and skips all<br />NVIDIA-default injections (DRA claim replacement, nvidia.com/gpu<br />toleration). When absent, existing NVIDIA-default behavior is preserved. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
