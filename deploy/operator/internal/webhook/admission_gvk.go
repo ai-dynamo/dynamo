@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package validation
+package webhook
 
 import (
 	"context"
@@ -25,7 +25,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-func validateAdmissionKind(ctx context.Context, expected schema.GroupVersionKind) error {
+// ValidateAdmissionGVK verifies that the API server dispatched the admission
+// request to the handler version the operator supports. This catches bad
+// webhook registration or unexpected API server dispatch, but it cannot prove
+// that CRD schema conversion rewrote the object body.
+func ValidateAdmissionGVK(ctx context.Context, expected schema.GroupVersionKind) error {
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
 		return fmt.Errorf("admission request missing from context: %w", err)
@@ -40,5 +44,5 @@ func validateAdmissionKind(ctx context.Context, expected schema.GroupVersionKind
 		return nil
 	}
 
-	return fmt.Errorf("admission requires %s, got %s; check CRD conversion webhook configuration", expected, got)
+	return fmt.Errorf("admission requires %s, got %s; check webhook and CRD conversion configuration", expected, got)
 }
