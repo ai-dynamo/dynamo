@@ -28,10 +28,9 @@ adding required approvals.
 | `areas.yaml` | The single source of truth: path globs to GitHub team, by subsystem. **Edit this.** |
 | `codeowners_match.py` | Shared matcher + resolution pipeline. Build, emit, and who_owns all call into this -- one matcher, one resolver, no drift. |
 | `build_codeowners.py` | Resolves `areas.yaml` against the tree and validates 100% coverage (CI gate). |
-| `emit_codeowners.py` | Generates the root `CODEOWNERS` (a minimal, per-area-grouped last-match cover) and `advisory-reviewers.yaml`. |
+| `emit_codeowners.py` | Generates the root `CODEOWNERS` (a minimal, per-area-grouped last-match cover). |
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
 | `test_codeowners.py` | Unit tests for the canonical matcher and the min-cost cover. |
-| `advisory-reviewers.yaml` | Non-blocking reviewers (e.g. docs on any markdown), consumed by a review-request Action, not by `CODEOWNERS`. |
 
 ## Change ownership
 
@@ -45,10 +44,10 @@ adding required approvals.
      --areas .github/codeowners/areas.yaml --repo . --strict
    python .github/codeowners/emit_codeowners.py \
      --areas .github/codeowners/areas.yaml --repo . \
-     --out CODEOWNERS --advisory-out .github/codeowners/advisory-reviewers.yaml
+     --out CODEOWNERS
    ```
 
-3. Commit `areas.yaml`, `CODEOWNERS`, and `advisory-reviewers.yaml` together.
+3. Commit `areas.yaml` and `CODEOWNERS` together.
 
 ## How it stays correct (CI)
 
