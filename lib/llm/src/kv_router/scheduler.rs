@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::{LocalBlockHash, RouterBackpressureReason, SharedCacheHits};
+use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
@@ -100,7 +100,6 @@ where
             slots,
             workers_with_configs.clone(),
             profile,
-            dynamo_kv_router::config::RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
             prefill_load_estimator,
@@ -284,34 +283,23 @@ where
                 shared_cache_hits,
             )
             .await;
-        match &response {
-            Err(KvSchedulerError::Backpressure { reason, .. }) => {
-                if let Some(metrics) = self.queue_metrics.first()
-                    && router_backpressure_reason_label(reason) == "max_queued_isl_tokens_exceeded"
-                {
-                    metrics.legacy_backpressure_rejections.inc();
+        if let Err(KvSchedulerError::QueueRejected(rejection)) = &response
+            && let Some(metrics) = self
+                .queue_metric_indices
+                .get(&rejection.policy_class)
+                .and_then(|index| self.queue_metrics.get(*index))
+        {
+            match rejection.limit_kind {
+                dynamo_kv_router::scheduling::QueueLimitKind::Requests => {
+                    metrics.request_limit_rejections.inc();
+                }
+                dynamo_kv_router::scheduling::QueueLimitKind::RawIslTokens => {
+                    metrics.raw_isl_limit_rejections.inc();
+                }
+                dynamo_kv_router::scheduling::QueueLimitKind::CachedTokens => {
+                    metrics.cached_token_limit_rejections.inc();
                 }
             }
-            Err(KvSchedulerError::QueueRejected(rejection)) => {
-                if let Some(metrics) = self
-                    .queue_metric_indices
-                    .get(&rejection.policy_class)
-                    .and_then(|index| self.queue_metrics.get(*index))
-                {
-                    match rejection.limit_kind {
-                        dynamo_kv_router::scheduling::QueueLimitKind::Requests => {
-                            metrics.request_limit_rejections.inc();
-                        }
-                        dynamo_kv_router::scheduling::QueueLimitKind::RawIslTokens => {
-                            metrics.raw_isl_limit_rejections.inc();
-                        }
-                        dynamo_kv_router::scheduling::QueueLimitKind::CachedTokens => {
-                            metrics.cached_token_limit_rejections.inc();
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
         self.update_queue_metrics();
         response
@@ -384,12 +372,6 @@ where
         update_queue_metrics(&self.queue_metrics, |class_index| {
             self.inner.class_queue_stats(class_index)
         });
-    }
-}
-
-fn router_backpressure_reason_label(reason: &RouterBackpressureReason) -> &'static str {
-    match reason {
-        RouterBackpressureReason::MaxQueuedIslTokensExceeded => "max_queued_isl_tokens_exceeded",
     }
 }
 

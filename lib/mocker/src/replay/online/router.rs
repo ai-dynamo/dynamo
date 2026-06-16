@@ -160,7 +160,6 @@ impl KvReplayRouter {
             slots,
             worker_config_rx,
             profile,
-            dynamo_kv_router::config::RouterQueueDepthTiers::unbounded_cap(),
             args.block_size as u32,
             selector,
             prefill_load_estimator,

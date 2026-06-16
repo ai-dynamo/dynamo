@@ -13,8 +13,7 @@ use super::filter::RoutingEligibility;
 use super::prefill_load::effective_prefill_tokens;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
+    RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -36,15 +35,6 @@ pub struct TierOverlapBlocks {
 pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
-
-    #[error(
-        "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
-    )]
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        max_queued_isl_tokens: Option<usize>,
-    },
 
     #[error(transparent)]
     QueueRejected(#[from] QueueRejection),
@@ -72,9 +62,7 @@ impl KvSchedulerError {
     pub fn is_overload(&self) -> bool {
         matches!(
             self,
-            Self::Backpressure { .. }
-                | Self::AllEligibleWorkersOverloaded
-                | Self::PinnedWorkerOverloaded { .. }
+            Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. }
         )
     }
 }

@@ -8,9 +8,7 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    config::RouterConfigOverride,
-    protocols::{RouterBackpressureReason, RoutingConstraints},
+    PrefillLoadEstimator, config::RouterConfigOverride, protocols::RoutingConstraints,
     scheduling::QueueRejection,
 };
 use dynamo_runtime::{
@@ -102,11 +100,6 @@ pub enum PrefillQueryOutcome {
     Routed {
         worker_id: u64,
         dp_rank: Option<u32>,
-    },
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        max_queued_isl_tokens: Option<usize>,
     },
     QueueRejected {
         rejection: QueueRejection,

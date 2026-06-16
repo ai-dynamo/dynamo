@@ -1428,31 +1428,6 @@ impl KvRouter {
                     overlap_blocks,
                     ..
                 } => (worker, overlap_blocks),
-                llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
-                    reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens,
-                } => {
-                    // Note: Backpressure is currently treated as Unavailable and falls through
-                    // to the error path. Distinguishing backpressure from regular errors in Python
-                    // would require returning a structured result type instead of raising an exception,
-                    // which is a breaking API change. For now, callers should treat any error from
-                    // best_worker as potentially transient and implement retry logic accordingly.
-                    // The backpressure info (reason, queued_isl_tokens, max_queued_isl_tokens) is logged but
-                    // not exposed to Python callers.
-                    tracing::warn!(
-                        reason = ?reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens = ?max_queued_isl_tokens,
-                        "Router backpressure - treating as unavailable"
-                    );
-                    return Err(to_pyerr(anyhow::anyhow!(
-                        "router backpressure: {:?} (queued_isl_tokens={}, max_queued_isl_tokens={:?})",
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens
-                    )));
-                }
                 llm_rs::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
                     return Err(crate::errors::queue_rejection_to_pyerr(rejection));
                 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
-use super::config::{RouterQueueDepthTiers, RouterQueuePolicy};
+use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, read_overlap_refresh_after,
@@ -24,9 +24,7 @@ use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
     SchedulingResponse,
 };
-use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId,
-};
+use crate::protocols::{LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
@@ -54,6 +52,11 @@ struct QueuedRequest {
     block_hashes: Option<Vec<LocalBlockHash>>,
 }
 
+struct ResolvedPolicyClass {
+    class_index: usize,
+    snapshot: Option<QueueSnapshot>,
+}
+
 #[allow(clippy::large_enum_variant)]
 enum AdmissionCommand {
     Enqueue {
@@ -79,7 +82,6 @@ struct SchedulerQueueActor<
     class_counters: Arc<Vec<ClassQueueCounters>>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-    queue_depth_tiers: RouterQueueDepthTiers,
     start_time: Instant,
     block_size: u32,
     selector: Sel,
@@ -126,7 +128,6 @@ impl<
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
-        queue_depth_tiers: RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         queue_policy: RouterQueuePolicy,
@@ -139,7 +140,6 @@ impl<
             slots,
             workers_with_configs,
             profile,
-            queue_depth_tiers,
             block_size,
             selector,
             prefill_load_estimator,
@@ -153,7 +153,6 @@ impl<
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
-        queue_depth_tiers: RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -164,7 +163,6 @@ impl<
             slots,
             workers_with_configs,
             profile,
-            queue_depth_tiers,
             block_size,
             selector,
             prefill_load_estimator,
@@ -179,7 +177,6 @@ impl<
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
-        queue_depth_tiers: RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -200,9 +197,6 @@ impl<
                 prefill_busy_threshold_frac = ?class.prefill_busy_threshold_frac,
                 "Router policy class configured"
             );
-        }
-        if !queue_depth_tiers.is_unbounded() {
-            tracing::info!("Router queue tiered by cache-miss: pending ISL token caps configured");
         }
         let overlap_refresh_after = if overlap_scores_refresh.is_some() {
             let configured = read_overlap_refresh_after();
@@ -241,7 +235,6 @@ impl<
             class_counters: Arc::clone(&class_counters),
             slots: Arc::clone(&slots),
             workers_with_configs: workers_with_configs.clone(),
-            queue_depth_tiers,
             start_time: Instant::now(),
             block_size,
             selector,
@@ -276,7 +269,6 @@ impl<
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
-        queue_depth_tiers: RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         queue_policy: RouterQueuePolicy,
@@ -286,7 +278,6 @@ impl<
             slots,
             workers_with_configs,
             threshold_frac,
-            queue_depth_tiers,
             block_size,
             selector,
             queue_policy,
@@ -301,7 +292,6 @@ impl<
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
-        queue_depth_tiers: RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         queue_policy: RouterQueuePolicy,
@@ -312,7 +302,6 @@ impl<
             slots,
             workers_with_configs,
             threshold_frac,
-            queue_depth_tiers,
             block_size,
             selector,
             queue_policy,
@@ -496,14 +485,15 @@ impl<
 
     fn handle_enqueue(
         &mut self,
-        mut request: SchedulingRequest,
+        request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
     ) {
         let eligibility = request.eligibility();
         let decay_now = Instant::now();
-        let class_index = self
-            .profile
-            .resolve_class_index(request.policy_class.as_deref());
+        let ResolvedPolicyClass {
+            class_index,
+            snapshot,
+        } = self.resolve_policy_class(&request);
         let class = self.profile.class(class_index);
 
         if !class.queueing_enabled() {
@@ -518,59 +508,69 @@ impl<
 
         let should_queue = self.pending.has_backlog(class_index)
             || self.all_workers_prefill_busy(class, request.eligibility(), decay_now);
-        if should_queue {
-            let snapshot = {
-                let workers = self.workers_with_configs.borrow();
-                let context = SchedulingContext::new(&request, &workers);
-                QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
-            };
-            if !self.queue_depth_tiers.is_unbounded() {
-                let pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
-                // This is a rejection threshold on current queued ISL, not a hard
-                // post-admission bound on `pending + incoming`.
-                if let Some(max_isl_tokens) = self.tier_cap_for_request(&request)
-                    && pending_isl_tokens >= max_isl_tokens
-                {
-                    request.respond(Err(KvSchedulerError::Backpressure {
-                        reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
-                        queued_isl_tokens: pending_isl_tokens,
-                        max_queued_isl_tokens: Some(max_isl_tokens),
-                    }));
-                    return;
-                }
-            }
-            tracing::debug!(policy_class = class.name, "queueing request");
-            let arrival_offset = self.start_time.elapsed().as_secs_f64();
-            let priority_jump = request.priority_jump;
-            let strict_priority = request.strict_priority;
-            let queued = QueuedRequest {
-                request,
-                enqueue_at: decay_now,
-                block_hashes,
-            };
-            if let Err((rejection, queued)) = self.pending.enqueue(
-                class_index,
-                snapshot,
-                arrival_offset,
-                priority_jump,
-                strict_priority,
-                queued,
-            ) {
-                let mut request = queued.request;
-                request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
-                return;
-            }
-            self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
-            self.pending_isl_tokens
-                .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-            self.add_class_counters(class_index, snapshot);
+        if !should_queue {
+            self.admit_one(request, decay_now);
             return;
         }
 
-        // Strict priority only orders requests parked in `pending`. Preserve
-        // direct admission for eligible arrivals to avoid global head-of-line
-        // blocking across requests with different worker eligibility.
-        self.admit_one(request, decay_now);
+        let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
+        tracing::debug!(policy_class = class.name, "queueing request");
+        let arrival_offset = self.start_time.elapsed().as_secs_f64();
+        let priority_jump = request.priority_jump;
+        let strict_priority = request.strict_priority;
+        let queued = QueuedRequest {
+            request,
+            enqueue_at: decay_now,
+            block_hashes,
+        };
+        if let Err((rejection, queued)) = self.pending.enqueue(
+            class_index,
+            snapshot,
+            arrival_offset,
+            priority_jump,
+            strict_priority,
+            queued,
+        ) {
+            let mut request = queued.request;
+            request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
+            return;
+        }
+        self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.pending_isl_tokens
+            .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
+        self.add_class_counters(class_index, snapshot);
+    }
+
+    fn resolve_policy_class(&self, request: &SchedulingRequest) -> ResolvedPolicyClass {
+        if let Some(class_index) = self
+            .profile
+            .explicit_class_index(request.policy_class.as_deref())
+        {
+            return ResolvedPolicyClass {
+                class_index,
+                snapshot: None,
+            };
+        }
+        if !self.profile.uses_uncached_isl_classification() {
+            return ResolvedPolicyClass {
+                class_index: self.profile.resolve_class_index(None, 0),
+                snapshot: None,
+            };
+        }
+
+        let snapshot = self.snapshot_for(request);
+        ResolvedPolicyClass {
+            class_index: self
+                .profile
+                .resolve_class_index(None, snapshot.uncached_tokens),
+            snapshot: Some(snapshot),
+        }
+    }
+
+    fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
+        let workers = self.workers_with_configs.borrow();
+        let context = SchedulingContext::new(request, &workers);
+        QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
     async fn handle_update(&mut self) {
@@ -792,24 +792,6 @@ impl<
         })
     }
 
-    /// Resolve the admission cap for `request` from the cache-miss tier table.
-    ///
-    /// Returns `None` when capping is disabled.
-    fn tier_cap_for_request(&self, request: &SchedulingRequest) -> Option<usize> {
-        let workers = self.workers_with_configs.borrow();
-        let ctx = SchedulingContext::new(request, &workers);
-        let cache_miss_tokens = ctx.best_effective_prefill_tokens();
-        // Scale against the total registered worker count instead of projecting
-        // the existing global queue onto only this request's eligible workers.
-        // For narrowed requests (for example pinned or allow-listed routing),
-        // shrinking the cap to the eligible subset would make the global queue
-        // look like it must all be drained by that subset, which overstates the
-        // backlog pressure on those workers.
-        let worker_count = workers.len();
-        self.queue_depth_tiers
-            .cap_for(cache_miss_tokens, worker_count)
-    }
-
     /// Check if all eligible workers are prefill-busy based on threshold.
     /// When `pinned_worker` is `Some`, only that exact worker/rank is considered.
     /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
@@ -893,10 +875,8 @@ mod tests {
     use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::config::RouterQueueDepthByMissingIslTier;
     use crate::protocols::{
-        ActiveLoad, ActiveSequenceEvent, RouterBackpressureReason, WorkerSelectionResult,
-        WorkerWithDpRank,
+        ActiveLoad, ActiveSequenceEvent, WorkerSelectionResult, WorkerWithDpRank,
     };
     use crate::scheduling::RouterPolicyConfig;
     use crate::scheduling::types::KvSchedulerError;
@@ -1031,14 +1011,8 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let (queue, slots, _tx) = make_queue_with_sender_with_tiers(
-            num_workers,
-            block_size,
-            isl,
-            threshold_frac,
-            RouterQueueDepthTiers::unbounded_cap(),
-            None,
-        );
+        let (queue, slots, _tx) =
+            make_queue_with_sender(num_workers, block_size, isl, threshold_frac, None);
         (queue, slots)
     }
 
@@ -1080,7 +1054,6 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
-            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
             RouterQueuePolicy::Fcfs,
@@ -1096,29 +1069,6 @@ mod tests {
         block_size: u32,
         isl: usize,
         threshold_frac: Option<f64>,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    ) -> (
-        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
-        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
-        watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
-    ) {
-        make_queue_with_sender_with_tiers(
-            num_workers,
-            block_size,
-            isl,
-            threshold_frac,
-            RouterQueueDepthTiers::unbounded_cap(),
-            prefill_load_estimator,
-        )
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn make_queue_with_sender_with_tiers(
-        num_workers: usize,
-        block_size: u32,
-        isl: usize,
-        threshold_frac: Option<f64>,
-        queue_depth_tiers: RouterQueueDepthTiers,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
@@ -1153,7 +1103,6 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
-            queue_depth_tiers,
             block_size,
             selector,
             RouterQueuePolicy::Fcfs,
@@ -1205,7 +1154,6 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             profile,
-            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             DefaultWorkerSelector::new(None, "test"),
             None,
@@ -1252,7 +1200,6 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             None,
-            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
             RouterQueuePolicy::Fcfs,
@@ -1359,7 +1306,6 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
-            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             DefaultWorkerSelector::new(None, "test"),
             RouterQueuePolicy::Fcfs,
@@ -1417,7 +1363,6 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             PolicyProfile::synthetic(threshold_frac, crate::config::RouterQueuePolicy::Fcfs),
-            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             DefaultWorkerSelector::new(None, "test"),
             None,
@@ -1551,7 +1496,6 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             None,
-            RouterQueueDepthTiers::unbounded_cap(),
             16,
             DefaultWorkerSelector::new(None, "test"),
             RouterQueuePolicy::Fcfs,
@@ -1838,6 +1782,66 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn uncached_isl_mapping_selects_flat_classes_with_trusted_header_override() {
+        let profile = policy_profile(
+            r#"
+default_policy_class: cached
+uncached_isl_policy_class_tiers:
+  - min_tokens: 0
+    policy_class: cached
+  - min_tokens: 32
+    policy_class: uncached
+policy_classes:
+  - name: cached
+    quantum: 1
+    prefill_busy_threshold: 0
+  - name: uncached
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (mut mapped_cached, _mapped_cached_rx) = make_request("mapped-cached", 64);
+        mapped_cached.effective_cached_tokens.insert(worker, 64);
+        queue.enqueue(mapped_cached).await;
+
+        let (mapped_uncached, _mapped_uncached_rx) = make_request("mapped-uncached", 64);
+        queue.enqueue(mapped_uncached).await;
+
+        let (mut unknown_cached, _unknown_cached_rx) = make_request("unknown-cached", 64);
+        unknown_cached.policy_class = Some("unknown".to_string());
+        unknown_cached.effective_cached_tokens.insert(worker, 64);
+        queue.enqueue(unknown_cached).await;
+
+        let (mut explicit_cached, _explicit_cached_rx) = make_request("explicit-cached", 64);
+        explicit_cached.policy_class = Some("cached".to_string());
+        queue.enqueue(explicit_cached).await;
+
+        assert_eq!(
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
+                pending_count: 3,
+                pending_isl_tokens: 192,
+                pending_cached_tokens: 128,
+            })
+        );
+        assert_eq!(
+            queue.class_queue_stats(1),
+            Some(ClassQueueStats {
+                pending_count: 1,
+                pending_isl_tokens: 64,
+                pending_cached_tokens: 0,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn class_local_limit_rejection_is_typed_and_not_overload() {
         let profile = policy_profile(
             r#"
@@ -1877,96 +1881,6 @@ policy_classes:
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 0,
             })
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_backpressure_when_missing_isl_tier_cap_reached() {
-        let block_size = 16;
-        let isl = 512;
-
-        // Single tier at floor=0 with cap=512 ISL tokens: every request matches,
-        // queue capped at 512 ISL tokens (1 request worth).
-        let tiers = RouterQueueDepthTiers::try_from(vec![RouterQueueDepthByMissingIslTier {
-            missing_cache_tokens_floor: 0,
-            max_queue_depth: isl,
-        }])
-        .unwrap();
-        let (queue, _slots, _cfg_tx) =
-            make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
-
-        let (req1, rx1) = make_request("req-1", isl);
-        queue.enqueue(req1).await;
-        let _resp1 = rx1.await.unwrap().unwrap();
-
-        let (req2, _rx2) = make_request("req-2", isl);
-        queue.enqueue(req2).await;
-        assert_eq!(queue.pending_count(), 1);
-        assert_eq!(queue.pending_isl_tokens(), isl);
-
-        let (req3, rx3) = make_request("req-3", isl);
-        queue.enqueue(req3).await;
-
-        let resp3 = rx3.await.expect("oneshot dropped");
-        assert!(
-            matches!(
-                resp3,
-                Err(KvSchedulerError::Backpressure {
-                    reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
-                    queued_isl_tokens: 512,
-                    max_queued_isl_tokens: Some(512),
-                })
-            ),
-            "expected backpressure when queue is full, got {resp3:?}"
-        );
-        assert_eq!(queue.pending_count(), 1);
-        assert_eq!(queue.pending_isl_tokens(), isl);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_missing_isl_tiers_shed_expensive_first() {
-        let block_size = 16;
-        let isl = 512;
-
-        // All test requests have 512 cache-miss tokens, so they match the
-        // expensive tier and should backpressure once one request is pending.
-        let tiers = RouterQueueDepthTiers::try_from(vec![
-            RouterQueueDepthByMissingIslTier {
-                missing_cache_tokens_floor: 0,
-                max_queue_depth: 4 * isl,
-            },
-            RouterQueueDepthByMissingIslTier {
-                missing_cache_tokens_floor: 256,
-                max_queue_depth: isl,
-            },
-        ])
-        .unwrap();
-        let (queue, _slots, _cfg_tx) =
-            make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
-
-        let (req1, rx1) = make_request("req-1", isl);
-        queue.enqueue(req1).await;
-        let _ = rx1.await.unwrap().unwrap();
-
-        let (req2, _rx2) = make_request("req-2", isl);
-        queue.enqueue(req2).await;
-        assert_eq!(queue.pending_count(), 1);
-        assert_eq!(queue.pending_isl_tokens(), isl);
-
-        let (req3, rx3) = make_request("req-3", isl);
-        queue.enqueue(req3).await;
-
-        let resp3 = rx3.await.expect("oneshot dropped");
-        assert!(
-            matches!(
-                resp3,
-                Err(KvSchedulerError::Backpressure {
-                    reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
-                    queued_isl_tokens: 512,
-                    max_queued_isl_tokens: Some(512),
-                })
-            ),
-            "expensive-tier request should backpressure at depth 1, got {resp3:?}"
         );
     }
 

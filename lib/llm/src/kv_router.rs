@@ -14,9 +14,9 @@ use dynamo_kv_router::{
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint,
-        RouterBackpressureReason, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
-        TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
+        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
         CacheHitEstimates, OverloadedWorkerProvider, effective_prefill_tokens,
@@ -87,11 +87,6 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
-    },
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        max_queued_isl_tokens: Option<usize>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -541,17 +536,6 @@ where
             .await
         {
             Ok(response) => response,
-            Err(KvSchedulerError::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            }) => {
-                return Ok(FindBestMatchOutcome::Backpressure {
-                    reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens,
-                });
-            }
             Err(KvSchedulerError::QueueRejected(rejection)) => {
                 return Ok(FindBestMatchOutcome::QueueRejected { rejection });
             }
@@ -643,13 +627,6 @@ where
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            FindBestMatchOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => Err(anyhow::anyhow!(
-                "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
-            )),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
     }
@@ -1074,15 +1051,6 @@ where
                         worker_id: worker.worker_id,
                         dp_rank: worker.dp_rank,
                         overlap_blocks,
-                    },
-                    Ok(FindBestMatchOutcome::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    }) => RouterResponse::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
                     },
                     Ok(FindBestMatchOutcome::QueueRejected { rejection }) => {
                         RouterResponse::QueueRejected { rejection }

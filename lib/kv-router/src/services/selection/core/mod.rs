@@ -401,7 +401,6 @@ impl SelectionCore {
             slots,
             workers_rx,
             profile,
-            crate::config::RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
             None,

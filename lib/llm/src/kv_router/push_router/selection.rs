@@ -9,11 +9,7 @@ use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
     scheduling::{RoutingEligibility, WorkerEligibilityError},
 };
-use dynamo_runtime::{
-    dynamo_nvtx_range,
-    error::{DynamoError, ErrorType},
-    pipeline::Error,
-};
+use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
     kv_router::{
@@ -108,17 +104,6 @@ impl KvPushRouter {
                 routing_hashes,
                 scheduler_tracked: args.scheduler_tracked,
             }),
-            FindBestMatchOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => Err(DynamoError::builder()
-                .error_type(ErrorType::ResourceExhausted)
-                .message(format!(
-                    "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
-                ))
-                .build()
-                .into()),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
     }

@@ -45,8 +45,7 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         KvSchedulerError::NoEndpoints
         | KvSchedulerError::SubscriberShutdown
         | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::Backpressure { .. }
-        | KvSchedulerError::AllEligibleWorkersOverloaded
+        KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,

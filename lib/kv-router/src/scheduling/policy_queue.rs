@@ -15,6 +15,7 @@ pub struct QueueSnapshot {
     pub raw_isl_tokens: usize,
     pub cached_tokens: usize,
     pub uncached_tokens: usize,
+    pub scheduling_cost_tokens: usize,
 }
 
 impl QueueSnapshot {
@@ -23,7 +24,8 @@ impl QueueSnapshot {
         Self {
             raw_isl_tokens,
             cached_tokens,
-            uncached_tokens: raw_isl_tokens.saturating_sub(cached_tokens).max(1),
+            uncached_tokens: raw_isl_tokens.saturating_sub(cached_tokens),
+            scheduling_cost_tokens: raw_isl_tokens.saturating_sub(cached_tokens).max(1),
         }
     }
 }
@@ -203,7 +205,7 @@ impl<T> PolicyQueue<T> {
         let policy_score = match class.config.queue_policy {
             RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
             RouterQueuePolicy::Wspt => {
-                (1.0 + priority_jump.max(0.0)) / snapshot.uncached_tokens as f64
+                (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
             }
             RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
         };
@@ -246,11 +248,11 @@ impl<T> PolicyQueue<T> {
             }
 
             self.dispatchable[class_index] = true;
-            if front.snapshot.uncached_tokens <= class.deficit {
+            if front.snapshot.scheduling_cost_tokens <= class.deficit {
                 return Some(self.pop_class(class_index));
             }
             class.deficit = class.deficit.saturating_add(class.config.quantum);
-            if front.snapshot.uncached_tokens <= class.deficit {
+            if front.snapshot.scheduling_cost_tokens <= class.deficit {
                 return Some(self.pop_class(class_index));
             }
         }
@@ -264,7 +266,7 @@ impl<T> PolicyQueue<T> {
                     return None;
                 }
                 let class = &self.classes[class_index];
-                let cost = class.pending.peek()?.snapshot.uncached_tokens;
+                let cost = class.pending.peek()?.snapshot.scheduling_cost_tokens;
                 let missing = cost.saturating_sub(class.deficit);
                 Some(missing.div_ceil(class.config.quantum))
             })
@@ -287,7 +289,7 @@ impl<T> PolicyQueue<T> {
                 && class
                     .pending
                     .peek()
-                    .is_some_and(|entry| entry.snapshot.uncached_tokens <= class.deficit)
+                    .is_some_and(|entry| entry.snapshot.scheduling_cost_tokens <= class.deficit)
             {
                 return Some(self.pop_class(class_index));
             }
@@ -305,7 +307,9 @@ impl<T> PolicyQueue<T> {
     fn pop_class(&mut self, class_index: usize) -> PolicyQueueEntry<T> {
         let class = &mut self.classes[class_index];
         let entry = class.pending.pop().expect("policy class front vanished");
-        class.deficit = class.deficit.saturating_sub(entry.snapshot.uncached_tokens);
+        class.deficit = class
+            .deficit
+            .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
         if class.pending.is_empty() {
@@ -314,7 +318,7 @@ impl<T> PolicyQueue<T> {
         } else if class
             .pending
             .peek()
-            .is_some_and(|next| next.snapshot.uncached_tokens <= class.deficit)
+            .is_some_and(|next| next.snapshot.scheduling_cost_tokens <= class.deficit)
         {
             self.next_class = class_index;
         } else {
@@ -405,6 +409,13 @@ policy_classes:
         assert_eq!(rejection.current, 2);
         assert_eq!(queue.class_stats(0).raw_isl_tokens, 108);
         assert_eq!(queue.class_stats(0).cached_tokens, 104);
+    }
+
+    #[test]
+    fn exact_zero_uncached_tokens_use_unit_scheduling_cost() {
+        let snapshot = QueueSnapshot::new(32, 32);
+        assert_eq!(snapshot.uncached_tokens, 0);
+        assert_eq!(snapshot.scheduling_cost_tokens, 1);
     }
 
     #[test]

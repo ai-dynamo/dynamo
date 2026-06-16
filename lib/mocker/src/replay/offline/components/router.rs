@@ -237,15 +237,23 @@ impl OfflineReplayRouter {
     ) -> Result<RouterEffects> {
         let pending = self.build_pending_request(request, replay_hashes)?;
         let decay_now = self.decay_now(now_ms);
-        let class_index = self
+        let mut snapshot = None;
+        let explicit_class_index = self
             .profile
-            .resolve_class_index(pending.policy_class.as_deref());
+            .explicit_class_index(pending.policy_class.as_deref());
+        if explicit_class_index.is_none() && self.profile.uses_uncached_isl_classification() {
+            snapshot = Some(self.snapshot_for(&pending));
+        }
+        let class_index = self.profile.resolve_class_index(
+            pending.policy_class.as_deref(),
+            snapshot.map_or(0, |snapshot| snapshot.uncached_tokens),
+        );
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
 
         if should_queue {
-            let snapshot = self.snapshot_for(&pending);
+            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
             self.pending
@@ -811,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_classes_and_model_selection_use_shared_replay_queue_logic() {
+    fn policy_mapping_and_model_selection_use_shared_replay_queue_logic() {
         let path =
             std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
         std::fs::write(
@@ -824,6 +832,11 @@ policy_classes:
 models:
   replay-model:
     default_policy_class: latency
+    uncached_isl_policy_class_tiers:
+      - min_tokens: 0
+        policy_class: latency
+      - min_tokens: 32
+        policy_class: batch
     policy_classes:
       - name: latency
         quantum: 1
@@ -854,31 +867,44 @@ models:
             1
         );
 
-        let mut batch = request(2, 2);
-        batch.policy_class = Some("batch".to_string());
+        let mapped_batch = request(2, 2);
         assert_eq!(
             router
-                .on_request_arrival(&batch, None, 0.0)
+                .on_request_arrival(&mapped_batch, None, 0.0)
                 .unwrap()
                 .admissions
                 .len(),
             1,
-            "batch class should use its own higher busy threshold"
+            "uncached ISL should map to the batch class and use its higher busy threshold"
         );
 
-        let mut queued = request(3, 3);
-        queued.policy_class = Some("latency".to_string());
+        let mapped_latency = request_with_priorities(3, 3, 16, 0, 0);
         assert!(
             router
-                .on_request_arrival(&queued, None, 0.0)
+                .on_request_arrival(&mapped_latency, None, 0.0)
                 .unwrap()
                 .admissions
-                .is_empty()
+                .is_empty(),
+            "small uncached ISL should map to the latency queue"
         );
 
-        let mut rejected = request(4, 4);
-        rejected.policy_class = Some("latency".to_string());
-        let error = router.on_request_arrival(&rejected, None, 0.0).unwrap_err();
+        let mut unknown_batch = request(4, 4);
+        unknown_batch.policy_class = Some("unknown".to_string());
+        assert_eq!(
+            router
+                .on_request_arrival(&unknown_batch, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1,
+            "unknown headers should fall through to automatic mapping"
+        );
+
+        let mut explicit_latency = request(5, 5);
+        explicit_latency.policy_class = Some("latency".to_string());
+        let error = router
+            .on_request_arrival(&explicit_latency, None, 0.0)
+            .unwrap_err();
         let rejection = error
             .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
             .expect("replay should preserve the typed queue rejection");
