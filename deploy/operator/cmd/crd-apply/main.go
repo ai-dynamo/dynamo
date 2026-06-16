@@ -151,8 +151,11 @@ func configureConversionWebhookService(
 		return fmt.Errorf("conversion webhook service namespace is required")
 	}
 
+	// Override service coordinates because these might be customized through Helm values.
 	crd.Spec.Conversion.Webhook.ClientConfig.Service.Name = serviceName
 	crd.Spec.Conversion.Webhook.ClientConfig.Service.Namespace = serviceNamespace
+
+	// The main operator process patches caBundle after certificate setup.
 	crd.Spec.Conversion.Webhook.ClientConfig.CABundle = nil
 	return nil
 }

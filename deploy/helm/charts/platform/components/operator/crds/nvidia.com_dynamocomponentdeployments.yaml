@@ -20179,10 +20179,10 @@ spec:
     strategy: Webhook
     webhook:
       clientConfig:
-        # CA will be patched in by the Dynamo operator
+        # CA will be patched in by the Dynamo operator or other means, depending on cert mode auto or manual
         service:
-          namespace: system
-          name: webhook-service
+          namespace: dynamo-system
+          name: dynamo-operator-webhook-service
           path: /convert
       conversionReviewVersions:
         - v1
