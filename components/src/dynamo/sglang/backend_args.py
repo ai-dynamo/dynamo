@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# TODO(DIS-2240): Remove deprecated multimodal flags across engine
+
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
 import argparse
