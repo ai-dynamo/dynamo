@@ -275,7 +275,7 @@ func specToGroveTopologyConstraint(tc *v1beta1.SpecTopologyConstraint) *grovev1a
 // pcsgMinAvailable returns the PCSG-level MinAvailable for a service.
 // If the user set MinAvailable on the DGD service spec, that value is used;
 // otherwise defaults to 1 for backwards compatibility.
-func pcsgMinAvailable(component *v1alpha1.DynamoComponentDeploymentSharedSpec) *int32 {
+func pcsgMinAvailable(component *v1beta1.DynamoComponentDeploymentSharedSpec) *int32 {
 	if component.MinAvailable != nil {
 		return component.MinAvailable
 	}

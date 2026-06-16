@@ -8300,7 +8300,7 @@ func TestGenerateGrovePodCliqueSet_PCSG_MinAvailable_UserOverride(t *testing.T) 
 
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd,
+		betaDGD(t, dgd),
 		&configv1alpha1.OperatorConfiguration{
 			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
@@ -8342,7 +8342,7 @@ func TestGenerateGrovePodCliqueSet_PCSG_MinAvailable_DefaultsToOne(t *testing.T)
 
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd,
+		betaDGD(t, dgd),
 		&configv1alpha1.OperatorConfiguration{
 			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},

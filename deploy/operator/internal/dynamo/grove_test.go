@@ -1192,22 +1192,22 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 func TestPcsgMinAvailable(t *testing.T) {
 	tests := []struct {
 		name     string
-		spec     *v1alpha1.DynamoComponentDeploymentSharedSpec
+		spec     *v1beta1.DynamoComponentDeploymentSharedSpec
 		expected int32
 	}{
 		{
 			name:     "nil MinAvailable defaults to 1",
-			spec:     &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			spec:     &v1beta1.DynamoComponentDeploymentSharedSpec{},
 			expected: 1,
 		},
 		{
 			name:     "user-specified MinAvailable",
-			spec:     &v1alpha1.DynamoComponentDeploymentSharedSpec{MinAvailable: ptr.To(int32(3))},
+			spec:     &v1beta1.DynamoComponentDeploymentSharedSpec{MinAvailable: ptr.To(int32(3))},
 			expected: 3,
 		},
 		{
 			name:     "MinAvailable set to 1 explicitly",
-			spec:     &v1alpha1.DynamoComponentDeploymentSharedSpec{MinAvailable: ptr.To(int32(1))},
+			spec:     &v1beta1.DynamoComponentDeploymentSharedSpec{MinAvailable: ptr.To(int32(1))},
 			expected: 1,
 		},
 	}
