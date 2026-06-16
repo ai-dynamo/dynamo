@@ -27,6 +27,7 @@ UTC = dt.timezone.utc
 API_ROOT = "https://api.github.com"
 DEFAULT_REPO = os.environ.get("GITHUB_REPOSITORY", "ai-dynamo/dynamo")
 DEFAULT_ARTIFACT_PREFIXES = ("junit-", "test-results-")
+ARTIFACT_JOB_RE = re.compile(r"[-_](?P<run_id>\d+)[-_](?P<job_id>\d+)$")
 DEFAULT_PRESETS = {
     "nightly": {
         "workflow": "Nightly CI Pipeline",
@@ -90,6 +91,13 @@ class JUnitStats:
     skipped: int
     seconds: float
     failed_tests: tuple[str, ...]
+    source_url: str
+
+
+@dataclasses.dataclass(frozen=True)
+class FailureExample:
+    date: str
+    url: str
 
 
 class GithubClient:
@@ -308,6 +316,16 @@ def artifact_matches(name: str, prefixes: tuple[str, ...]) -> bool:
     return any(name.startswith(prefix) for prefix in prefixes)
 
 
+def artifact_source_url(repo: str, run: RunInfo, artifact_name: str) -> str:
+    match = ARTIFACT_JOB_RE.search(artifact_name)
+    if match and int(match.group("run_id")) == run.run_id:
+        return (
+            f"https://github.com/{repo}/actions/runs/{run.run_id}"
+            f"/job/{match.group('job_id')}"
+        )
+    return run.url or f"https://github.com/{repo}/actions/runs/{run.run_id}"
+
+
 def download_artifact_zip(
     client: GithubClient,
     artifact: dict[str, object],
@@ -359,11 +377,37 @@ def testcase_name(testcase: ET.Element) -> str:
     return "<unnamed testcase>"
 
 
+def is_parent_failure(candidate: str, failed_tests: set[str]) -> bool:
+    return any(
+        other != candidate
+        and (other.startswith(f"{candidate}.") or other.startswith(f"{candidate}["))
+        for other in failed_tests
+    )
+
+
+def filter_aggregate_failures(
+    failed_tests: list[str], artifact_name: str, include_aggregate_failures: bool
+) -> tuple[str, ...]:
+    if include_aggregate_failures:
+        return tuple(failed_tests)
+    if artifact_name.startswith("junit-"):
+        return ()
+
+    failed_set = set(failed_tests)
+    return tuple(
+        failed_test
+        for failed_test in failed_tests
+        if not is_parent_failure(failed_test, failed_set)
+    )
+
+
 def parse_junit_xml(
     xml_bytes: bytes,
     run: RunInfo,
     artifact_name: str,
     xml_path: str,
+    source_url: str,
+    include_aggregate_failures: bool,
 ) -> JUnitStats | None:
     try:
         root = ET.fromstring(xml_bytes)
@@ -423,7 +467,10 @@ def parse_junit_xml(
         errors=errors,
         skipped=skipped,
         seconds=seconds,
-        failed_tests=tuple(failed_tests),
+        failed_tests=filter_aggregate_failures(
+            failed_tests, artifact_name, include_aggregate_failures
+        ),
+        source_url=source_url,
     )
 
 
@@ -431,6 +478,8 @@ def parse_artifact(
     zip_bytes: bytes,
     run: RunInfo,
     artifact_name: str,
+    source_url: str,
+    include_aggregate_failures: bool,
 ) -> list[JUnitStats]:
     try:
         archive = zipfile.ZipFile(io.BytesIO(zip_bytes))
@@ -445,7 +494,14 @@ def parse_artifact(
         if member.endswith("/") or not member.lower().endswith(".xml"):
             continue
         with archive.open(member) as file:
-            parsed = parse_junit_xml(file.read(), run, artifact_name, member)
+            parsed = parse_junit_xml(
+                file.read(),
+                run,
+                artifact_name,
+                member,
+                source_url,
+                include_aggregate_failures,
+            )
         if parsed:
             stats.append(parsed)
     return stats
@@ -496,7 +552,15 @@ def collect_stats(
                         file=sys.stderr,
                     )
                     continue
-                all_stats.extend(parse_artifact(zip_bytes, run, name))
+                all_stats.extend(
+                    parse_artifact(
+                        zip_bytes,
+                        run,
+                        name,
+                        artifact_source_url(client.repo, run, name),
+                        args.include_aggregate_failures,
+                    )
+                )
 
     return all_runs, all_stats
 
@@ -583,6 +647,7 @@ def print_ascii_report(
     runs: list[RunInfo],
     stats: list[JUnitStats],
     top: int,
+    failure_examples: int,
 ) -> None:
     buckets = build_buckets(runs, stats)
     print(f"Repo: {repo}")
@@ -612,7 +677,7 @@ def print_ascii_report(
             f"{conclusion_summary(bucket['conclusions'])}"
         )
 
-    print_top_flakes(stats, top)
+    print_top_flakes(stats, top, failure_examples)
 
 
 def flake_history(
@@ -620,28 +685,36 @@ def flake_history(
 ) -> tuple[
     collections.Counter[str],
     dict[str, collections.Counter[str]],
-    dict[str, collections.Counter[str]],
+    dict[str, list[FailureExample]],
 ]:
     counts: collections.Counter[str] = collections.Counter()
     by_day: dict[str, collections.Counter[str]] = collections.defaultdict(
         collections.Counter
     )
-    by_workflow: dict[str, collections.Counter[str]] = collections.defaultdict(
-        collections.Counter
-    )
+    examples: dict[str, list[FailureExample]] = collections.defaultdict(list)
+    seen_examples: dict[str, set[tuple[str, str]]] = collections.defaultdict(set)
 
-    for item in stats:
+    for item in sorted(stats, key=lambda stat: stat.run_created_at, reverse=True):
         day = item.run_created_at.date().isoformat()
         for failed_test in item.failed_tests:
             counts[failed_test] += 1
             by_day[failed_test][day] += 1
-            by_workflow[failed_test][item.workflow] += 1
+            example_key = (day, item.source_url)
+            if example_key not in seen_examples[failed_test]:
+                examples[failed_test].append(FailureExample(day, item.source_url))
+                seen_examples[failed_test].add(example_key)
 
-    return counts, by_day, by_workflow
+    return counts, by_day, examples
 
 
-def print_top_flakes(stats: list[JUnitStats], top: int) -> None:
-    counts, by_day, by_workflow = flake_history(stats)
+def top_flake_items(
+    counts: collections.Counter[str], top: int
+) -> list[tuple[str, int]]:
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:top]
+
+
+def print_top_flakes(stats: list[JUnitStats], top: int, failure_examples: int) -> None:
+    counts, _by_day, examples = flake_history(stats)
 
     print()
     if not counts:
@@ -649,19 +722,19 @@ def print_top_flakes(stats: list[JUnitStats], top: int) -> None:
         return
 
     print(f"Top test flakes by failure/error occurrence over this window (top {top}):")
-    for rank, (test_name, count) in enumerate(counts.most_common(top), 1):
-        days = ", ".join(f"{day}:{n}" for day, n in sorted(by_day[test_name].items()))
-        workflows = ", ".join(
-            f"{workflow}:{n}" for workflow, n in sorted(by_workflow[test_name].items())
-        )
-        print(f"{rank:>2}. {count:>4}  {test_name}")
-        print(f"    workflows: {workflows}")
-        print(f"    days: {days}")
+    top_items = top_flake_items(counts, top)
+    for rank, (test_name, count) in enumerate(top_items, 1):
+        print(f"{rank}. {count} {test_name}")
+        print()
+        for example in examples[test_name][:failure_examples]:
+            print(f"           {example.date}: {example.url}")
+        if rank != len(top_items):
+            print()
 
 
 def write_flake_svg(path: pathlib.Path, stats: list[JUnitStats], top: int) -> None:
-    counts, by_day, by_workflow = flake_history(stats)
-    top_items = counts.most_common(top)
+    counts, by_day, _examples = flake_history(stats)
+    top_items = top_flake_items(counts, top)
     dates = sorted({item.run_created_at.date().isoformat() for item in stats})
 
     if not dates or not top_items:
@@ -699,15 +772,12 @@ def write_flake_svg(path: pathlib.Path, stats: list[JUnitStats], top: int) -> No
 
     for row, (test_name, total) in enumerate(top_items):
         y = top_margin + row * cell_height
-        workflows = ", ".join(
-            f"{workflow}:{n}" for workflow, n in sorted(by_workflow[test_name].items())
-        )
         label = f"{row + 1}. {test_name}"
         visible_label = shorten(label, 74)
         elements.append(
             f'<text x="24" y="{y + 18}" font-size="11" fill="#111">'
             f"{html.escape(visible_label)}"
-            f"<title>{html.escape(label)} total={total} workflows={html.escape(workflows)}</title></text>"
+            f"<title>{html.escape(label)} total={total}</title></text>"
         )
         total_width = max(2, (total / max_total) * 72)
         elements.append(
@@ -726,8 +796,7 @@ def write_flake_svg(path: pathlib.Path, stats: list[JUnitStats], top: int) -> No
             elements.append(
                 f'<rect x="{x + 6:.1f}" y="{y + 4}" width="{cell_width - 12}" height="{cell_height - 8}" '
                 f'rx="2" fill="{color}" stroke="#ffffff">'
-                f"<title>{html.escape(label)}&#10;{date}: {count}"
-                f"&#10;workflows: {html.escape(workflows)}</title></rect>"
+                f"<title>{html.escape(label)}&#10;{date}: {count}</title></rect>"
             )
             elements.append(
                 f'<text x="{x + cell_width / 2:.1f}" y="{y + 19}" font-size="10" '
@@ -831,6 +900,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--top", type=int, default=15, help="Number of failing testcases to show."
     )
+    parser.add_argument(
+        "--failure-examples",
+        type=int,
+        default=5,
+        help="Number of example failure job URLs to show per top testcase.",
+    )
+    parser.add_argument(
+        "--include-aggregate-failures",
+        action="store_true",
+        help="Include synthetic job-level and parent aggregate failures in top flakes.",
+    )
     return parser.parse_args()
 
 
@@ -870,7 +950,7 @@ def main() -> int:
 
     queries = workflow_queries(args)
     runs, stats = collect_stats(client, queries, cutoff, args)
-    print_ascii_report(args.repo, cutoff, runs, stats, args.top)
+    print_ascii_report(args.repo, cutoff, runs, stats, args.top, args.failure_examples)
 
     if args.plot:
         write_flake_svg(args.plot, stats, args.top)
