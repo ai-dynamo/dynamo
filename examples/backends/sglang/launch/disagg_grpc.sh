@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Disaggregated prefill/decode via the Rust bridge to SMG's SGLang scheduler gRPC service.
-# Five processes: dynamo.frontend, sglang prefill, sglang decode, bridge prefill, bridge decode.
+# Disaggregated prefill/decode via SGLang's embedded Dynamo backend.
+# Three processes: dynamo.frontend, sglang prefill, sglang decode.
 # GPUs: 2
 
 set -e
@@ -23,7 +23,7 @@ DECODE_SYSTEM_PORT="${DECODE_SYSTEM_PORT:-8082}"
 PREFILL_COMPONENT="${PREFILL_COMPONENT:-prefill}"
 DECODE_COMPONENT="${DECODE_COMPONENT:-backend}"
 
-print_launch_banner "Launching Disaggregated Serving (gRPC bridge, 2 GPUs)" "$MODEL" "$HTTP_PORT"
+print_launch_banner "Launching Disaggregated SGLang gRPC Serving (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
 FRONTEND_MODEL_PATH="$(resolve_local_model_dir "$MODEL")"
 
@@ -34,12 +34,18 @@ python3 -m dynamo.frontend \
 for role in prefill decode; do
     if [ "$role" = "prefill" ]; then
         gpu=0; grpc_port=$PREFILL_GRPC_PORT
+        system_port=$PREFILL_SYSTEM_PORT
+        component=$PREFILL_COMPONENT
     else
         gpu=1; grpc_port=$DECODE_GRPC_PORT
+        system_port=$DECODE_SYSTEM_PORT
+        component=$DECODE_COMPONENT
     fi
     CUDA_VISIBLE_DEVICES=$gpu \
+    DYN_SYSTEM_PORT="$system_port" \
+    DYN_COMPONENT="$component" \
     python3 -m sglang.launch_server \
-        --grpc-mode \
+        --enable-dynamo \
         --port "$grpc_port" \
         --model-path "$MODEL" \
         --tp 1 \
@@ -51,25 +57,5 @@ for role in prefill decode; do
         --disaggregation-transfer-backend nixl \
         --disable-piecewise-cuda-graph &
 done
-
-echo "Waiting for SGLang gRPC (:$PREFILL_GRPC_PORT, :$DECODE_GRPC_PORT)..."
-for port in "$PREFILL_GRPC_PORT" "$DECODE_GRPC_PORT"; do
-    wait_for_port "$port" 600 \
-        || { echo "ERROR: SGLang gRPC :$port did not open within 600s" >&2; exit 1; }
-done
-
-DYN_SYSTEM_PORT="$PREFILL_SYSTEM_PORT" \
-DYN_SMG_BOOTSTRAP_ROOM="${DYN_SMG_BOOTSTRAP_ROOM:-1}" \
-python3 -m dynamo.sglang_grpc \
-    --component "$PREFILL_COMPONENT" \
-    --disaggregation-mode prefill \
-    --sglang-grpc-endpoint "http://127.0.0.1:$PREFILL_GRPC_PORT" &
-
-DYN_SYSTEM_PORT="$DECODE_SYSTEM_PORT" \
-DYN_SMG_BOOTSTRAP_ROOM="${DYN_SMG_BOOTSTRAP_ROOM:-1}" \
-python3 -m dynamo.sglang_grpc \
-    --component "$DECODE_COMPONENT" \
-    --disaggregation-mode decode \
-    --sglang-grpc-endpoint "http://127.0.0.1:$DECODE_GRPC_PORT" &
 
 wait_any_exit

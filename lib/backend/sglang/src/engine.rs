@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bridge to Shepherd Model Gateway's SGLang scheduler gRPC service. Forwards
+//! Dynamo SGLang backend for Shepherd Model Gateway's scheduler gRPC service. Forwards
 //! `PreprocessedRequest` to SMG's `Generate` RPC and streams tokens back.
 
 use std::sync::Arc;
@@ -35,14 +35,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Cap on the exponential backoff between HealthCheck polls during startup.
 const HEALTH_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// Emit an info-level "still waiting" log once per this many HealthCheck
-/// failures so ops can see the bridge is alive and waiting on SGLang.
+/// failures so ops can see the backend is alive and waiting on SGLang.
 const HEALTH_LOG_EVERY_N_ATTEMPTS: u32 = 20;
 /// Enable deterministic remapping of Dynamo's 63-bit bootstrap rooms into
 /// SMG v1.5's signed 32-bit `bootstrap_room` field.
 const SMG_BOOTSTRAP_ROOM_ENV: &str = "DYN_SMG_BOOTSTRAP_ROOM";
 const SMG_BOOTSTRAP_ROOM_MAX: u64 = i32::MAX as u64;
 
-pub struct SglangBridge {
+pub struct SglangBackend {
     grpc_endpoint: String,
     /// Discovered from SGLang's `GetServerInfo` in `start()`; read by
     /// `generate()` to dispatch prefill vs decode.
@@ -56,7 +56,7 @@ pub struct SglangBridge {
     smg_bootstrap_room_compat: bool,
 }
 
-impl SglangBridge {
+impl SglangBackend {
     /// Parse from an explicit argv (the PyO3 entry point).
     pub fn from_argv(argv: Vec<String>) -> Result<(Self, WorkerConfig), DynamoError> {
         Self::build(<Args as clap::Parser>::try_parse_from(argv))
@@ -64,7 +64,7 @@ impl SglangBridge {
 
     fn build(parsed: Result<Args, clap::Error>) -> Result<(Self, WorkerConfig), DynamoError> {
         let args = parsed.map_err(|e| invalid_arg(e.to_string()))?;
-        let engine = SglangBridge {
+        let engine = SglangBackend {
             grpc_endpoint: args.sglang_grpc_endpoint,
             disaggregation_mode: OnceCell::new(),
             bootstrap: OnceCell::new(),
@@ -338,7 +338,7 @@ impl SglangBridge {
 }
 
 #[async_trait]
-impl LLMEngine for SglangBridge {
+impl LLMEngine for SglangBackend {
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         let channel = Endpoint::from_shared(self.grpc_endpoint.clone())
             .map_err(|e| invalid_arg(format!("invalid grpc endpoint: {e}")))?
@@ -458,7 +458,7 @@ impl LLMEngine for SglangBridge {
             kv_events_enabled = info.kv_events.is_some(),
             dp_size,
             smg_bootstrap_room_compat = self.smg_bootstrap_room_compat,
-            "sglang_bridge connected"
+            "sglang backend connected"
         );
 
         let context_length = u32::try_from(model_info.max_context_length)
@@ -679,9 +679,9 @@ mod tests {
     }
 
     #[test]
-    fn bridge_args_set_worker_model_name_for_mdc() {
-        let (_engine, config) = SglangBridge::from_argv(vec![
-            "dynamo-sglang-bridge".to_string(),
+    fn backend_args_set_worker_model_name_for_mdc() {
+        let (_engine, config) = SglangBackend::from_argv(vec![
+            "dynamo-sglang".to_string(),
             "--model-name".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
         ])
@@ -691,9 +691,9 @@ mod tests {
     }
 
     #[test]
-    fn bridge_args_set_served_model_name_for_registration() {
-        let (_engine, config) = SglangBridge::from_argv(vec![
-            "dynamo-sglang-bridge".to_string(),
+    fn backend_args_set_served_model_name_for_registration() {
+        let (_engine, config) = SglangBackend::from_argv(vec![
+            "dynamo-sglang".to_string(),
             "--model-name".to_string(),
             "/models/qwen".to_string(),
             "--served-model-name".to_string(),

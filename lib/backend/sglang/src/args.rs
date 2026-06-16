@@ -5,8 +5,8 @@ use dynamo_backend_common::CommonArgs;
 
 #[derive(clap::Parser, Debug)]
 #[command(
-    name = "dynamo-sglang-bridge",
-    about = "Bridge to SMG's SGLang scheduler gRPC service."
+    name = "dynamo-sglang",
+    about = "Dynamo SGLang backend for SMG's scheduler gRPC service."
 )]
 pub struct Args {
     #[command(flatten)]

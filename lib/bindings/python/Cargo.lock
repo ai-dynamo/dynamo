@@ -2361,7 +2361,7 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-protocols",
  "dynamo-runtime",
- "dynamo-sglang-bridge",
+ "dynamo-sglang",
  "futures",
  "once_cell",
  "opentelemetry",
@@ -2480,16 +2480,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-sglang-bridge"
+name = "dynamo-sglang"
 version = "1.3.0"
 dependencies = [
- "anyhow",
  "async-stream",
  "async-trait",
  "clap",
  "dynamo-backend-common",
  "futures",
- "libc",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rand 0.9.4",

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated serving via the Rust bridge to SMG's SGLang scheduler gRPC service.
-# Three processes: dynamo.frontend, sglang.launch_server, dynamo.sglang_grpc.
+# Aggregated serving via SGLang's embedded Dynamo backend.
+# Two processes: dynamo.frontend, sglang.launch_server.
 # GPUs: 1
 
 set -e
@@ -17,7 +17,7 @@ MODEL="Qwen/Qwen3-0.6B"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-40000}"
 
-print_launch_banner "Launching Aggregated Serving (gRPC bridge)" "$MODEL" "$HTTP_PORT"
+print_launch_banner "Launching Aggregated SGLang gRPC Serving" "$MODEL" "$HTTP_PORT"
 
 # dynamo.frontend's preprocessor needs a local dir to load the tokenizer from.
 FRONTEND_MODEL_PATH="$(resolve_local_model_dir "$MODEL")"
@@ -26,21 +26,14 @@ python3 -m dynamo.frontend \
     --model-name "$MODEL" \
     --model-path "$FRONTEND_MODEL_PATH" &
 
+DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
 python3 -m sglang.launch_server \
-    --grpc-mode \
+    --enable-dynamo \
     --port "$SGLANG_GRPC_PORT" \
     --model-path "$MODEL" \
     --tp 1 \
     --page-size 16 \
     --trust-remote-code \
     --skip-tokenizer-init &
-
-echo "Waiting for SGLang gRPC (:$SGLANG_GRPC_PORT)..."
-wait_for_port "$SGLANG_GRPC_PORT" 600 \
-    || { echo "ERROR: SGLang gRPC :$SGLANG_GRPC_PORT did not open within 600s" >&2; exit 1; }
-
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
-python3 -m dynamo.sglang_grpc \
-    --sglang-grpc-endpoint "http://127.0.0.1:$SGLANG_GRPC_PORT" &
 
 wait_any_exit

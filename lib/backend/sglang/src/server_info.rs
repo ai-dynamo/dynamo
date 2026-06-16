@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parse the subset of SMG's `GetServerInfo` fields the bridge needs to
+//! Parse the subset of SMG's `GetServerInfo` fields the backend needs to
 //! populate Dynamo's MDC.
 
 use dynamo_backend_common::DisaggregationMode;
@@ -28,7 +28,7 @@ pub struct SglangServerInfo {
     pub kv_events: Option<KvEventsConfig>,
 }
 
-/// Subset of SGLang's `KVEventsConfig` the bridge cares about. DP rank N
+/// Subset of SGLang's `KVEventsConfig` the backend cares about. DP rank N
 /// connects at `base_port + N` (see [`offset_endpoint_port`]).
 #[derive(Debug, Clone)]
 pub struct KvEventsConfig {
@@ -150,7 +150,7 @@ fn parse_kv_events_config(raw: &str) -> Option<KvEventsConfig> {
 
 /// Mirror of SGLang's `ZmqEventPublisher.offset_endpoint_port`. DP rank N
 /// connects at `base_port + N`. `tcp://*:5557` + rank 1 → `tcp://*:5558`.
-/// The bridge always shares a pod with SGLang, so we only need `tcp://`.
+/// This backend always shares a pod with SGLang, so we only need `tcp://`.
 pub(crate) fn offset_endpoint_port(endpoint: &str, dp_rank: u32) -> Option<String> {
     if dp_rank == 0 {
         return Some(endpoint.to_string());

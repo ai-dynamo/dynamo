@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-sglang-bridge"
+name = "dynamo-sglang"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Dynamo sidecar bridge to Shepherd Model Gateway's SGLang scheduler gRPC service."
+description = "Dynamo SGLang backend for Shepherd Model Gateway's scheduler gRPC service."
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
