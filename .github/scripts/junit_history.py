@@ -727,7 +727,7 @@ def print_top_flakes(stats: list[JUnitStats], top: int, failure_examples: int) -
         print(f"{rank}. {count} {test_name}")
         print()
         for example in examples[test_name][:failure_examples]:
-            print(f"           {example.date}: {example.url}")
+            print(f"   {example.date}: {example.url}")
         if rank != len(top_items):
             print()
 
