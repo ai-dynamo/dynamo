@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeMap, sync::OnceLock};
+use std::{collections::HashMap, sync::OnceLock};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -14,12 +14,14 @@ use dynamo_runtime::transports::event_plane::EventPublisher;
 
 use crate::kv_router::MULTIMODAL_EMBEDDING_CACHE_SUBJECT;
 
+// Cache deltas are routing hints. Bound the queue so a slow event plane cannot
+// grow memory without limit; if it fills, routing cache state may become stale.
+const CACHE_UPDATE_CHANNEL_CAPACITY: usize = 4096;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MultimodalEmbeddingCacheUpdate {
-    Delta {
-        added_keys: Vec<String>,
-        removed_keys: Vec<String>,
-    },
+pub struct MultimodalEmbeddingCacheUpdate {
+    pub added_keys: Vec<String>,
+    pub removed_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,8 +30,13 @@ pub struct MultimodalEmbeddingCacheEvent {
     pub update: MultimodalEmbeddingCacheUpdate,
 }
 
+enum CacheDeltaAction {
+    Added,
+    Removed,
+}
+
 pub struct MultimodalEmbeddingCachePublisher {
-    tx: OnceLock<mpsc::UnboundedSender<MultimodalEmbeddingCacheUpdate>>,
+    tx: OnceLock<mpsc::Sender<MultimodalEmbeddingCacheUpdate>>,
     cancellation_token: CancellationToken,
 }
 
@@ -43,7 +50,7 @@ impl MultimodalEmbeddingCachePublisher {
             return Ok(());
         }
 
-        self.publish_update(MultimodalEmbeddingCacheUpdate::Delta {
+        self.publish_update(MultimodalEmbeddingCacheUpdate {
             added_keys,
             removed_keys,
         })
@@ -60,7 +67,7 @@ impl MultimodalEmbeddingCachePublisher {
             MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
         )
         .await?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(CACHE_UPDATE_CHANNEL_CAPACITY);
         let cancellation_token = self.cancellation_token.clone();
 
         if self.tx.set(tx).is_err() {
@@ -79,8 +86,14 @@ impl MultimodalEmbeddingCachePublisher {
         let tx = self.tx.get().ok_or_else(|| {
             anyhow::anyhow!("multimodal embedding cache publisher not initialized")
         })?;
-        tx.send(update)
-            .map_err(|_| anyhow::anyhow!("multimodal embedding cache publisher channel closed"))
+        tx.try_send(update).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                anyhow::anyhow!("multimodal embedding cache publisher channel full")
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                anyhow::anyhow!("multimodal embedding cache publisher channel closed")
+            }
+        })
     }
 }
 
@@ -103,7 +116,7 @@ async fn run_multimodal_embedding_cache_processor(
     publisher: EventPublisher,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<MultimodalEmbeddingCacheUpdate>,
+    mut rx: mpsc::Receiver<MultimodalEmbeddingCacheUpdate>,
 ) {
     loop {
         tokio::select! {
@@ -135,9 +148,9 @@ async fn run_multimodal_embedding_cache_processor(
 
 fn coalesce_delta_backlog(
     first_update: MultimodalEmbeddingCacheUpdate,
-    rx: &mut mpsc::UnboundedReceiver<MultimodalEmbeddingCacheUpdate>,
+    rx: &mut mpsc::Receiver<MultimodalEmbeddingCacheUpdate>,
 ) -> MultimodalEmbeddingCacheUpdate {
-    let mut net_delta = BTreeMap::new();
+    let mut net_delta = HashMap::new();
     merge_delta(&mut net_delta, first_update);
 
     while let Ok(update) = rx.try_recv() {
@@ -146,32 +159,27 @@ fn coalesce_delta_backlog(
 
     let mut added_keys = Vec::new();
     let mut removed_keys = Vec::new();
-    for (key, added) in net_delta {
-        if added {
-            added_keys.push(key);
-        } else {
-            removed_keys.push(key);
+    for (key, action) in net_delta {
+        match action {
+            CacheDeltaAction::Added => added_keys.push(key),
+            CacheDeltaAction::Removed => removed_keys.push(key),
         }
     }
 
-    MultimodalEmbeddingCacheUpdate::Delta {
+    MultimodalEmbeddingCacheUpdate {
         added_keys,
         removed_keys,
     }
 }
 
-fn merge_delta(net_delta: &mut BTreeMap<String, bool>, update: MultimodalEmbeddingCacheUpdate) {
-    match update {
-        MultimodalEmbeddingCacheUpdate::Delta {
-            added_keys,
-            removed_keys,
-        } => {
-            for key in added_keys {
-                net_delta.insert(key, true);
-            }
-            for key in removed_keys {
-                net_delta.insert(key, false);
-            }
-        }
+fn merge_delta(
+    net_delta: &mut HashMap<String, CacheDeltaAction>,
+    update: MultimodalEmbeddingCacheUpdate,
+) {
+    for key in update.added_keys {
+        net_delta.insert(key, CacheDeltaAction::Added);
+    }
+    for key in update.removed_keys {
+        net_delta.insert(key, CacheDeltaAction::Removed);
     }
 }
