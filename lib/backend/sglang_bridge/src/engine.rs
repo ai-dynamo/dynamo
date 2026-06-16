@@ -77,6 +77,7 @@ impl SglangBridge {
             namespace: args.common.namespace,
             component: args.common.component,
             endpoint: args.common.endpoint,
+            model_name: args.model_name.unwrap_or_default(),
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
             ..Default::default()
@@ -674,6 +675,18 @@ mod tests {
         let mapped = map_smg_bootstrap_room(room, dp_size, true).unwrap() as u64;
         assert!(mapped <= SMG_BOOTSTRAP_ROOM_MAX);
         assert_eq!(mapped % u64::from(dp_size), room % u64::from(dp_size));
+    }
+
+    #[test]
+    fn bridge_args_set_worker_model_name_for_mdc() {
+        let (_engine, config) = SglangBridge::from_argv(vec![
+            "dynamo-sglang-bridge".to_string(),
+            "--model-name".to_string(),
+            "Qwen/Qwen3-0.6B".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(config.model_name, "Qwen/Qwen3-0.6B");
     }
 }
 

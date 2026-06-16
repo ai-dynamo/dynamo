@@ -12,6 +12,10 @@ pub struct Args {
     #[command(flatten)]
     pub common: CommonArgs,
 
+    /// HF repo name or local model path used to build Dynamo's MDC.
+    #[arg(long, env = "DYN_MODEL_NAME")]
+    pub model_name: Option<String>,
+
     #[arg(
         long,
         env = "SGLANG_GRPC_ENDPOINT",
