@@ -7,6 +7,7 @@ import asyncio
 import logging
 import multiprocessing
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -37,6 +38,9 @@ def _fetch_model_process_main(remote_name: str, ignore_weights: bool) -> None:
         await fetch_model(remote_name, ignore_weights)
 
     asyncio.run(fetch_model_async())
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 async def fetch_model_in_subprocess(
