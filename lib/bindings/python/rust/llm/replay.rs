@@ -1618,6 +1618,19 @@ fn fpm_snapshots_to_json(
 /// calls `advance_to()` to run the simulation forward, collects FPM/traffic
 /// metrics, feeds them to the planner state machine, then calls
 /// `apply_scaling()` to resize worker pools.
+/// Reject a goodput SLA threshold that is not a finite, non-negative value;
+/// `None` (unset) is allowed and means "do not gate on this dimension".
+fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
+    if let Some(v) = value {
+        if !v.is_finite() || v < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "{name} must be a finite, non-negative value, got {v}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[pyclass(unsendable)]
 pub struct PlannerReplayBridge {
     handle: Option<dynamo_mocker::replay::PlannerReplayHandle>,
@@ -1645,6 +1658,9 @@ impl PlannerReplayBridge {
             Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
         let router_mode = parse_replay_router_mode(router_mode)?;
         let router_config = load_replay_router_config(router_config);
+        validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+        validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+        validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
         let sla = dynamo_mocker::replay::SlaThresholds {
             ttft_ms: sla_ttft_ms,
             itl_ms: sla_itl_ms,
@@ -1699,6 +1715,9 @@ impl PlannerReplayBridge {
         };
         let router_mode = parse_replay_router_mode(router_mode)?;
         let router_config = load_replay_router_config(router_config);
+        validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+        validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+        validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
         let sla = dynamo_mocker::replay::SlaThresholds {
             ttft_ms: sla_ttft_ms,
             itl_ms: sla_itl_ms,

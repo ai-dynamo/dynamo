@@ -44,13 +44,15 @@ pub struct TraceThroughputStats {
     pub total_throughput_tok_s: f64,
     /// Provisioned worker-time per role, in **worker-seconds**: the time-integral
     /// of the *provisioned* worker count over the whole simulated run. The
-    /// provisioned count is every worker physically holding a GPU — active +
-    /// starting-up + draining — so this captures the startup ramp and the
+    /// provisioned count is every worker physically holding a GPU (active +
+    /// starting-up + draining), so this captures the startup ramp and the
     /// scale-down drain tail, unlike a snapshot of the active/serving count.
-    /// Set by the runtime via [`TraceSimulationReport::with_worker_seconds`]
-    /// (0.0 until then). Multiply by GPUs-per-worker for GPU-seconds (÷3600 for
-    /// GPU-hours). Aggregated replay reports through `decode_worker_seconds`,
-    /// leaving `prefill_worker_seconds` at 0.0.
+    /// Populated on the collector by the runtime: `add_worker_seconds` accrues
+    /// the integral each clock advance (agg / disagg), and
+    /// `set_static_worker_count` covers the single-worker path; 0.0 otherwise.
+    /// Multiply by GPUs-per-worker for GPU-seconds (/3600 for GPU-hours).
+    /// Aggregated replay reports through `decode_worker_seconds`, leaving
+    /// `prefill_worker_seconds` at 0.0.
     pub prefill_worker_seconds: f64,
     pub decode_worker_seconds: f64,
 }

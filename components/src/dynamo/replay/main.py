@@ -525,7 +525,7 @@ def _run_planner_replay(
     result = adapter.run()
 
     # Surface true GPU-hours in the JSON report: the time-integrated provisioned
-    # worker-seconds (which already include the startup ramp and drain tail) ×
+    # worker-seconds (which already include the startup ramp and drain tail) x
     # the per-engine GPU count. This is ungated, unlike the diagnostics-only
     # `_cumulative_gpu_hours` (active-count based). Skipped when the per-engine
     # GPU counts are not configured — the raw *_worker_seconds remain in the
