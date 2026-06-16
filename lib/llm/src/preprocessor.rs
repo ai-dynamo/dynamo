@@ -721,12 +721,30 @@ impl OpenAIPreprocessor {
         // If omitted, allow generation up to the remaining context length. Responses requests
         // preserve omission so backend adapters can compute the dynamic cap from their
         // effective prompt length/tokenization.
+        //
+        // For multimodal requests the worker-bound `token_ids` still carry the
+        // UNEXPANDED image placeholders (one id per image), so their length
+        // understates the backend's real prompt length and would overshoot the
+        // cap into a context-length overflow. Prefer the MM-expanded prompt
+        // length (placeholders expanded to per-image token counts, matching the
+        // backend's processor) when the routing view is available; for pure
+        // text this equals `token_ids.len()`. If images are present but no
+        // expanded length is available, preserve omission and let the backend
+        // compute the cap from its own tokenization.
+        let has_images = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|m| m.get("image_url"))
+            .is_some_and(|v| !v.is_empty());
+        let effective_prompt_len = match preprocessed.mm_routing_info.as_ref() {
+            Some(mm) => Some(mm.expanded_prompt_len),
+            None if has_images => None,
+            None => Some(preprocessed.token_ids.len()),
+        };
         if preprocessed.stop_conditions.max_tokens.is_none()
-            && let Some(max_tokens) = Self::omitted_max_tokens_default(
-                preprocessed.token_ids.len(),
-                self.context_length,
-                options,
-            )
+            && let Some(prompt_len) = effective_prompt_len
+            && let Some(max_tokens) =
+                Self::omitted_max_tokens_default(prompt_len, self.context_length, options)
         {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
         }
@@ -1410,6 +1428,12 @@ impl OpenAIPreprocessor {
             }
         }
 
+        // Effective prompt length BEFORE block-padding: the real expanded token
+        // count the backend sees (image placeholders expanded to per-image
+        // counts). Captured here so consumers (e.g. the omitted-max_tokens cap)
+        // aren't inflated by the routing padding added below.
+        let expanded_prompt_len = expanded.len();
+
         // Pad to a whole multiple of kv_cache_block_size. The router's
         // compute_block_hash_for_seq only hashes whole blocks, so the partial
         // tail block doesn't influence routing either way; aligning the length
@@ -1436,6 +1460,7 @@ impl OpenAIPreprocessor {
         builder.mm_routing_info(Some(MmRoutingInfo {
             routing_token_ids: expanded,
             block_mm_infos: Vec::new(),
+            expanded_prompt_len,
         }));
         Ok(())
     }
