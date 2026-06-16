@@ -77,6 +77,23 @@ sha256:digest at install time:
 {{- end -}}
 
 {{/*
+Build an image reference, choosing the correct separator for the tag.
+
+A sha256 digest must be joined with "@" (repo@sha256:...); only a named tag
+uses ":". Hard-coding ":" produces an invalid "repo:sha256:..." reference when
+image.tag is a digest. Since values.yaml explicitly allows pinning to either a
+release tag or a sha256 digest, detect the digest form and switch separators.
+Per PR #9682 @sttts review (daemonset.yaml:64).
+
+Call with a dict, e.g.:
+    {{ include "power-agent.imageRef" (dict "repository" .Values.image.repository "tag" .Values.image.tag) }}
+*/}}
+{{- define "power-agent.imageRef" -}}
+{{- $sep := ternary "@" ":" (hasPrefix "sha256:" .tag) -}}
+{{- printf "%s%s%s" .repository $sep .tag -}}
+{{- end -}}
+
+{{/*
 Validate that production DaemonSet mode and in-cluster dev-pod mode are
 not both enabled, and that dev mode has a pinned nodeName. Surfaces at
 `helm install` / `helm template` time, not as two competing Pods at runtime.

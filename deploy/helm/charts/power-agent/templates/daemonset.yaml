@@ -61,7 +61,7 @@ spec:
       {{- end }}
       containers:
         - name: power-agent
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ include "power-agent.imageRef" (dict "repository" .Values.image.repository "tag" .Values.image.tag) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - python
