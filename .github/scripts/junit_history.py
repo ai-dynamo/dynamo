@@ -28,6 +28,7 @@ API_ROOT = "https://api.github.com"
 DEFAULT_REPO = os.environ.get("GITHUB_REPOSITORY", "ai-dynamo/dynamo")
 DEFAULT_ARTIFACT_PREFIXES = ("junit-", "test-results-")
 ARTIFACT_JOB_RE = re.compile(r"[-_](?P<run_id>\d+)[-_](?P<job_id>\d+)$")
+SYNTHETIC_FAILURE_NAMES = {"pytest.internal"}
 DEFAULT_PRESETS = {
     "nightly": {
         "workflow": "Nightly CI Pipeline",
@@ -397,7 +398,8 @@ def filter_aggregate_failures(
     return tuple(
         failed_test
         for failed_test in failed_tests
-        if not is_parent_failure(failed_test, failed_set)
+        if failed_test not in SYNTHETIC_FAILURE_NAMES
+        and not is_parent_failure(failed_test, failed_set)
     )
 
 
