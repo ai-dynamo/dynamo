@@ -34,7 +34,6 @@ const (
 	dgdCRDName                       = "dynamographdeployments.nvidia.com"
 	dcdCRDName                       = "dynamocomponentdeployments.nvidia.com"
 	dgdsaCRDName                     = "dynamographdeploymentscalingadapters.nvidia.com"
-	conversionWebhookPath            = "/convert"
 	defaultCABundlePollInterval      = 500 * time.Millisecond
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
@@ -399,7 +398,7 @@ func (i *CABundleInjector) patchCRDConversionWebhook(ctx context.Context, crdNam
 	}
 
 	original := crd.DeepCopy()
-	path := conversionWebhookPath
+	path := "/convert" //nolint:goconst
 	if caBundle == nil {
 		caBundle = existingConversionCABundle(crd)
 	}

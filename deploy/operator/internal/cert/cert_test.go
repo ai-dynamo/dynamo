@@ -418,7 +418,7 @@ func TestConfigureCRDConversionWebhooks(t *testing.T) {
 			testNamespace,
 			updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace)
 	}
-	path := conversionWebhookPath
+	path := "/convert" //nolint:goconst
 	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Path == nil ||
 		*updated.Spec.Conversion.Webhook.ClientConfig.Service.Path != path {
 		t.Errorf("expected service path %s, got %v", path,
@@ -526,9 +526,9 @@ func TestConfigureCRDConversionWebhooksPreservesExistingCABundle(t *testing.T) {
 			testServiceName,
 			updated.Spec.Conversion.Webhook.ClientConfig.Service.Name)
 	}
-	if *updated.Spec.Conversion.Webhook.ClientConfig.Service.Path != conversionWebhookPath {
+	if *updated.Spec.Conversion.Webhook.ClientConfig.Service.Path != "/convert" { //nolint:goconst
 		t.Errorf("expected service path %s, got %s",
-			conversionWebhookPath,
+			"/convert", //nolint:goconst
 			*updated.Spec.Conversion.Webhook.ClientConfig.Service.Path)
 	}
 }
@@ -595,7 +595,7 @@ func TestInjectCRDConversionCA_ReadsCABundleAndPatchesDGD(t *testing.T) {
 			testNamespace,
 			updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace)
 	}
-	path := conversionWebhookPath
+	path := "/convert" //nolint:goconst
 	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Path == nil ||
 		*updated.Spec.Conversion.Webhook.ClientConfig.Service.Path != path {
 		t.Errorf("expected service path %s, got %v", path,
