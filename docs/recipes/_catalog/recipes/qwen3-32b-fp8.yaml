@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-32b-fp8
+title: Qwen3-32B FP8
+page: recipes/qwen3-32b-fp8.mdx
+provider: qwen
+model:
+  name: Qwen3-32B-FP8
+  hf_id: Qwen/Qwen3-32B-FP8
+  precision: FP8
+status: validated
+targets:
+- id: trtllm-agg
+  recommended: true
+  hardware:
+    gpu: H100/H200/A100
+    count: 2
+  runtime:
+    framework: trtllm
+  topology: aggregated
+  techniques:
+  - cuda-graphs
+  - fp8-kv-cache
+  workload:
+    type: static-generation
+    traffic: 4K ISL / 500 OSL synthetic, concurrency 4, 40 requests
+  deploy:
+    asset: recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-32b-fp8/trtllm/agg/perf.yaml
+  expected_performance:
+    available: false
+- id: trtllm-disagg
+  recommended: false
+  hardware:
+    gpu: H100/H200/A100
+    count: 8
+  runtime:
+    framework: trtllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - fp8-kv-cache
+  workload:
+    type: static-generation
+    traffic: 4K ISL / 500 OSL synthetic, concurrency 48, 480 requests
+  deploy:
+    asset: recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-32b-fp8/trtllm/disagg/perf.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg
+  recommended: false
+  hardware:
+    gpu: H100/H200/A100, single node
+    count: 8
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - nixl-kv-transfer
+  workload:
+    type: static-generation
+    traffic: 2K ISL / 500 OSL synthetic, concurrency 8, 80 requests
+  deploy:
+    asset: recipes/qwen3-32b-fp8/vllm/disagg/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-32b-fp8/vllm/disagg/perf.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- No expected performance numbers in source; section omitted
+- No related feature benchmark page exists
+- TRT-LLM (4K ISL) and vLLM (2K ISL) targets use unnormalized traffic shapes
+- maintainer unknown
