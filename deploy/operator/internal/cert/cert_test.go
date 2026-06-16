@@ -484,14 +484,14 @@ func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T)
 	}
 }
 
-func TestInjectCRDConversionCA_ErrorsWhenConversionMissing(t *testing.T) {
+func TestEnsureCRDConversionCA_ErrorsWhenConversionMissing(t *testing.T) {
 	crd := newDGDConversionCRD()
 	crd.Spec.Conversion = nil
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
 
-	if err := injector.injectCRDConversionCA(context.Background(), []byte("test-ca")); err == nil {
+	if err := injector.ensureCRDConversionCA(context.Background(), []byte("test-ca")); err == nil {
 		t.Fatal("expected error when conversion webhook is missing")
 	}
 }
@@ -512,12 +512,12 @@ func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
 	}
 }
 
-func TestInjectCRDConversionCA_SkipsWhenCRDNotFound(t *testing.T) {
+func TestEnsureCRDConversionCA_SkipsWhenCRDNotFound(t *testing.T) {
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	ctx := context.Background()
 
-	if err := injector.injectCRDConversionCA(ctx, []byte("test-ca")); err != nil {
+	if err := injector.ensureCRDConversionCA(ctx, []byte("test-ca")); err != nil {
 		t.Fatalf("expected no error when CRD not found, got: %v", err)
 	}
 }

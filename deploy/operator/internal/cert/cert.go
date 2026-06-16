@@ -322,7 +322,7 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 	if err := i.injectIntoMutatingWebhooks(ctx, caBundle); err != nil {
 		return err
 	}
-	if err := i.injectCRDConversionCA(ctx, caBundle); err != nil {
+	if err := i.ensureCRDConversionCA(ctx, caBundle); err != nil {
 		return err
 	}
 
@@ -337,7 +337,7 @@ func (i *CABundleInjector) InjectCRDConversionCA(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := i.injectCRDConversionCA(ctx, caBundle); err != nil {
+	if err := i.ensureCRDConversionCA(ctx, caBundle); err != nil {
 		return err
 	}
 	i.logger.Info("CRD conversion webhook CA bundle injected")
@@ -493,11 +493,11 @@ func (i *CABundleInjector) injectIntoMutatingWebhooks(ctx context.Context, caBun
 	return nil
 }
 
-// injectCRDConversionCA patches the CA bundle on the conversion webhooks that
+// ensureCRDConversionCA patches the CA bundle on the conversion webhooks that
 // are already present in the CRD manifests. Missing CRDs are tolerated with an
 // info-level log so that a standalone operator image can be brought up before
 // the CRDs are installed (helm install idempotency).
-func (i *CABundleInjector) injectCRDConversionCA(ctx context.Context, caBundle []byte) error {
+func (i *CABundleInjector) ensureCRDConversionCA(ctx context.Context, caBundle []byte) error {
 	for _, name := range convertibleCRDs {
 		if err := i.patchCRDConversionCA(ctx, name, caBundle); err != nil {
 			return err

@@ -593,14 +593,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := registerWebhooks(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
+	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
 	}
 
-	// CRD manifests and crd-apply own the conversion webhook service refs. Patch
-	// CA bundles before mgr.Start so the configured webhooks can authenticate
-	// the operator as soon as the manager starts serving.
+	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS
+	// secrets before this point. Auto mode can therefore patch admission and
+	// conversion CAs immediately; manual mode waits for externally provided
+	// ca.crt and only patches conversion, leaving admission CA management
+	// out-of-band.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
@@ -620,6 +622,10 @@ func main() {
 		}
 	}
 
+	// Kubernetes propagates webhook configuration asynchronously, especially
+	// with HA apiservers. A missing or stale CA must fail closed during manager
+	// cache startup rather than allowing the operator to run without conversion
+	// or admission.
 	setupLog.Info("starting manager")
 	if err := mgr.Start(mainCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
@@ -729,7 +735,7 @@ func registerControllers(
 	return nil
 }
 
-func registerWebhooks(
+func registerWebhookHandlers(
 	mgr ctrl.Manager,
 	operatorCfg *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
