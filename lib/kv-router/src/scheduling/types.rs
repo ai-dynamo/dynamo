@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
+use super::prefill_load::effective_prefill_tokens;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
@@ -138,9 +139,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     }
 
     pub fn best_effective_prefill_tokens(&self) -> usize {
-        self.request
-            .isl_tokens
-            .saturating_sub(self.best_cached_tokens())
+        effective_prefill_tokens(self.request.isl_tokens, self.best_cached_tokens())
     }
 
     pub fn best_cached_tokens(&self) -> usize {

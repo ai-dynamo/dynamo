@@ -534,7 +534,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
 }
 
 fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, headers: &HeaderMap) {
-    if !crate::agents::trace::is_enabled() {
+    if !crate::request_trace::is_enabled() {
         return;
     }
 
@@ -543,7 +543,7 @@ fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, heade
         .and_then(|value| value.to_str().ok())
     {
         request.insert(
-            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             x_request_id.to_string(),
         );
     }
@@ -565,13 +565,13 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
 ) {
-    if !crate::agents::trace::is_enabled() {
+    if !crate::request_trace::is_enabled() {
         return;
     }
 
-    if let Ok(x_request_id) = source.get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY) {
+    if let Ok(x_request_id) = source.get::<String>(crate::request_trace::X_REQUEST_ID_CONTEXT_KEY) {
         target.insert(
-            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             x_request_id.as_ref().clone(),
         );
     }

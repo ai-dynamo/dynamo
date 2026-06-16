@@ -940,7 +940,7 @@ mod tests {
     // ── list_filtered tests ───────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn list_filtered_returns_metadata_fields() {
+    async fn list_filtered_returns_metadata_and_applies_filters() {
         let registry = test_registry();
         registry.signal_ready();
 
@@ -963,7 +963,7 @@ mod tests {
                 "tcp://127.0.0.1:15571".to_string(),
                 0,
                 "mistral".to_string(),
-                "acme".to_string(),
+                "other-tenant".to_string(),
                 8,
                 None,
             )
@@ -979,78 +979,11 @@ mod tests {
 
         let mistral = workers.iter().find(|w| w.model_name == "mistral").unwrap();
         assert_eq!(mistral.block_size, 8);
-        assert_eq!(mistral.tenant_id, "acme");
-    }
-
-    #[tokio::test]
-    async fn list_filtered_by_model_name() {
-        let registry = test_registry();
-        registry.signal_ready();
-
-        registry
-            .register(
-                10,
-                "tcp://127.0.0.1:15572".to_string(),
-                0,
-                "llama3".to_string(),
-                "acme".to_string(),
-                4,
-                None,
-            )
-            .await
-            .unwrap();
-
-        registry
-            .register(
-                11,
-                "tcp://127.0.0.1:15573".to_string(),
-                0,
-                "mistral".to_string(),
-                "acme".to_string(),
-                8,
-                None,
-            )
-            .await
-            .unwrap();
+        assert_eq!(mistral.tenant_id, "other-tenant");
 
         let filtered = registry.list_filtered(Some("llama3"), None);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].model_name, "llama3");
-
-        let empty = registry.list_filtered(Some("nonexistent"), None);
-        assert!(empty.is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_filtered_by_tenant_id() {
-        let registry = test_registry();
-        registry.signal_ready();
-
-        registry
-            .register(
-                10,
-                "tcp://127.0.0.1:15574".to_string(),
-                0,
-                "llama3".to_string(),
-                "acme".to_string(),
-                4,
-                None,
-            )
-            .await
-            .unwrap();
-
-        registry
-            .register(
-                11,
-                "tcp://127.0.0.1:15575".to_string(),
-                0,
-                "llama3".to_string(),
-                "other-tenant".to_string(),
-                4,
-                None,
-            )
-            .await
-            .unwrap();
 
         let acme = registry.list_filtered(None, Some("acme"));
         assert_eq!(acme.len(), 1);
@@ -1060,8 +993,12 @@ mod tests {
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].tenant_id, "other-tenant");
 
-        let both = registry.list_filtered(None, None);
-        assert_eq!(both.len(), 2);
+        assert!(
+            registry
+                .list_filtered(Some("llama3"), Some("other-tenant"))
+                .is_empty()
+        );
+        assert!(registry.list_filtered(Some("nonexistent"), None).is_empty());
     }
 
     #[test]

@@ -518,8 +518,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// This is used during generation to track output blocks as they are created.
     /// The decay_fraction represents how "temporary" the block is based on generation progress.
-    // TODO: output blocks are not replicated via replica_sync — add an
-    // ActiveSequenceEventData variant if cross-instance accuracy matters.
+    // NOTE: Output blocks remain local and are intentionally not replicated because their
+    // frequency would consume disproportionate replica-sync network bandwidth.
     pub fn add_output_block(
         &self,
         request_id: &RequestId,
