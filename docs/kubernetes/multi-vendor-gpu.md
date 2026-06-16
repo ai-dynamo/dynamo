@@ -64,9 +64,9 @@ resource keys on top of `nvidia.com/gpu`:
 - plus any task-specific keys your device plugin adds
 
 A full example lives at
-[`examples/backends/vllm/deploy/v1beta1/disagg_hami.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/v1beta1/disagg_hami.yaml).
+[`examples/backends/vllm/deploy/v1beta1/disagg_hami.yaml`](https://github.com/ai-dynamo/dynamo/blob/bdeb46ca87a2de1037808cc23a569c8f0e89cbe1/examples/backends/vllm/deploy/v1beta1/disagg_hami.yaml).
 The same shape, in v1alpha1 syntax, is at
-[`examples/backends/vllm/deploy/disagg_hami.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_hami.yaml).
+[`examples/backends/vllm/deploy/disagg_hami.yaml`](https://github.com/ai-dynamo/dynamo/blob/bdeb46ca87a2de1037808cc23a569c8f0e89cbe1/examples/backends/vllm/deploy/disagg_hami.yaml).
 
 Install steps on the cluster side:
 

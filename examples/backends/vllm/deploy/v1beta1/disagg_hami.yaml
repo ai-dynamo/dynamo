@@ -71,7 +71,8 @@ spec:
           name: main
           # Note: no explicit `resources.limits.nvidia.com/gpu` here. The
           # operator merges device.resources into the main container at build
-          # time. Users can still override per-key via podTemplate.resources.
+          # time. For overlapping keys, device.resources is authoritative.
+          # Use podTemplate.resources for non-device keys (e.g. CPU/memory).
           resources:
             requests:
               # Increase this value for larger models.
