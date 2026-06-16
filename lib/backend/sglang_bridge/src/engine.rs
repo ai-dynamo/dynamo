@@ -78,6 +78,7 @@ impl SglangBridge {
             component: args.common.component,
             endpoint: args.common.endpoint,
             model_name: args.model_name.unwrap_or_default(),
+            served_model_name: args.served_model_name,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
             ..Default::default()
@@ -687,6 +688,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.model_name, "Qwen/Qwen3-0.6B");
+    }
+
+    #[test]
+    fn bridge_args_set_served_model_name_for_registration() {
+        let (_engine, config) = SglangBridge::from_argv(vec![
+            "dynamo-sglang-bridge".to_string(),
+            "--model-name".to_string(),
+            "/models/qwen".to_string(),
+            "--served-model-name".to_string(),
+            "qwen-public".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(config.model_name, "/models/qwen");
+        assert_eq!(config.served_model_name.as_deref(), Some("qwen-public"));
     }
 }
 

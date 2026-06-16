@@ -16,6 +16,10 @@ pub struct Args {
     #[arg(long, env = "DYN_MODEL_NAME")]
     pub model_name: Option<String>,
 
+    /// Public-facing model name to register with Dynamo.
+    #[arg(long, env = "DYN_SERVED_MODEL_NAME")]
+    pub served_model_name: Option<String>,
+
     #[arg(
         long,
         env = "SGLANG_GRPC_ENDPOINT",
