@@ -3400,3 +3400,53 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 		})
 	}
 }
+
+func TestMainContainerResources(t *testing.T) {
+	one := resource.MustParse("1")
+
+	t.Run("returns empty when no pod template", func(t *testing.T) {
+		got := mainContainerResources(nil)
+		if got.Limits != nil || got.Requests != nil {
+			t.Errorf("expected empty ResourceRequirements, got %+v", got)
+		}
+	})
+
+	t.Run("returns empty when main container missing", func(t *testing.T) {
+		spec := &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "sidecar"}},
+			},
+		}
+		got := mainContainerResources(spec)
+		if got.Limits != nil || got.Requests != nil {
+			t.Errorf("expected empty, got %+v", got)
+		}
+	})
+
+	t.Run("reads main container after device merge", func(t *testing.T) {
+		// Simulate what GenerateBasePodSpec produces after applyDeviceSpec
+		// injects an AMD GPU into the main container.
+		spec := &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: commonconsts.MainContainerName,
+						Resources: corev1.ResourceRequirements{
+							Limits:   corev1.ResourceList{"amd.com/gpu": one},
+							Requests: corev1.ResourceList{"amd.com/gpu": one},
+						},
+					},
+					{Name: "sidecar"},
+				},
+			},
+		}
+		got := mainContainerResources(spec)
+		qty := got.Limits["amd.com/gpu"]
+		if !qty.Equal(one) {
+			t.Errorf("limits amd.com/gpu = %s, want 1", qty.String())
+		}
+		if !dynamo.HasAnyGPUResource(got) {
+			t.Errorf("HasAnyGPUResource = false on device-only main container, want true")
+		}
+	})
+}

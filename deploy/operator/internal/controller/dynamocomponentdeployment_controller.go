@@ -542,12 +542,31 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
 	}
 
-	resources := dynamo.GetMainContainerResources(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
+	resources := mainContainerResources(workerPodTemplateSpec)
 	if !dynamo.HasAnyGPUResource(resources) {
 		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: no GPU resource request or limit is set for LWS worker pod")
 	}
 
 	return workerPodTemplateSpec, nil
+}
+
+// mainContainerResources returns the resource requirements of the main
+// container inside the given PodTemplateSpec, or an empty ResourceRequirements
+// when no main container is present. Reading from the generated PodTemplateSpec
+// (rather than the original component) is what makes the DeviceSpec flow work:
+// device resources are merged into the main container by
+// dynamo.GenerateBasePodSpec and are not visible in the user-provided
+// PodTemplate until then.
+func mainContainerResources(podTemplateSpec *corev1.PodTemplateSpec) corev1.ResourceRequirements {
+	if podTemplateSpec == nil {
+		return corev1.ResourceRequirements{}
+	}
+	for i := range podTemplateSpec.Spec.Containers {
+		if podTemplateSpec.Spec.Containers[i].Name == commonconsts.MainContainerName {
+			return podTemplateSpec.Spec.Containers[i].Resources
+		}
+	}
+	return corev1.ResourceRequirements{}
 }
 
 // generateLeaderWorkerSet creates a single LeaderWorkerSet resource from the DynamoComponentDeployment
