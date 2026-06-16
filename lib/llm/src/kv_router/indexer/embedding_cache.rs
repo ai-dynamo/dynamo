@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -59,31 +59,29 @@ impl EmbeddingCacheIndexer {
             return Vec::new();
         }
 
-        let mut per_key_sets = requested
-            .iter()
-            .map(|key| {
-                self.key_workers
-                    .get(*key)
-                    .map(|workers| workers.iter().copied().collect::<HashSet<_>>())
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>();
-
-        if per_key_sets.iter().any(HashSet::is_empty) {
-            return Vec::new();
-        }
-
-        per_key_sets.sort_by_key(HashSet::len);
-        let mut intersection = per_key_sets.remove(0);
-        for workers in per_key_sets {
-            intersection.retain(|worker_id| workers.contains(worker_id));
-            if intersection.is_empty() {
-                return Vec::new();
+        // Partial cache hits are useful: for a request with multiple images,
+        // a worker that already has some embeddings can still avoid work.
+        // Count per-worker hits across the de-duplicated requested keys, then
+        // prefer workers with more hits.
+        let mut worker_hits = HashMap::<WorkerId, usize>::with_capacity(requested.len());
+        for key in requested {
+            if let Some(workers) = self.key_workers.get(key) {
+                for worker_id in workers.iter() {
+                    *worker_hits.entry(*worker_id).or_default() += 1;
+                }
             }
         }
 
-        let mut worker_ids = intersection.into_iter().collect::<Vec<_>>();
-        worker_ids.sort_unstable();
+        let mut worker_ids = worker_hits.into_iter().collect::<Vec<_>>();
+        worker_ids.sort_by(|(left_id, left_hits), (right_id, right_hits)| {
+            right_hits
+                .cmp(left_hits)
+                .then_with(|| left_id.cmp(right_id))
+        });
+        let worker_ids = worker_ids
+            .into_iter()
+            .map(|(worker_id, _hits)| worker_id)
+            .collect();
         worker_ids
     }
 
@@ -172,27 +170,28 @@ impl EmbeddingCacheIndexer {
         added_keys: HashSet<String>,
         removed_keys: HashSet<String>,
     ) {
-        let mut worker_keys = self
-            .worker_cache_keys
-            .get(&worker_id)
-            .map(|keys| keys.clone())
-            .unwrap_or_default();
+        let should_remove_worker_entry;
 
-        for key in removed_keys {
-            if worker_keys.remove(&key) {
-                self.remove_worker_from_key(&key, worker_id);
+        {
+            let mut worker_keys = self.worker_cache_keys.entry(worker_id).or_default();
+
+            for key in removed_keys {
+                if worker_keys.remove(&key) {
+                    self.remove_worker_from_key(&key, worker_id);
+                }
             }
-        }
-        for key in added_keys {
-            if worker_keys.insert(key.clone()) {
-                self.add_worker_to_key(key, worker_id);
+            for key in added_keys {
+                if worker_keys.insert(key.clone()) {
+                    self.add_worker_to_key(key, worker_id);
+                }
             }
+
+            should_remove_worker_entry = worker_keys.is_empty();
         }
 
-        if worker_keys.is_empty() {
-            self.worker_cache_keys.remove(&worker_id);
-        } else {
-            self.worker_cache_keys.insert(worker_id, worker_keys);
+        if should_remove_worker_entry {
+            self.worker_cache_keys
+                .remove_if(&worker_id, |_, keys| keys.is_empty());
         }
     }
 
@@ -215,7 +214,7 @@ impl EmbeddingCacheIndexer {
 }
 
 impl MultimodalCacheIndex for EmbeddingCacheIndexer {
-    fn workers_with_all_cache_keys(&self, cache_keys: &[String]) -> Vec<WorkerId> {
+    fn workers_with_any_cache_key(&self, cache_keys: &[String]) -> Vec<WorkerId> {
         self.workers_with_cached_keys(cache_keys.iter().map(|key| key.as_str()))
     }
 
@@ -250,11 +249,13 @@ mod tests {
             },
         });
 
-        assert_eq!(indexer.cache_keys_for_worker(7), vec!["c".to_string()]);
+        let worker_keys = indexer.worker_cache_keys.get(&7).unwrap();
+        assert_eq!(worker_keys.len(), 1);
+        assert!(worker_keys.contains("c"));
     }
 
     #[test]
-    fn workers_with_cached_keys_requires_all_requested_keys() {
+    fn workers_with_cached_keys_returns_partial_matches_first() {
         let indexer = EmbeddingCacheIndexer::default();
 
         indexer.apply_event(&MultimodalEmbeddingCacheEvent {
@@ -272,7 +273,7 @@ mod tests {
             },
         });
 
-        assert_eq!(indexer.workers_with_cached_keys(["a", "b"]), vec![1]);
+        assert_eq!(indexer.workers_with_cached_keys(["a", "b"]), vec![1, 2]);
     }
 
     #[test]
@@ -302,6 +303,6 @@ mod tests {
         });
 
         assert_eq!(indexer.workers_with_cached_keys(["a"]), vec![3, 4]);
-        assert!(indexer.workers_with_cached_keys(["a", "b"]).is_empty());
+        assert_eq!(indexer.workers_with_cached_keys(["a", "b"]), vec![3, 4]);
     }
 }

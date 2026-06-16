@@ -113,7 +113,7 @@ pub trait WorkerLoadMonitor: Send + Sync {
 
 /// Query interface for routing against multimodal embedding cache state.
 pub trait MultimodalCacheIndex: Send + Sync {
-    fn workers_with_all_cache_keys(&self, cache_keys: &[String]) -> Vec<u64>;
+    fn workers_with_any_cache_key(&self, cache_keys: &[String]) -> Vec<u64>;
     fn remove_worker(&self, worker_id: u64);
 }
 
@@ -862,7 +862,7 @@ where
             .as_ref()
             .filter(|_| !request_cache_keys.is_empty())
             .map(|indexer| {
-                let mut matched = indexer.workers_with_all_cache_keys(&request_cache_keys);
+                let mut matched = indexer.workers_with_any_cache_key(&request_cache_keys);
                 matched.retain(|id| instance_ids.contains(id));
                 matched
             })
