@@ -17,7 +17,7 @@ use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
+        ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
     },
     state::AggRequestState,
 };
@@ -39,6 +39,7 @@ pub(super) struct AggRuntimeStats {
     dispatch_history: Vec<usize>,
     dispatch_order: Vec<Uuid>,
     assigned_worker_by_uuid: HashMap<Uuid, usize>,
+    overlap_history: Vec<u32>,
     max_in_flight_seen: usize,
     prefill_marked_count: usize,
     router_freed_count: usize,
@@ -76,6 +77,10 @@ pub(in crate::replay) struct AggRuntime {
     fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
     /// Traffic statistics accumulated between planner ticks.
     traffic: TrafficAccumulator,
+    /// Optional cap on simulated wall-clock time. When set, `run()` exits
+    /// gracefully once the next scheduled timestamp exceeds this cap, leaving
+    /// any in-flight requests as incomplete in the report.
+    max_sim_time_ms: Option<f64>,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
     #[cfg(test)]
@@ -176,11 +181,39 @@ impl AggRuntime {
             stats: AggRuntimeStats,
             fpm_buffer: Vec::new(),
             traffic: TrafficAccumulator::new(),
+            max_sim_time_ms: None,
             #[cfg(test)]
             worker_active_requests: vec![Vec::new(); num_workers],
             #[cfg(test)]
             stepped: false,
         })
+    }
+
+    /// Toggle per-request record capture on the underlying collector. When
+    /// `true`, the final `TraceSimulationReport` returned from `run()` will
+    /// have `per_request` populated. Default `false` (cheap).
+    pub(in crate::replay) fn with_per_request_records(mut self, capture: bool) -> Self {
+        self.collector.set_capture_per_request(capture);
+        self
+    }
+
+    /// Cap the simulated wall-clock duration. After construction, call this to
+    /// have `run()` stop gracefully once the simulated clock would exceed
+    /// `ms`. Pass `None` to run to natural completion (the default).
+    ///
+    /// max_sim_time_ms is a **soft cap** on the scheduling loop, not a hard truncation
+    /// of recorded work. When the next scheduled simulated timestamp would
+    /// exceed the cap, the loop exits, but worker passes already in flight
+    /// complete normally — even if their token timestamps land past `ms`.
+    /// Requests that hadn't received their first token before the cap fired
+    /// stay in the report as incomplete (`first_token_ms = None`,
+    /// `e2e_latency_ms = None`). `report.duration_ms` may exceed `ms` by up
+    /// to one in-flight pass's duration. Enforcing a precise cap would
+    /// require plumbing a deadline into the worker / engine core; not worth
+    /// it for the calibration use case this exists to serve.
+    pub(in crate::replay) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
+        self.max_sim_time_ms = ms;
+        self
     }
 
     /// Count all requests currently consuming cluster capacity, including router-queued ones.
@@ -247,6 +280,11 @@ impl AggRuntime {
     ) -> anyhow::Result<()> {
         self.engine.dispatch(worker_idx, request)?;
         self.record_dispatch(uuid, worker_idx);
+        // Aggregated replay uses a single pool. Treat the assignment as the
+        // decode_worker_idx so per-request records consistently carry the
+        // worker that served the request; prefill_worker_idx stays None,
+        // signaling "no separate prefill pool".
+        self.collector.on_decode_assigned(uuid, worker_idx);
         #[cfg(test)]
         self.worker_active_requests[worker_idx].push(uuid);
         Ok(())
@@ -265,6 +303,8 @@ impl AggRuntime {
         } in admissions
         {
             self.traffic.on_admission(overlap_blocks, isl_blocks);
+            #[cfg(test)]
+            self.stats.overlap_history.push(overlap_blocks);
             let request = self
                 .requests
                 .get_mut(&uuid)
@@ -306,15 +346,14 @@ impl AggRuntime {
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
         }
-        let queued_request = request.clone();
-        self.requests
-            .insert(uuid, AggRequestState::new_queued(request));
         let admissions = {
             let router = self.router.as_mut().expect("router presence checked above");
             router
-                .on_request_arrival(&queued_request, replay_hashes, self.now_ms)?
+                .on_request_arrival(&request, replay_hashes, self.now_ms)?
                 .admissions
         };
+        self.requests
+            .insert(uuid, AggRequestState::new_queued(request));
         self.record_router_pending();
         self.dispatch_router_admissions(admissions)?;
         self.record_in_flight_peak();
@@ -351,10 +390,13 @@ impl AggRuntime {
     /// Pick the next logical timestamp from either arrivals or scheduled worker completions.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        choose_next_timestamp(
-            self.admission.next_ready_time_ms(self.cluster_in_flight()),
-            next_event_ms,
-        )
+        let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
+        #[cfg(feature = "kvbm-offload")]
+        {
+            return choose_next_timestamp(next, self.engine.earliest_offload_deadline());
+        }
+        #[cfg(not(feature = "kvbm-offload"))]
+        next
     }
 
     /// Apply router-visible KV events at the phase chosen by the scheduler core.
@@ -367,6 +409,14 @@ impl AggRuntime {
             bail!("offline replay router KV event application must not admit requests");
         }
         Ok(())
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn tick_offload_engines(&mut self) -> anyhow::Result<bool> {
+        let events = self.engine.tick_offload_engines(self.now_ms);
+        let changed = !events.is_empty();
+        self.apply_router_events(events)?;
+        Ok(changed)
     }
 
     /// Consume one output signal, updating router state, collector state, and completion counts.
@@ -388,12 +438,16 @@ impl AggRuntime {
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
-            let latencies = self.collector.request_latencies(signal.uuid);
-            self.traffic.on_request(
-                removed_state.input_tokens,
-                removed_state.output_tokens,
-                latencies,
-            );
+            // Rejected requests never ran: keep them out of the planner-facing
+            // traffic deltas (they still free their slot and advance below).
+            if !signal.rejected {
+                let latencies = self.collector.request_latencies(signal.uuid);
+                self.traffic.on_request(
+                    removed_state.input_tokens,
+                    removed_state.output_tokens,
+                    latencies,
+                );
+            }
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();
@@ -455,8 +509,12 @@ impl AggRuntime {
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         kv_events: Vec<RouterEvent>,
+        accept_length_output_tokens: usize,
+        accept_length_decode_forwards: usize,
     ) -> anyhow::Result<()> {
         self.apply_router_events(kv_events)?;
+        self.traffic
+            .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
             self.process_output_signal(signal)?;
         }
@@ -474,6 +532,8 @@ impl AggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.kv_events,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
             changed = true;
         }
@@ -488,7 +548,19 @@ impl AggRuntime {
             .admission
             .drain_ready(self.now_ms, self.cluster_in_flight())?
         {
-            self.assign_request(ready.request, ready.arrival_time_ms, ready.replay_hashes)?;
+            let ReadyArrival {
+                request,
+                arrival_time_ms,
+                replay_hashes,
+                session_id,
+                turn_index,
+            } = ready;
+            let session_metadata = session_id.zip(turn_index);
+            let uuid = self.assign_request(request, arrival_time_ms, replay_hashes)?;
+            if let Some((session_id, turn_index)) = session_metadata {
+                self.collector
+                    .on_session_metadata(uuid, session_id, turn_index);
+            }
             released_any = true;
         }
         Ok(released_any)
@@ -519,6 +591,8 @@ impl AggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.kv_events,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
         }
         for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
@@ -551,7 +625,13 @@ impl AggRuntime {
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
         loop {
-            let mut changed = self.apply_worker_completions()?;
+            #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
+            let mut changed = false;
+            #[cfg(feature = "kvbm-offload")]
+            {
+                changed |= self.tick_offload_engines()?;
+            }
+            changed |= self.apply_worker_completions()?;
             changed |= self.apply_worker_ready_events()?;
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_ready_workers()?;
@@ -583,6 +663,9 @@ impl AggRuntime {
             };
 
             if next_timestamp_ms > until_ms {
+                if until_ms > self.now_ms {
+                    self.now_ms = until_ms;
+                }
                 break;
             }
 
@@ -682,9 +765,17 @@ impl AggRuntime {
     }
 
     /// Run the aggregated offline replay until all arrivals and worker work are exhausted.
+    /// If `max_sim_time_ms` is set, exits gracefully when the next scheduled
+    /// timestamp would exceed that cap; in-flight requests at that point are
+    /// reported as incomplete.
     pub(in crate::replay::offline) fn run(
         mut self,
     ) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
+        if let Some(cap_ms) = self.max_sim_time_ms
+            && (!cap_ms.is_finite() || cap_ms < 0.0)
+        {
+            bail!("max_sim_time_ms must be a finite, non-negative value; got {cap_ms}");
+        }
         self.drain_current_timestamp()?;
 
         while !self.is_done() {
@@ -694,7 +785,11 @@ impl AggRuntime {
                     self.cluster_in_flight()
                 );
             };
-
+            if let Some(cap_ms) = self.max_sim_time_ms
+                && next_timestamp_ms > cap_ms
+            {
+                break;
+            }
             self.now_ms = next_timestamp_ms;
             self.drain_current_timestamp()?;
         }
@@ -763,15 +858,18 @@ impl AggRuntime {
 #[cfg(test)]
 mod tests {
     use super::super::entrypoints::{
+        run_agentic_trace_multi_collect_with_stats, run_agentic_trace_single_collect,
         run_concurrency_multi_collect_with_stats, run_concurrency_single_collect,
-        run_concurrency_workload_multi_collect_with_stats, run_trace_multi_collect_with_stats,
-        run_trace_single_collect, run_trace_workload_multi_collect_with_stats,
+        run_concurrency_workload_multi_collect_with_stats, run_concurrency_workload_single_collect,
+        run_trace_multi_collect_with_stats, run_trace_single_collect,
+        run_trace_workload_multi_collect_with_stats, run_trace_workload_single_collect,
     };
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs};
-    use crate::loadgen::{SessionTrace, Trace, TurnTrace};
-    use crate::replay::normalize_trace_requests;
+    use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+    use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
     use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
+    use rstest::rstest;
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
         MockEngineArgs::builder()
@@ -784,6 +882,155 @@ mod tests {
             .speedup_ratio(0.0)
             .build()
             .unwrap()
+    }
+
+    fn parity_args(engine_type: EngineType) -> MockEngineArgs {
+        let mut builder = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(128)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0);
+        if engine_type == EngineType::Sglang {
+            builder = builder.sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }));
+        }
+        builder.build().unwrap()
+    }
+
+    fn parity_requests() -> Vec<DirectRequest> {
+        vec![
+            DirectRequest {
+                tokens: vec![1; 4],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(11)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![2; 8],
+                max_output_tokens: 4,
+                uuid: Some(Uuid::from_u128(22)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(101.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![3; 12],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(33)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(500.0),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn parity_workload() -> Trace {
+        Trace {
+            block_size: 4,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "session-a".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 4,
+                            max_output_tokens: 2,
+                            hash_ids: vec![11],
+                            delay_after_previous_ms: 0.0,
+                            ..Default::default()
+                        },
+                        TurnTrace {
+                            input_length: 12,
+                            max_output_tokens: 2,
+                            hash_ids: vec![21, 22, 23],
+                            delay_after_previous_ms: 5.0,
+                            ..Default::default()
+                        },
+                    ],
+                },
+                SessionTrace {
+                    session_id: "session-b".to_string(),
+                    first_arrival_timestamp_ms: Some(1.0),
+                    turns: vec![TurnTrace {
+                        input_length: 8,
+                        max_output_tokens: 2,
+                        hash_ids: vec![31, 32],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    }],
+                },
+            ],
+        }
+    }
+
+    fn parity_agentic_trace() -> AgenticTrace {
+        AgenticTrace {
+            block_size: 4,
+            turns: vec![
+                AgenticTurnTrace {
+                    request_id: "root".to_string(),
+                    session_id: "root".to_string(),
+                    input_length: 4,
+                    max_output_tokens: 2,
+                    hash_ids: vec![1],
+                    first_ready_timestamp_ms: Some(0.0),
+                    delay_after_dependencies_ms: 0.0,
+                    wait_for: Vec::new(),
+                    prefix_reset: true,
+                    ..Default::default()
+                },
+                AgenticTurnTrace {
+                    request_id: "dependent".to_string(),
+                    session_id: "dependent".to_string(),
+                    input_length: 8,
+                    max_output_tokens: 2,
+                    hash_ids: vec![1, 2],
+                    first_ready_timestamp_ms: Some(100.0),
+                    delay_after_dependencies_ms: 5.0,
+                    wait_for: vec!["root".to_string()],
+                    prefix_reset: true,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
+
+    fn sorted_snapshots(collector: &TraceCollector) -> Vec<TraceRequestStatsSnapshot> {
+        let mut snapshots = collector.snapshots();
+        snapshots.sort_by_key(|snapshot| snapshot.input_length);
+        snapshots
+    }
+
+    fn assert_collectors_match(single: TraceCollector, multi: TraceCollector) {
+        assert_eq!(sorted_snapshots(&single), sorted_snapshots(&multi));
+
+        let single_report = single.finish();
+        let multi_report = multi.finish();
+        assert_eq!(
+            single_report.request_counts.num_requests,
+            multi_report.request_counts.num_requests
+        );
+        assert_eq!(
+            single_report.request_counts.completed_requests,
+            multi_report.request_counts.completed_requests
+        );
+        assert_eq!(
+            single_report.request_counts.total_input_tokens,
+            multi_report.request_counts.total_input_tokens
+        );
+        assert_eq!(
+            single_report.request_counts.total_output_tokens,
+            multi_report.request_counts.total_output_tokens
+        );
     }
 
     fn fast_router_args() -> MockEngineArgs {
@@ -813,6 +1060,56 @@ mod tests {
             .unwrap()
     }
 
+    fn queueing_router_config(policy: RouterQueuePolicy) -> KvRouterConfig {
+        KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            router_queue_policy: policy,
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn run_trace_multi_queueing_collect_with_stats(
+        policy: RouterQueuePolicy,
+        requests: Vec<DirectRequest>,
+        num_workers: usize,
+    ) -> (TraceCollector, AggRuntimeStats) {
+        let args = queueing_router_args(policy);
+        let pending = normalize_trace_requests(requests, 1.0).unwrap();
+        AggRuntime::new(
+            &args,
+            Some(queueing_router_config(policy)),
+            None,
+            pending,
+            num_workers,
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap()
+        .run()
+        .unwrap()
+    }
+
+    fn run_concurrency_multi_queueing_collect_with_stats(
+        policy: RouterQueuePolicy,
+        requests: Vec<DirectRequest>,
+        max_in_flight: usize,
+        num_workers: usize,
+    ) -> (TraceCollector, AggRuntimeStats) {
+        let args = queueing_router_args(policy);
+        AggRuntime::new(
+            &args,
+            Some(queueing_router_config(policy)),
+            None,
+            VecDeque::from(requests),
+            num_workers,
+            ReplayMode::Concurrency { max_in_flight },
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap()
+        .run()
+        .unwrap()
+    }
+
     fn planner_router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_queue_threshold: Some(0.5),
@@ -833,6 +1130,64 @@ mod tests {
             .unwrap()
     }
 
+    fn trtllm_reject_args() -> MockEngineArgs {
+        // 4 GPU blocks * block_size 4 = 16-token to-completion budget per request.
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Trtllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap()
+    }
+
+    fn reject_request(uuid: u128, prompt_tokens: u32, max_output: usize) -> DirectRequest {
+        let base = uuid as u32 * 100_000;
+        DirectRequest {
+            tokens: (base..base + prompt_tokens).collect(),
+            max_output_tokens: max_output,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        }
+    }
+
+    /// Aggregated-runtime regression for terminal-rejection propagation. An
+    /// oversized request (footprint exceeds the whole KV pool) at the FIFO head
+    /// must be terminally rejected so it neither hangs the `max_in_flight = 1`
+    /// slot (no terminal signal = dead-ended `in_flight`) nor is counted as a
+    /// completion; the valid follower behind it runs to completion.
+    #[test]
+    fn trtllm_oversized_request_rejected_unblocks_follower_agg() {
+        let oversized = reject_request(1, 20, 8); // 20-token prompt = 5 blocks > 4-block pool
+        let valid = reject_request(2, 4, 4); // 2 blocks, fits
+        let (collector, _stats) = run_concurrency_multi_collect_with_stats(
+            &trtllm_reject_args(),
+            vec![oversized, valid],
+            1, // max_in_flight = 1: rejection must free the slot or the run hangs
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+        let report = collector.finish();
+        assert_eq!(
+            report.request_counts.num_requests, 2,
+            "both requests arrived"
+        );
+        assert_eq!(
+            report.request_counts.completed_requests, 1,
+            "only the valid request completes; the rejected one is excluded"
+        );
+        assert_eq!(
+            report.request_counts.total_output_tokens, 4,
+            "rejected request contributes no output tokens to the report"
+        );
+    }
+
     fn multiturn_trace() -> Trace {
         Trace {
             block_size: 64,
@@ -846,12 +1201,14 @@ mod tests {
                             max_output_tokens: 2,
                             hash_ids: vec![11],
                             delay_after_previous_ms: 0.0,
+                            ..Default::default()
                         },
                         TurnTrace {
                             input_length: 192,
                             max_output_tokens: 2,
                             hash_ids: vec![21, 22, 23],
                             delay_after_previous_ms: 10.0,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -863,6 +1220,7 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![31, 32],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -920,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrency_workload_delayed_follow_up_does_not_bypass_other_ready_sessions() {
+    fn test_concurrency_workload_holds_session_slot_depth_first() {
         let args = fast_router_args();
         let (collector, stats) = run_concurrency_workload_multi_collect_with_stats(
             &args,
@@ -936,7 +1294,67 @@ mod tests {
             .iter()
             .map(|uuid| collector.snapshot(*uuid).unwrap().input_length)
             .collect::<Vec<_>>();
-        assert_eq!(dispatch_input_lengths, vec![64, 128, 192]);
+        assert_eq!(dispatch_input_lengths, vec![64, 192, 128]);
+    }
+
+    #[test]
+    fn test_concurrency_ttft_excludes_cap_wait_and_think_time() {
+        // Deterministic TTFT-boundary check (no sleeps). cap=1, depth-first: session-a runs
+        // t0 (input 64) → 10ms inter-turn think-time → t1 (input 192); session-b (input 128)
+        // is cap-blocked the whole time. The collector defines TTFT = first_token - arrival,
+        // and concurrency stamps `arrival` at DISPATCH (now_ms) — the same dispatch-time
+        // stamping the online runtime uses (`live_runtime.rs`, Concurrency arm). So the cap
+        // wait and the think-time (both elapse BEFORE dispatch) are excluded from TTFT, while
+        // routing/prefill (AFTER dispatch) is included.
+        let args = fast_router_args();
+        let (collector, stats) = run_concurrency_workload_multi_collect_with_stats(
+            &args,
+            multiturn_trace(),
+            1,
+            2,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        let snap = |input_len: usize| {
+            let uuid = stats
+                .dispatch_order
+                .iter()
+                .find(|u| collector.snapshot(**u).unwrap().input_length == input_len)
+                .expect("request with this input_length was dispatched");
+            collector.snapshot(*uuid).unwrap()
+        };
+        let a0 = snap(64); // session-a turn-0
+        let a1 = snap(192); // session-a turn-1 (behind 10ms think-time)
+        let b = snap(128); // session-b (cap-blocked behind session-a)
+
+        // TTFT (as the collector defines it: first_token - arrival) is positive for every
+        // request — i.e. it is measured from dispatch and *does* include the post-dispatch
+        // prefill/routing compute.
+        for s in [&a0, &a1, &b] {
+            assert!(
+                s.first_token_ms.unwrap() - s.arrival_time_ms > 0.0,
+                "prefill/routing time is included in TTFT"
+            );
+        }
+
+        // Think-time excluded: a.t1 is dispatched only after a.t0 completes + 10ms think-time,
+        // so that 10ms sits before a.t1's arrival and cannot be inside its TTFT.
+        assert!(
+            a1.arrival_time_ms >= a0.last_token_ms.unwrap() + 10.0,
+            "a.t1 is admitted only after the inter-turn think-time elapses"
+        );
+
+        // Cap wait excluded: session-b is blocked for the whole time session-a runs, so it is
+        // dispatched late (large arrival), yet its TTFT is only its own prefill — the long
+        // pre-dispatch wait is not folded in.
+        assert!(
+            b.arrival_time_ms >= a1.last_token_ms.unwrap(),
+            "b (cap-blocked) is admitted only after session-a fully completes"
+        );
+        assert!(
+            b.first_token_ms.unwrap() - b.arrival_time_ms < b.arrival_time_ms,
+            "the cap wait before b's dispatch is excluded from b's TTFT"
+        );
     }
 
     #[test]
@@ -949,6 +1367,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(111)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: [vec![11; 64], vec![22; 32]].concat(),
@@ -956,6 +1375,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(222)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(500.0),
+                ..Default::default()
             },
         ];
         let workload = Trace {
@@ -969,6 +1389,7 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![11, 21],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
                 SessionTrace {
@@ -979,6 +1400,7 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![11, 22],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -1021,14 +1443,19 @@ mod tests {
             request_report.prefix_cache_reused_ratio,
             workload_report.prefix_cache_reused_ratio
         );
+        assert_eq!(
+            request_report.first_admission_prefix_cache_reused_ratio,
+            workload_report.first_admission_prefix_cache_reused_ratio
+        );
     }
 
     #[test]
     fn test_multi_worker_trace_kv_router_debug_snapshot_tracks_queue_and_cached_dispatch() {
-        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
+        let policy = RouterQueuePolicy::Fcfs;
+        let args = queueing_router_args(policy);
         let mut runtime = AggRuntime::new(
             &args,
-            None,
+            Some(queueing_router_config(policy)),
             None,
             normalize_trace_requests(
                 vec![
@@ -1038,6 +1465,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(11)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
                     },
                     DirectRequest {
                         tokens: vec![22; 64],
@@ -1045,6 +1473,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(22)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
                     },
                     DirectRequest {
                         tokens: vec![11; 64],
@@ -1052,6 +1481,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(33)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.1),
+                        ..Default::default()
                     },
                 ],
                 1.0,
@@ -1129,6 +1559,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(1)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
                     },
                     DirectRequest {
                         tokens: vec![22; 64],
@@ -1136,6 +1567,7 @@ mod tests {
                         uuid: Some(Uuid::from_u128(2)),
                         dp_rank: 0,
                         arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
                     },
                 ],
                 1.0,
@@ -1179,6 +1611,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(11)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(100.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6],
@@ -1186,6 +1619,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(22)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(100.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
@@ -1193,6 +1627,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(33)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(101.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![7, 7, 7, 7, 8, 8, 8, 8],
@@ -1200,6 +1635,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(44)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(101.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1238,6 +1674,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(1)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 8],
@@ -1245,6 +1682,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(2)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3; 8],
@@ -1252,6 +1690,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(3)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![4; 8],
@@ -1259,6 +1698,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(4)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![5; 8],
@@ -1266,6 +1706,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(5)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
             ],
             4,
@@ -1287,6 +1728,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(901)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1294,6 +1736,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(902)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(5.0),
+                    ..Default::default()
                 },
             ],
             1,
@@ -1318,6 +1761,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(911)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![7; 64],
@@ -1325,6 +1769,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(912)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(500.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1334,6 +1779,11 @@ mod tests {
         let report = collector.finish();
         assert_eq!(report.request_counts.completed_requests, 2);
         assert_eq!(stats.dispatch_history.len(), 2);
+        assert_eq!(
+            stats.overlap_history,
+            vec![0, 32],
+            "second identical SGLang request should see all 32 KV blocks cached"
+        );
     }
 
     #[test]
@@ -1348,6 +1798,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(11)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(900.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
@@ -1355,6 +1806,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(22)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(1000.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
@@ -1362,6 +1814,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(33)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(100.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1397,6 +1850,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(11)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![22; 64],
@@ -1404,6 +1858,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(22)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![11; 64],
@@ -1411,6 +1866,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(33)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(2.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![22; 64],
@@ -1418,6 +1874,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(44)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(2.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1446,6 +1903,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(9)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![8; 64],
@@ -1453,6 +1911,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(8)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
             ],
             2,
@@ -1466,9 +1925,8 @@ mod tests {
 
     #[test]
     fn test_multi_worker_trace_kv_router_queues_until_prefill_completion() {
-        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
-        let (collector, stats) = run_trace_multi_collect_with_stats(
-            &args,
+        let (collector, stats) = run_trace_multi_queueing_collect_with_stats(
+            RouterQueuePolicy::Fcfs,
             vec![
                 DirectRequest {
                     tokens: vec![1; 64],
@@ -1476,6 +1934,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(1)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1483,6 +1942,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(2)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3; 64],
@@ -1490,10 +1950,10 @@ mod tests {
                     uuid: Some(Uuid::from_u128(3)),
                     dp_rank: 0,
                     arrival_timestamp_ms: Some(0.1),
+                    ..Default::default()
                 },
             ],
             2,
-            ReplayRouterMode::KvRouter,
         );
 
         let request_1 = collector.snapshot(Uuid::from_u128(1)).unwrap();
@@ -1520,6 +1980,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(10)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![20; 64],
@@ -1527,6 +1988,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(20)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![30; 64],
@@ -1534,6 +1996,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(30)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.1),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![40; 64],
@@ -1541,21 +2004,17 @@ mod tests {
                 uuid: Some(Uuid::from_u128(40)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.2),
+                ..Default::default()
             },
         ];
 
-        let (_, fcfs_stats) = run_trace_multi_collect_with_stats(
-            &queueing_router_args(RouterQueuePolicy::Fcfs),
+        let (_, fcfs_stats) = run_trace_multi_queueing_collect_with_stats(
+            RouterQueuePolicy::Fcfs,
             requests.clone(),
             2,
-            ReplayRouterMode::KvRouter,
         );
-        let (_, lcfs_stats) = run_trace_multi_collect_with_stats(
-            &queueing_router_args(RouterQueuePolicy::Lcfs),
-            requests,
-            2,
-            ReplayRouterMode::KvRouter,
-        );
+        let (_, lcfs_stats) =
+            run_trace_multi_queueing_collect_with_stats(RouterQueuePolicy::Lcfs, requests, 2);
 
         assert!(fcfs_stats.max_router_pending_count > 0);
         assert!(lcfs_stats.max_router_pending_count > 0);
@@ -1587,6 +2046,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(10)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![20; 128],
@@ -1594,6 +2054,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(20)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![30; 64],
@@ -1601,6 +2062,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(30)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.1),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![40; 64],
@@ -1608,21 +2070,17 @@ mod tests {
                 uuid: Some(Uuid::from_u128(40)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.2),
+                ..Default::default()
             },
         ];
 
-        let (fcfs_collector, fcfs_stats) = run_trace_multi_collect_with_stats(
-            &queueing_router_args(RouterQueuePolicy::Fcfs),
+        let (fcfs_collector, fcfs_stats) = run_trace_multi_queueing_collect_with_stats(
+            RouterQueuePolicy::Fcfs,
             requests.clone(),
             2,
-            ReplayRouterMode::KvRouter,
         );
-        let (lcfs_collector, lcfs_stats) = run_trace_multi_collect_with_stats(
-            &queueing_router_args(RouterQueuePolicy::Lcfs),
-            requests,
-            2,
-            ReplayRouterMode::KvRouter,
-        );
+        let (lcfs_collector, lcfs_stats) =
+            run_trace_multi_queueing_collect_with_stats(RouterQueuePolicy::Lcfs, requests, 2);
 
         let fcfs_request_30 = fcfs_collector.snapshot(Uuid::from_u128(30)).unwrap();
         let fcfs_request_40 = fcfs_collector.snapshot(Uuid::from_u128(40)).unwrap();
@@ -1645,9 +2103,8 @@ mod tests {
 
     #[test]
     fn test_multi_worker_concurrency_kv_router_respects_max_in_flight() {
-        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
-        let (_, stats) = run_concurrency_multi_collect_with_stats(
-            &args,
+        let (_, stats) = run_concurrency_multi_queueing_collect_with_stats(
+            RouterQueuePolicy::Fcfs,
             vec![
                 DirectRequest {
                     tokens: vec![1; 64],
@@ -1655,6 +2112,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(1)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1662,6 +2120,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(2)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![1; 64],
@@ -1669,6 +2128,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(3)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1676,11 +2136,11 @@ mod tests {
                     uuid: Some(Uuid::from_u128(4)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
             ],
             3,
             2,
-            ReplayRouterMode::KvRouter,
         );
 
         assert_eq!(stats.max_in_flight_seen, 3);
@@ -1699,6 +2159,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(11)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![2; 64],
@@ -1706,6 +2167,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(22)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
                 DirectRequest {
                     tokens: vec![3; 64],
@@ -1713,6 +2175,7 @@ mod tests {
                     uuid: Some(Uuid::from_u128(33)),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 },
             ],
             2,
@@ -1732,46 +2195,21 @@ mod tests {
         assert_eq!(stats.max_in_flight_seen, 2);
     }
 
-    #[test]
-    fn test_multi_worker_trace_single_worker_round_robin_matches_single_runtime() {
-        let args = replay_args(true, true);
-        let requests = vec![
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(11)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(100.0),
-            },
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(22)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(101.0),
-            },
-            DirectRequest {
-                tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(33)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(500.0),
-            },
-        ];
-
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_multi_worker_trace_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let requests = parity_requests();
         let single = run_trace_single_collect(args.clone(), requests.clone(), 1.0);
         let (multi, stats) =
             run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::RoundRobin);
 
         assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
-        for uuid in [11_u128, 22, 33] {
-            assert_eq!(
-                multi.snapshot(Uuid::from_u128(uuid)),
-                single.snapshot(Uuid::from_u128(uuid))
-            );
-        }
-        assert_eq!(multi.finish().request_counts.completed_requests, 3);
-        assert_eq!(single.finish().request_counts.completed_requests, 3);
+        assert_collectors_match(single, multi);
     }
 
     #[test]
@@ -1784,6 +2222,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
@@ -1791,6 +2230,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(101.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
@@ -1798,6 +2238,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(500.0),
+                ..Default::default()
             },
         ];
 
@@ -1817,33 +2258,15 @@ mod tests {
         assert_eq!(single.finish().request_counts.completed_requests, 3);
     }
 
-    #[test]
-    fn test_multi_worker_concurrency_single_worker_round_robin_matches_single_runtime() {
-        let args = replay_args(true, true);
-        let requests = vec![
-            DirectRequest {
-                tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(11)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(900.0),
-            },
-            DirectRequest {
-                tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
-                max_output_tokens: 4,
-                uuid: Some(Uuid::from_u128(22)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(1000.0),
-            },
-            DirectRequest {
-                tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
-                max_output_tokens: 2,
-                uuid: Some(Uuid::from_u128(33)),
-                dp_rank: 0,
-                arrival_timestamp_ms: Some(100.0),
-            },
-        ];
-
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_multi_worker_concurrency_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let requests = parity_requests();
         let single = run_concurrency_single_collect(args.clone(), requests.clone(), 2);
         let (multi, stats) = run_concurrency_multi_collect_with_stats(
             &args,
@@ -1854,12 +2277,68 @@ mod tests {
         );
 
         assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
-        for uuid in [11_u128, 22, 33] {
-            assert_eq!(
-                multi.snapshot(Uuid::from_u128(uuid)),
-                single.snapshot(Uuid::from_u128(uuid))
-            );
-        }
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_trace_workload_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_trace_workload_single_collect(args.clone(), parity_workload());
+        let (multi, stats) = run_trace_workload_multi_collect_with_stats(
+            &args,
+            parity_workload(),
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_concurrency_workload_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_concurrency_workload_single_collect(args.clone(), parity_workload(), 1);
+        let (multi, stats) = run_concurrency_workload_multi_collect_with_stats(
+            &args,
+            parity_workload(),
+            1,
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0, 0]);
+        assert_collectors_match(single, multi);
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    #[case(EngineType::Trtllm)]
+    fn test_agentic_trace_single_worker_round_robin_matches_single_runtime(
+        #[case] engine_type: EngineType,
+    ) {
+        let args = parity_args(engine_type);
+        let single = run_agentic_trace_single_collect(args.clone(), parity_agentic_trace());
+        let (multi, stats) = run_agentic_trace_multi_collect_with_stats(
+            &args,
+            parity_agentic_trace(),
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 0]);
+        assert_collectors_match(single, multi);
     }
 
     #[test]
@@ -1872,6 +2351,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(900.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![3, 3, 3, 3, 4, 4, 4, 4],
@@ -1879,6 +2359,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(1000.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![5, 5, 5, 5, 6, 6, 6, 6],
@@ -1886,6 +2367,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
         ];
 
@@ -1932,6 +2414,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(i as u128 + 1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(i as f64 * arrival_interval_ms),
+                ..Default::default()
             })
             .collect()
     }
@@ -1974,6 +2457,35 @@ mod tests {
         rt.advance_to(expected_ready_ms).unwrap();
         assert_eq!(rt.active_worker_count(), 2); // now active
         assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn test_advance_to_moves_clock_across_idle_gap() {
+        let args = fast_router_args();
+        let requests = VecDeque::from([DirectRequest {
+            tokens: vec![1; 64],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(1000.0),
+            ..Default::default()
+        }]);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        rt.advance_to(500.0).unwrap();
+
+        assert_eq!(rt.now_ms(), 500.0);
+        let stats = rt.drain_traffic();
+        assert!((stats.duration_s - 0.5).abs() < 1e-9);
     }
 
     #[test]
@@ -2056,6 +2568,95 @@ mod tests {
         assert!(
             done,
             "advance_to should report done when workload is complete"
+        );
+    }
+
+    fn cap_request(uuid: u128, arrival_ms: f64) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1; 64],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(arrival_ms),
+            ..Default::default()
+        }
+    }
+
+    /// Verifies that the cap operates on **simulated** time: with arrivals
+    /// at 0/1/2/3/4 seconds of sim time and a 2.5s cap, the resulting
+    /// simulated duration stays at or below the cap. Real wall-clock
+    /// runtime is microseconds (speedup_ratio=1000).
+    #[test]
+    fn test_agg_multi_max_sim_time_truncates_run() {
+        let args = fast_router_args();
+        let submitted = 5;
+        let cap_ms = 2500.0;
+        let pending = VecDeque::from([
+            cap_request(1, 0.0),
+            cap_request(2, 1000.0),
+            cap_request(3, 2000.0),
+            cap_request(4, 3000.0),
+            cap_request(5, 4000.0),
+        ]);
+        let (collector, _) = AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_max_sim_time_ms(Some(cap_ms))
+        .run()
+        .unwrap();
+        let report = collector.finish();
+        assert!(
+            report.request_counts.num_requests < submitted,
+            "cap should admit fewer than {} requests; got num_requests={}",
+            submitted,
+            report.request_counts.num_requests
+        );
+        assert!(
+            report.throughput.duration_ms <= cap_ms,
+            "simulated duration must respect cap; got duration_ms={} cap_ms={}",
+            report.throughput.duration_ms,
+            cap_ms
+        );
+    }
+
+    /// Sanity: uncapped, the same setup admits all requests and the
+    /// simulated duration extends past the last arrival.
+    #[test]
+    fn test_agg_multi_no_cap_completes_everything() {
+        let args = fast_router_args();
+        let pending = VecDeque::from([
+            cap_request(1, 0.0),
+            cap_request(2, 1000.0),
+            cap_request(3, 2000.0),
+            cap_request(4, 3000.0),
+            cap_request(5, 4000.0),
+        ]);
+        let (collector, _) = AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .run()
+        .unwrap();
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 5);
+        assert_eq!(report.request_counts.num_requests, 5);
+        assert!(
+            report.throughput.duration_ms >= 4000.0,
+            "uncapped sim duration should extend past last arrival; got {}",
+            report.throughput.duration_ms
         );
     }
 }

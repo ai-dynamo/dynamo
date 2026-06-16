@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
@@ -8,6 +9,22 @@ use tokio::sync::Notify;
 pub struct GracefulShutdownTracker {
     active_endpoints: AtomicUsize,
     shutdown_complete: Notify,
+}
+
+/// RAII handle that holds a `GracefulShutdownTracker` registration. Drop
+/// it to release the registration. Used by long-running shutdown
+/// orchestrators (e.g. backend `Worker`) to keep `Runtime::shutdown`'s
+/// Phase 2 wait alive until they finish — otherwise Phase 3 cancels the
+/// main token and tears down NATS/etcd while the orchestrator is still
+/// running drain/cleanup.
+pub struct GracefulTaskGuard {
+    tracker: Arc<GracefulShutdownTracker>,
+}
+
+impl Drop for GracefulTaskGuard {
+    fn drop(&mut self) {
+        self.tracker.unregister_endpoint();
+    }
 }
 
 impl std::fmt::Debug for GracefulShutdownTracker {
@@ -26,6 +43,16 @@ impl GracefulShutdownTracker {
         Self {
             active_endpoints: AtomicUsize::new(0),
             shutdown_complete: Notify::new(),
+        }
+    }
+
+    /// Acquire a guard that participates in the graceful-shutdown wait.
+    /// `Runtime::shutdown`'s Phase 2 will not advance to Phase 3 (NATS/etcd
+    /// teardown) until every outstanding guard is dropped.
+    pub fn register_task(self: &Arc<Self>) -> GracefulTaskGuard {
+        self.register_endpoint();
+        GracefulTaskGuard {
+            tracker: self.clone(),
         }
     }
 

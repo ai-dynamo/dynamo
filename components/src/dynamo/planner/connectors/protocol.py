@@ -16,6 +16,12 @@ class ScaleStatus(str, Enum):
 
     SUCCESS = "success"
     ERROR = "error"
+    # Soft denial: the request was well-formed and the GlobalPlanner is
+    # functioning correctly, but the requested change would breach the
+    # cluster-wide GPU budget (floor or ceiling) and could not be paired with
+    # an opposite-direction intent. Local planners should treat this as
+    # "hold current allocation this tick" and re-decide next tick — it is
+    # NOT a fatal error.
     REJECTED = "rejected"
     SCALING = "scaling"
 

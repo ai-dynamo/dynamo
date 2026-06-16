@@ -37,6 +37,7 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 
@@ -98,7 +99,7 @@ def test_parse_args_returns_config_with_expected_attrs(monkeypatch):
     assert isinstance(config, Config)
     assert config.model == "Qwen/Qwen3-0.6B"
     assert config.namespace == "testns"
-    assert config.component == "tensorrt_llm"
+    assert config.component == "backend"
     assert config.endpoint == "generate"
 
 
@@ -112,6 +113,30 @@ def test_config_use_kv_events_derived_from_publish_events(monkeypatch):
     config_off = parse_args(["--no-publish-events"])
     assert config_off.publish_events_and_metrics is False
     assert config_off.use_kv_events is False
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_rejects_invalid_kv_cache_config_override(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--override-engine-args",
+            '{"kv_cache_config": []}',
+        ]
+    )
+
+    with pytest.raises(
+        TypeError, match="kv_cache_config must be a dict or KvCacheConfig, got list"
+    ):
+        await init_llm_worker(
+            runtime=mock.MagicMock(),
+            config=config,
+            shutdown_event=asyncio.Event(),
+        )
 
 
 def test_config_has_connector(monkeypatch):
@@ -263,22 +288,28 @@ async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
 async def test_init_llm_worker_engine_args_with_extra_engine_args(
     tmp_path, monkeypatch
 ):
-    """--extra-engine-args YAML overrides are reflected in engine_args passed to get_llm_engine."""
+    """--extra-engine-args YAML overrides are reflected in engine_args and MDC-visible config."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
 
     yaml_file = tmp_path / "engine_config.yaml"
-    yaml_file.write_text("max_num_tokens: 32768\nmax_batch_size: 512\n")
+    yaml_file.write_text(
+        "max_seq_len: 32768\nmax_num_tokens: 32768\nmax_batch_size: 512\n"
+    )
 
     config = parse_args(
         [
             "--model",
             "fake-model",
+            "--max-seq-len",
+            "131072",
             "--extra-engine-args",
             str(yaml_file),
         ]
     )
     # CLI config should NOT reflect the YAML values
+    assert config.max_seq_len != 32768
     assert config.max_num_tokens != 32768
     assert config.max_batch_size != 512
 
@@ -300,6 +331,10 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
             )
 
         engine_args = exc_info.value.engine_args
+        assert engine_args["max_seq_len"] == 32768, (
+            f"Expected max_seq_len=32768 from YAML override, "
+            f"got {engine_args['max_seq_len']}"
+        )
         assert engine_args["max_num_tokens"] == 32768, (
             f"Expected max_num_tokens=32768 from YAML override, "
             f"got {engine_args['max_num_tokens']}"
@@ -308,6 +343,11 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
             f"Expected max_batch_size=512 from YAML override, "
             f"got {engine_args['max_batch_size']}"
         )
+        # MDC registration reads config.max_seq_len, so keep it in sync with
+        # the final engine args.
+        assert config.max_seq_len == 32768
+        assert config.max_num_tokens == 32768
+        assert config.max_batch_size == 512
 
 
 class MultimodalProcessorInstantiated(Exception):

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -22,6 +23,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+func init() {
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		panic(err)
+	}
+}
 
 func TestResolveKaiSchedulerQueueName(t *testing.T) {
 	tests := []struct {
@@ -329,7 +336,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 		existingPodClique  *grovev1alpha1.PodClique
 		wantReady          bool
 		wantReasonContains string
-		wantServiceStatus  v1alpha1.ServiceReplicaStatus
+		wantServiceStatus  v1beta1.ComponentReplicaStatus
 	}{
 		{
 			name:               "PodClique not found",
@@ -337,7 +344,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			namespace:          "default",
 			wantReady:          false,
 			wantReasonContains: "resource not found",
-			wantServiceStatus:  v1alpha1.ServiceReplicaStatus{},
+			wantServiceStatus:  v1beta1.ComponentReplicaStatus{},
 		},
 		{
 			name:         "PodClique fully ready",
@@ -360,9 +367,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				},
 			},
 			wantReady: true,
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   v1alpha1.ComponentKindPodClique,
-				ComponentName:   "ready-podclique",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:   v1beta1.ComponentKindPodClique,
 				ComponentNames:  []string{"ready-podclique"},
 				Replicas:        3,
 				UpdatedReplicas: 3,
@@ -390,9 +396,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				},
 			},
 			wantReady: true,
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   v1alpha1.ComponentKindPodClique,
-				ComponentName:   "zero-replicas-podclique",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:   v1beta1.ComponentKindPodClique,
 				ComponentNames:  []string{"zero-replicas-podclique"},
 				Replicas:        0,
 				UpdatedReplicas: 0,
@@ -421,9 +426,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "spec not yet processed",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   v1alpha1.ComponentKindPodClique,
-				ComponentName:   "stale-podclique",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:   v1beta1.ComponentKindPodClique,
 				ComponentNames:  []string{"stale-podclique"},
 				Replicas:        2,
 				UpdatedReplicas: 2,
@@ -452,9 +456,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "desired=3, ready=1",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   v1alpha1.ComponentKindPodClique,
-				ComponentName:   "not-ready-podclique",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:   v1beta1.ComponentKindPodClique,
 				ComponentNames:  []string{"not-ready-podclique"},
 				Replicas:        3,
 				UpdatedReplicas: 3,
@@ -483,9 +486,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "desired=3, updated=2",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   v1alpha1.ComponentKindPodClique,
-				ComponentName:   "not-updated-podclique",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:   v1beta1.ComponentKindPodClique,
 				ComponentNames:  []string{"not-updated-podclique"},
 				Replicas:        3,
 				UpdatedReplicas: 2,
@@ -514,9 +516,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "performing rolling update",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   v1alpha1.ComponentKindPodClique,
-				ComponentName:   "rolling-update-podclique",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:   v1beta1.ComponentKindPodClique,
 				ComponentNames:  []string{"rolling-update-podclique"},
 				Replicas:        4,
 				UpdatedReplicas: 3,
@@ -545,9 +546,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "observedGeneration is nil",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   v1alpha1.ComponentKindPodClique,
-				ComponentName:   "nil-observed-gen-podclique",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:   v1beta1.ComponentKindPodClique,
 				ComponentNames:  []string{"nil-observed-gen-podclique"},
 				Replicas:        2,
 				UpdatedReplicas: 2,
@@ -601,7 +601,7 @@ func TestCheckPCSGReady(t *testing.T) {
 		existingPCSG       *grovev1alpha1.PodCliqueScalingGroup
 		wantReady          bool
 		wantReasonContains string
-		wantServiceStatus  v1alpha1.ServiceReplicaStatus
+		wantServiceStatus  v1beta1.ComponentReplicaStatus
 	}{
 		{
 			name:               "PCSG not found",
@@ -609,7 +609,7 @@ func TestCheckPCSGReady(t *testing.T) {
 			namespace:          "default",
 			wantReady:          false,
 			wantReasonContains: "resource not found",
-			wantServiceStatus:  v1alpha1.ServiceReplicaStatus{},
+			wantServiceStatus:  v1beta1.ComponentReplicaStatus{},
 		},
 		{
 			name:         "PCSG fully ready",
@@ -632,9 +632,8 @@ func TestCheckPCSGReady(t *testing.T) {
 				},
 			},
 			wantReady: true,
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-				ComponentName:     "ready-pcsg",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 				ComponentNames:    []string{"ready-pcsg"},
 				Replicas:          3,
 				UpdatedReplicas:   3,
@@ -662,9 +661,8 @@ func TestCheckPCSGReady(t *testing.T) {
 				},
 			},
 			wantReady: true,
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-				ComponentName:     "zero-replicas-pcsg",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 				ComponentNames:    []string{"zero-replicas-pcsg"},
 				Replicas:          0,
 				UpdatedReplicas:   0,
@@ -693,9 +691,8 @@ func TestCheckPCSGReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "spec not yet processed",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-				ComponentName:     "stale-pcsg",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 				ComponentNames:    []string{"stale-pcsg"},
 				Replicas:          2,
 				UpdatedReplicas:   2,
@@ -724,9 +721,8 @@ func TestCheckPCSGReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "desired=3, available=1",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-				ComponentName:     "not-ready-pcsg",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 				ComponentNames:    []string{"not-ready-pcsg"},
 				Replicas:          3,
 				UpdatedReplicas:   3,
@@ -755,9 +751,8 @@ func TestCheckPCSGReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "desired=3, updated=2",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-				ComponentName:     "not-updated-pcsg",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 				ComponentNames:    []string{"not-updated-pcsg"},
 				Replicas:          3,
 				UpdatedReplicas:   2,
@@ -786,9 +781,8 @@ func TestCheckPCSGReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "performing rolling update",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-				ComponentName:     "rolling-update-pcsg",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 				ComponentNames:    []string{"rolling-update-pcsg"},
 				Replicas:          4,
 				UpdatedReplicas:   3,
@@ -817,9 +811,8 @@ func TestCheckPCSGReady(t *testing.T) {
 			},
 			wantReady:          false,
 			wantReasonContains: "observedGeneration is nil",
-			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-				ComponentName:     "nil-observed-gen-pcsg",
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 				ComponentNames:    []string{"nil-observed-gen-pcsg"},
 				Replicas:          2,
 				UpdatedReplicas:   2,
@@ -872,7 +865,7 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 		existingGroveResources []client.Object
 		wantReady              bool
 		wantReason             string
-		wantServiceStatuses    map[string]v1alpha1.ServiceReplicaStatus
+		wantServiceStatuses    map[string]v1beta1.ComponentReplicaStatus
 	}{
 		{
 			name: "single-node service not ready - PodClique not ready",
@@ -905,10 +898,9 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			},
 			wantReady:  false,
 			wantReason: "podclique/test-dgd-0-frontend: desired=2, ready=1",
-			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+			wantServiceStatuses: map[string]v1beta1.ComponentReplicaStatus{
 				"frontend": {
-					ComponentKind:   v1alpha1.ComponentKindPodClique,
-					ComponentName:   "test-dgd-0-frontend",
+					ComponentKind:   v1beta1.ComponentKindPodClique,
 					ComponentNames:  []string{"test-dgd-0-frontend"},
 					Replicas:        2,
 					UpdatedReplicas: 2,
@@ -974,18 +966,16 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			},
 			wantReady:  true,
 			wantReason: "",
-			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+			wantServiceStatuses: map[string]v1beta1.ComponentReplicaStatus{
 				"decode": {
-					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-					ComponentName:     "test-dgd-0-decode",
+					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-decode"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					AvailableReplicas: ptr.To(int32(2)),
 				},
 				"prefill": {
-					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-					ComponentName:     "test-dgd-0-prefill",
+					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-prefill"},
 					Replicas:          3,
 					UpdatedReplicas:   3,
@@ -1027,10 +1017,9 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			},
 			wantReady:  false,
 			wantReason: "pcsg/test-dgd-0-worker: desired=2, available=1",
-			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+			wantServiceStatuses: map[string]v1beta1.ComponentReplicaStatus{
 				"worker": {
-					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-					ComponentName:     "test-dgd-0-worker",
+					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-worker"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
@@ -1117,26 +1106,23 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			},
 			wantReady:  false,
 			wantReason: "pcsg/test-dgd-0-decode: desired=2, available=1",
-			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+			wantServiceStatuses: map[string]v1beta1.ComponentReplicaStatus{
 				"frontend": {
-					ComponentKind:   v1alpha1.ComponentKindPodClique,
-					ComponentName:   "test-dgd-0-frontend",
+					ComponentKind:   v1beta1.ComponentKindPodClique,
 					ComponentNames:  []string{"test-dgd-0-frontend"},
 					Replicas:        1,
 					UpdatedReplicas: 1,
 					ReadyReplicas:   ptr.To(int32(1)),
 				},
 				"decode": {
-					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-					ComponentName:     "test-dgd-0-decode",
+					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-decode"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					AvailableReplicas: ptr.To(int32(1)),
 				},
 				"prefill": {
-					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-					ComponentName:     "test-dgd-0-prefill",
+					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-prefill"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
@@ -1159,7 +1145,7 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			existingGroveResources: []client.Object{},
 			wantReady:              false,
 			wantReason:             "podclique/test-dgd-0-frontend: resource not found",
-			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+			wantServiceStatuses: map[string]v1beta1.ComponentReplicaStatus{
 				"frontend": {},
 			},
 		},
@@ -1183,8 +1169,9 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 				Spec: tt.dgdSpec,
 			}
 
+			betaDGD := betaDGD(t, dgd)
 			var objects []client.Object
-			objects = append(objects, dgd)
+			objects = append(objects, betaDGD)
 			objects = append(objects, tt.existingGroveResources...)
 
 			fakeKubeClient := fake.NewClientBuilder().
@@ -1193,7 +1180,7 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			ready, reason, serviceStatuses := GetComponentReadinessAndServiceReplicaStatuses(ctx, fakeKubeClient, dgd)
+			ready, reason, serviceStatuses := GetComponentReadinessAndServiceReplicaStatuses(ctx, fakeKubeClient, betaDGD)
 
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
 			g.Expect(reason).To(gomega.Equal(tt.wantReason))

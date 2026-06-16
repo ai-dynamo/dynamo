@@ -15,8 +15,17 @@
  * limitations under the License.
  */
 
-// Conversion scaffolding between v1alpha1 and v1beta1 DynamoGraphDeploymentScalingAdapter.
-// See dynamographdeployment_conversion.go for the design rationale.
+// Conversion between v1alpha1 and v1beta1 DynamoGraphDeploymentScalingAdapter.
+//
+// v1beta1 is the hub (see api/v1beta1/dynamographdeploymentscalingadapter_conversion.go).
+// The DGDSA shapes differ only in the embedded DGDRef carrier:
+//
+//   - v1alpha1: spec.dgdRef is a DynamoGraphDeploymentServiceRef{Name, ServiceName}
+//   - v1beta1:  spec.dgdRef is a DynamoGraphDeploymentComponentRef{Name, ComponentName}
+//
+// Replicas, status, and metadata are structurally identical, so this is a
+// lossless straight copy with a single field rename. v1beta1 is served, and
+// conversion wiring routes cross-version requests through this path.
 
 package v1alpha1
 
@@ -28,24 +37,50 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
-// errDGDSAConversionNotImplemented is returned by the v1alpha1 <-> v1beta1
-// DGDSA conversion stubs until real mapping logic is added.
-var errDGDSAConversionNotImplemented = fmt.Errorf(
-	"DynamoGraphDeploymentScalingAdapter v1alpha1 <-> v1beta1 conversion is not yet implemented; " +
-		"v1beta1 is marked unserved, use v1alpha1")
-
-// ConvertTo converts this DynamoGraphDeploymentScalingAdapter (v1alpha1) to the Hub version (v1beta1).
+// ConvertTo converts this DynamoGraphDeploymentScalingAdapter (v1alpha1) into
+// the hub version (v1beta1).
 func (src *DynamoGraphDeploymentScalingAdapter) ConvertTo(dstRaw conversion.Hub) error {
-	if _, ok := dstRaw.(*v1beta1.DynamoGraphDeploymentScalingAdapter); !ok {
+	dst, ok := dstRaw.(*v1beta1.DynamoGraphDeploymentScalingAdapter)
+	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentScalingAdapter but got %T", dstRaw)
 	}
-	return errDGDSAConversionNotImplemented
+
+	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
+
+	dst.Spec.Replicas = src.Spec.Replicas
+	dst.Spec.DGDRef = v1beta1.DynamoGraphDeploymentComponentRef{
+		Name:          src.Spec.DGDRef.Name,
+		ComponentName: src.Spec.DGDRef.ServiceName,
+	}
+
+	dst.Status.Replicas = src.Status.Replicas
+	dst.Status.Selector = src.Status.Selector
+	if src.Status.LastScaleTime != nil {
+		dst.Status.LastScaleTime = src.Status.LastScaleTime.DeepCopy()
+	}
+	return nil
 }
 
-// ConvertFrom converts from the Hub version (v1beta1) to this DynamoGraphDeploymentScalingAdapter (v1alpha1).
+// ConvertFrom converts from the hub (v1beta1) DynamoGraphDeploymentScalingAdapter
+// into this v1alpha1 instance.
 func (dst *DynamoGraphDeploymentScalingAdapter) ConvertFrom(srcRaw conversion.Hub) error {
-	if _, ok := srcRaw.(*v1beta1.DynamoGraphDeploymentScalingAdapter); !ok {
+	src, ok := srcRaw.(*v1beta1.DynamoGraphDeploymentScalingAdapter)
+	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentScalingAdapter but got %T", srcRaw)
 	}
-	return errDGDSAConversionNotImplemented
+
+	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
+
+	dst.Spec.Replicas = src.Spec.Replicas
+	dst.Spec.DGDRef = DynamoGraphDeploymentServiceRef{
+		Name:        src.Spec.DGDRef.Name,
+		ServiceName: src.Spec.DGDRef.ComponentName,
+	}
+
+	dst.Status.Replicas = src.Status.Replicas
+	dst.Status.Selector = src.Status.Selector
+	if src.Status.LastScaleTime != nil {
+		dst.Status.LastScaleTime = src.Status.LastScaleTime.DeepCopy()
+	}
+	return nil
 }

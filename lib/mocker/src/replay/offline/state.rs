@@ -7,6 +7,8 @@ use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::TraceCollector;
 use crate::scheduler::{EngineCore, EnginePassResult};
+#[cfg(feature = "kvbm-offload")]
+use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,12 +162,13 @@ pub(crate) struct OfflineWorkerSnapshot {
 impl OfflineWorkerState {
     pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
         let core = match args.engine_type {
-            crate::common::protocols::EngineType::Vllm => {
+            crate::common::protocols::EngineType::Vllm
+            | crate::common::protocols::EngineType::Trtllm => {
                 #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
                 let mut core = if capture_kv_events {
                     crate::scheduler::VllmCore::new_with_kv_capture(args, worker_idx as u64)
                 } else {
-                    crate::scheduler::VllmCore::new(args)
+                    crate::scheduler::VllmCore::new_with_worker_id(args, worker_idx as u64)
                 };
                 #[cfg(feature = "kvbm-offload")]
                 if let Err(e) = core.init_offload_offline() {
@@ -182,7 +185,10 @@ impl OfflineWorkerState {
                         worker_idx as u64,
                     ))
                 } else {
-                    EngineCore::Sglang(crate::scheduler::SglangCore::new(args))
+                    EngineCore::Sglang(crate::scheduler::SglangCore::new_with_worker_id(
+                        args,
+                        worker_idx as u64,
+                    ))
                 }
             }
         };
@@ -236,6 +242,16 @@ impl OfflineWorkerState {
         self.core.execute_hidden_pass(now_ms)
     }
 
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn tick_offload_only(&mut self, now_ms: f64) -> Vec<RouterEvent> {
+        self.core.tick_offload_only(now_ms)
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn earliest_offload_deadline(&self) -> Option<f64> {
+        self.core.earliest_offload_deadline()
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_snapshot(&self) -> OfflineWorkerSnapshot {
         OfflineWorkerSnapshot {
@@ -244,5 +260,34 @@ impl OfflineWorkerState {
             ready: self.is_ready(),
             drained: self.is_drained(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::DisaggRequestState;
+    use crate::common::protocols::DirectRequest;
+
+    #[test]
+    fn disagg_prefill_request_preserves_router_priorities() {
+        let state = DisaggRequestState::new(
+            DirectRequest {
+                tokens: vec![1; 8],
+                max_output_tokens: 12,
+                uuid: Some(Uuid::from_u128(1)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+                priority: -3,
+                strict_priority: 9,
+            },
+            0.0,
+        );
+
+        let request = state.build_prefill_request().unwrap();
+        assert_eq!(request.max_output_tokens, 1);
+        assert_eq!(request.priority, -3);
+        assert_eq!(request.strict_priority, 9);
     }
 }

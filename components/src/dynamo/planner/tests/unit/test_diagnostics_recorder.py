@@ -3,6 +3,8 @@
 
 """Tests for DiagnosticsRecorder and HTML report generation."""
 
+import gzip
+import json
 import os
 import tempfile
 
@@ -49,12 +51,12 @@ pytestmark = [
 def _make_config(tmp_dir: str, **overrides) -> PlannerConfig:
     defaults = dict(
         mode="disagg",
-        ttft=500.0,
-        itl=50.0,
+        ttft_ms=500.0,
+        itl_ms=50.0,
         min_endpoint=1,
         max_gpu_budget=-1,
-        throughput_adjustment_interval=60,
-        load_adjustment_interval=5,
+        throughput_adjustment_interval_seconds=60,
+        load_adjustment_interval_seconds=5,
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         load_predictor="constant",
@@ -63,6 +65,7 @@ def _make_config(tmp_dir: str, **overrides) -> PlannerConfig:
         metric_reporting_prometheus_port=0,
         report_interval_hours=0.5,
         report_output_dir=tmp_dir,
+        report_write_gzip_log=True,
         live_dashboard_port=0,
     )
     defaults.update(overrides)
@@ -263,6 +266,8 @@ class TestDiagnosticsRecorder:
             assert len(content) > 1000
             assert "plotly" in content.lower()
             assert "Replica Counts" in content
+            assert "Recommended Prefill Replicas" in content
+            assert "Recommended Decode Replicas" in content
             assert "Observed TTFT vs SLA" in content
             assert "Observed ITL vs SLA" in content
             assert "Estimated TTFT vs SLA" in content
@@ -274,6 +279,170 @@ class TestDiagnosticsRecorder:
             assert "Load Scaling Decisions" in content
             assert "Throughput Scaling Decisions" in content
             assert "Planner Diagnostics Report" in content
+
+    def test_generate_report_creates_gzip_snapshot_log(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            data = _synthetic_ticks(num_ticks=5)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+
+            filepath = recorder.generate_report()
+            assert filepath is not None
+            log_path = os.path.splitext(filepath)[0] + ".log.jsonl.gz"
+            assert os.path.exists(log_path)
+
+            with gzip.open(log_path, "rt", encoding="utf-8") as f:
+                records = [json.loads(line) for line in f]
+
+            assert records[0]["kind"] == "metadata"
+            assert records[0]["schema"] == "planner_diagnostics_snapshot_log_v1"
+            assert records[0]["num_snapshots"] == 5
+
+            first_snapshot = records[1]
+            assert first_snapshot["kind"] == "snapshot"
+            assert first_snapshot["schema"] == "planner_diagnostics_snapshot_log_v1"
+            assert first_snapshot["observed_requests_per_second"] == 2.0
+            assert first_snapshot["num_prefill_replicas"] == 1
+            assert first_snapshot["num_decode_replicas"] == 1
+            assert len(first_snapshot["prefill_engines"]) == 1
+            assert len(first_snapshot["decode_engines"]) == 1
+
+    def test_generate_report_gzip_snapshot_log_uses_fixed_filename(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir, report_filename="run.v1")
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            data = _synthetic_ticks(num_ticks=1)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+
+            filepath = recorder.generate_report()
+            assert filepath == os.path.join(tmp_dir, "run.v1")
+            assert os.path.exists(os.path.join(tmp_dir, "run.v1.log.jsonl.gz"))
+            assert not os.path.exists(os.path.join(tmp_dir, "run.log.jsonl.gz"))
+
+    def test_generate_report_gzip_snapshot_log_sanitizes_non_finite_values(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            data = _synthetic_ticks(num_ticks=1)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+            recorder._snapshots[0].observed_ttft_ms = float("nan")
+            recorder._snapshots[0].observed_itl_ms = float("inf")
+
+            filepath = recorder.generate_report()
+            assert filepath is not None
+            log_path = os.path.splitext(filepath)[0] + ".log.jsonl.gz"
+            with gzip.open(log_path, "rt", encoding="utf-8") as f:
+                content = f.read()
+            assert "NaN" not in content
+            assert "Infinity" not in content
+
+            records = [json.loads(line) for line in content.splitlines()]
+            assert records[1]["observed_ttft_ms"] is None
+            assert records[1]["observed_itl_ms"] is None
+
+    def test_generate_report_gzip_snapshot_log_failure_is_nonfatal(self, caplog):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir, report_filename="report.html")
+            recorder = DiagnosticsRecorder(config=cfg)
+            os.mkdir(os.path.join(tmp_dir, "report.log.jsonl.gz"))
+
+            data = _synthetic_ticks(num_ticks=1)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+
+            caplog.set_level("WARNING")
+            filepath = recorder.generate_report()
+            assert filepath == os.path.join(tmp_dir, "report.html")
+            assert os.path.exists(filepath)
+            assert len(recorder._snapshots) == 0
+            assert "Failed to write planner diagnostics gzip log" in caplog.text
+
+    def test_generate_report_can_skip_gzip_snapshot_log(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir, report_write_gzip_log=False)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            data = _synthetic_ticks(num_ticks=5)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+
+            filepath = recorder.generate_report()
+            assert filepath is not None
+            log_path = os.path.splitext(filepath)[0] + ".log.jsonl.gz"
+            assert not os.path.exists(log_path)
+
+    def test_report_plots_recommended_replica_events(self, monkeypatch):
+        from plotly.graph_objects import Figure
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            ticks = [
+                (
+                    TickInput(
+                        now_s=1000.0,
+                        worker_counts=WorkerCounts(
+                            ready_num_prefill=1, ready_num_decode=1
+                        ),
+                    ),
+                    PlannerEffects(diagnostics=TickDiagnostics()),
+                ),
+                (
+                    TickInput(
+                        now_s=1060.0,
+                        worker_counts=WorkerCounts(
+                            ready_num_prefill=1, ready_num_decode=1
+                        ),
+                    ),
+                    PlannerEffects(
+                        scale_to=ScalingDecision(num_prefill=3, num_decode=4),
+                        diagnostics=TickDiagnostics(),
+                    ),
+                ),
+                (
+                    TickInput(
+                        now_s=1120.0,
+                        worker_counts=WorkerCounts(
+                            ready_num_prefill=1, ready_num_decode=1
+                        ),
+                    ),
+                    PlannerEffects(diagnostics=TickDiagnostics()),
+                ),
+            ]
+
+            observed = Metrics(ttft=100.0, itl=10.0, num_req=60, isl=800, osl=120)
+            for tick_input, effects in ticks:
+                recorder.record(tick_input, effects, observed, gpu_hours=1.0)
+
+            traces = []
+            original_add_trace = Figure.add_trace
+
+            def capture_trace(self, trace, *args, **kwargs):
+                traces.append(trace)
+                return original_add_trace(self, trace, *args, **kwargs)
+
+            monkeypatch.setattr(Figure, "add_trace", capture_trace)
+            recorder._build_report_html(list(recorder._snapshots))
+
+            prefill_trace = next(
+                t for t in traces if t.name == "Recommended Prefill Replicas"
+            )
+            decode_trace = next(
+                t for t in traces if t.name == "Recommended Decode Replicas"
+            )
+
+            assert list(prefill_trace.y) == [None, 3, None]
+            assert list(decode_trace.y) == [None, 4, None]
+            assert prefill_trace.mode == "markers"
+            assert decode_trace.mode == "markers"
 
     def test_generate_report_clears_snapshots(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

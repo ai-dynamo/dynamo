@@ -80,7 +80,7 @@ func PrepareRestorePodSpec(
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
 		if storage.BasePath != "" {
-			injectCheckpointVolumeMount(container, storage.BasePath)
+			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
 		if isCheckpointReady {
@@ -92,8 +92,10 @@ func PrepareRestorePodSpec(
 	return nil
 }
 
-// ensureRestoreStartupProbe reuses the workload's probe when possible and
-// falls back to the restore-complete sentinel when the workload has no probe.
+// ensureRestoreStartupProbe installs a StartupProbe that gates Ready until
+// CRIU restore completes. It prefers the workload's existing Startup/Liveness/
+// Readiness probe (deep-copied with tightened cadence and infinite retries),
+// and falls back to a sentinel-file exec probe when none is defined.
 func ensureRestoreStartupProbe(container *corev1.Container) {
 	startup := container.StartupProbe
 	if startup == nil {
@@ -109,6 +111,7 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 					Command: []string{"cat", filepath.Join(SnapshotControlMountPath, RestoreCompleteFile)},
 				},
 			},
+			TimeoutSeconds:   1,
 			PeriodSeconds:    1,
 			FailureThreshold: math.MaxInt32,
 			SuccessThreshold: 1,
@@ -117,6 +120,8 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 	}
 
 	startup = startup.DeepCopy()
+	startup.InitialDelaySeconds = 0
+	startup.PeriodSeconds = 1
 	startup.FailureThreshold = math.MaxInt32
 	startup.SuccessThreshold = 1
 	container.StartupProbe = startup
@@ -350,7 +355,7 @@ func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 	})
 }
 
-func injectCheckpointVolumeMount(container *corev1.Container, basePath string) {
+func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 	for _, mount := range container.VolumeMounts {
 		if mount.Name == CheckpointVolumeName {
 			return

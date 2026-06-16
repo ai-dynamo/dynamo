@@ -10,6 +10,7 @@ import sglang as sgl
 
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.llm import WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
@@ -17,7 +18,11 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     VideoGenerationHealthCheckPayload,
 )
-from dynamo.sglang.publisher import handle_non_leader_node, setup_sgl_metrics
+from dynamo.sglang.publisher import (
+    handle_non_leader_node,
+    set_forward_pass_metrics_worker_id,
+    setup_sgl_metrics,
+)
 from dynamo.sglang.register import (
     register_image_diffusion_model,
     register_model_with_readiness_gate,
@@ -51,17 +56,21 @@ async def init_llm_diffusion(
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    engine = sgl.Engine(server_args=server_args)
-
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
+
+    engine = sgl.Engine(server_args=server_args)
 
     shutdown_endpoints[:] = [generate_endpoint]
 
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)
@@ -97,6 +106,8 @@ async def init_llm_diffusion(
                 dynamo_args,
                 output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
+                worker_type=WorkerType.Aggregated,
+                needs=[],
             ),
         )
     except Exception as e:

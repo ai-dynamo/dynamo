@@ -9,14 +9,12 @@ struct SplitLookupFinish<'a> {
     prefix_blocks: &'a [KvCacheStoredBlockData],
     tail_blocks: &'a [KvCacheStoredBlockData],
     tail_node: &'a SharedNode,
-    num_blocks_added: usize,
 }
 
 struct StoreParentCursor<'a> {
     parent: &'a SharedNode,
     parent_is_anchor: bool,
     last_ext_hash: Option<ExternalSequenceBlockHash>,
-    num_blocks_added: usize,
 }
 
 impl ConcurrentRadixTreeCompressed {
@@ -37,7 +35,7 @@ impl ConcurrentRadixTreeCompressed {
 
         let parent_resolution = self.resolve_store_parent(lookup, worker, &op, id)?;
         let outcome = self.insert_for_resolved_parent(lookup, worker, parent_resolution, &op)?;
-        self.record_store_outcome(worker, &outcome, counters);
+        self.record_store_outcome(&outcome, counters);
 
         Ok(())
     }
@@ -185,7 +183,6 @@ impl ConcurrentRadixTreeCompressed {
                 worker,
                 &op.blocks,
                 &node,
-                0,
                 !op.blocks.is_empty() && !coverage_changed,
             ),
         };
@@ -197,14 +194,12 @@ impl ConcurrentRadixTreeCompressed {
         worker: WorkerWithDpRank,
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
-        num_blocks_added: usize,
         duplicate_store: bool,
     ) -> StoreInsertOutcome {
         let wl = lookup.get_mut(&worker).unwrap();
-        let (added, lookup_changed) = Self::update_lookup_for_blocks(wl, blocks, node);
+        let lookup_changed = Self::update_lookup_for_blocks(wl, blocks, node);
 
         StoreInsertOutcome {
-            num_blocks_added: num_blocks_added + added,
             duplicate_store: duplicate_store && !lookup_changed,
         }
     }
@@ -218,33 +213,19 @@ impl ConcurrentRadixTreeCompressed {
         self.apply_split_lookup(lookup, finish.split);
 
         let wl = lookup.get_mut(&worker).unwrap();
-        let (prefix_added, _) =
-            Self::update_lookup_for_blocks(wl, finish.prefix_blocks, finish.prefix_node);
-        let (tail_added, _) =
-            Self::update_lookup_for_blocks(wl, finish.tail_blocks, finish.tail_node);
+        Self::update_lookup_for_blocks(wl, finish.prefix_blocks, finish.prefix_node);
+        Self::update_lookup_for_blocks(wl, finish.tail_blocks, finish.tail_node);
 
         StoreInsertOutcome {
-            num_blocks_added: finish.num_blocks_added + prefix_added + tail_added,
             duplicate_store: false,
         }
     }
 
     fn record_store_outcome(
         &self,
-        worker: WorkerWithDpRank,
         outcome: &StoreInsertOutcome,
         counters: Option<&PreBoundEventCounters>,
     ) {
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_add(outcome.num_blocks_added, Ordering::Relaxed);
-            }
-            None => {
-                self.tree_sizes
-                    .insert(worker, AtomicUsize::new(outcome.num_blocks_added));
-            }
-        }
-
         if outcome.duplicate_store
             && let Some(counters) = counters
         {
@@ -318,7 +299,6 @@ impl ConcurrentRadixTreeCompressed {
                             worker,
                             remaining,
                             cursor.parent,
-                            cursor.num_blocks_added,
                             !remaining.is_empty() && !coverage_changed,
                         )));
                     }
@@ -358,7 +338,6 @@ impl ConcurrentRadixTreeCompressed {
                         worker,
                         remaining,
                         cursor.parent,
-                        cursor.num_blocks_added,
                         false,
                     )));
                 }
@@ -390,7 +369,6 @@ impl ConcurrentRadixTreeCompressed {
                         worker,
                         remaining,
                         cursor.parent,
-                        cursor.num_blocks_added,
                         false,
                     )));
                 }
@@ -407,16 +385,9 @@ impl ConcurrentRadixTreeCompressed {
                 parent_is_anchor: cursor.parent_is_anchor,
             }),
             InsertChildOutcome::Existing(child) => Ok(StoreInsertStep::Descend(child)),
-            InsertChildOutcome::Inserted(new_node) => {
-                Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
-                    lookup,
-                    worker,
-                    remaining,
-                    &new_node,
-                    cursor.num_blocks_added,
-                    false,
-                )))
-            }
+            InsertChildOutcome::Inserted(new_node) => Ok(StoreInsertStep::Done(
+                Self::finish_with_lookup_update(lookup, worker, remaining, &new_node, false),
+            )),
         }
     }
 
@@ -426,7 +397,6 @@ impl ConcurrentRadixTreeCompressed {
         worker: WorkerWithDpRank,
         child: &SharedNode,
         remaining: &[KvCacheStoredBlockData],
-        num_blocks_added: usize,
         duplicate_store: bool,
     ) -> ChildInsertStep {
         loop {
@@ -464,7 +434,6 @@ impl ConcurrentRadixTreeCompressed {
                         worker,
                         remaining,
                         child,
-                        num_blocks_added,
                         duplicate_store && !remaining.is_empty() && !coverage_changed,
                     ));
                 }
@@ -499,7 +468,6 @@ impl ConcurrentRadixTreeCompressed {
                         prefix_blocks: &remaining[..scan.match_len],
                         tail_blocks: tail,
                         tail_node: &tail_node,
-                        num_blocks_added,
                     },
                 ));
             }
@@ -524,7 +492,7 @@ impl ConcurrentRadixTreeCompressed {
             }
 
             let wl = lookup.get_mut(&worker).unwrap();
-            let (added, lookup_changed) =
+            let lookup_changed =
                 Self::update_lookup_for_blocks(wl, &remaining[..scan.edge_len], child);
             if lookup_changed {
                 duplicate_store = false;
@@ -533,7 +501,6 @@ impl ConcurrentRadixTreeCompressed {
             return ChildInsertStep::Descend {
                 edge_len: scan.edge_len,
                 last_ext_hash: remaining[scan.edge_len - 1].block_hash,
-                num_blocks_added: num_blocks_added + added,
                 duplicate_store,
             };
         }
@@ -552,7 +519,6 @@ impl ConcurrentRadixTreeCompressed {
         let mut current_parent = parent.clone();
         let mut current_parent_is_anchor = parent_is_anchor;
         let mut remaining = blocks;
-        let mut num_blocks_added = 0usize;
         let mut duplicate_store = !blocks.is_empty();
         // Track the last ExternalSequenceBlockHash we matched to detect if
         // `current_parent` was split by a concurrent thread between iterations.
@@ -573,7 +539,6 @@ impl ConcurrentRadixTreeCompressed {
                     parent: &current_parent,
                     parent_is_anchor: current_parent_is_anchor,
                     last_ext_hash,
-                    num_blocks_added,
                 },
                 remaining,
             )? {
@@ -589,22 +554,13 @@ impl ConcurrentRadixTreeCompressed {
                 StoreInsertStep::Done(outcome) => return Ok(outcome),
             };
 
-            match self.insert_into_child(
-                lookup,
-                worker,
-                &child,
-                remaining,
-                num_blocks_added,
-                duplicate_store,
-            ) {
+            match self.insert_into_child(lookup, worker, &child, remaining, duplicate_store) {
                 ChildInsertStep::Done(outcome) => return Ok(outcome),
                 ChildInsertStep::Descend {
                     edge_len,
                     last_ext_hash: matched_hash,
-                    num_blocks_added: added,
                     duplicate_store: duplicate,
                 } => {
-                    num_blocks_added = added;
                     duplicate_store = duplicate;
                     last_ext_hash = Some(matched_hash);
                     remaining = &remaining[edge_len..];
@@ -614,9 +570,6 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        Ok(StoreInsertOutcome {
-            num_blocks_added,
-            duplicate_store,
-        })
+        Ok(StoreInsertOutcome { duplicate_store })
     }
 }

@@ -12,6 +12,7 @@ The standalone KV indexer (`python -m dynamo.indexer`) is a lightweight service 
 - It subscribes to ZMQ KV event streams directly from workers.
 - It exposes an HTTP API for registration, inspection, and overlap queries.
 - It preserves P2P recovery and gap detection/replay for the standalone ZMQ path.
+- It indexes device, host-pinned, and disk tier blocks and reports per-tier matches in `/query` responses.
 
 This is distinct from the [Standalone Router](../../../components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
 
@@ -34,6 +35,8 @@ The indexer maintains one radix tree per `(model_name, tenant_id)` pair. Workers
 ## Compatibility
 
 The standalone indexer works with any engine that publishes KV cache events over ZMQ in the expected msgpack format. This includes bare vLLM and SGLang engines, which emit ZMQ KV events natively — no Dynamo-specific wrapper is required.
+
+Events tagged with non-device storage tiers (host-pinned, disk, external) are routed into a lower-tier slot rather than dropped, and surface in `/query` responses as `cpu` / `disk` reach.
 
 ## Use Cases
 
@@ -196,6 +199,7 @@ curl -X POST http://localhost:8090/register \
 | `tenant_id` | no | `"default"` | Tenant identifier for isolation |
 | `dp_rank` | no | `0` | Data parallel rank |
 | `replay_endpoint` | no | — | ZMQ ROUTER address for gap replay (e.g. `tcp://host:5560`) |
+| `additional_salt` | no | — | Per-tenant salt (Mooncake RFC #1403 `additionalsalt`, alias accepted). Currently parsed for forward compatibility — engines apply their own salting today. |
 
 ### `POST /unregister` — Deregister an instance
 
@@ -227,8 +231,22 @@ curl -X POST http://localhost:8090/unregister \
 
 ### `GET /workers` — List registered instances
 
+Returns all registered workers, optionally filtered by model and/or tenant.
+
+| Query parameter | Description |
+|-----------------|-------------|
+| `model_name` | Return only workers registered for this model. Omit to return all models. |
+| `tenant_id` | Return only workers registered for this tenant. Omit to return all tenants. |
+
 ```bash
+# All workers
 curl http://localhost:8090/workers
+
+# Workers for a specific model
+curl "http://localhost:8090/workers?model_name=llama-3-8b"
+
+# Workers for a specific model and tenant
+curl "http://localhost:8090/workers?model_name=llama-3-8b&tenant_id=customer-a"
 ```
 
 Returns:
@@ -238,6 +256,9 @@ Returns:
     "instance_id": 1,
     "source": "zmq",
     "status": "active",
+    "model_name": "llama-3-8b",
+    "tenant_id": "default",
+    "block_size": 16,
     "endpoints": {
       "0": "tcp://127.0.0.1:5557",
       "1": "tcp://127.0.0.1:5558"
@@ -252,18 +273,22 @@ Returns:
         "status": "active"
       }
     }
-  },
-  {
-    "instance_id": 2,
-    "source": "discovery",
-    "status": "active",
-    "endpoints": {},
-    "listeners": {}
   }
 ]
 ```
 
-For ZMQ-managed workers, `status` is aggregated across listeners with priority `failed > pending > active > paused`. Each listener entry may also expose a `last_error` field when the most recent startup or recv-loop attempt failed.
+| Response field | Description |
+|----------------|-------------|
+| `instance_id` | Worker instance identifier |
+| `source` | Always `"zmq"` for ZMQ-managed workers |
+| `status` | Aggregated listener status: `failed > pending > active > paused` |
+| `model_name` | Model this worker is registered under |
+| `tenant_id` | Tenant this worker is registered under |
+| `block_size` | KV cache block size for this worker's `(model_name, tenant_id)` indexer |
+| `endpoints` | Map of `dp_rank → zmq_address` |
+| `listeners` | Per-dp_rank listener detail; each entry may include a `last_error` field when the most recent startup or recv-loop attempt failed |
+
+Filters are independent — providing both `model_name` and `tenant_id` returns only workers matching both. An empty array is returned (not a 404) when no workers match the filter.
 
 ### `POST /query` — Query overlap for token IDs
 
@@ -279,11 +304,30 @@ Returns:
 ```json
 {
   "scores": {"1": {"0": 32}, "2": {"1": 0}},
-  "frequencies": [1, 1]
+  "frequencies": [1, 1],
+  "instances": {
+    "1": {
+      "longest_matched": 48,
+      "gpu": 32,
+      "dp": {"0": 32},
+      "cpu": 48,
+      "disk": 48
+    },
+    "2": {
+      "longest_matched": 0,
+      "gpu": 0,
+      "dp": {"1": 0},
+      "cpu": 0,
+      "disk": 0
+    }
+  }
 }
 ```
 
-Scores are in **matched tokens** (block overlap count × block size). Nested by `instance_id` then `dp_rank`.
+All counts are in **matched tokens** (block overlap count × block size).
+
+- `scores` / `frequencies`: legacy device-tier overlap. `scores` is nested by `instance_id` then `dp_rank`. Preserved for backward compatibility — existing callers do not need to change.
+- `instances`: per-instance, per-tier breakdown aligned with [Mooncake RFC #1403](https://github.com/kvcache-ai/Mooncake/issues/1403). See [Per-instance tier breakdown](#per-instance-tier-breakdown) below.
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
@@ -291,6 +335,7 @@ Scores are in **matched tokens** (block overlap count × block size). Nested by 
 | `model_name` | yes | — | Model name (selects the indexer) |
 | `tenant_id` | no | `"default"` | Tenant identifier |
 | `lora_name` | no | — | LoRA adapter (overrides indexer-level lora_name for this query) |
+| `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). Currently parsed for forward compatibility — engines apply their own salting today. |
 
 ### `POST /query_by_hash` — Query overlap for pre-computed hashes
 
@@ -300,13 +345,30 @@ curl -X POST http://localhost:8090/query_by_hash \
   -d '{"block_hashes": [123456, 789012], "model_name": "llama-3-8b"}'
 ```
 
-Same response format as `/query`. Scores are in matched tokens.
+Same response format as `/query`, including the per-instance `instances` map. Scores are in matched tokens.
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `block_hashes` | yes | — | Pre-computed block hash array |
 | `model_name` | yes | — | Model name (selects the indexer) |
 | `tenant_id` | no | `"default"` | Tenant identifier |
+| `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). Currently parsed for forward compatibility — engines apply their own salting today. |
+
+### Per-instance tier breakdown
+
+Each entry in `instances` is keyed by `instance_id` (as a string) and reports prefix reach across the device, host-pinned, and disk storage tiers:
+
+| Field | Description |
+|-------|-------------|
+| `gpu` | Tokens matched on the device tier (the longest device-tier prefix for any `dp_rank` of this instance). |
+| `dp` | Per-`dp_rank` device-tier match count, as `{rank: tokens}`. |
+| `cpu` | Tokens matched through the host-pinned tier. **Cumulative** through the device tier — includes everything counted in `gpu` plus any host-pinned extension. |
+| `disk` | Tokens matched through the disk (or external) tier. **Cumulative** through the device → host-pinned walk. |
+| `longest_matched` | The maximum of `gpu`, `cpu`, and `disk` — a single "best prefix length" the gateway can sort on. |
+
+Tier counts are cumulative because the lower-tier walk reports each tier's *extension* on top of the previous one. Under a natural offload pipeline (device → host → disk), this guarantees `gpu ≤ cpu ≤ disk` for every instance — lower tiers extend the device-tier prefix rather than shrink it.
+
+Legacy callers that only consume `scores` keep working: those values are equal to each instance's per-`dp_rank` `gpu` count.
 
 ### `GET /dump` — Dump all radix tree events
 

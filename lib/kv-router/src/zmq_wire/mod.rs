@@ -37,6 +37,10 @@ pub fn decode_event_batch(payload: &[u8]) -> Result<KvEventBatch, rmps::decode::
 #[derive(Debug, Clone)]
 pub struct ZmqEventNormalizer {
     kv_block_size: u32,
+    /// Model's image placeholder token id, when MM-aware routing is active.
+    /// Lets `convert_event` normalize vLLM BlockStored events to the canonical
+    /// pad_value scheme. `None` for text-only models / non-MM deployments.
+    image_token_id: Option<u32>,
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
 }
@@ -47,10 +51,32 @@ struct KvCacheGroupMetadata {
     sliding_window: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZmqEventFilterReason {
+    IgnoredEvent,
+    NonMainAttentionKind,
+    UnknownKind,
+    NonMainAttentionGroup,
+    UnlearnedGroupIdx,
+}
+
+impl ZmqEventFilterReason {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::IgnoredEvent => "ignored_event",
+            Self::NonMainAttentionKind => "non_main_attention_kind",
+            Self::UnknownKind => "unknown_kind",
+            Self::NonMainAttentionGroup => "non_main_attention_group",
+            Self::UnlearnedGroupIdx => "unlearned_group_idx",
+        }
+    }
+}
+
 impl ZmqEventNormalizer {
     pub fn new(kv_block_size: u32) -> Self {
         Self {
             kv_block_size,
+            image_token_id: None,
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
         }
@@ -59,21 +85,41 @@ impl ZmqEventNormalizer {
     pub fn with_warning_count(kv_block_size: u32, warning_count: Arc<AtomicU32>) -> Self {
         Self {
             kv_block_size,
+            image_token_id: None,
             warning_count,
             group_metadata: FxHashMap::default(),
         }
     }
 
+    /// Set the model's image placeholder token id so vLLM BlockStored events
+    /// get normalized to the canonical pad_value scheme. No-op for text-only
+    /// models (leave unset).
+    pub fn with_image_token_id(mut self, image_token_id: Option<u32>) -> Self {
+        self.image_token_id = image_token_id;
+        self
+    }
+
     pub fn preprocess(&mut self, raw: RawKvEvent, worker: WorkerWithDpRank) -> Option<RawKvEvent> {
+        self.preprocess_with_reason(raw, worker).ok()
+    }
+
+    pub fn preprocess_with_reason(
+        &mut self,
+        raw: RawKvEvent,
+        worker: WorkerWithDpRank,
+    ) -> Result<RawKvEvent, ZmqEventFilterReason> {
         if raw.is_ignored() {
-            return None;
+            return Err(ZmqEventFilterReason::IgnoredEvent);
         }
 
         let metadata = raw.metadata();
         if matches!(raw, RawKvEvent::BlockStored { .. }) {
             self.learn_metadata(metadata, worker.dp_rank);
         }
-        self.should_accept(metadata, worker.dp_rank).then_some(raw)
+        if let Some(reason) = self.filter_reason(metadata, worker.dp_rank) {
+            return Err(reason);
+        }
+        Ok(raw)
     }
 
     pub fn normalize_preprocessed(
@@ -88,6 +134,7 @@ impl ZmqEventNormalizer {
             self.kv_block_size,
             worker,
             &self.warning_count,
+            self.image_token_id,
         )
     }
 
@@ -116,20 +163,38 @@ impl ZmqEventNormalizer {
         );
     }
 
-    fn should_accept(&self, metadata: KvCacheEventMetadata, dp_rank: DpRank) -> bool {
+    fn filter_reason(
+        &self,
+        metadata: KvCacheEventMetadata,
+        dp_rank: DpRank,
+    ) -> Option<ZmqEventFilterReason> {
         if let Some(kind) = metadata.kv_cache_spec_kind {
-            return kind.is_main_attention();
+            if kind.is_main_attention() {
+                return None;
+            }
+            if kind == KvCacheSpecKind::Unknown {
+                return Some(ZmqEventFilterReason::UnknownKind);
+            }
+            return Some(ZmqEventFilterReason::NonMainAttentionKind);
         }
 
-        let Some(group_idx) = metadata.group_idx else {
-            return true;
-        };
+        let group_idx = metadata.group_idx?;
 
         if let Some(metadata) = self.group_metadata.get(&(dp_rank, group_idx)) {
             let _sliding_window = metadata.sliding_window;
-            return metadata.kind.is_main_attention();
+            if metadata.kind.is_main_attention() {
+                return None;
+            }
+            if metadata.kind == KvCacheSpecKind::Unknown {
+                return Some(ZmqEventFilterReason::UnknownKind);
+            }
+            return Some(ZmqEventFilterReason::NonMainAttentionGroup);
         }
 
-        group_idx == 0
+        if group_idx == 0 {
+            None
+        } else {
+            Some(ZmqEventFilterReason::UnlearnedGroupIdx)
+        }
     }
 }

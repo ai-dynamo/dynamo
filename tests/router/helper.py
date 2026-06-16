@@ -8,7 +8,8 @@ import os
 import random
 import string
 import sys
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
@@ -35,6 +36,19 @@ def generate_random_suffix() -> str:
 def get_kv_indexer_command() -> list[str]:
     """Return the preferred standalone indexer command for the current Python env."""
     return [sys.executable, "-m", "dynamo.indexer"]
+
+
+def get_select_service_command() -> list[str]:
+    """Return the preferred standalone selection service command."""
+    return [sys.executable, "-m", "dynamo.select_service"]
+
+
+def get_kv_indexer_test_env() -> Dict[str, str]:
+    """Indexer launch env that enables the listener-control test endpoints
+    (gated off by default; used by the ZMQ replay scenario)."""
+    env = os.environ.copy()
+    env["DYN_KV_INDEXER_TEST_ENDPOINTS"] = "1"
+    return env
 
 
 def assert_event_dumps_equal(
@@ -161,7 +175,10 @@ def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) ->
 
 
 async def wait_for_frontend_ready(
-    frontend_url: str, expected_num_workers: int = 2, timeout: int = 120
+    frontend_url: str,
+    expected_num_workers: int = 2,
+    timeout: int = 120,
+    test_payload: dict[str, Any] | None = None,
 ):
     """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
 
@@ -176,6 +193,8 @@ async def wait_for_frontend_ready(
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
         expected_num_workers: Number of workers to wait for (currently logs but doesn't enforce)
         timeout: Maximum time to wait in seconds for both phases combined
+        test_payload: Optional chat completions payload for the phase 2 readiness probe.
+            Use this when readiness must satisfy the same routing constraints as the test.
 
     Raises:
         TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
@@ -224,12 +243,16 @@ async def wait_for_frontend_ready(
 
     # Phase 2: Wait for chat completions pipeline to be ready
     logger.info("Waiting for chat completions pipeline to be built...")
-    test_payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": "test"}],
-        "max_tokens": 1,
-        "stream": False,
-    }
+    if test_payload is None:
+        test_payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+    else:
+        test_payload = {**test_payload}
+        test_payload.setdefault("model", model_name)
 
     while True:
         elapsed = asyncio.get_event_loop().time() - start_time
@@ -331,8 +354,6 @@ async def wait_for_workers_ready(
             kv_python_router=router,
             model_name=model_name,
             token_ids=test_token_ids,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,
                 "max_tokens": 2,
@@ -414,6 +435,58 @@ async def wait_for_indexer_workers_active(
     )
 
 
+async def wait_for_selection_service_ready(
+    selector_url: str,
+    expected_worker_ids: set[int],
+    timeout_s: float = 30.0,
+) -> None:
+    """Wait until the standalone selection service reports expected workers ready."""
+    if not expected_worker_ids:
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    ready_url = f"{selector_url}/ready"
+
+    async with aiohttp.ClientSession() as session:
+        while loop.time() < deadline:
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                break
+
+            try:
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(ready_url, timeout=request_timeout) as resp:
+                    if resp.status not in (200, 503):
+                        await asyncio.sleep(0.5)
+                        continue
+                    body = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                await asyncio.sleep(0.5)
+                continue
+
+            workers_by_id = {
+                worker["worker_id"]: worker for worker in body.get("workers", [])
+            }
+            all_schedulable = all(
+                workers_by_id.get(worker_id, {}).get("lifecycle") == "schedulable"
+                for worker_id in expected_worker_ids
+            )
+            if (
+                resp.status == 200
+                and body.get("ready") is True
+                and body.get("schedulable_workers", 0) >= len(expected_worker_ids)
+                and all_schedulable
+            ):
+                return
+
+            await asyncio.sleep(0.5)
+
+    raise RuntimeError(
+        f"Timed out waiting for selection service workers to become ready at {ready_url}"
+    )
+
+
 async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8):
     """Send a single request with exponential backoff retry"""
     wait_time = 1  # Start with 1 second
@@ -444,12 +517,17 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime(store_backend="etcd", request_plane="tcp"):
+def get_runtime(
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+    event_plane: Optional[str] = None,
+):
     """Create a DistributedRuntime instance for testing.
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "tcp".
+        request_plane: How frontend talks to backend ("tcp", "nats"). Defaults to "tcp".
+        event_plane: How KV events are transported ("nats" or "zmq"). Defaults to runtime behavior.
     """
     try:
         # Try to get running loop (works in async context)
@@ -458,7 +536,9 @@ def get_runtime(store_backend="etcd", request_plane="tcp"):
         # No running loop, create a new one (sync context)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return DistributedRuntime(loop, store_backend, request_plane)
+    return DistributedRuntime(
+        loop, store_backend, request_plane, event_plane=event_plane
+    )
 
 
 async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
@@ -563,8 +643,8 @@ async def send_request_via_python_kv_router(
     kv_python_router: KvRouter,
     model_name: str,
     token_ids: list,
-    initial_wait: float,
-    max_retries: int,
+    initial_wait: float = 0.25,
+    max_retries: int = 8,
     stop_conditions: Optional[dict] = None,
     sampling_options: Optional[dict] = None,
     output_options: Optional[dict] = None,
@@ -652,11 +732,13 @@ async def send_request_via_python_kv_router(
                     f"Stream finished with reason: {response['finish_reason']}"
                 )
 
-            # Extract worker IDs and dp_ranks from disaggregated_params if present
-            if return_worker_ids and "disaggregated_params" in response:
-                disagg_params = response["disaggregated_params"]
-                if isinstance(disagg_params, dict) and "worker_id" in disagg_params:
-                    worker_id_info = disagg_params["worker_id"]
+            # Extract worker IDs and dp_ranks from routing_data if present. The KvRouter
+            # binding forwards worker attribution on the typed ``routing_data.worker_id``
+            # field rather than the legacy ``disaggregated_params`` JSON blob.
+            if return_worker_ids and "routing_data" in response:
+                routing_data = response["routing_data"]
+                if isinstance(routing_data, dict) and "worker_id" in routing_data:
+                    worker_id_info = routing_data["worker_id"]
                     if isinstance(worker_id_info, dict):
                         if "prefill_worker_id" in worker_id_info:
                             prefill_worker_id = worker_id_info["prefill_worker_id"]
@@ -694,3 +776,24 @@ async def send_request_via_python_kv_router(
         }
 
     return True
+
+
+def topology_env(
+    tmp_path: Path,
+    name: str,
+    topology_domains: Dict[str, str],
+    *,
+    transfer_domain: str = "zone",
+    enforcement: str = "required",
+) -> Dict[str, str]:
+    topology_dir = tmp_path / name
+    topology_dir.mkdir()
+    for domain, value in topology_domains.items():
+        (topology_dir / domain).write_text(value)
+
+    return {
+        "DYN_TOPOLOGY_ENABLED": "true",
+        "DYN_TOPOLOGY_MOUNT_PATH": str(topology_dir),
+        "DYN_KV_TRANSFER_DOMAIN": transfer_domain,
+        "DYN_KV_TRANSFER_ENFORCEMENT": enforcement,
+    }

@@ -4,7 +4,7 @@
 import asyncio
 
 # Timing notes (measured locally):
-# - GPU-1 subset (`-m "gpu_1 and not gpu_2"`): 130.43s total for 3 tests.
+# - GPU-1 subset (`-m "gpu_1 and not gpu_2"`): 130.43s total for 3 tests on vLLM 0.20.0.
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import json
@@ -25,6 +25,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
+    get_kv_indexer_test_env,
     wait_for_indexer_workers_active,
 )
 from tests.utils.constants import DefaultPort
@@ -109,7 +110,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             num_workers: Number of vLLM worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
@@ -340,6 +341,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="dynamo-kv-indexer",
+            env=get_kv_indexer_test_env(),
         )
         logger.info(
             "Starting standalone indexer on port %s", self._standalone_indexer_port
@@ -472,6 +474,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="dynamo-kv-indexer-b",
+            env=get_kv_indexer_test_env(),
         )
         logger.info(
             "Starting standalone indexer B on port %s with peer http://localhost:%s",
@@ -491,7 +494,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
     request,
@@ -519,7 +522,7 @@ def test_vllm_kv_router_basic(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
     request,
@@ -547,7 +550,7 @@ def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
     request,
@@ -645,7 +648,7 @@ def test_router_decisions_vllm_disagg(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(690)  # 3x ~230s under new scheduler (3d1554f)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [

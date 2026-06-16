@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1.10.0-labs
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Standalone test image — layers test deps on top of a pre-built runtime image.
+# Usage: docker build -f container/Dockerfile.test --target test_image --build-arg BASE_IMAGE=<runtime-image> .
+# For adding specific unique tests software, like in planner, add a target: docker build -f container/Dockerfile.test --target test_distroless --build-arg BASE_IMAGE=<runtime-image> .
+ARG BASE_IMAGE
+
+FROM ${BASE_IMAGE} AS test_image
+
+# Install test dependencies on top of runtime image
+USER root
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    if [ -n "$VIRTUAL_ENV" ]; then \
+        uv pip install \
+            --requirement /tmp/requirements.test.txt; \
+    else \
+        pip install --break-system-packages \
+            --requirement /tmp/requirements.test.txt; \
+    fi
+
+USER dynamo
+
+# Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
+COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+# Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
+COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+
+FROM debian:bookworm-slim AS github_runner_tools
+
+RUN set -eux; \
+    tools="bash tail tar gzip cat grep env tr head mkdir chmod mv sleep"; \
+    mkdir -p /github-runner-tools/usr/local/bin /github-runner-tools/opt/dynamo/lib; \
+    for tool in ${tools}; do \
+        tool_path="$(command -v "${tool}")"; \
+        cp -L "${tool_path}" "/github-runner-tools/usr/local/bin/${tool}"; \
+        ldd "${tool_path}" \
+            | awk '/=> \// { print $3 } /^\// { print $1 }' \
+            | grep -Ev '/(ld-linux|libc\.so)' \
+            | while read -r lib_path; do \
+                cp -L "${lib_path}" "/github-runner-tools/opt/dynamo/lib/$(basename "${lib_path}")"; \
+            done; \
+    done
+
+FROM test_image AS test_distroless
+
+# The planner runtime is distroless, so add supporting software for GitHub Actions.
+USER root
+COPY --from=github_runner_tools /github-runner-tools/usr/local/bin/ /usr/local/bin/
+COPY --from=github_runner_tools /github-runner-tools/opt/dynamo/lib/ /opt/dynamo/lib/
+
+USER dynamo

@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# DestinationRule for Qwen3-0.6B aggregated GAIE deployment with Istio
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: qwen3-0-6b-agg-epp
+spec:
+  # Short name resolves in the DestinationRule's own namespace — apply this
+  # manifest into the same namespace as the EPP service.
+  host: qwen3-0-6b-agg-epp
+  trafficPolicy:
+    tls:
+      insecureSkipVerify: true
+      mode: SIMPLE

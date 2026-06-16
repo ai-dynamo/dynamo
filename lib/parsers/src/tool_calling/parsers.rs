@@ -58,7 +58,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("gemma-4", ToolCallConfig::gemma4());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
-        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes
+        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes; EOF-recovery opt-out is keyed by name in detect_and_parse_tool_call_with_recovery_options
         map
     })
 }
@@ -116,11 +116,18 @@ pub async fn try_tool_call_parse(
 }
 
 /// Same as [`detect_and_parse_tool_call`] but flips `allow_eof_recovery=true`
-/// on the JSON / XML / GLM-4.7 configs so finalize / non-streaming aggregate
+/// on the JSON / XML / DSML configs so finalize / non-streaming aggregate
 /// paths recover from missing-end-token / truncated-JSON instead of silently
 /// dropping the call. Streaming jails MUST keep using the non-recovery
 /// variant — otherwise `should_exit_jail_early` fires before the end-token
 /// has actually arrived (see jail.rs).
+///
+/// DSML recovery covers DeepSeek V4: when the outer `</｜DSML｜tool_calls>`
+/// wrapper never arrives (EOS / max_tokens), still recover every complete
+/// `<｜DSML｜invoke>...</｜DSML｜invoke>` pair and keep the pre-block prose as
+/// `normal_text`, while dropping any trailing invoke that was never closed.
+/// This is best-effort recovery from the bytes already received, so the same
+/// behavior applies on both batch/non-streaming and stream-finalize paths.
 pub async fn detect_and_parse_tool_call_with_recovery(
     message: &str,
     parser_str: Option<&str>,
@@ -141,7 +148,10 @@ pub async fn detect_and_parse_tool_call_with_recovery(
     let recovery_config = match &base.parser_config {
         ParserConfig::Json(c) => {
             let mut c = c.clone();
-            c.allow_eof_recovery = true;
+            // qwen25 opts out of EOF recovery so unterminated calls are dropped,
+            // not salvaged. Keyed by name (not a config field) to keep the
+            // exported JsonParserConfig stable for downstream callers.
+            c.allow_eof_recovery = parser_key != "qwen25";
             ParserConfig::Json(c)
         }
         ParserConfig::Xml(c) => {
@@ -149,18 +159,49 @@ pub async fn detect_and_parse_tool_call_with_recovery(
             c.allow_eof_recovery = true;
             ParserConfig::Xml(c)
         }
-        ParserConfig::Glm47(c) => {
+        ParserConfig::Dsml(c) => {
             let mut c = c.clone();
             c.allow_eof_recovery = true;
-            ParserConfig::Glm47(c)
+            ParserConfig::Dsml(c)
         }
+        // GLM-4.7 intentionally omitted: match upstream vLLM/SGLang behavior
+        // (drop the call when </tool_call> is missing).
         // Other parsers don't have an EOF-recovery flag — pass through.
         other => other.clone(),
     };
     let cfg = ToolCallConfig {
         parser_config: recovery_config,
+        structural_tag_builder: None,
     };
-    try_tool_call_parse(message, &cfg, tools).await
+    let (calls, normal_text) = try_tool_call_parse(message, &cfg, tools).await?;
+
+    // An unterminated qwen25 call (open <tool_call>, no close, nothing parsed)
+    // drops its partial markup instead of leaking it. Deliberate non-parity
+    // with SGLang, which surfaces the raw text.
+    if parser_key == "qwen25"
+        && calls.is_empty()
+        && let Some(text) = normal_text.as_deref()
+        && text.contains("<tool_call>")
+        && !text.contains("</tool_call>")
+    {
+        return Ok((calls, Some(String::new())));
+    }
+
+    Ok((calls, normal_text))
+}
+
+/// Deprecated compatibility shim retained for the published `dynamo-parsers`
+/// API. Batch/non-streaming and stream-end finalize now share one recovery
+/// path; call [`detect_and_parse_tool_call_with_recovery`] directly.
+#[deprecated(
+    note = "batch and stream finalize now share one recovery path; use detect_and_parse_tool_call_with_recovery"
+)]
+pub async fn detect_and_parse_tool_call_with_stream_finalize_recovery(
+    message: &str,
+    parser_str: Option<&str>,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    detect_and_parse_tool_call_with_recovery(message, parser_str, tools).await
 }
 
 // Base Detector to call for all tool parsing
@@ -246,6 +287,64 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
                 } else {
                     parser_key
                 };
+                // mistral's `[/TOOL_CALLS]` close marker is optional, so the
+                // streaming jail can't simply split at the JSON array `]`: if a
+                // `[/TOOL_CALLS]` arrives in a later chunk it would be stranded
+                // as leaked normal_text (TOOLCALLING.stream.1.b / .2 / .3). But
+                // it also can't just wait for the marker, because the bare
+                // `[TOOL_CALLS][...]` form is frequently followed by ordinary
+                // trailing prose that must still stream as content. Decide based
+                // on what trails the JSON body. Guarded to mistral so phi4
+                // (empty end token) and the marker-required families
+                // (hermes / nemotron_deci) keep their existing behavior.
+                // Only the framed form (an explicit `[TOOL_CALLS]` opener) can
+                // strand a later `[/TOOL_CALLS]`; the bare `[{...}]` form keeps
+                // the normal immediate-split behavior so trailing prose still
+                // streams as its own chunk.
+                let has_open_marker = json_config
+                    .tool_call_start_tokens
+                    .iter()
+                    .any(|t| !t.is_empty() && chunk.contains(t.as_str()));
+                if effective_parser == "mistral"
+                    && has_open_marker
+                    && let Some(marker) = json_config
+                        .tool_call_end_tokens
+                        .iter()
+                        .find(|t| !t.is_empty())
+                {
+                    // Full close marker already present: consume through it so
+                    // it is part of the jailed region, never leaked. Advance
+                    // past any consecutive close markers separated only by
+                    // whitespace (e.g. `[/TOOL_CALLS][/TOOL_CALLS]`) so a
+                    // repeated marker isn't stranded as trailing normal_text.
+                    // Mirrors the consecutive-block loop in the hermes branch of
+                    // `find_tool_call_end_position_json`.
+                    if let Some(pos) = chunk.find(marker.as_str()) {
+                        let mut cursor = pos + marker.len();
+                        loop {
+                            let rest = &chunk[cursor..];
+                            let trimmed = rest.trim_start();
+                            if !trimmed.starts_with(marker.as_str()) {
+                                break;
+                            }
+                            let trim_offset = rest.len() - trimmed.len();
+                            cursor += trim_offset + marker.len();
+                        }
+                        return Some(cursor);
+                    }
+                    let json_end =
+                        find_tool_call_end_position_json(chunk, effective_parser, json_config);
+                    let tail = chunk.get(json_end..).unwrap_or("").trim_start();
+                    // Tail empty, or a partial `[/TOOL_CALLS]` still arriving:
+                    // keep the jail open so the marker is consumed once complete
+                    // (or the call is recovered by `finalize()` if the stream
+                    // ends here). Real non-marker prose: split at the JSON body
+                    // end so the trailing content streams normally.
+                    if tail.is_empty() || marker.starts_with(tail) {
+                        return None;
+                    }
+                    return Some(json_end);
+                }
                 Some(find_tool_call_end_position_json(
                     chunk,
                     effective_parser,
@@ -411,6 +510,7 @@ mod tests {
                     tool_call_end_tokens: vec!["".to_string()],
                     ..Default::default()
                 }),
+                structural_tag_builder: None,
             },
             None,
         )
@@ -562,6 +662,99 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         assert_eq!(result.len(), 1);
     }
 
+    /// Hermes-style models emit `arguments` as compact JSON (no spaces) on the
+    /// wire. The parser must preserve those exact bytes so the next turn's
+    /// rendered prompt is byte-equivalent to [turn-N prompt + model output],
+    /// keeping KV-cache prefix matching intact across multi-step tool use.
+    /// See PR 9301 for the matching prompt-rendering fix.
+    #[tokio::test]
+    async fn parser_preserves_compact_arguments_byte_span() {
+        let input = r#"<tool_call>{"name": "get_weather", "arguments": {"location":"San Francisco, USA","unit":"celsius"}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].function.arguments, r#"{"location":"San Francisco, USA","unit":"celsius"}"#,
+            "arguments must be preserved byte-for-byte (no `, ` or `: ` injected)"
+        );
+    }
+
+    /// HashMap iteration order is randomized; key order in the output of a
+    /// `HashMap` round-trip would not match what the model emitted. With
+    /// RawValue passthrough, the order survives.
+    #[tokio::test]
+    async fn parser_preserves_argument_key_order() {
+        let input = r#"<tool_call>{"name":"f","arguments":{"z":1,"a":2,"m":3}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].function.arguments, r#"{"z":1,"a":2,"m":3}"#);
+    }
+
+    /// Numeric formatting (e.g. `1.0` vs `1`) must survive round-tripping;
+    /// `serde_json::Value` parses `1.0` as `Number::F64(1.0)` and may
+    /// serialize differently than what the model emitted.
+    #[tokio::test]
+    async fn parser_preserves_numeric_formatting() {
+        let input = r#"<tool_call>{"name":"f","arguments":{"x":1.0,"y":42}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].function.arguments, r#"{"x":1.0,"y":42}"#);
+    }
+
+    /// Parallel tool_calls each go through the array-deserialization path
+    /// (`Vec<Box<RawValue>>`); each element's byte span must be independent.
+    #[tokio::test]
+    async fn parser_preserves_byte_span_for_parallel_calls() {
+        let input = r#"<tool_call>{"name":"a","arguments":{"k":"v1"}}</tool_call>
+<tool_call>{"name":"b","arguments":{"k":"v2"}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].function.arguments, r#"{"k":"v1"}"#);
+        assert_eq!(result[1].function.arguments, r#"{"k":"v2"}"#);
+    }
+
+    /// Single-token-start parsers (`functools`, `[TOOL_CALLS]`,
+    /// `<|python_tag|>`) route arrays through
+    /// `handle_single_token_tool_calls`. That helper previously round-tripped
+    /// each element through `serde_json::Value` + `to_string`, which dropped
+    /// whitespace and reordered keys in `arguments` before the downstream
+    /// `Vec<Box<RawValue>>` parser ever saw them. The fix parses the array
+    /// directly as `Vec<Box<RawValue>>` so each element retains its original
+    /// byte span end-to-end.
+    #[tokio::test]
+    async fn single_token_array_preserves_argument_byte_span_phi4() {
+        let input = r#"functools[{"name":"f","arguments":{"z":1,"a":2,"unit":"celsius"}}]"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("phi4"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].function.arguments, r#"{"z":1,"a":2,"unit":"celsius"}"#,
+            "phi4/functools path must preserve key order and absent whitespace verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_token_array_preserves_argument_byte_span_mistral() {
+        let input = r#"[TOOL_CALLS] [{"name":"f","arguments":{"z":1,"a":2}}, {"name":"g","arguments":{"b":3.0}}]"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("mistral"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].function.arguments, r#"{"z":1,"a":2}"#);
+        assert_eq!(
+            result[1].function.arguments, r#"{"b":3.0}"#,
+            "numeric formatting (3.0 vs 3) must be preserved"
+        );
+    }
+
     #[tokio::test]
     async fn test_nousresearch_hermes3_llama31_8b_simple() {
         let input = r#"<tool_call>
@@ -666,6 +859,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -805,7 +999,8 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"Hey How are you? [TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig::mistral();
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
-        assert_eq!(content, Some("Hey How are you?".to_string()));
+        // mistral preserves the boundary space before `[TOOL_CALLS]` (matches vLLM).
+        assert_eq!(content, Some("Hey How are you? ".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -858,7 +1053,8 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"Hey How are you? [TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig::mistral();
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
-        assert_eq!(content, Some("Hey How are you?".to_string()));
+        // mistral preserves the boundary space before `[TOOL_CALLS]` (matches vLLM).
+        assert_eq!(content, Some("Hey How are you? ".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1114,6 +1310,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -1639,14 +1836,11 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_harmony_parser_basic() {
         let input = r#"
-        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}"#;
+        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("harmony"), None)
             .await
             .unwrap();
-        assert_eq!(
-            content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -1790,7 +1984,32 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["timezone"], "Asia/Shanghai");
     }
-    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a CASE.*; covers registry plumbing.
+    /// Both the batch/non-streaming finalize and stream-finalize paths now run
+    /// `detect_and_parse_tool_call_with_recovery`, which enables DSML EOF
+    /// recovery: a complete `<｜DSML｜invoke>...</｜DSML｜invoke>` is recovered
+    /// even when the outer `</｜DSML｜tool_calls>` wrapper never arrives.
+    #[tokio::test]
+    async fn test_deepseek_v4_recovery_recovers_without_outer_close() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_datetime">
+<｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
+</｜DSML｜invoke>"#;
+
+        let (tool_calls, normal_text) =
+            detect_and_parse_tool_call_with_recovery(input, Some("deepseek_v4"), None)
+                .await
+                .expect("Failed to parse");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_datetime");
+        assert_eq!(normal_text, Some("".to_string()));
+
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["timezone"], "Asia/Shanghai");
+    }
+
+    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a TOOLCALLING.*; covers registry plumbing.
     #[tokio::test]
     async fn test_deepseek_v4_compatibility_aliases() {
         let input = r#"<｜DSML｜tool_calls>
@@ -1960,7 +2179,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =============================================================================
-    // 1. NEMOTRON/DECI TOOL PARSER FORMAT (JSON Array in XML tags)
+    // 1. NEMOTRON/DECI TOOL-CALL FORMAT (JSON Array in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -2016,7 +2235,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =================================================
-    // 2. QWEN3CODER TOOL PARSER FORMAT (XML-style tags)
+    // 2. QWEN3CODER TOOL-CALL FORMAT (XML-style tags)
     // =================================================
 
     #[tokio::test]
@@ -2057,7 +2276,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 3. xLAM TOOL PARSER FORMAT (Pure JSON Array) - Testing via mistral parser
+    // 3. xLAM TOOL-CALL FORMAT (Pure JSON Array) - Testing via mistral parser
     // =============================================================================
 
     #[tokio::test]
@@ -2088,7 +2307,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 4. MINIMAX TOOL PARSER FORMAT (Multi-line JSON in XML tags)
+    // 4. MINIMAX TOOL-CALL FORMAT (Multi-line JSON in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -2115,7 +2334,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 5. HARMONY TOOL PARSER FORMAT (Multiple Tool Calls with Harmony Encoding)
+    // 5. HARMONY TOOL-CALL FORMAT (Multiple Tool Calls with Harmony Encoding)
     // =============================================================================
 
     #[tokio::test]
@@ -2775,14 +2994,14 @@ mod detect_parser_tests {
     }
 
     // DeepSeek V3
-    #[test]
-    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3() {
+    #[test] // A bare inner call (no outer wrapper) is jailed so it can be recovered, matching deepseek_v3_2/v4.
+    fn test_e2e_detect_bare_tool_call_start_deepseek_v3() {
         let text = r#"<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
 {"location": "Tokyo"}
 ```<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -2796,11 +3015,11 @@ mod detect_parser_tests {
     }
 
     // DeepSeek V3.1
-    #[test]
-    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
+    #[test] // A bare inner call (no outer wrapper) is jailed so it can be recovered, matching deepseek_v3_2/v4.
+    fn test_e2e_detect_bare_tool_call_start_deepseek_v3_1() {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -2898,10 +3117,7 @@ fahrenheit
             .unwrap();
         assert_eq!(
             content,
-            Some(
-                "I'll help you check the weather.  Let me get that information for you."
-                    .to_string()
-            )
+            Some("I'll help you check the weather. ".to_string())
         );
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -2975,6 +3191,7 @@ fahrenheit
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -3013,6 +3230,7 @@ true
                     "enabled": {"type": "bool"},
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3135,6 +3353,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -3191,6 +3410,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3242,6 +3462,7 @@ weather forecasting
                     "query_list": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3334,6 +3555,7 @@ weather forecasting
                     "enabled": {"type": "boolean"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3360,6 +3582,7 @@ weather forecasting
                     "items": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await

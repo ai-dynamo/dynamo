@@ -126,6 +126,15 @@ impl Default for MediaFetcher {
 }
 
 impl MediaFetcher {
+    fn with_internal_access(allow_internal: bool) -> Self {
+        Self {
+            allow_direct_ip: allow_internal,
+            allow_direct_port: allow_internal,
+            allow_private_ips: allow_internal,
+            ..Self::default()
+        }
+    }
+
     /// Build a `MediaFetcher` whose defaults respect the shared
     /// `DYN_MM_ALLOW_INTERNAL` environment variable. Mirrors the Python
     /// `UrlValidationPolicy.from_env()` behavior so both fetch paths
@@ -137,12 +146,7 @@ impl MediaFetcher {
     /// once.
     pub fn from_env() -> Self {
         let allow_internal = std::env::var("DYN_MM_ALLOW_INTERNAL").ok().as_deref() == Some("1");
-        Self {
-            allow_direct_ip: allow_internal,
-            allow_direct_port: allow_internal,
-            allow_private_ips: allow_internal,
-            ..Self::default()
-        }
+        Self::with_internal_access(allow_internal)
     }
 }
 
@@ -223,6 +227,38 @@ impl MediaFetcher {
             }
         }
         Ok(())
+    }
+
+    /// Build a `reqwest::Client` that enforces this fetcher's policy on every
+    /// request *and* every redirect hop: blocklist DNS resolution, redirect
+    /// revalidation against `check_if_url_allowed`, and the configured
+    /// user-agent / timeout. Callers that want a single security contract
+    /// across every outbound HTTP request in the frontend should reuse this
+    /// — the connection pool stays warm and SSRF policy can't be bypassed.
+    pub fn build_http_client(&self) -> Result<reqwest::Client> {
+        let fetcher_for_redirects = self.clone();
+        let redirect_policy = Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                return attempt.error(anyhow::anyhow!("too many redirects (max={MAX_REDIRECTS})"));
+            }
+            match fetcher_for_redirects.check_if_url_allowed(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            }
+        });
+
+        let mut builder = reqwest::Client::builder()
+            .user_agent(&self.user_agent)
+            .redirect(redirect_policy)
+            .dns_resolver(Arc::new(BlocklistResolver {
+                allow_private_ips: self.allow_private_ips,
+            }));
+
+        if let Some(timeout) = self.timeout {
+            builder = builder.timeout(timeout);
+        }
+
+        Ok(builder.build()?)
     }
 }
 
@@ -340,16 +376,20 @@ pub struct MediaLoader {
 }
 
 impl MediaLoader {
-    /// Read the cache budget (in bytes) from `DYN_MULTIMODAL_LOADER_CACHE_GB`.
-    /// Value parses as a float number of gibibytes (1 GiB = 1024^3 bytes).
-    /// Default `0` (disabled) — opt-in only.
-    fn cache_budget_bytes_from_env() -> u64 {
-        let gb = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB")
-            .ok()
+    fn cache_budget_bytes(value: Option<&str>) -> u64 {
+        let gb = value
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|v| v.is_finite() && *v >= 0.0)
             .unwrap_or(0.0);
         (gb * (1024.0 * 1024.0 * 1024.0)) as u64
+    }
+
+    /// Read the cache budget (in bytes) from `DYN_MULTIMODAL_LOADER_CACHE_GB`.
+    /// Value parses as a float number of gibibytes (1 GiB = 1024^3 bytes).
+    /// Default `0` (disabled) — opt-in only.
+    fn cache_budget_bytes_from_env() -> u64 {
+        let value = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB").ok();
+        Self::cache_budget_bytes(value.as_deref())
     }
 
     /// Hash a URL/datauri string into a stable u64 cache key.
@@ -363,34 +403,7 @@ impl MediaLoader {
         // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
         // honored even when the caller doesn't pass an explicit fetcher.
         let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
-
-        // Redirect policy: revalidate the policy-visible part of the URL
-        // (scheme, IP literals, hostname blocklist, direct-IP / direct-port
-        // rules) on every hop. DNS-based attacks on redirect targets are
-        // handled by the custom resolver below.
-        let fetcher_for_redirects = media_fetcher.clone();
-        let redirect_policy = Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(anyhow::anyhow!("too many redirects (max={MAX_REDIRECTS})"));
-            }
-            match fetcher_for_redirects.check_if_url_allowed(attempt.url()) {
-                Ok(()) => attempt.follow(),
-                Err(e) => attempt.error(e),
-            }
-        });
-
-        let mut http_client_builder = reqwest::Client::builder()
-            .user_agent(&media_fetcher.user_agent)
-            .redirect(redirect_policy)
-            .dns_resolver(Arc::new(BlocklistResolver {
-                allow_private_ips: media_fetcher.allow_private_ips,
-            }));
-
-        if let Some(timeout) = media_fetcher.timeout {
-            http_client_builder = http_client_builder.timeout(timeout);
-        }
-
-        let http_client = http_client_builder.build()?;
+        let http_client = media_fetcher.build_http_client()?;
 
         let nixl_agent = get_nixl_agent()?;
 
@@ -864,47 +877,20 @@ mod tests_non_nixl {
 
     #[test]
     fn test_cache_budget_from_env_default_zero() {
-        const VAR: &str = "DYN_MULTIMODAL_LOADER_CACHE_GB";
         const GIB: u64 = 1024 * 1024 * 1024;
-        // Save and restore so other tests in the same process aren't affected.
-        let prev = std::env::var(VAR).ok();
-        // SAFETY: env mutation is fine within this single-threaded test;
-        // we restore on exit below.
-        unsafe {
-            std::env::remove_var(VAR);
-        }
-        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), 0);
-
-        unsafe {
-            std::env::set_var(VAR, "1");
-        }
-        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), GIB);
+        assert_eq!(MediaLoader::cache_budget_bytes(None), 0);
+        assert_eq!(MediaLoader::cache_budget_bytes(Some("1")), GIB);
 
         // Fractional GB are honoured (lets users set, e.g., 0.5 for 512 MiB).
-        unsafe {
-            std::env::set_var(VAR, "0.5");
-        }
-        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), GIB / 2);
-
-        unsafe {
-            std::env::set_var(VAR, "not-a-number");
-        }
+        assert_eq!(MediaLoader::cache_budget_bytes(Some("0.5")), GIB / 2);
         assert_eq!(
-            MediaLoader::cache_budget_bytes_from_env(),
+            MediaLoader::cache_budget_bytes(Some("not-a-number")),
             0,
             "non-numeric value should fall back to 0"
         );
 
         // Negative values are rejected (treated as 0).
-        unsafe {
-            std::env::set_var(VAR, "-1");
-        }
-        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), 0);
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var(VAR, v) },
-            None => unsafe { std::env::remove_var(VAR) },
-        }
+        assert_eq!(MediaLoader::cache_budget_bytes(Some("-1")), 0);
     }
 
     #[test]
@@ -1066,17 +1052,16 @@ mod tests_non_nixl {
     }
 
     #[test]
-    fn test_from_env_default() {
-        // Saving/restoring env vars in tests is racy with parallel tests,
-        // so we only assert the "unset" case here (parallel-safe).
-        // SAFETY: single-threaded mutation acceptable for this restore.
-        unsafe {
-            std::env::remove_var("DYN_MM_ALLOW_INTERNAL");
-        }
-        let f = MediaFetcher::from_env();
+    fn test_internal_access_defaults() {
+        let f = MediaFetcher::with_internal_access(false);
         assert!(!f.allow_private_ips);
         assert!(!f.allow_direct_ip);
         assert!(!f.allow_direct_port);
+
+        let f = MediaFetcher::with_internal_access(true);
+        assert!(f.allow_private_ips);
+        assert!(f.allow_direct_ip);
+        assert!(f.allow_direct_port);
     }
 
     #[test]

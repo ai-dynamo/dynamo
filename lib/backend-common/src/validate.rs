@@ -13,26 +13,29 @@
 //! The wrapper is compiled out in release — `lib.rs` gates the module
 //! with `#[cfg(debug_assertions)]`, so zero cost in release builds.
 
+use crate::error::DynamoError;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
 pub(crate) fn wrap(
-    stream: BoxStream<'static, LLMEngineOutput>,
-) -> BoxStream<'static, LLMEngineOutput> {
+    stream: BoxStream<'static, Result<LLMEngineOutput, DynamoError>>,
+) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
     let mut terminal_seen = false;
     Box::pin(async_stream::stream! {
         let mut inner = stream;
-        while let Some(chunk) = inner.next().await {
+        while let Some(item) = inner.next().await {
             assert!(
                 !terminal_seen,
-                "LLMEngine contract violation: chunk yielded after terminal chunk \
-                 (a chunk with finish_reason set must be the last item)"
+                "LLMEngine contract violation: item yielded after terminal item \
+                 (a chunk with finish_reason set, or an Err, must be the last item)"
             );
-            if chunk.finish_reason.is_some() {
-                terminal_seen = true;
+            match &item {
+                Ok(chunk) if chunk.finish_reason.is_some() => terminal_seen = true,
+                Err(_) => terminal_seen = true,
+                _ => {}
             }
-            yield chunk;
+            yield item;
         }
     })
 }
@@ -43,7 +46,15 @@ mod tests {
     use crate::engine::{FinishReason, chunk};
     use futures::stream;
 
-    fn to_stream(chunks: Vec<LLMEngineOutput>) -> BoxStream<'static, LLMEngineOutput> {
+    fn to_stream(
+        chunks: Vec<LLMEngineOutput>,
+    ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
+        Box::pin(stream::iter(chunks.into_iter().map(Ok)))
+    }
+
+    fn to_stream_with_err(
+        chunks: Vec<Result<LLMEngineOutput, DynamoError>>,
+    ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
         Box::pin(stream::iter(chunks))
     }
 
@@ -60,8 +71,6 @@ mod tests {
 
     #[tokio::test]
     async fn valid_terminal_without_usage_passes() {
-        // LLMEngineOutput::cancelled() sets completion_usage to None — must
-        // not trip the validator.
         let wrapped = wrap(to_stream(vec![
             chunk::token(1),
             LLMEngineOutput::cancelled(),
@@ -69,15 +78,25 @@ mod tests {
         let collected: Vec<_> = wrapped.collect().await;
         assert_eq!(collected.len(), 2);
         assert!(matches!(
-            collected[1].finish_reason,
+            collected[1].as_ref().unwrap().finish_reason,
             Some(FinishReason::Cancelled)
         ));
     }
 
     #[tokio::test]
-    #[should_panic(expected = "chunk yielded after terminal chunk")]
+    #[should_panic(expected = "item yielded after terminal item")]
     async fn panics_on_chunk_after_terminal() {
         let wrapped = wrap(to_stream(vec![LLMEngineOutput::length(), chunk::token(2)]));
+        let _collected: Vec<_> = wrapped.collect().await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "item yielded after terminal item")]
+    async fn panics_on_chunk_after_err() {
+        let wrapped = wrap(to_stream_with_err(vec![
+            Err(DynamoError::msg("typed failure")),
+            Ok(chunk::token(1)),
+        ]));
         let _collected: Vec<_> = wrapped.collect().await;
     }
 }

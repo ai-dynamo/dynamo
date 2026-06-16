@@ -11,7 +11,9 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{BlockHashOptions, OverlapScores, RouterEvent, WorkerId};
+use dynamo_kv_router::protocols::{
+    BlockHashOptions, OverlapScores, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
+};
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +36,10 @@ enum ReplayIndexer {
 
 impl ReplayIndexer {
     async fn apply_event(&self, event: RouterEvent) {
+        // TODO: support lower tier events in replay indexer
+        if !event.storage_tier.is_gpu() {
+            return;
+        }
         match self {
             Self::Single(indexer) => indexer.apply_event(event).await,
             Self::Concurrent(indexer) => indexer.apply_event(event).await,
@@ -74,9 +80,8 @@ fn create_replay_indexer(block_size: u32, num_threads: usize) -> ReplayIndexer {
         )));
     }
 
-    ReplayIndexer::Single(KvIndexer::new_with_frequency(
+    ReplayIndexer::Single(KvIndexer::new_with_pruning(
         CancellationToken::new(),
-        None,
         block_size,
         Arc::new(KvIndexerMetrics::new_unregistered()),
         None,
@@ -93,6 +98,20 @@ impl KvCacheEventSink for ReplayKvEventSink {
     fn publish(&self, event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
         self.event_tx
             .send(RouterEvent::new(self.worker_id, event))
+            .map_err(|_| anyhow!("replay router event channel closed"))
+    }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: dynamo_kv_router::protocols::KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.event_tx
+            .send(RouterEvent::with_storage_tier(
+                self.worker_id,
+                event,
+                storage_tier,
+            ))
             .map_err(|_| anyhow!("replay router event channel closed"))
     }
 }
@@ -139,6 +158,7 @@ impl KvReplayRouter {
             slots,
             worker_config_rx,
             config.router_queue_threshold,
+            config.router_queue_by_incoming_missing_isl.clone(),
             args.block_size as u32,
             selector,
             policy,
@@ -213,6 +233,7 @@ impl KvReplayRouter {
             BlockHashOptions::default(),
             None,
         );
+        let (priority_jump, strict_priority) = request.router_priorities();
         let response = self
             .scheduler
             .schedule(
@@ -225,13 +246,15 @@ impl KvReplayRouter {
                 None,
                 true,
                 None,
-                0.0,
+                priority_jump,
+                strict_priority,
                 Some(
                     u32::try_from(request.max_output_tokens)
                         .context("max_output_tokens does not fit into u32")?,
                 ),
                 None,
                 None,
+                RoutingConstraints::default(),
                 None,
             )
             .await?;
@@ -363,5 +386,149 @@ impl ReplayRouter {
             Self::RoundRobin(_) => Vec::new(),
             Self::Kv(router) => router.debug_potential_loads(isl_tokens, track_prefill_tokens),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use dynamo_kv_router::config::RouterQueuePolicy;
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, StorageTier, WorkerWithDpRank,
+        compute_block_hash_for_seq,
+    };
+
+    use super::*;
+
+    fn priority_request(uuid: u128, priority: i32, strict_priority: u32) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![uuid as u32; 64],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+            priority,
+            strict_priority,
+        }
+    }
+
+    #[tokio::test]
+    async fn online_replay_forwards_priorities_to_scheduler_queue() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(64))
+            .build()
+            .unwrap();
+        let config = KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            router_queue_policy: RouterQueuePolicy::Fcfs,
+            ..KvRouterConfig::default()
+        };
+        let router = Arc::new(ReplayRouter::new(
+            ReplayRouterMode::KvRouter,
+            &args,
+            Some(config),
+            None,
+            1,
+        ));
+
+        let active = priority_request(1, 0, 0);
+        router.select_worker(&active, 1).await.unwrap();
+
+        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+        let low_task = {
+            let router = Arc::clone(&router);
+            let completed_tx = completed_tx.clone();
+            tokio::spawn(async move {
+                let request = priority_request(2, 1_000, 0);
+                router.select_worker(&request, 1).await.unwrap();
+                completed_tx.send(2).unwrap();
+            })
+        };
+        tokio::task::yield_now().await;
+        let high_task = {
+            let router = Arc::clone(&router);
+            tokio::spawn(async move {
+                let request = priority_request(3, 0, 1);
+                router.select_worker(&request, 1).await.unwrap();
+                completed_tx.send(3).unwrap();
+            })
+        };
+        tokio::task::yield_now().await;
+
+        router.on_complete(Uuid::from_u128(1)).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, 3);
+
+        router.on_complete(Uuid::from_u128(3)).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second, 2);
+        router.on_complete(Uuid::from_u128(2)).await.unwrap();
+
+        low_task.await.unwrap();
+        high_task.await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+
+    fn store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        tokens_hash: LocalBlockHash,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash,
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+            storage_tier,
+        )
+    }
+
+    #[tokio::test]
+    async fn replay_indexer_ignores_lower_tier_events_for_primary_overlap() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let tokens = vec![1, 2, 3, 4];
+        let tokens_hash = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())[0];
+        let indexer = create_replay_indexer(4, 1);
+
+        indexer
+            .apply_event(store_event(7, 1, tokens_hash, StorageTier::HostPinned))
+            .await;
+        indexer.flush().await;
+        let matches = indexer
+            .find_matches_for_request(&tokens, None)
+            .await
+            .unwrap();
+        assert_eq!(matches.scores.get(&worker), None);
+
+        indexer
+            .apply_event(store_event(7, 2, tokens_hash, StorageTier::Device))
+            .await;
+        indexer.flush().await;
+        let matches = indexer
+            .find_matches_for_request(&tokens, None)
+            .await
+            .unwrap();
+        assert_eq!(matches.scores.get(&worker), Some(&1));
     }
 }

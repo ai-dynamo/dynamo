@@ -8,6 +8,8 @@ Topology Aware Scheduling (TAS) lets you control where Dynamo places inference w
 
 TAS is **opt-in**. Existing deployments without topology constraints continue to work unchanged.
 
+TAS controls pod placement. To constrain or bias the Dynamo router's prefill-to-decode handoff after pods are already running, see [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
+
 ## Prerequisites
 
 | Requirement | Details |
@@ -50,7 +52,6 @@ spec:
     packDomain: zone
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       envFromSecret: hf-token-secret
@@ -64,7 +65,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -89,7 +89,6 @@ spec:
     topologyProfile: my-cluster-topology
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       multinode:
@@ -107,7 +106,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model meta-llama/Llama-4-Maverick-17B-128E
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -133,7 +131,6 @@ spec:
     packDomain: zone
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       multinode:
@@ -151,7 +148,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model meta-llama/Llama-4-Maverick-17B-128E
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       # inherits zone from spec.topologyConstraint

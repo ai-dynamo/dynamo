@@ -51,7 +51,14 @@ fn get_id_regex() -> &'static Regex {
 /// Check if a chunk contains the start of a Kimi K2 style tool call.
 /// Detects `<|tool_calls_section_begin|>` (or singular variant) or partial match for streaming.
 pub fn detect_tool_call_start_kimi_k2(chunk: &str, config: &KimiK2ParserConfig) -> bool {
-    for start_token in &config.section_start_variants {
+    if chunk.contains(config.call_start.as_str()) {
+        return true;
+    }
+
+    let mut start_tokens = config.section_start_variants.clone();
+    start_tokens.push(config.call_start.clone());
+
+    for start_token in &start_tokens {
         debug_assert!(
             start_token.is_ascii(),
             "Kimi K2 section tokens must be ASCII for safe byte slicing, got: {start_token:?}"
@@ -152,6 +159,44 @@ fn find_section_end(
     best
 }
 
+/// True for prefix-only narration before a tool section where vLLM preserves
+/// the wrapper-adjacent trailing space (TOOLCALLING.batch.8.a).
+fn should_preserve_vllm_prefix_trailing_space(normal_parts: &[String]) -> bool {
+    let mut non_empty_parts = normal_parts
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| !part.trim().is_empty());
+
+    matches!(
+        non_empty_parts.next(),
+        Some((0, part)) if part.chars().next_back().is_some_and(|ch| ch.is_whitespace())
+    ) && non_empty_parts.next().is_none()
+}
+
+/// True when the first visible normal text appears only after a parsed tool
+/// section, so the intermediate Kimi tool-call turn should expose no content
+/// (TOOLCALLING.batch.8.b).
+fn should_drop_post_tool_text_without_prefix(normal_parts: &[String]) -> bool {
+    normal_parts
+        .iter()
+        .enumerate()
+        .find(|(_, part)| !part.trim().is_empty())
+        .is_some_and(|(idx, _)| idx != 0)
+}
+
+/// True when there is prefix narration before the first tool section plus
+/// post-wrapper or inter-wrapper narration that should be dropped for Kimi
+/// tool-call turns (TOOLCALLING.batch.2.c, 8.c, 8.d).
+fn should_drop_post_tool_text_after_prefix(normal_parts: &[String]) -> bool {
+    normal_parts
+        .first()
+        .is_some_and(|prefix| !prefix.trim().is_empty())
+        && normal_parts
+            .iter()
+            .skip(1)
+            .any(|part| !part.trim().is_empty())
+}
+
 /// Extract tool calls and normal text from message.
 ///
 /// ## Difference from Moonshot's reference implementation
@@ -187,12 +232,41 @@ fn extract_tool_calls(
     let mut calls = Vec::new();
     let mut cursor = 0;
 
+    if find_section_start(text, 0, config).is_none()
+        && let Some(marker_idx) = first_orphan_kimi_marker_index(text, config)
+    {
+        let orphan_tail = &text[marker_idx..];
+        if orphan_tail.starts_with(config.call_start.as_str()) {
+            let mut recovered = parse_section_block(orphan_tail, config, tools)?;
+            if !recovered.is_empty() {
+                tracing::warn!(
+                    why = "bare_call_recovery",
+                    recovered_calls = recovered.len(),
+                    recovered_bytes = orphan_tail.len(),
+                    kept_prefix_bytes = marker_idx,
+                    "Kimi K2 parser recovered complete call(s) without section_begin"
+                );
+                calls.append(&mut recovered);
+                return Ok((text[..marker_idx].trim().to_string(), calls));
+            }
+        }
+        return Ok((text[..marker_idx].trim().to_string(), calls));
+    }
+
     while cursor < text.len() {
         if let Some((start_pos, _start_len)) = find_section_start(text, cursor, config) {
             let abs_start = cursor + start_pos;
+            let gap = &text[cursor..abs_start];
+            if let Some((prefix, mut recovered)) =
+                recover_bare_kimi_calls_in_span(gap, config, tools)?
+            {
+                normal_parts.push(prefix);
+                calls.append(&mut recovered);
+            } else {
+                normal_parts.push(gap.to_string());
+            }
 
             // Add text before tool call section to normal parts.
-            normal_parts.push(&text[cursor..abs_start]);
 
             let (block, next_cursor) =
                 if let Some((end_pos, end_len)) = find_section_end(text, abs_start, config) {
@@ -213,13 +287,92 @@ fn extract_tool_calls(
             cursor = next_cursor;
         } else {
             // No more tool call sections.
-            normal_parts.push(&text[cursor..]);
+            let gap = &text[cursor..];
+            if let Some((prefix, mut recovered)) =
+                recover_bare_kimi_calls_in_span(gap, config, tools)?
+            {
+                normal_parts.push(prefix);
+                calls.append(&mut recovered);
+            } else {
+                normal_parts.push(gap.to_string());
+            }
             break;
         }
     }
 
-    let normal_text = normal_parts.join("").trim().to_string();
+    let joined_normal_text = normal_parts.join("");
+    let normal_text =
+        if !calls.is_empty() && should_drop_post_tool_text_without_prefix(&normal_parts) {
+            // Kimi tool-call responses are intermediate assistant turns: the
+            // official API flow treats content as empty while tool_calls are
+            // emitted, then asks the client to execute tools before returning
+            // final user-facing content. Match vLLM/SGLang by not surfacing
+            // post-wrapper text when there is no prefix narration.
+            String::new()
+        } else if !calls.is_empty() && should_drop_post_tool_text_after_prefix(&normal_parts) {
+            // Kimi tool-call responses are intermediate assistant turns even
+            // when a single section contains multiple calls or a turn contains
+            // multiple sections. Preserve only the prefix emitted before the
+            // first tool section and drop post-wrapper/inter-wrapper text;
+            // final user-facing content should be produced after tool results.
+            normal_parts[0].trim_start().to_string()
+        } else if !calls.is_empty() && should_preserve_vllm_prefix_trailing_space(&normal_parts) {
+            // vLLM preserves wrapper-adjacent trailing whitespace when the
+            // response has only prefix narration before a Kimi tool section.
+            // Keep this compatibility path narrow to avoid changing Dynamo's
+            // existing handling of post-wrapper/inter-wrapper narration.
+            normal_parts[0].trim_start().to_string()
+        } else {
+            joined_normal_text.trim().to_string()
+        };
     Ok((normal_text, calls))
+}
+
+fn recover_bare_kimi_calls_in_span(
+    span: &str,
+    config: &KimiK2ParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    let Some(marker_idx) = first_orphan_kimi_marker_index(span, config) else {
+        return Ok(None);
+    };
+    let orphan_tail = &span[marker_idx..];
+    if !orphan_tail.starts_with(config.call_start.as_str()) {
+        return Ok(None);
+    }
+
+    let recovered = parse_section_block(orphan_tail, config, tools)?;
+    if recovered.is_empty() {
+        return Ok(None);
+    }
+
+    tracing::warn!(
+        why = "bare_call_gap_recovery",
+        recovered_calls = recovered.len(),
+        recovered_bytes = orphan_tail.len(),
+        kept_prefix_bytes = marker_idx,
+        "Kimi K2 parser recovered complete bare call(s) before a later section_begin"
+    );
+    Ok(Some((span[..marker_idx].trim().to_string(), recovered)))
+}
+
+fn first_orphan_kimi_marker_index(text: &str, config: &KimiK2ParserConfig) -> Option<usize> {
+    let mut best = [
+        config.call_start.as_str(),
+        config.call_end.as_str(),
+        config.argument_begin.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|marker| text.find(marker))
+    .min();
+
+    for marker in &config.section_end_variants {
+        if let Some(idx) = text.find(marker.as_str()) {
+            best = Some(best.map_or(idx, |current| current.min(idx)));
+        }
+    }
+
+    best
 }
 
 /// Parse a tool calls section block, extracting individual tool calls.
@@ -312,7 +465,7 @@ mod tests {
         KimiK2ParserConfig::default()
     }
 
-    #[test] // CASE.20 — detection helper
+    #[test] // detection helper
     fn test_detect_tool_call_start() {
         let config = default_config();
         assert!(detect_tool_call_start_kimi_k2(
@@ -334,7 +487,7 @@ mod tests {
         assert!(!detect_tool_call_start_kimi_k2("toolcall", &config));
     }
 
-    #[test] // CASE.20 — detection helper
+    #[test] // detection helper
     fn test_find_tool_call_end_position() {
         let config = default_config();
         let text = "<|tool_calls_section_begin|><|tool_call_begin|>functions.test:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>more text";
@@ -347,7 +500,8 @@ mod tests {
         assert_eq!(pos, None, "should return None when section_end is missing");
     }
 
-    #[test] // CASE.1
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1 in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1
     fn test_parse_simple_tool_call() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -361,7 +515,8 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
-    #[test] // CASE.1, CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1, TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.7.yaml, tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1, TOOLCALLING.batch.7
     fn test_parse_multiple_args() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"San Francisco, CA","unit":"fahrenheit"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -375,7 +530,8 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[test] // CASE.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2
     fn test_parse_multiple_tool_calls() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -392,21 +548,77 @@ mod tests {
         assert_eq!(args1["timezone"], "EST");
     }
 
-    #[test] // CASE.13
-    fn test_parse_with_normal_text() {
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.c in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.8.c
+    fn test_parse_keeps_prefix_drops_post_tool_text() {
         let config = default_config();
         let input = r#"I'll help you with that. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check."#;
 
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(
-            normal,
-            Some("I'll help you with that.  Let me check.".to_string())
-        );
+        assert_eq!(normal, Some("I'll help you with that. ".to_string()));
     }
 
-    #[test] // CASE.6
+    #[test] // TOOLCALLING.batch.8.a
+    fn test_parse_preserves_vllm_prefix_trailing_space() {
+        let config = default_config();
+        let input = r#"I'll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("I'll check the weather. ".to_string()));
+    }
+
+    #[test] // TOOLCALLING.batch.8.a
+    fn test_parse_prefix_only_ignores_post_wrapper_whitespace() {
+        let config = default_config();
+        let input = r#"I'll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>   "#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("I'll check the weather. ".to_string()));
+    }
+
+    #[test] // TOOLCALLING.batch.2.c
+    fn test_parse_parallel_calls_with_surrounding_text() {
+        let config = default_config();
+        let input = r#"I will check both. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|> Done."#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_time");
+        assert_eq!(normal, Some("I will check both. ".to_string()));
+    }
+
+    #[test] // TOOLCALLING.batch.8.d
+    fn test_parse_multiple_sections_drops_inter_wrapper_text() {
+        let config = default_config();
+        let input = r#"First check Dallas. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Then check NYC. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_eq!(normal, Some("First check Dallas. ".to_string()));
+    }
+
+    #[test] // TOOLCALLING.batch.8.b
+    fn test_parse_drops_post_tool_text_without_prefix() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check."#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("".to_string()));
+    }
+
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.6.yaml.
+    #[test] // TOOLCALLING.batch.6
     fn test_parse_no_arg_call() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_current_time:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -419,7 +631,7 @@ mod tests {
         assert!(args.as_object().unwrap().is_empty());
     }
 
-    #[test] // CASE.3
+    #[test] // TOOLCALLING.batch.3
     fn test_parse_no_tool_calls() {
         let config = default_config();
         let input = "This is just normal text without any tool calls.";
@@ -429,7 +641,7 @@ mod tests {
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test] // CASE.21 — function-name conventions (`functions.X` vs bare `X`)
+    #[test] // TOOLCALLING.fmt.1 — function-name conventions (`functions.X` vs bare `X`)
     fn test_parse_without_functions_prefix() {
         let config = default_config();
         // Some models may emit without the "functions." prefix
@@ -440,7 +652,8 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test] // CASE.1 (with declared `ToolDefinition` tools provided)
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1 in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1 (with declared `ToolDefinition` tools provided)
     fn test_parse_with_tool_validation() {
         let config = default_config();
         let tools = vec![ToolDefinition {
@@ -451,6 +664,7 @@ mod tests {
                     "location": {"type": "string"}
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -467,7 +681,8 @@ mod tests {
     // `serde_json::from_str` falls back to raw-string arguments when the
     // payload doesn't parse, matching the behavior of the existing
     // `test_parse_invalid_json_falls_back_to_raw_string` case.
-    #[test] // CASE.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_truncated_json_inside_complete_fences_recovers() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -479,7 +694,8 @@ mod tests {
         assert_eq!(calls[0].function.arguments, r#"{"location":"NYC"#);
     }
 
-    #[test] // CASE.5 (PR #8208)
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5 (PR #8208)
     fn test_parse_malformed_no_section_end() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|>"#;
@@ -496,7 +712,8 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test] // CASE.4, CASE.5
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b, TOOLCALLING.batch.5.c in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.4.yaml, tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.4, TOOLCALLING.batch.5
     fn test_parse_truncated_mid_argument_no_section_end() {
         let config = default_config();
         // Model hit max_tokens mid-argument — no call_end, no section_end.
@@ -515,7 +732,8 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // CASE.2, CASE.5
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a, TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.5
     fn test_parse_multiple_calls_no_section_end() {
         let config = default_config();
         // Two complete individual tool calls, but model stopped before section_end.
@@ -531,7 +749,8 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
-    #[test] // CASE.2, CASE.4, CASE.5
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b, TOOLCALLING.batch.4.b, TOOLCALLING.batch.5.c in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.4.yaml, tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.4, TOOLCALLING.batch.5
     fn test_parse_complete_plus_truncated_no_section_end() {
         let config = default_config();
         // First call is complete, second is truncated mid-argument.
@@ -546,7 +765,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test] // CASE.22 — whitespace tolerance
+    #[test] // TOOLCALLING.fmt.2 — whitespace tolerance
     fn test_parse_with_whitespace() {
         let config = default_config();
         let input = "<|tool_calls_section_begin|>\n<|tool_call_begin|> functions.search:0 <|tool_call_argument_begin|> {\"query\":\"rust programming\"} <|tool_call_end|>\n<|tool_calls_section_end|>";
@@ -559,7 +778,8 @@ mod tests {
         assert_eq!(args["query"], "rust programming");
     }
 
-    #[test] // CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_complex_json_arguments() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.process_data:0<|tool_call_argument_begin|>{"items":[1,2,3],"config":{"nested":true}}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -573,7 +793,8 @@ mod tests {
         assert_eq!(args["config"]["nested"], true);
     }
 
-    #[test] // CASE.2, CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a, TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.7
     fn test_parse_deeply_nested_json_multiple_calls() {
         let config = default_config();
         // Multiple tool calls with deeply nested JSON - stress test for regex backtracking
@@ -600,7 +821,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // CASE.20, CASE.23 — detection helper, singular section-token variant
+    #[test] // helper, TOOLCALLING.fmt.3 — detection helper, singular section-token variant
     fn test_detect_singular_section_start() {
         let config = default_config();
         // Singular variant: <|tool_call_section_begin|> (without 's')
@@ -615,7 +836,7 @@ mod tests {
         ));
     }
 
-    #[test] // CASE.23 — singular section-token variant
+    #[test] // TOOLCALLING.fmt.3 — singular section-token variant
     fn test_parse_with_singular_section_tokens() {
         let config = default_config();
         // Use singular form: tool_call_section_begin/end (without 's')
@@ -627,7 +848,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // CASE.20, CASE.23 — detection helper, singular section-token variant
+    #[test] // helper, TOOLCALLING.fmt.3 — detection helper, singular section-token variant
     fn test_find_end_position_singular_variant() {
         let config = default_config();
         // Singular variant end token
@@ -638,7 +859,8 @@ mod tests {
 
     // --- Tests inspired by vllm/sglang coverage gaps ---
 
-    #[test] // CASE.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_invalid_json_falls_back_to_raw_string() {
         // vllm: test_extract_tool_calls_invalid_json
         // Invalid JSON in arguments should fall back to raw string, not panic
@@ -652,7 +874,7 @@ mod tests {
         assert_eq!(calls[0].function.arguments, "{invalid json here}");
     }
 
-    #[test] // CASE.21 — function-name conventions (ID regex validation)
+    #[test] // TOOLCALLING.fmt.1 — function-name conventions (ID regex validation)
     fn test_parse_invalid_function_id_rejected_by_regex() {
         // vllm: test_extract_tool_calls_invalid_funcall
         // sglang: test_invalid_tool_call
@@ -681,7 +903,8 @@ mod tests {
         assert_eq!(calls[0].function.name, "valid");
     }
 
-    #[test] // CASE.7 — special characters in arg values
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7 — special characters in arg values
     fn test_parse_angle_brackets_in_json_arguments() {
         // vllm: angle_brackets_in_json
         // JSON values containing <tag> constructs should not confuse the parser,
@@ -699,7 +922,8 @@ mod tests {
         assert_eq!(args["format"], "html");
     }
 
-    #[test] // CASE.2 — parallel calls, zero-spacing edge case
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2 — parallel calls, zero-spacing edge case
     fn test_parse_three_concatenated_calls_no_spacing() {
         // vllm: concatenated_tool_calls_bug_fix, three_concatenated_tool_calls
         // Three tool calls concatenated with zero whitespace between them
@@ -728,7 +952,8 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // CASE.7 — newlines in arg values
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7 — newlines in arg values
     fn test_parse_newlines_in_json_arguments() {
         // vllm: newlines_in_json
         // Multi-line formatted JSON arguments (model may emit pretty-printed JSON)
@@ -745,7 +970,7 @@ mod tests {
         assert_eq!(args["tags"], serde_json::json!(["admin", "active"]));
     }
 
-    #[test] // CASE.24 — empty wrapper (start+end with no calls between)
+    #[test] // TOOLCALLING.fmt.4 — empty wrapper (start+end with no calls between)
     fn test_parse_empty_tool_section() {
         // vllm: test_empty_tool_section
         // Section begin immediately followed by section end, no tool calls inside
@@ -761,7 +986,7 @@ mod tests {
         );
     }
 
-    #[rstest] // CASE.21 — function-name conventions (hyphens, double-underscores)
+    #[rstest] // TOOLCALLING.fmt.1 — function-name conventions (hyphens, double-underscores)
     #[case(
         r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.list-tasklists:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#,
         "list-tasklists",
@@ -785,16 +1010,17 @@ mod tests {
         assert_eq!(calls[0].id, id);
     }
 
-    /// `CASE.4` — call missing its `<|tool_call_end|>` while the outer
+    /// `TOOLCALLING.batch.4` — call missing its `<|tool_call_end|>` while the outer
     /// `<|tool_calls_section_end|>` IS present. Per-call delimiter is the
     /// regex anchor; without it the call cannot be matched even though
     /// the block fences are intact. Pin the silent-drop.
     ///
-    /// TODO(CASE.4) — BUG, NEEDS FIX: a real call is silently dropped when
+    /// TODO(TOOLCALLING.batch.4) — BUG, NEEDS FIX: a real call is silently dropped when
     /// `<|tool_call_end|>` is missing and section fences are complete. Fix:
     /// anchor on the next `<|tool_call_begin|>` or `<|tool_calls_section_end|>`
     /// to terminate the args region. Flip this test once fixed.
-    #[test] // CASE.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_missing_call_end_inside_complete_section_silent_drop() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_calls_section_end|>"#;
@@ -808,15 +1034,16 @@ mod tests {
         );
     }
 
-    /// `CASE.4` — middle-call truncation. Three calls A, B, C inside a
+    /// `TOOLCALLING.batch.4` — middle-call truncation. Three calls A, B, C inside a
     /// complete section; B is missing its `<|tool_call_end|>`. Does B's
     /// body bleed into C, or are both lost? Pin whichever today does.
     ///
-    /// TODO(CASE.4) — BUG, NEEDS FIX: B's args swallow all of C's raw
+    /// TODO(TOOLCALLING.batch.4) — BUG, NEEDS FIX: B's args swallow all of C's raw
     /// markup, and C is dropped — caller gets garbage args for B and
     /// never sees C. Fix: same anchor on `<|tool_call_begin|>` as the
     /// silent-drop case above. Flip this test once fixed.
-    #[test] // CASE.2, CASE.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b, TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.4
     fn test_parse_middle_call_missing_end_corrupts_next() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.a:0<|tool_call_argument_begin|>{"x":"1"}<|tool_call_end|><|tool_call_begin|>functions.b:1<|tool_call_argument_begin|>{"y":"2"}<|tool_call_begin|>functions.c:2<|tool_call_argument_begin|>{"z":"3"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -842,7 +1069,7 @@ mod tests {
     /// `tool_choice` — it returns every well-formed call it sees, and the
     /// jail / response builder above this layer is responsible for filtering
     /// per `tool_choice=named`/`required`/`none`. This test exists to
-    /// catch accidental in-parser filtering. Real CASE.11 coverage lives at
+    /// catch accidental in-parser filtering. Real FRONTEND.tool_choice coverage lives at
     /// the integration layer (`lib/llm/tests/tool_choice.rs`).
     #[test]
     fn test_parser_does_not_filter_by_tool_choice() {
@@ -856,7 +1083,7 @@ mod tests {
 
     /// Parser-level invariant: the kimi_k2 parser is byte-stable — it doesn't
     /// see `finish_reason` and produces the same output for any upstream
-    /// stream-end reason. Real CASE.12 coverage (stop / tool_calls / length
+    /// stream-end reason. Real PIPELINE.finish_reason coverage (stop / tool_calls / length
     /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
     /// belongs in cross-parser finish_reason mapping work-item (tracked separately).
     #[test]
@@ -869,10 +1096,11 @@ mod tests {
         assert_eq!(calls_stop.len(), 1);
     }
 
-    /// `CASE.14` — empty / null content variants. Empty section already
+    /// `TOOLCALLING.batch.9` — empty / null content variants. Empty section already
     /// covered by `test_parse_empty_tool_section`; this pins the
     /// truly-empty (zero bytes) and null-ish ("\n", whitespace-only) inputs.
-    #[test] // CASE.14
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.9
     fn test_parse_empty_and_whitespace_inputs() {
         let config = default_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -891,9 +1119,10 @@ mod tests {
         }
     }
 
-    /// `CASE.15` — duplicate calls (same function name twice in one section).
+    /// `TOOLCALLING.batch.10` — duplicate calls (same function name twice in one section).
     /// Universal gap noted in the test taxonomy; first parser to land coverage.
-    #[test] // CASE.15
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.10 in tests/parity/toolcalling/fixtures/kimi_k2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.10
     fn test_parse_duplicate_calls_same_name() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"LA"}<|tool_call_end|><|tool_calls_section_end|>"#;

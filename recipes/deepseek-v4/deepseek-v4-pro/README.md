@@ -9,9 +9,9 @@ Recipes for **DeepSeek-V4-Pro** on Dynamo across two backends (**vLLM**, **SGLan
 
 | Variant | Backend | Hardware | Manifest | Topology | Container |
 |---------|---------|----------|----------|----------|-----------|
-| **vllm-agg-b200**       | vLLM   | 1 node, 8x B200 | [`vllm/agg/b200/deploy.yaml`](vllm/agg/b200/deploy.yaml)         | TP=8 + Expert Parallel (single node)                                            | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.2`, multi-arch) |
-| **vllm-agg-gb200**      | vLLM   | 2 nodes, 4x GB200 each (8 total) | [`vllm/agg/gb200/deploy.yaml`](vllm/agg/gb200/deploy.yaml)       | TP=8 + Expert Parallel cross-node, MNNVL via ComputeDomain (NVLink72)           | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.2`, multi-arch) |
-| **vllm-disagg-gb200**   | vLLM   | 2 nodes, 4x GB200 each (8 prefill + 8 decode = 16 total) | [`vllm/disagg/gb200/deploy.yaml`](vllm/disagg/gb200/deploy.yaml) | 1P + 1D, DP=8 + Expert Parallel per worker, MNNVL via ComputeDomain (NVLink72) | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.2`, multi-arch) |
+| **vllm-agg-b200**       | vLLM   | 1 node, 8x B200 | [`vllm/agg/b200/deploy.yaml`](vllm/agg/b200/deploy.yaml)         | TP=8 + Expert Parallel (single node)                                            | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.3`, multi-arch) |
+| **vllm-agg-gb200**      | vLLM   | 2 nodes, 4x GB200 each (8 total) | [`vllm/agg/gb200/deploy.yaml`](vllm/agg/gb200/deploy.yaml)       | TP=8 + Expert Parallel cross-node, MNNVL via ComputeDomain (NVLink72)           | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.3`, multi-arch) |
+| **vllm-disagg-gb200**   | vLLM   | 2 nodes, 4x GB200 each (8 prefill + 8 decode = 16 total) | [`vllm/disagg/gb200/deploy.yaml`](vllm/disagg/gb200/deploy.yaml) | 1P + 1D, DP=8 + Expert Parallel per worker, MNNVL via ComputeDomain (NVLink72) | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.3`, multi-arch) |
 | **sglang-agg**          | SGLang | 1 node, 8x B200 | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml)               | TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4                                   | Prebuilt NGC image; optional [custom build](../container/) |
 
 A perf-benchmark Job for the GB200 disagg variant is provided alongside the deploy:
@@ -145,6 +145,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `--kv-cache-dtype fp8` + `--block-size 256` | FP8 KV cache; block size matches the upstream recipe |
 | `--tensor-parallel-size 8 --enable-expert-parallel` | TP=8 across 8 GPUs of one node, with EP enabled for the MoE experts |
 | `--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Conservative cudagraph mode appropriate for the larger Pro model (matches upstream V4-Pro example) |
+| `--no-enable-flashinfer-autotune` | Skip per-shape FlashInfer autotuning at startup; required on dsv4 for correct accuracy |
 | `--max-num-seqs 256` | Concurrency cap |
 
 ### vLLM GB200 agg (`vllm/agg/gb200/deploy.yaml`)
@@ -156,6 +157,7 @@ V4-Pro at ~865 GB on disk does not fit a single GB200 NVL4 tray (~768 GB HBM acr
 | `--tensor-parallel-size 8 --enable-expert-parallel` | TP=8 + EP across 2 nodes (4 GPUs/node × 2 nodes) — no DP. |
 | `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":false}}'` | FULL_AND_PIECEWISE cudagraph + all custom ops; `fuse_allreduce_rms:false` avoids a non-fatal FlashInfer trtllm allreduce-norm workspace warning at startup. |
 | `--attention-config '{"use_fp4_indexer_cache":true}'` + `--moe-backend deep_gemm_mega_moe` | Blackwell FP4 indexer cache + DeepGEMM "mega MoE" kernel — same kernels as the B200 agg variant. |
+| `--no-enable-flashinfer-autotune` | Skip per-shape FlashInfer autotuning at startup; required on dsv4 for correct accuracy |
 | `NCCL_MNNVL_ENABLE=1`, `UCX_CUDA_IPC_ENABLE_MNNVL=y`, `UCX_TLS=cuda_copy,cuda_ipc,tcp`, `NCCL_NVLS_ENABLE=1`, `NCCL_P2P_LEVEL=NVL` | Enable cross-node NVLink72 / MNNVL fabric. Required because the TP=8 process group spans 2 nodes. |
 | `ComputeDomain` CR + `resourceClaimTemplate` (top of manifest) | DRA primitive that asks the scheduler to allocate an MNNVL channel on demand and co-locate the 2-pod set on the same NVLink72 clique. |
 | (no `--data-parallel-rpc-port`) | TP-only — torch.distributed master binds `MASTER_PORT` (29500) for the cross-node rendezvous, which also satisfies the operator's `wait-for-leader-mp` TCP probe. |
@@ -172,6 +174,7 @@ V4-Pro at ~865 GB on disk does not fit a single GB200 NVL4 tray (~768 GB HBM acr
 | `NCCL_MNNVL_ENABLE=1`, `UCX_CUDA_IPC_ENABLE_MNNVL=y`, `NCCL_NVLS_ENABLE=1`, `NCCL_P2P_LEVEL=NVL` | Enable cross-node NVLink72 / MNNVL fabric. Required because the prefill and decode workers each span 2 nodes. |
 | `ComputeDomain` CR + `resourceClaimTemplate` (top of manifest) | DRA primitive that asks the scheduler to allocate an MNNVL channel on demand and co-locate the 4-pod set on the same NVLink72 clique. Without it, NCCL bring-up across pods fails — TCP-only fallback is not viable for DP=8 cross-pod all-reduce. |
 | `--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'` (decode), `--enforce-eager` (prefill) | Conservative compile/graph config — matches the B200 agg variant's V4-Pro tuning. |
+| `--no-enable-flashinfer-autotune` (prefill + decode) | Skip per-shape FlashInfer autotuning at startup; required on dsv4 for correct accuracy |
 | `--max-model-len 9280`, `--max-num-seqs 16` (prefill) / `128` (decode) | Capped to the 8K-input / 1K-output benchmark shape. |
 
 ### SGLang (`sglang/agg/deploy.yaml`)
@@ -210,7 +213,7 @@ Recipe-level (per-variant) settings:
 
 | | vLLM (`vllm-agg`) | SGLang (`sglang-agg`) |
 |---|---|---|
-| **Backend image** | Prebuilt `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (multi-arch) | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` |
+| **Backend image** | Prebuilt `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (multi-arch) | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3` |
 | **Parallelism** | TP=8, Expert Parallel enabled | TP=8 |
 | **MoE backend** | vLLM's V4 expert kernel (FP4) | FlashInfer MXFP4 |
 | **KV cache** | FP8, block size 256 | engine default |
@@ -286,13 +289,14 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 ### vLLM-specific
 
-- **Prebuilt images.** All three vLLM manifests (`vllm/agg/b200/`, `vllm/agg/gb200/`, `vllm/disagg/gb200/`) reference `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (multi-arch). To rebuild from source (custom Dynamo branch, different vLLM base, etc.), see [`<repo_root>/container/README.md`](../../../container/README.md).
+- **Prebuilt images.** All three vLLM manifests (`vllm/agg/b200/`, `vllm/agg/gb200/`, `vllm/disagg/gb200/`) reference `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (multi-arch). To rebuild from source (custom Dynamo branch, different vLLM base, etc.), see [`<repo_root>/container/README.md`](../../../container/README.md).
 - **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match the startup probe budget (`failureThreshold: 540` at `periodSeconds: 10`).
+- **FlashInfer autotune.** `--no-enable-flashinfer-autotune` skips per-shape FlashInfer autotuning at startup and is set on every vLLM worker (prefill and decode). Required on dsv4: the autotuner currently produces tunings that regress GSM8k accuracy. Skipping it also shortens first-launch warmup.
 - **GB200: agg vs. disagg.** Both spread V4-Pro across two GB200 NVL4 trays via MNNVL/ComputeDomain. The agg variant runs one TP=8 group across both nodes (lower-latency, simpler topology, 2 pods); the disagg variant runs separate prefill and decode DP=8 workers (higher steady-state throughput at high concurrency, 4 pods). Use the agg variant for general-purpose serving and the disagg variant when prefill/decode separation pays off for the workload.
 
 ### SGLang-specific
 
-- **Prebuilt image.** `sglang/agg/deploy.yaml` already references the public NGC tag `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2`. To rebuild (custom Dynamo branch, different SGLang base, etc.), see [`recipes/deepseek-v4/container/README.md`](../container/README.md).
+- **Prebuilt image.** `sglang/agg/deploy.yaml` already references the public NGC tag `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3`. To rebuild (custom Dynamo branch, different SGLang base, etc.), see [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 - **DeepGEMM / FlashInfer warmup.** `SGLANG_JIT_DEEPGEMM_PRECOMPILE=0` + `SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1` skip the slow precompile and use the fast warmup path. `--disable-flashinfer-autotune` skips per-shape FlashInfer autotuning at startup; the dsv4 base ships pre-tuned defaults.
 - **NCCL / Gloo.** `NCCL_CUMEM_ENABLE=1` is set for V4 NCCL collectives on Blackwell. `GLOO_SOCKET_IFNAME=eth0` pins Gloo to the standard pod interface.
 

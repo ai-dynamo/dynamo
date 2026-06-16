@@ -337,10 +337,11 @@ fn test_normalizer_ignores_non_main_group_idx_without_metadata() {
         from_slice(&block_removed_sequence(Some(1), None)).expect("valid raw event");
     let mut normalizer = ZmqEventNormalizer::new(2);
 
-    assert!(
+    assert_eq!(
         normalizer
-            .preprocess(raw_event, WorkerWithDpRank::new(3, 0))
-            .is_none()
+            .preprocess_with_reason(raw_event, WorkerWithDpRank::new(3, 0))
+            .unwrap_err(),
+        ZmqEventFilterReason::UnlearnedGroupIdx
     );
 }
 
@@ -374,10 +375,11 @@ fn test_normalizer_ignores_map_serialized_non_main_attention_kind() {
     let mut normalizer = ZmqEventNormalizer::new(2);
 
     assert_event_metadata(&decoded, Some(1), Some(KvCacheSpecKind::Mamba), None);
-    assert!(
+    assert_eq!(
         normalizer
-            .preprocess(decoded, WorkerWithDpRank::new(3, 0))
-            .is_none()
+            .preprocess_with_reason(decoded, WorkerWithDpRank::new(3, 0))
+            .unwrap_err(),
+        ZmqEventFilterReason::NonMainAttentionKind
     );
 }
 
@@ -479,8 +481,14 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         kv_cache_spec_sliding_window: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
-    let placement_event =
-        convert_event(raw_event, 7, 2, WorkerWithDpRank::new(3, 0), &warning_count);
+    let placement_event = convert_event(
+        raw_event,
+        7,
+        2,
+        WorkerWithDpRank::new(3, 0),
+        &warning_count,
+        None,
+    );
 
     match placement_event.unwrap().event.data {
         KvCacheEventData::Stored(store_data) => {

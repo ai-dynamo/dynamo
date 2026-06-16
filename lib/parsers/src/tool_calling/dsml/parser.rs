@@ -28,17 +28,20 @@ use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bool {
     let start_token = &config.block_start;
 
-    // Check for complete start token
-    if chunk.contains(start_token.as_str()) {
+    // Check for complete outer block start, or a bare invoke when the outer
+    // wrapper opener is missing.
+    if chunk.contains(start_token.as_str()) || chunk.contains(config.invoke_start_prefix.as_str()) {
         return true;
     }
 
-    // Check for partial match at the end (streaming scenario)
-    let start_chars: Vec<char> = start_token.chars().collect();
-    for i in 1..start_chars.len() {
-        let partial: String = start_chars[..i].iter().collect();
-        if chunk.ends_with(&partial) {
-            return true;
+    // Check for partial match at the end (streaming scenario).
+    for token in [start_token, &config.invoke_start_prefix] {
+        let chars: Vec<char> = token.chars().collect();
+        for i in 1..chars.len() {
+            let partial: String = chars[..i].iter().collect();
+            if chunk.ends_with(&partial) {
+                return true;
+            }
         }
     }
 
@@ -56,23 +59,19 @@ pub fn find_tool_call_end_position_dsml(chunk: &str, config: &DsmlParserConfig) 
     }
 }
 
-/// Build the regex that matches a complete DSML tool_calls / function_calls block.
-/// Shared by `extract_tool_calls_with_regex` and `try_tool_call_parse_dsml` so
-/// the two stay in lockstep on how a block is recognised.
-fn build_block_regex(config: &DsmlParserConfig) -> anyhow::Result<Regex> {
-    // Matches: <｜DSML｜function_calls> ... </｜DSML｜function_calls>
-    // Pattern: (?s) = dot matches newlines
-    //          \s*(.*?)\s* = capture content between start/end tags (non-greedy)
-    let block_pattern = format!(
-        r"(?s){}\s*(.*?)\s*{}",
-        regex::escape(&config.block_start),
-        regex::escape(&config.block_end)
-    );
-    Ok(Regex::new(&block_pattern)?)
-}
-
-/// Parse DSML formatted tool calls from a message
-/// Returns (parsed_tool_calls, normal_text_content)
+/// Parse DSML formatted tool calls from a message.
+///
+/// Returns `(parsed_tool_calls, normal_text_content)`. `normal_text` is the
+/// text BEFORE the first `<｜DSML｜tool_calls>` / `<｜DSML｜function_calls>`
+/// start marker. Text between blocks, after the last block, and any
+/// back-to-back-block content are all dropped — matching upstream vLLM
+/// (`vllm/tool_parsers/deepseek_v4_tool_parser.py` and the V3.2 sibling),
+/// which compute `content = model_output[:content_end]` where
+/// `content_end = model_output.find(self.tool_call_start_token)`.
+///
+/// Per `tests/parity/README.md`: vLLM and SGLang both drop trailing text
+/// after the wrapper across XML-style families; this aligns Dynamo to that
+/// behavior. Cases: TOOLCALLING.batch.{2.b, 2.c, 8.b, 8.c, 8.d}.
 pub fn try_tool_call_parse_dsml(
     message: &str,
     config: &DsmlParserConfig,
@@ -84,65 +83,182 @@ pub fn try_tool_call_parse_dsml(
         return Ok((vec![], Some(String::new())));
     }
 
-    // Check if tool call block exists
-    let start_idx = trimmed.find(&config.block_start);
-    if start_idx.is_none() {
+    let Some(start_idx) = trimmed.find(&config.block_start) else {
+        if let Some(marker_idx) = first_orphan_dsml_marker_index(trimmed, config) {
+            let marker_tail = &trimmed[marker_idx..];
+            if marker_tail.starts_with(config.invoke_start_prefix.as_str())
+                && (marker_tail.contains(config.block_end.as_str()) || config.allow_eof_recovery)
+            {
+                let tool_calls = extract_invokes(marker_tail, config)?;
+                if !tool_calls.is_empty() {
+                    tracing::warn!(
+                        why = "bare_invoke_recovery",
+                        recovered_calls = tool_calls.len(),
+                        recovered_bytes = marker_tail.len(),
+                        kept_prefix_bytes = marker_idx,
+                        "DSML recovery: recovered complete bare invoke(s) without outer block_start"
+                    );
+                    return Ok((
+                        tool_calls,
+                        Some(trimmed[..marker_idx].trim_end().to_string()),
+                    ));
+                }
+            }
+            let stripped = &trimmed[marker_idx..];
+            tracing::warn!(
+                why = "DSML tool-call marker found without the outer block_start; dropping orphan marker tail so wire tags do not leak into normal_text",
+                stripped_bytes = stripped.len(),
+                "DSML strip (orphan markers)"
+            );
+            return Ok((vec![], Some(trimmed[..marker_idx].trim_end().to_string())));
+        }
         return Ok((vec![], Some(trimmed.to_string())));
-    }
+    };
 
-    // Extract tool calls blocks
-    let block_regex = build_block_regex(config)?;
-    let tool_calls = extract_tool_calls_with_regex(trimmed, &block_regex, config)?;
+    // Extract tool calls blocks. Finalize paths can opt into EOF recovery so
+    // a missing outer block end still yields any complete inner invokes.
+    let tool_calls = extract_tool_calls(trimmed, config)?;
+
+    // Whether or not invokes parsed, normal_text is the prefix before the
+    // first block_start — mirrors vLLM's success path. On no-invokes the
+    // markup-leak warning still fires for the diagnostic trail.
+    let pre_block_span = &trimmed[..start_idx];
+    let pre_block_text = first_orphan_dsml_marker_index(pre_block_span, config)
+        .filter(|idx| pre_block_span[*idx..].starts_with(config.invoke_start_prefix.as_str()))
+        .map(|idx| pre_block_span[..idx].trim_end().to_string())
+        .unwrap_or_else(|| pre_block_span.to_string());
 
     if tool_calls.is_empty() {
         // A block-start was detected but no valid invokes parsed. Do NOT leak
-        // the DSML markup back to the client; return only the pre-block text
-        // and emit a diagnostic with a prefix of the failed block.
+        // the DSML markup back to the client; emit a diagnostic with a prefix
+        // of the failed block.
         //
         // Note: an unterminated block-start here means `block_regex` finds no
         // match at all, so any valid block *after* the unterminated one is
         // lost. This matches the pre-existing conservative P1-3 contract.
-        if let Some(idx) = start_idx {
-            let failed = &trimmed[idx..];
-            let prefix: String = failed.chars().take(120).collect();
-            tracing::warn!(
-                "DSML tool_calls block parsed no invokes; suppressing markup. prefix={:?}",
-                prefix
-            );
-        }
-        let pre_block_text = start_idx
-            .map(|idx| trimmed[..idx].to_string())
-            .unwrap_or_default();
+        let failed = &trimmed[start_idx..];
+        let prefix: String = failed.chars().take(120).collect();
+        tracing::warn!(
+            why = "no_invokes_parsed",
+            stripped_bytes = failed.len(),
+            "DSML strip (recovery): block_start detected but extract_tool_calls returned 0 invokes; suppressing all bytes from block_start onward so tool-call markup never bleeds into normal_text. preview={:?}",
+            prefix
+        );
         return Ok((vec![], Some(pre_block_text)));
     }
 
-    // Preserve inter-block and trailing text: strip every complete block span
-    // from the trimmed input rather than slicing up to the first start token.
-    // Without this we silently lose text between and after multiple blocks.
-    let normal_text = block_regex.replace_all(trimmed, "").to_string();
+    // Success path: prefix-only contract — everything from the first block_start
+    // onward (the block(s) themselves plus any inter-block / trailing narration)
+    // is stripped from normal_text. Mirrors vLLM's
+    // `content = model_output[:content_end]`.
+    let stripped = &trimmed[start_idx..];
+    if !stripped.is_empty() {
+        let preview: String = stripped.chars().take(120).collect();
+        tracing::debug!(
+            why = "prefix_only_contract",
+            n_calls = tool_calls.len(),
+            kept_prefix_bytes = pre_block_text.len(),
+            stripped_bytes = stripped.len(),
+            "DSML strip (success): kept prefix before first block_start; dropped parsed-block(s) + any inter-block / trailing narration. preview={:?}",
+            preview
+        );
+    }
 
-    Ok((tool_calls, Some(normal_text)))
+    Ok((tool_calls, Some(pre_block_text)))
 }
 
-/// Extract all tool calls matched by `block_regex` from the DSML formatted text.
-fn extract_tool_calls_with_regex(
+fn first_orphan_dsml_marker_index(text: &str, config: &DsmlParserConfig) -> Option<usize> {
+    [
+        config.block_end.as_str(),
+        config.invoke_start_prefix.as_str(),
+        config.invoke_end.as_str(),
+        config.parameter_prefix.as_str(),
+        config.parameter_end.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
+}
+
+/// Extract all tool calls from DSML formatted text.
+fn extract_tool_calls(
     text: &str,
-    block_regex: &Regex,
     config: &DsmlParserConfig,
 ) -> anyhow::Result<Vec<ToolCallResponse>> {
     let mut tool_calls = Vec::new();
+    let mut cursor = 0;
 
-    for block_match in block_regex.captures_iter(text) {
-        if let Some(block_content) = block_match.get(1) {
-            let block = block_content.as_str();
-
-            // Extract individual invokes from this block
-            let invokes = extract_invokes(block, config)?;
-            tool_calls.extend(invokes);
+    while cursor < text.len() {
+        let Some(rel_start) = text[cursor..].find(config.block_start.as_str()) else {
+            if let Some((_, mut recovered)) =
+                recover_orphan_invokes_in_span(&text[cursor..], config)?
+            {
+                tool_calls.append(&mut recovered);
+            }
+            break;
+        };
+        let abs_start = cursor + rel_start;
+        if let Some((_, mut recovered)) =
+            recover_orphan_invokes_in_span(&text[cursor..abs_start], config)?
+        {
+            tool_calls.append(&mut recovered);
         }
+
+        let block_content_start = abs_start + config.block_start.len();
+        let after_start = &text[block_content_start..];
+
+        let (block, next_cursor) =
+            if let Some(rel_end) = after_start.find(config.block_end.as_str()) {
+                (
+                    &after_start[..rel_end],
+                    block_content_start + rel_end + config.block_end.len(),
+                )
+            } else if config.allow_eof_recovery {
+                (&text[block_content_start..], text.len())
+            } else {
+                break;
+            };
+
+        let invokes = extract_invokes(block, config)?;
+        tool_calls.extend(invokes);
+
+        cursor = next_cursor;
     }
 
     Ok(tool_calls)
+}
+
+fn recover_orphan_invokes_in_span(
+    span: &str,
+    config: &DsmlParserConfig,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    let Some(marker_idx) = first_orphan_dsml_marker_index(span, config) else {
+        return Ok(None);
+    };
+    let marker_tail = &span[marker_idx..];
+    if !marker_tail.starts_with(config.invoke_start_prefix.as_str()) {
+        return Ok(None);
+    }
+    if !marker_tail.contains(config.block_end.as_str()) && !config.allow_eof_recovery {
+        return Ok(None);
+    }
+
+    let tool_calls = extract_invokes(marker_tail, config)?;
+    if tool_calls.is_empty() {
+        return Ok(None);
+    }
+
+    tracing::warn!(
+        why = "bare_invoke_gap_recovery",
+        recovered_calls = tool_calls.len(),
+        recovered_bytes = marker_tail.len(),
+        kept_prefix_bytes = marker_idx,
+        "DSML recovery: recovered complete bare invoke(s) before a later outer block"
+    );
+    Ok(Some((
+        span[..marker_idx].trim_end().to_string(),
+        tool_calls,
+    )))
 }
 
 /// Extract individual invoke blocks from function_calls content
@@ -259,7 +375,14 @@ mod tests {
         }
     }
 
-    #[test] // CASE.20
+    fn get_v4_recovery_test_config() -> DsmlParserConfig {
+        DsmlParserConfig {
+            allow_eof_recovery: true,
+            ..get_v4_test_config()
+        }
+    }
+
+    #[test] // helper
     fn test_detect_tool_call_start() {
         let config = get_test_config();
         assert!(detect_tool_call_start_dsml(
@@ -275,65 +398,79 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // DeepSeek V4 coverage (see lib/parsers/TEST_CASES.md for CASE.* taxonomy).
+    // DEPRECATED(parser-fixture-duplicate): Legacy V4 coverage manifest.
+    // The blackbox case mapping now lives in the YAML parser fixtures under
+    // tests/parity/toolcalling/fixtures/deepseek_v4/ and the taxonomy in
+    // lib/parsers/TOOLCALLING_CASES.md; keep this temporarily as a pointer while
+    // the duplicate Rust tests are being retired.
+    //
+    // DeepSeek V4 coverage (see lib/parsers/TOOLCALLING_CASES.md for TOOLCALLING.* taxonomy).
     //
     // Covered by the V4 tests below (or by a shared DSML generic test):
-    //   - CASE.1   single-call            (parsers.rs :: test_deepseek_v4_single_tool_call)
-    //   - CASE.2   multi-calls            (test_parse_deepseek_v4_multiple_tool_calls)
-    //   - CASE.3   no-call                (shared: test_parse_no_tool_calls)
-    //   - CASE.4   malformed-args         (test_parse_deepseek_v4_malformed_json_value_falls_back_to_string,
+    //   - TOOLCALLING.batch.1   single-call            (parsers.rs :: test_deepseek_v4_single_tool_call)
+    //   - TOOLCALLING.batch.2   multi-calls            (test_parse_deepseek_v4_multiple_tool_calls)
+    //   - TOOLCALLING.batch.3   no-call                (shared: test_parse_no_tool_calls)
+    //   - TOOLCALLING.batch.4   malformed-args         (test_parse_deepseek_v4_malformed_json_value_falls_back_to_string,
     //                                      test_parse_deepseek_v4_missing_invoke_close_drops_call)
-    //   - CASE.5   missing-end-token      (test_parse_deepseek_v4_missing_end_token{,_multiple_calls})
+    //   - TOOLCALLING.batch.5   missing-end-token      (test_parse_deepseek_v4_missing_end_token{,_multiple_calls})
     //                                      — PINNED AS BROKEN: parser drops the call. See TODO below.
-    //   - CASE.6   empty-args             (test_parse_deepseek_v4_no_parameters)
-    //   - CASE.7   complex-args           (shared: test_parse_mixed_types_realistic, test_parse_nested_object_parameter,
+    //   - TOOLCALLING.batch.6   empty-args             (test_parse_deepseek_v4_no_parameters)
+    //   - TOOLCALLING.batch.7   complex-args           (shared: test_parse_mixed_types_realistic, test_parse_nested_object_parameter,
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._mixed_param_types_vllm,
     //                                      ..._special_chars_vllm)
-    //   - CASE.8   streaming              (test_detect_tool_call_start_v4, test_find_tool_call_end_position_v4,
+    //   - TOOLCALLING.stream.3   streaming              (test_detect_tool_call_start_v4, test_find_tool_call_end_position_v4,
     //                                      test_streaming_chunk_boundary_split_v4,
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._fragmented_tokens_vllm)
-    //   - CASE.9   reasoning-plus-tool    (test_parse_reasoning_plus_tool_v4;
+    //   - TOOLCALLING.batch.8   reasoning-plus-tool    (test_parse_reasoning_plus_tool_v4;
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._with_tools_vllm)
-    //   - CASE.10  reasoning-only         (test_parse_reasoning_only_no_tool_v4;
+    //   - TOOLCALLING.batch.3  reasoning-only         (test_parse_reasoning_only_no_tool_v4;
     //                                      reasoning/mod.rs :: test_deepseek_v4_detect_and_parse etc.)
-    //   - CASE.11  tool_choice            (lib/llm/tests/tool_choice.rs ::
+    //   - FRONTEND.tool_choice  tool_choice            (lib/llm/tests/tool_choice.rs ::
     //                                      test_deepseek_v4_tool_choice_{auto,required_pins_current_behavior,
     //                                      named_correct_tool_passes,named_wrong_tool_filtered};
     //                                      parser-level invariant in
     //                                      test_parser_does_not_filter_by_tool_choice_v4;
     //                                      cross-parser tool_choice parametrisation work-item (tracked separately) covers full cross-parser parametrisation)
-    //   - CASE.12  finish-reason          (parser-level invariant in
+    //   - PIPELINE.finish_reason  finish-reason          (parser-level invariant in
     //                                      test_parser_output_independent_of_upstream_finish_v4;
     //                                      cross-parser stop/tool_calls/length mapping is
     //                                      cross-parser finish_reason mapping work-item (tracked separately); lib/llm/tests/test_streaming_tool_parsers
     //                                      covers ToolCalls / Stop on E2E fixtures)
-    //   - CASE.13  interleaved-text       (test_parse_deepseek_v4_multiple_tool_calls prefix text;
+    //   - TOOLCALLING.batch.8  interleaved-text       (test_parse_deepseek_v4_multiple_tool_calls prefix text;
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._content_before_tool_vllm)
-    //   - CASE.14  empty/null             (test_parse_empty_and_whitespace_inputs_v4)
-    //   - CASE.15  duplicate-calls        (test_parse_duplicate_invokes_same_name_v4)
+    //   - TOOLCALLING.batch.9  empty/null             (test_parse_empty_and_whitespace_inputs_v4)
+    //   - TOOLCALLING.batch.10  duplicate-calls        (test_parse_duplicate_invokes_same_name_v4)
     //
-    //   - CASE.xml.*  N/A — DSML carries per-parameter string="true|false" type hints,
-    //                  so XML entity decoding (CASE.xml.entities) and schema-aware
-    //                  coercion (CASE.xml.schema-coercion) don't apply.
-    //   - CASE.harmony.* N/A — Harmony-only.
+    //   - TOOLCALLING.xml.1 / TOOLCALLING.xml.2  N/A — DSML carries per-parameter
+    //                  string="true|false" type hints, so XML entity decoding
+    //                  and schema-aware coercion don't apply.
+    //   - TOOLCALLING.harmony.1 / TOOLCALLING.harmony.2 N/A — Harmony-only.
+    //
+    // EOF recovery:
+    //   - TOOLCALLING.stream.4.a / TOOLCALLING.batch.5  Both the stream-finalize
+    //             and batch/non-streaming finalize paths set
+    //             `allow_eof_recovery=true` (via
+    //             `detect_and_parse_tool_call_with_recovery`) and recover every
+    //             complete <｜DSML｜invoke>...</｜DSML｜invoke> pair even when the
+    //             outer close fence is absent at EOS, keeping the pre-block prose
+    //             as normal_text and dropping any trailing invoke that was never
+    //             closed. Only streaming early-exit keeps recovery disabled so it
+    //             does not claim DSML calls before `</｜DSML｜tool_calls>` actually
+    //             arrives (see test_parse_deepseek_v4_missing_end_token_without_recovery).
     //
     // TODO — bugs pinned, parser still needs to be fixed:
-    //   - CASE.5  BUG: parser drops all calls when </｜DSML｜tool_calls> is
-    //             absent (max_tokens / EOS before close). Same class as
-    //             Kimi K2 pre-PR #8208. Fix: scan for complete
-    //             <｜DSML｜invoke>...</｜DSML｜invoke> pairs even without the
-    //             outer close fence (see kimi_k2_parser.rs for precedent).
-    //             Pinning tests below assert the current silent-drop;
-    //             flip them once the parser is fixed.
-    //   - (CASE.4 missing-parameter-close & middle-invoke-truncation now
+    //   - (TOOLCALLING.batch.5  FIXED: batch/non-streaming finalize now recovers
+    //     complete invokes when </｜DSML｜tool_calls> is absent, matching the
+    //     stream-finalize path. Same class as Kimi K2 pre-PR #8208.)
+    //   - (TOOLCALLING.batch.4 missing-parameter-close & middle-invoke-truncation now
     //     pinned: see test_parse_deepseek_v4_missing_parameter_close_loses_param,
     //     test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next.)
     // No customer-incident regression tests yet — V4 is hours old
     // (2026-04-24) and no bugs have been filed against it.
     // -------------------------------------------------------------------
 
-    /// `CASE.8` — streaming start-token detection (V4 variant).
-    #[test] // CASE.20, CASE.23 — V4 token variant
+    /// `TOOLCALLING.stream.3` — streaming start-token detection (V4 variant).
+    #[test] // helper, TOOLCALLING.fmt.3 — V4 token variant
     fn test_detect_tool_call_start_v4() {
         let config = get_v4_test_config();
         assert!(detect_tool_call_start_dsml("<｜DSML｜tool_calls>", &config));
@@ -349,7 +486,7 @@ mod tests {
         assert!(!detect_tool_call_start_dsml("no tool call here", &config));
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn test_find_tool_call_end_position() {
         let config = get_test_config();
         let text = "<｜DSML｜function_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜function_calls>more";
@@ -357,8 +494,8 @@ mod tests {
         assert_eq!(&text[pos..], "more");
     }
 
-    /// `CASE.8` — streaming end-position lookup (V4 variant).
-    #[test] // CASE.20, CASE.23 — V4 token variant
+    /// `TOOLCALLING.stream.3` — streaming end-position lookup (V4 variant).
+    #[test] // helper, TOOLCALLING.fmt.3 — V4 token variant
     fn test_find_tool_call_end_position_v4() {
         let config = get_v4_test_config();
         let text = "<｜DSML｜tool_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜tool_calls>more";
@@ -366,7 +503,8 @@ mod tests {
         assert_eq!(&text[pos..], "more");
     }
 
-    #[test] // CASE.1
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1 in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1
     fn test_parse_single_tool_call_string_param() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="get_weather">
@@ -394,7 +532,8 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
-    #[test] // CASE.1, CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1, TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml, tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1, TOOLCALLING.batch.7
     fn test_parse_single_tool_call_mixed_params() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="search">
@@ -413,7 +552,8 @@ mod tests {
         assert_eq!(args["topn"], 10);
     }
 
-    #[test] // CASE.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="get_weather">
@@ -439,8 +579,9 @@ mod tests {
         assert_eq!(args2["location"], "Hangzhou");
     }
 
-    /// `CASE.2` multi-calls + `CASE.13` interleaved-text (prefix text before the block).
-    #[test] // CASE.2, CASE.23 — V4 variant
+    /// `TOOLCALLING.batch.2` multi-calls + `TOOLCALLING.batch.8` interleaved-text (prefix text before the block).
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.c, TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.fmt.3 — V4 variant
     fn test_parse_deepseek_v4_multiple_tool_calls() {
         let input = r#"Let's check this. <｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_favorite_tourist_spot">
@@ -472,8 +613,9 @@ mod tests {
         assert_eq!(args2["source"], "web");
     }
 
-    /// `CASE.6` — empty args (no-parameter invoke).
-    #[test] // CASE.6, CASE.23 — V4 variant
+    /// `TOOLCALLING.batch.6` — empty args (no-parameter invoke).
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.6.yaml.
+    #[test] // TOOLCALLING.batch.6, TOOLCALLING.fmt.3 — V4 variant
     fn test_parse_deepseek_v4_no_parameters() {
         let input = r#"<｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_current_time">
@@ -490,7 +632,8 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
-    #[test] // CASE.13
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.8
     fn test_parse_with_normal_text() {
         let input = r#"Here's the result: <｜DSML｜function_calls>
 <｜DSML｜invoke name="test">
@@ -528,7 +671,7 @@ mod tests {
         assert_eq!(normal, "Let me check the forecast.\n\n");
     }
 
-    #[test] // CASE.3
+    #[test] // TOOLCALLING.batch.3
     fn test_parse_no_tool_calls() {
         let input = "This is just normal text without any tool calls.";
         let config = get_test_config();
@@ -537,7 +680,8 @@ mod tests {
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test] // CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_json_parameter_value() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="process">
@@ -555,7 +699,8 @@ mod tests {
         assert_eq!(args["config"]["count"], 42);
     }
 
-    #[test] // CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_array_parameter_value() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="process">
@@ -573,7 +718,8 @@ mod tests {
         assert_eq!(args["items"][2], 3);
     }
 
-    #[test] // CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_boolean_parameters() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="config">
@@ -591,7 +737,8 @@ mod tests {
         assert_eq!(args["disabled"], false);
     }
 
-    #[test] // CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_number_parameters() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="calculate">
@@ -611,7 +758,8 @@ mod tests {
         assert_eq!(args["negative"], -100);
     }
 
-    #[test] // CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_mixed_types_realistic() {
         // Realistic example based on test data
         let input = r#"<｜DSML｜function_calls>
@@ -633,7 +781,8 @@ mod tests {
         assert_eq!(args["source"], "web");
     }
 
-    #[test] // CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_nested_object_parameter() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="configure">
@@ -653,7 +802,8 @@ mod tests {
         assert_eq!(args["settings"]["endpoints"][0], "a");
     }
 
-    #[test] // CASE.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.b in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_empty_string_parameter() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="test">
@@ -772,10 +922,10 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_block_preserves_inter_and_trailing_text() {
+    fn test_multi_block_drops_inter_and_trailing_text() {
         // Two complete DSML blocks with text before, between, and after.
-        // Both blocks must be parsed AND the inter-block / trailing text must
-        // survive in normal_content.
+        // Both blocks must be parsed; only the pre-block prefix survives in
+        // normal_content — matches vLLM (drops inter / trailing).
         let input = "pre <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"a\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> middle <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"b\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> tail";
 
         let config = get_v4_test_config();
@@ -785,12 +935,7 @@ mod tests {
         assert_eq!(calls[1].function.name, "b");
 
         let normal = normal.unwrap();
-        assert!(
-            normal.contains(" middle "),
-            "inter-block text lost: {:?}",
-            normal
-        );
-        assert!(normal.contains(" tail"), "trailing text lost: {:?}", normal);
+        assert_eq!(normal, "pre ", "only pre-block text survives: {:?}", normal);
         assert!(
             !normal.contains("<｜DSML｜"),
             "normal_content leaked DSML markup: {:?}",
@@ -821,30 +966,19 @@ mod tests {
             "outer invoke name is matched first (non-greedy)"
         );
 
+        // After alignment to vLLM, normal_text is the prefix BEFORE the first
+        // block_start only — trailing text after the block is dropped.
         let normal = normal.unwrap();
-        assert!(
-            normal.starts_with("pre"),
-            "pre-block text must survive: {:?}",
-            normal
-        );
-        assert!(
-            normal.contains(" tail"),
-            "trailing text must survive: {:?}",
-            normal
-        );
+        assert_eq!(normal, "pre ", "only pre-block text survives: {:?}", normal);
         assert!(
             !normal.contains("<｜DSML｜tool_calls>"),
             "normal_content leaked block_start: {:?}",
             normal
         );
-        assert!(
-            !normal.contains("</｜DSML｜tool_calls>"),
-            "normal_content leaked block_end: {:?}",
-            normal
-        );
     }
 
-    #[test] // CASE.7, CASE.14
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.a, TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.7.yaml, tests/parity/toolcalling/fixtures/deepseek_v3_2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.7, TOOLCALLING.batch.9
     fn test_parse_null_parameter() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="test">
@@ -861,29 +995,17 @@ mod tests {
     }
 
     // Corner-case pinning tests. See the V4 coverage manifest above for the
-    // full mapping from CASE.* → test. Each test's doc-comment names the
+    // full mapping from TOOLCALLING.* → test. Each test's doc-comment names the
     // specific CASE it pins.
 
-    /// `CASE.5` — missing end-token recovery.
-    /// **Pinned as broken** — parser drops the call; see the TODO block above.
+    /// `TOOLCALLING.batch.5` — missing end-token, streaming-safe path.
     ///
-    /// If a DeepSeek V4 stream is truncated before `</｜DSML｜tool_calls>`
-    /// arrives (max_tokens cut-off, EOS mid-generation, connection drop),
-    /// the block regex requires both fences and matches zero times. The
-    /// entire DSML-looking payload falls through as raw `normal_text`; no
-    /// tool calls are recovered.
-    ///
-    /// This is the same structural failure mode Kimi K2 had before its
-    /// parser gained end-token recovery; see
-    /// `kimi_k2_parser.rs::test_parse_malformed_no_section_end` for the
-    /// post-fix recovery pattern.
-    ///
-    /// Note: post-hardening, the parser no longer leaks raw DSML markup
-    /// into `normal_text` when block-start appears but no invokes parse —
-    /// it returns the pre-block text only (empty here, since the input
-    /// starts with the block-start fence). The call is still dropped.
-    #[test] // CASE.5, CASE.23 — V4 variant
-    fn test_parse_deepseek_v4_missing_end_token() {
+    /// Without EOF recovery, the parser must not claim a complete tool call
+    /// before `</｜DSML｜tool_calls>` arrives. Streaming early-exit uses this
+    /// path and keeps buffering until stream finalization.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5, TOOLCALLING.fmt.3 — V4 variant
+    fn test_parse_deepseek_v4_missing_end_token_without_recovery() {
         // Start fence + complete invoke, but no </｜DSML｜tool_calls>.
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"get_weather\">\n\
@@ -895,9 +1017,8 @@ mod tests {
 
         assert!(
             calls.is_empty(),
-            "V4 DSML parser currently drops tool calls when \
-             </｜DSML｜tool_calls> is missing. \
-             If recovery is added, flip this assertion."
+            "Streaming-safe DSML parser must wait for </｜DSML｜tool_calls> \
+             instead of recovering early."
         );
         assert_eq!(
             normal_text.as_deref(),
@@ -907,13 +1028,14 @@ mod tests {
         );
     }
 
-    /// `CASE.5` — multiple complete invokes, missing end fence.
+    /// `TOOLCALLING.batch.5` — multiple complete invokes, missing end fence.
     ///
     /// Even with multiple fully-formed invokes inside the start fence, the
     /// absence of the closing fence prevents the block regex from matching.
     /// All calls are dropped. If the parser ever gains partial-block
     /// recovery, this test will fail and force an intentional update.
-    #[test] // CASE.2, CASE.5, CASE.23
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a, TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.2, TOOLCALLING.batch.5, TOOLCALLING.fmt.3
     fn test_parse_deepseek_v4_missing_end_token_multiple_calls() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"a\">\n\
@@ -933,12 +1055,58 @@ mod tests {
         );
     }
 
-    /// `CASE.4` — malformed JSON in a `string="false"` parameter value falls back
+    /// `TOOLCALLING.stream.4.a` — missing end-token recovery at stream finalize.
+    ///
+    /// Stream finalization flips `allow_eof_recovery=true`, treating an
+    /// unterminated outer block as extending to EOF and recovering complete
+    /// inner invokes. Batch/non-streaming aggregate parsing remains strict.
+    #[test] // TOOLCALLING.stream.4.a — V4 variant
+    fn test_parse_deepseek_v4_missing_end_token_with_recovery() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>";
+
+        let config = get_v4_recovery_test_config();
+        let (calls, normal_text) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(normal_text.as_deref(), Some(""));
+        let (name, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["city"], "NYC");
+    }
+
+    /// Stream-finalize recovery with multiple complete invokes and no outer end fence.
+    #[test]
+    fn test_parse_deepseek_v4_missing_end_token_multiple_calls_with_recovery() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"a\">\n\
+<｜DSML｜parameter name=\"x\" string=\"true\">1</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+<｜DSML｜invoke name=\"b\">\n\
+<｜DSML｜parameter name=\"y\" string=\"true\">2</｜DSML｜parameter>\n\
+</｜DSML｜invoke>";
+
+        let config = get_v4_recovery_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert_eq!(calls.len(), 2);
+        let (name1, args1) = extract_name_and_args(calls[0].clone());
+        let (name2, args2) = extract_name_and_args(calls[1].clone());
+        assert_eq!(name1, "a");
+        assert_eq!(args1["x"], "1");
+        assert_eq!(name2, "b");
+        assert_eq!(args2["y"], "2");
+    }
+
+    /// `TOOLCALLING.batch.4` — malformed JSON in a `string="false"` parameter value falls back
     /// to a string. `parse_parameters` explicitly swallows the serde error
     /// (unwrap_or_else → Value::String). Pin the fallback so removing it
     /// (which would cause the whole call to 500 on ragged-edge JSON) is a
     /// deliberate change.
-    #[test] // CASE.4, CASE.23
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4, TOOLCALLING.fmt.3
     fn test_parse_deepseek_v4_malformed_json_value_falls_back_to_string() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"test\">\n\
@@ -959,10 +1127,11 @@ mod tests {
         );
     }
 
-    /// `CASE.4` — malformed invoke (missing `</｜DSML｜invoke>` but block fences
+    /// `TOOLCALLING.batch.4` — malformed invoke (missing `</｜DSML｜invoke>` but block fences
     /// intact). The invoke regex requires its own close tag, so the call is
     /// silently dropped. Pin the behavior.
-    #[test] // CASE.4, CASE.23
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4, TOOLCALLING.fmt.3
     fn test_parse_deepseek_v4_missing_invoke_close_drops_call() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"test\">\n\
@@ -978,15 +1147,16 @@ mod tests {
         );
     }
 
-    /// `CASE.4` — malformed invoke (missing `</｜DSML｜parameter>` close tag).
+    /// `TOOLCALLING.batch.4` — malformed invoke (missing `</｜DSML｜parameter>` close tag).
     /// The parameter regex requires its closing tag; if a parameter never
     /// closes before `</｜DSML｜invoke>`, the parameter is silently lost
     /// while the call itself still parses. Pin the partial behavior.
     ///
-    /// TODO(CASE.4) — BUG, NEEDS FIX: parser silently loses the parameter
+    /// TODO(TOOLCALLING.batch.4) — BUG, NEEDS FIX: parser silently loses the parameter
     /// and ships an under-specified call to the user. The fix should keep
     /// the raw value up to `</｜DSML｜invoke>`. Flip this test once fixed.
-    #[test] // CASE.4, CASE.23
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4, TOOLCALLING.fmt.3
     fn test_parse_deepseek_v4_missing_parameter_close_loses_param() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"test\">\n\
@@ -1007,16 +1177,17 @@ mod tests {
         );
     }
 
-    /// `CASE.4` — middle-invoke truncation. If invoke A is missing its
+    /// `TOOLCALLING.batch.4` — middle-invoke truncation. If invoke A is missing its
     /// `</｜DSML｜invoke>` and invoke B follows inside the same outer block,
     /// A's body bleeds through into B (regex non-greedy match consumes B's
     /// markup). Pin the corruption.
     ///
-    /// TODO(CASE.4) — BUG, NEEDS FIX: A swallows B's parameters and B is
+    /// TODO(TOOLCALLING.batch.4) — BUG, NEEDS FIX: A swallows B's parameters and B is
     /// silently dropped — caller receives wrong args for A and never sees
     /// B at all. Fix: anchor on `<｜DSML｜invoke name=` to re-sync between
     /// invokes. Flip this test once fixed.
-    #[test] // CASE.4, CASE.23
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4, TOOLCALLING.fmt.3
     fn test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"a\">\n\
@@ -1041,10 +1212,10 @@ mod tests {
         );
     }
 
-    /// `CASE.8` — streaming chunk-boundary split. Token-by-token assembly:
+    /// `TOOLCALLING.stream.3` — streaming chunk-boundary split. Token-by-token assembly:
     /// the start-token detector and end-position lookup must each tolerate
     /// the block boundary landing in the middle of a multi-byte fence.
-    #[test] // CASE.8
+    #[test] // TOOLCALLING.stream.3
     fn test_streaming_chunk_boundary_split_v4() {
         let config = get_v4_test_config();
         // Detector should fire on a partial start fence (one char short).
@@ -1061,11 +1232,12 @@ mod tests {
         );
     }
 
-    /// `CASE.9` — paired reasoning + tool in same response. DSv4 emits
+    /// `TOOLCALLING.batch.8` — paired reasoning + tool in same response. DSv4 emits
     /// `<think>...</think>` before the DSML block; the tool parser is
     /// concerned only with the DSML, but normal text must round-trip
     /// the reasoning markup verbatim for the reasoning parser to pick up.
-    #[test] // CASE.9
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.8
     fn test_parse_reasoning_plus_tool_v4() {
         let input = "<think>Let me check the weather.</think>\
 <｜DSML｜tool_calls>\n\
@@ -1086,9 +1258,9 @@ mod tests {
         );
     }
 
-    /// `CASE.10` — reasoning only (think tags, no tool call). Parser must
+    /// `TOOLCALLING.batch.3` — reasoning only (think tags, no tool call). Parser must
     /// return zero calls and pass the entire input through as normal text.
-    #[test] // CASE.10
+    #[test] // TOOLCALLING.batch.3
     fn test_parse_reasoning_only_no_tool_v4() {
         let input = "<think>Just thinking out loud, no tools needed.</think>";
         let config = get_v4_test_config();
@@ -1100,7 +1272,7 @@ mod tests {
     /// Parser-level invariant: the dsml parser does NOT filter by
     /// `tool_choice` — it returns every well-formed invoke, and the jail /
     /// response builder above this layer is responsible for filtering per
-    /// `tool_choice=named`/`required`/`none`. Real CASE.11 coverage lives
+    /// `tool_choice=named`/`required`/`none`. Real FRONTEND.tool_choice coverage lives
     /// at the integration layer (`lib/llm/tests/tool_choice.rs`).
     #[test]
     fn test_parser_does_not_filter_by_tool_choice_v4() {
@@ -1119,7 +1291,7 @@ mod tests {
 
     /// Parser-level invariant: the dsml parser is byte-stable — it doesn't
     /// see `finish_reason` and produces the same output for any upstream
-    /// stream-end reason. Real CASE.12 coverage (stop / tool_calls / length
+    /// stream-end reason. Real PIPELINE.finish_reason coverage (stop / tool_calls / length
     /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
     /// belongs in cross-parser finish_reason mapping work-item (tracked separately).
     #[test]
@@ -1134,9 +1306,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
     }
 
-    /// `CASE.14` — empty / null content variants. Pin behavior on truly
+    /// `TOOLCALLING.batch.9` — empty / null content variants. Pin behavior on truly
     /// empty bytes and whitespace-only inputs.
-    #[test] // CASE.14
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.9
     fn test_parse_empty_and_whitespace_inputs_v4() {
         let config = get_v4_test_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -1157,9 +1330,10 @@ mod tests {
         }
     }
 
-    /// `CASE.15` — duplicate calls (same invoke name twice in one block).
+    /// `TOOLCALLING.batch.10` — duplicate calls (same invoke name twice in one block).
     /// Universal gap noted in the test taxonomy; first DSML coverage.
-    #[test] // CASE.15
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.10 in tests/parity/toolcalling/fixtures/deepseek_v4/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.10
     fn test_parse_duplicate_invokes_same_name_v4() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"get_weather\">\n\

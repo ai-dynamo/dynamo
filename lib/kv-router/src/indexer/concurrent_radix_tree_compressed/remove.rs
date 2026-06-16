@@ -57,8 +57,6 @@ impl ConcurrentRadixTreeCompressed {
             return Err(KvCacheEventError::BlockNotFound);
         }
 
-        let mut total_removed = 0usize;
-
         'outer: for block_hash in op.block_hashes {
             let mut cur_node = match self.resolve_lookup(
                 lookup,
@@ -80,9 +78,14 @@ impl ConcurrentRadixTreeCompressed {
             };
 
             loop {
+                // TODO(CORRECTNESS): Invalidate this worker throughout the descendant
+                // subtree when a mid-edge removal leaves the node alive for another
+                // worker. Otherwise stale descendants can be reused as store parents,
+                // reactivated by restoring only the removed block, or emitted by dumps
+                // without a valid worker-specific parent. Preserve CRTC's locking and
+                // snapshot guarantees when implementing the traversal.
                 match cur_node.remove_worker_for_hash(worker, block_hash) {
                     Some(outcome) => {
-                        total_removed += outcome.removed;
                         if let Some(wl) = lookup.get_mut(&worker) {
                             for hash in outcome.stale_hashes {
                                 wl.remove(&hash);
@@ -127,18 +130,6 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    Some(v.saturating_sub(total_removed))
-                })
-                .ok();
-            }
-            None => {
-                self.tree_sizes.insert(worker, AtomicUsize::new(0));
-            }
-        }
-
         Ok(())
     }
 
@@ -167,11 +158,6 @@ impl ConcurrentRadixTreeCompressed {
 
                 if keep_worker {
                     lookup.insert(worker, FxHashMap::default());
-                    if let Some(size) = self.tree_sizes.get(&worker) {
-                        size.store(0, Ordering::Relaxed);
-                    }
-                } else {
-                    self.tree_sizes.remove(&worker);
                 }
             }
         }
@@ -193,7 +179,6 @@ impl ConcurrentRadixTreeCompressed {
                 }
                 node.drop_worker(key);
             }
-            self.tree_sizes.remove(&key);
         }
     }
 

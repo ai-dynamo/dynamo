@@ -3,6 +3,7 @@
 
 //! Shared test utilities for radix tree tests.
 
+use std::collections::HashSet;
 use std::future;
 
 use crate::indexer::KvIndexerInterface;
@@ -347,6 +348,24 @@ pub async fn assert_exact_scores(
     }
 }
 
+/// Assert two [`OverlapScores`] are identical.
+///
+/// [`OverlapScores`] does not derive `PartialEq`, so this compares both fields explicitly: the
+/// `scores` map (`FxHashMap` equality is order-independent) and the `frequencies` vec. `ctx` is
+/// included in the failure message to identify which query diverged.
+pub fn assert_overlap_scores_eq(left: &OverlapScores, right: &OverlapScores, ctx: &str) {
+    assert_eq!(
+        left.scores, right.scores,
+        "scores map mismatch ({ctx}): left={:?} right={:?}",
+        left.scores, right.scores
+    );
+    assert_eq!(
+        left.frequencies, right.frequencies,
+        "frequencies mismatch ({ctx}): left={:?} right={:?}",
+        left.frequencies, right.frequencies
+    );
+}
+
 /// No-op [`SequencePublisher`] for tests and benchmarks that don't need event transport.
 pub struct NoopSequencePublisher;
 
@@ -370,6 +389,7 @@ pub struct SimpleWorkerConfig {
     pub data_parallel_size: u32,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub taints: HashSet<String>,
 }
 
 impl Default for SimpleWorkerConfig {
@@ -379,6 +399,7 @@ impl Default for SimpleWorkerConfig {
             data_parallel_size: 1,
             max_num_batched_tokens: None,
             total_kv_blocks: None,
+            taints: HashSet::new(),
         }
     }
 }
@@ -398,5 +419,9 @@ impl WorkerConfigLike for SimpleWorkerConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn taints(&self) -> &HashSet<String> {
+        &self.taints
     }
 }

@@ -5,7 +5,7 @@ mod model;
 pub use model::Model;
 
 mod model_manager;
-pub use model_manager::{ModelManager, ModelManagerError};
+pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
 mod worker_set;
 pub use worker_set::WorkerSet;

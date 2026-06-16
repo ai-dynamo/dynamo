@@ -32,7 +32,19 @@ class PickedParallelConfig(BaseModel):
 
     @property
     def num_gpus(self) -> int:
-        return self.tp * self.pp * self.dp
+        """Physical GPU count per engine across all pipeline stages.
+
+        ``dp`` models attention-DP for AIC and interpolation purposes. When
+        attention-DP is layered on top of tensor parallelism it reuses the
+        existing TP ranks rather than multiplying the engine width again, so we
+        treat the widest parallel axis per pipeline stage as the physical width.
+
+        For dense picks this reduces to ``max(tp, dp)``; for MoE picks the
+        expert width ``moe_tp * moe_ep`` captures the same physical engine
+        width and keeps pure DEP / hybrid MoE picks at the expected GPU count.
+        """
+        stage_width = max(self.tp, self.dp, self.moe_tp * self.moe_ep)
+        return self.pp * stage_width
 
     @property
     def tp_size(self) -> int:

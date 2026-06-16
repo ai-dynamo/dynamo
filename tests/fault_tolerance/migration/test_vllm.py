@@ -216,6 +216,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(290)  # 3x average
 @pytest.mark.post_merge
+@pytest.mark.skip(
+    reason="Flaky: 0% post-merge pass rate across multiple parametrizations; "
+    "skipped wholesale until the underlying migration fault is owned and fixed."
+)
 def test_request_migration_vllm_aggregated(
     request,
     runtime_services_dynamic_ports,

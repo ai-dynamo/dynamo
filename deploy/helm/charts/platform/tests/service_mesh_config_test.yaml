@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# One regression test per known service-mesh template bug:
+# - DYN-3115: insecureSkipVerify=false must not be silently coerced back to true.
+# - DYN-713: tlsMode=MUTUAL must propagate the user-supplied client cert/key/CA
+#   paths into the operator config (otherwise Istio rejects the EPP DR).
+
+suite: service mesh operator configuration
+templates:
+  - charts/dynamo-operator/templates/operator-config.yaml
+tests:
+  - it: DYN-3115 — explicit insecureSkipVerify=false must round-trip
+    set:
+      dynamo-operator.dynamo.serviceMesh.enabled: true
+      dynamo-operator.dynamo.serviceMesh.istio.insecureSkipVerify: false
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "insecureSkipVerify: false"
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "insecureSkipVerify: true"
+
+  - it: DYN-713 — MUTUAL mode must plumb clientCertificate, privateKey, caCertificates
+    set:
+      dynamo-operator.dynamo.serviceMesh.enabled: true
+      dynamo-operator.dynamo.serviceMesh.istio.tlsMode: MUTUAL
+      dynamo-operator.dynamo.serviceMesh.istio.clientCertificate: /etc/certs/client.pem
+      dynamo-operator.dynamo.serviceMesh.istio.privateKey: /etc/certs/client.key
+      dynamo-operator.dynamo.serviceMesh.istio.caCertificates: /etc/certs/ca.pem
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'tlsMode: "MUTUAL"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'clientCertificate: "/etc/certs/client.pem"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'privateKey: "/etc/certs/client.key"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'caCertificates: "/etc/certs/ca.pem"'

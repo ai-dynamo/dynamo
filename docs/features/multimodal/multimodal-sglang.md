@@ -12,8 +12,10 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS/`file://` URL | Yes | No | Aggregated only |
-| **Audio** | HTTP/HTTPS URL | No | No |  |
+| **Video** | HTTP/HTTPS/`file://` URL | Yes | Yes | Vision encoder generates embeddings |
+| **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
+
+> **MM-aware KV routing** is available for SGLang via the Rust frontend — it substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix-cache key matches the router's overlap calculation. The frontend auto-detects the backend from the worker's `ModelDeploymentCard` (the SGLang worker advertises `backend_framework="sglang"`), so no deployer-side flag is required. See [Multimodal KV Routing → SGLang section](./multimodal-kv-routing.md#sglang). That path is orthogonal to the encode-worker / EPD topologies documented below; it's a frontend routing concern that works with the aggregated SGLang worker layout in `examples/backends/sglang/launch/agg_multimodal_router.sh`.
 
 ### Supported URL Formats
 
@@ -28,7 +30,7 @@ SGLang supports EPD, E/PD, and E/P/D patterns. See [Multimodal Architecture Patt
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
-| EPD (Simple Aggregated) | ✅ | `agg.sh` | Internal encoding |
+| EPD (Simple Aggregated) | ✅ | `agg_vision.sh` | Internal encoding |
 | E/PD (Encode Separate) | ✅ | `multimodal_epd.sh` | Vision encoder separate |
 | E/P/D (Full Disaggregation) | ✅ | `multimodal_disagg.sh` | KV cache via bootstrap |
 | EP/D (Traditional Disaggregated) | ❌ | N/A | Not supported |
@@ -461,7 +463,6 @@ Key NVTX ranges emitted:
 
 - **No Data URL support** - Only HTTP/HTTPS URLs supported; `data:image/...` base64 URLs not supported
 - **No pre-computed embeddings** - Cannot use `.pt`, `.pth`, `.bin` embedding files; vision encoder runs for every request
-- **No video support** - No video encoder implementation
 - **No audio support** - No audio encoder implementation
 - **Only Processor registers with Dynamo** - Workers are internal components, frontend routes to Processor only
 - **Disaggregated routing** - Decode Worker is the entry point (calls Prefill), cannot route directly to Prefill workers

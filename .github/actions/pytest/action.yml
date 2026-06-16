@@ -1,4 +1,4 @@
-name: 'Pytest'
+﻿name: 'Pytest'
 description: 'Run pytest on pre-built container images'
 inputs:
   pytest_marks:
@@ -51,6 +51,10 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  device:
+    description: 'Target device (cuda, xpu, cpu)'
+    required: false
+    default: 'cuda'
 
 runs:
   using: "composite"
@@ -222,14 +226,21 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          # Detect GPU availability and conditionally add GPU flags
+          # Set device-specific docker flags
           GPU_FLAGS=""
-          # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
-          if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
+          DOCKER_EXTRA_FLAGS=()
+          if [[ "${{ inputs.device }}" == "xpu" ]]; then
+            echo "✓ XPU device specified, enabling /dev/dri device flags"
+            RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+            DOCKER_EXTRA_FLAGS=(-v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
+            PYTEST_TIMEOUT_OPT="--timeout=600"
+          elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
+            PYTEST_TIMEOUT_OPT=""
           else
-            echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
+            echo "⚠️  No GPU detected, running in CPU-only mode"
+            PYTEST_TIMEOUT_OPT=""
           fi
 
           # Determine parallelization based on parallel_mode input
@@ -248,6 +259,13 @@ runs:
               ;;
           esac
 
+          # Add coverage flags if enabled
+          COVERAGE_FLAGS=""
+          if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+            echo "📊 Coverage collection enabled"
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
+          fi
+
           # When max_vram_gib is set, the GPU-parallel orchestrator
           # (tests/utils/pytest_parallel_gpu.py via tests/conftest.py) takes over
           # parallelism. We pass `--max-vram-gib=N` plus `-n auto`; the conftest
@@ -263,7 +281,8 @@ runs:
             DIST_OPTS="--dist=loadscope"
           fi
 
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
+
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -282,8 +301,14 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+        if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+          DOCKER_ENV_FLAGS+=(--env "COVERAGE_FILE=/workspace/test-results/.coverage")
+          DOCKER_ENV_FLAGS+=(--env "PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src")
+        fi
 
-        docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
+        docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
+          "${DOCKER_EXTRA_FLAGS[@]}" \
+          --rm -w /workspace \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \

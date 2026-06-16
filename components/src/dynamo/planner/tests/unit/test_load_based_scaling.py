@@ -6,7 +6,7 @@
 These test the perf_model classes directly (PrefillRegressionModel,
 DecodeRegressionModel, AggRegressionModel) without any planner adapter.
 
-FPM-driven scaling integration tests live in test_state_machine.py.
+FPM-driven scaling integration tests live in the plugin/orchestrator test suite.
 """
 
 import os
@@ -140,6 +140,27 @@ class TestPrefillRegressionModel:
             )
             model.add_observation(fpm)
         assert abs(model.avg_isl - 2000.0) < 1.0
+
+    def test_idle_fpms_decay_avg_isl_after_traffic(self):
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=3, min_observations=3, bucket_count=16
+        )
+        model.add_observation(_make_fpm(wall_time=0.0))
+        assert model.avg_isl == 0.0
+
+        for isl in [1000, 2000, 3000]:
+            model.add_observation(
+                _make_fpm(
+                    sum_prefill_tokens=isl,
+                    num_prefill_requests=1,
+                    wall_time=0.01,
+                )
+            )
+        assert abs(model.avg_isl - 2000.0) < 1.0
+
+        for _ in range(3):
+            model.add_observation(_make_fpm(wall_time=0.0))
+        assert model.avg_isl == 0.0
 
     def test_find_best_engine_prefill_rps(self):
         model = PrefillRegressionModel(
@@ -460,6 +481,29 @@ class TestDecodeRegressionModel:
         )
         assert rps > 0 and actual_itl > 0 and actual_itl <= 50.0
 
+    def test_find_best_engine_decode_rps_discounts_itl(self):
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_thpt_model(model)
+        base_rps, base_itl = model.find_best_engine_decode_rps(
+            itl=50.0,
+            context_length=1000.0,
+            osl=150.0,
+            accept_length=1.0,
+            max_num_seqs=1,
+        )
+        spec_rps, spec_itl = model.find_best_engine_decode_rps(
+            itl=50.0,
+            context_length=1000.0,
+            osl=150.0,
+            accept_length=2.0,
+            max_num_seqs=1,
+        )
+
+        assert spec_itl == pytest.approx(base_itl / 2)
+        assert spec_rps == pytest.approx(base_rps * 2)
+
     def test_find_best_engine_decode_rps_zero_context(self):
         model = DecodeRegressionModel(
             max_num_fpm_samples=50, min_observations=3, bucket_count=16
@@ -543,6 +587,60 @@ class TestAggRegressionModel:
             itl_sla=50.0,
         )
         assert thpt > 0 and actual_ttft >= 0 and actual_itl >= 0
+
+    def test_find_best_engine_agg_rps_discounts_itl(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
+        base_rps, _, base_itl = model.find_best_engine_agg_rps(
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
+            accept_length=1.0,
+        )
+        spec_rps, _, spec_itl = model.find_best_engine_agg_rps(
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
+            accept_length=2.0,
+        )
+
+        assert spec_itl < base_itl
+        assert spec_rps > base_rps
+
+    def test_find_best_engine_agg_rps_caps_spec_decode_by_prefill_admission(
+        self, monkeypatch
+    ):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        monkeypatch.setattr(model, "_ensure_fitted", lambda: True)
+        monkeypatch.setattr(model, "_predict_2d", lambda _prefill, _decode: 0.05)
+        monkeypatch.setattr(
+            model,
+            "estimate_next_ttft",
+            lambda **_kwargs: 0.0,
+        )
+
+        rps, _ttft, itl = model.find_best_engine_agg_rps(
+            isl=100.0,
+            osl=100.0,
+            max_num_batched_tokens=1000,
+            ttft_sla=10_000.0,
+            itl_sla=10_000.0,
+            accept_length=2.0,
+        )
+
+        # Without the stricter agg cap, the old raw balance could choose
+        # batch=500 and report 200 rps. Spec decode doubles decode egress, so
+        # steady-state prefill admission requires a smaller sustainable batch.
+        assert rps == pytest.approx(133.2)
+        assert itl == pytest.approx(25.0)
 
     def test_find_best_engine_agg_rps_insufficient_data(self):
         model = AggRegressionModel(
@@ -675,22 +773,20 @@ class TestRefreshWorkerInfoFromConnector:
         # Bypass Prometheus registration (Gauge+Enum double-register across
         # tests). KubernetesConnector.__init__ loads ~/.kube/config and reads
         # DYN_PARENT_DGD_K8S_NAME; stub both so this runs in plain pytest envs.
-        with patch(
-            "dynamo.planner.core.base.PlannerPrometheusMetrics"
-        ) as mock_metrics, patch(
-            "dynamo.planner.connectors.kubernetes.KubernetesAPI"
-        ), patch.dict(
-            os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+        with (
+            patch("dynamo.planner.core.base.PlannerPrometheusMetrics") as mock_metrics,
+            patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"),
+            patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}),
         ):
             mock_metrics.return_value = Mock()
             config = PlannerConfig.model_construct(
-                throughput_adjustment_interval=60,
+                throughput_adjustment_interval_seconds=60,
                 prefill_engine_num_gpu=1,
                 decode_engine_num_gpu=1,
                 min_endpoint=1,
                 max_gpu_budget=-1,
-                ttft=500.0,
-                itl=50.0,
+                ttft_ms=500.0,
+                itl_ms=50.0,
                 backend="vllm",
                 no_operation=True,
                 metric_pulling_prometheus_endpoint="http://localhost:9090",
@@ -701,11 +797,10 @@ class TestRefreshWorkerInfoFromConnector:
                 mode="agg",
                 enable_load_scaling=True,
                 enable_throughput_scaling=True,
-                load_adjustment_interval=5,
+                load_adjustment_interval_seconds=5,
                 max_num_fpm_samples=50,
                 fpm_sample_bucket_size=16,
                 load_scaling_down_sensitivity=80,
-                load_metric_samples=10,
                 load_min_observations=5,
             )
             planner = NativePlannerBase(None, config)
@@ -785,19 +880,16 @@ class TestRefreshWorkerInfoFromConnector:
         planner._refresh_worker_info_from_connector()  # must not raise
         assert planner.decode_worker_info.max_num_batched_tokens is None
 
-    def test_updates_state_machine_capabilities(self):
-        """State machine capabilities are updated via update_capabilities()."""
+    def test_updates_engine_capabilities(self):
+        """Builtin engine capabilities are refreshed after worker-info discovery."""
         planner = self._make_planner()
-        _ = planner.state_machine
-        assert planner._state_machine is not None
+        engine = planner._ensure_engine()
 
         self._install_mock_connector(planner, max_num_batched_tokens=4096)
 
         planner._refresh_worker_info_from_connector()
         assert planner.decode_worker_info.max_num_batched_tokens == 4096
-        assert (
-            planner._state_machine._capabilities.decode.max_num_batched_tokens == 4096
-        )
+        assert engine._scaling_state._capabilities.decode.max_num_batched_tokens == 4096
 
     def test_refresh_skips_unneeded_sub_component(self):
         """Only sub-components with require_* True are refreshed."""
@@ -815,3 +907,19 @@ class TestRefreshWorkerInfoFromConnector:
         planner._refresh_worker_info_from_connector()
         assert planner.prefill_worker_info.max_num_batched_tokens is None
         assert planner.decode_worker_info.max_num_batched_tokens == 4096
+
+    async def test_load_only_accept_length_missing_returns_observation(self):
+        planner = self._make_planner(require_prefill=False, require_decode=True)
+        planner.model_name = "Qwen/Qwen3"
+        planner.decode_worker_info = WorkerInfo(component_name="backend")
+        planner.prometheus_traffic_client = Mock()
+        planner.prometheus_traffic_client.get_avg_kv_hit_rate.return_value = None
+        planner.prometheus_traffic_client.get_avg_spec_decode_accept_length.return_value = (
+            None
+        )
+
+        obs = await planner._collect_kv_hit_rate_observation(duration_s=5)
+
+        assert obs is not None
+        assert obs.kv_hit_rate is None
+        assert obs.accept_length is None
