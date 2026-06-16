@@ -354,11 +354,11 @@ pub(crate) struct MultimodalEmbeddingCachePublisher {
 #[pymethods]
 impl MultimodalEmbeddingCachePublisher {
     #[new]
-    fn new() -> PyResult<Self> {
+    fn new() -> Self {
         let inner = llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher::new();
-        Ok(Self {
+        Self {
             inner: inner.into(),
-        })
+        }
     }
 
     #[pyo3(signature = (endpoint))]

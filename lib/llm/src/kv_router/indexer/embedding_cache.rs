@@ -50,17 +50,6 @@ impl EmbeddingCacheIndexer {
         Ok(indexer)
     }
 
-    pub fn cache_keys_for_worker(&self, worker_id: WorkerId) -> Vec<String> {
-        self.worker_cache_keys
-            .get(&worker_id)
-            .map(|keys| {
-                let mut keys = keys.iter().cloned().collect::<Vec<_>>();
-                keys.sort();
-                keys
-            })
-            .unwrap_or_default()
-    }
-
     pub fn workers_with_cached_keys<'a, I>(&self, cache_keys: I) -> Vec<WorkerId>
     where
         I: IntoIterator<Item = &'a str>,
