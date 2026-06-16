@@ -20,7 +20,10 @@ use crate::{
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
-    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+    protocols::common::{
+        llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+        preprocessor::MultimodalData,
+    },
     request_template::RequestTemplate,
     types::{
         Annotated,
@@ -37,11 +40,37 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
-        ServiceEngine, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
+        SegmentSource, ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
 use std::sync::Arc;
+
+fn multimodal_cache_key_from_url(url: &str) -> String {
+    blake3::hash(url.as_bytes()).to_hex().to_string()
+}
+
+fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<String> {
+    let Some(items) = request
+        .multi_modal_data
+        .as_ref()
+        .and_then(|media| media.get("image_url"))
+    else {
+        return Vec::new();
+    };
+
+    let mut keys = items
+        .iter()
+        .filter_map(|item| match item {
+            MultimodalData::Url(url) => Some(multimodal_cache_key_from_url(url.as_str())),
+            MultimodalData::RawUrl(url) => Some(multimodal_cache_key_from_url(url)),
+            MultimodalData::Decoded(_) => None,
+        })
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    keys
+}
 
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
@@ -160,6 +189,10 @@ pub async fn build_preprocessed_routing(
     } else {
         None
     };
+    let cache_key_extractor = embedding_cache_indexer.as_ref().map(|_| {
+        Arc::new(preprocessed_multimodal_cache_keys)
+            as MultimodalCacheKeyExtractor<PreprocessedRequest>
+    });
 
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
@@ -169,6 +202,7 @@ pub async fn build_preprocessed_routing(
         router_mode,
         monitor_arc,
         embedding_cache_indexer,
+        cache_key_extractor,
     )
     .await?;
 

@@ -1114,7 +1114,7 @@ impl ModelWatcher {
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_state(
-                    client.clone(), router_config.router_mode, None, None
+                    client.clone(), router_config.router_mode, None, None, None
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -1125,7 +1125,7 @@ impl ModelWatcher {
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
                 >::from_client_with_state(
-                    client.clone(), router_config.router_mode, None, None
+                    client.clone(), router_config.router_mode, None, None, None
                 )
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
@@ -1136,7 +1136,7 @@ impl ModelWatcher {
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
                 >::from_client_with_state(
-                    client.clone(), router_config.router_mode, None, None
+                    client.clone(), router_config.router_mode, None, None, None
                 )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
@@ -1147,7 +1147,7 @@ impl ModelWatcher {
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
                 >::from_client_with_state(
-                    client.clone(), router_config.router_mode, None, None
+                    client.clone(), router_config.router_mode, None, None, None
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));

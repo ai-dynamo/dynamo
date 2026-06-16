@@ -117,6 +117,8 @@ pub trait MultimodalCacheIndex: Send + Sync {
     fn remove_worker(&self, worker_id: u64);
 }
 
+pub type MultimodalCacheKeyExtractor<T> = Arc<dyn Fn(&T) -> Vec<String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct PushRouter<T, U>
 where
@@ -162,6 +164,9 @@ where
     /// Currently consumed by `RouterMode::DeviceAwareWeighted`.
     multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
 
+    /// Optional typed request extractor for multimodal embedding cache keys.
+    multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -196,41 +201,6 @@ impl RouterMode {
     pub fn is_direct_routing(&self) -> bool {
         *self == RouterMode::Direct
     }
-}
-
-fn multimodal_cache_key_from_url(url: &str) -> Option<String> {
-    Some(blake3::hash(url.as_bytes()).to_hex().to_string())
-}
-
-fn extract_multimodal_cache_keys_from_request<T: Data + Serialize>(
-    request: &SingleIn<T>,
-) -> Vec<String> {
-    let value = match serde_json::to_value(request.content()) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let Some(items) = value.pointer("/multi_modal_data/image_url") else {
-        return Vec::new();
-    };
-    let Some(arr) = items.as_array() else {
-        return Vec::new();
-    };
-
-    let mut keys = arr
-        .iter()
-        .filter_map(|item| {
-            if let Some(url) = item.as_str() {
-                return multimodal_cache_key_from_url(url);
-            }
-            item.get("Url")
-                .and_then(|v| v.as_str())
-                .and_then(multimodal_cache_key_from_url)
-        })
-        .collect::<Vec<_>>();
-    keys.sort();
-    keys.dedup();
-    keys
 }
 
 /// Pick the instance with lower in-flight count from two random candidates.
@@ -590,6 +560,7 @@ where
             occupancy_state,
             worker_monitor: None,
             multimodal_cache_indexer: None,
+            multimodal_cache_key_extractor: None,
             _phantom: PhantomData,
         })
     }
@@ -605,7 +576,7 @@ where
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
-        Self::from_client_with_state(client, router_mode, worker_monitor, None).await
+        Self::from_client_with_state(client, router_mode, worker_monitor, None, None).await
     }
 
     /// Create a new PushRouter with optional load monitoring and multimodal cache indexing.
@@ -614,6 +585,7 @@ where
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
         multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
+        multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
@@ -659,6 +631,7 @@ where
             occupancy_state,
             worker_monitor,
             multimodal_cache_indexer,
+            multimodal_cache_key_extractor,
             _phantom: PhantomData,
         };
 
@@ -856,17 +829,25 @@ where
             .filter(|v| *v >= 1)
             .unwrap_or(8);
 
-        let request_cache_keys = extract_multimodal_cache_keys_from_request(&request);
-        let cache_matched_candidates = self
-            .multimodal_cache_indexer
-            .as_ref()
-            .filter(|_| !request_cache_keys.is_empty())
-            .map(|indexer| {
+        let (request_cache_keys, cache_matched_candidates) = if let (
+            Some(indexer),
+            Some(extractor),
+        ) = (
+            self.multimodal_cache_indexer.as_ref(),
+            self.multimodal_cache_key_extractor.as_ref(),
+        ) {
+            let request_cache_keys = extractor(request.content());
+            let matched = if request_cache_keys.is_empty() {
+                Vec::new()
+            } else {
                 let mut matched = indexer.workers_with_any_cache_key(&request_cache_keys);
                 matched.retain(|id| instance_ids.contains(id));
                 matched
-            })
-            .unwrap_or_default();
+            };
+            (request_cache_keys, matched)
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         let skip_weighted_accounting = !cache_matched_candidates.is_empty();
 
