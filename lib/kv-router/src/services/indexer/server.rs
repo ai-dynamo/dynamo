@@ -14,9 +14,10 @@ use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 
 use crate::indexer::TieredMatchDetails;
-use crate::protocols::{
-    BlockHashOptions, LocalBlockHash, StorageTier, WorkerId, compute_block_hash_for_seq,
-};
+#[cfg(test)]
+use crate::protocols::StorageTier;
+use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block_hash_for_seq};
+use crate::services::overlap::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
 
 use super::backend::Indexer;
 use super::registry::{IndexerKey, ListenerControlError, WorkerRegistry};
@@ -116,26 +117,7 @@ struct ScoreResponse {
     scores: HashMap<String, HashMap<String, u32>>,
     frequencies: Vec<usize>,
     /// Per-instance tier breakdown (Mooncake RFC #1403 alignment).
-    instances: HashMap<String, InstanceTierBreakdown>,
-}
-
-/// Per-instance match summary in Mooncake RFC #1403 shape.
-///
-/// All counts are in *tokens* (block count × `block_size`), matching the flat
-/// `scores` fields. The tier counts are CUMULATIVE through each tier's walk:
-/// `cpu` includes everything reachable through device → host-pinned, and
-/// `disk` includes everything reachable through device → host → disk. Under a
-/// natural offload pipeline where blocks flow device → host → disk, these
-/// satisfy `gpu ≤ cpu ≤ disk`. `longest_matched` is the max across the three
-/// and is useful as a single-number "best prefix length" the gateway can use.
-#[derive(Serialize, Default)]
-struct InstanceTierBreakdown {
-    longest_matched: u32,
-    gpu: u32,
-    /// Per-`dp_rank` device-tier match counts.
-    dp: HashMap<String, u32>,
-    cpu: u32,
-    disk: u32,
+    instances: HashMap<String, MooncakeOverlapSummary>,
 }
 
 async fn register(
@@ -247,66 +229,10 @@ fn build_score_response(tiered: &TieredMatchDetails, block_size: u32) -> ScoreRe
             .insert(k.dp_rank.to_string(), v * block_size);
     }
 
-    // Per-worker (instance + dp_rank) reaches: cumulative through each tier.
-    // The lower-tier indexer reports per-tier *extension* blocks beyond the
-    // previous tier; we accumulate them here so the per-tier counts answer
-    // "how many prefix tokens does this worker have through this tier" —
-    // which is the natural reading of Mooncake RFC #1403's `GPU`/`CPU`/`DISK`
-    // fields. Each worker's tier counts therefore satisfy gpu ≤ cpu ≤ disk
-    // (since lower tiers extend the device match rather than shrink it).
-    let host_extension = tiered.lower_tier.get(&StorageTier::HostPinned);
-    let disk_extension = tiered.lower_tier.get(&StorageTier::Disk);
-    let external_extension = tiered.lower_tier.get(&StorageTier::External);
-
-    // Helper: blocks for `worker` in `extension`, defaulting to 0.
-    let ext = |extension: Option<&crate::indexer::LowerTierMatchDetails>,
-               worker: &crate::protocols::WorkerWithDpRank|
-     -> u32 {
-        extension
-            .and_then(|e| e.hits.get(worker))
-            .map(|&n| n as u32)
-            .unwrap_or(0)
-    };
-
-    let mut instances: HashMap<String, InstanceTierBreakdown> = HashMap::new();
-
-    // Collect the union of all workers seen in device tier and extension tiers.
-    let mut all_workers = std::collections::HashSet::new();
-    for worker in device.scores.keys() {
-        all_workers.insert(*worker);
-    }
-    for extension in [host_extension, disk_extension, external_extension]
-        .iter()
-        .filter_map(|&e| e)
-    {
-        for worker in extension.hits.keys() {
-            all_workers.insert(*worker);
-        }
-    }
-
-    for worker in all_workers {
-        let gpu_blocks = device.scores.get(&worker).copied().unwrap_or(0);
-        let cpu_blocks = gpu_blocks + ext(host_extension, &worker);
-        // Treat External as further-away storage and roll it into the disk
-        // bucket alongside Disk; both extensions stack on top of host-pinned.
-        let disk_blocks =
-            cpu_blocks + ext(disk_extension, &worker) + ext(external_extension, &worker);
-
-        let gpu_tokens = gpu_blocks * block_size;
-        let cpu_tokens = cpu_blocks * block_size;
-        let disk_tokens = disk_blocks * block_size;
-
-        let entry = instances.entry(worker.worker_id.to_string()).or_default();
-
-        entry.dp.insert(worker.dp_rank.to_string(), gpu_tokens);
-        entry.gpu = entry.gpu.max(gpu_tokens);
-        entry.cpu = entry.cpu.max(cpu_tokens);
-        entry.disk = entry.disk.max(disk_tokens);
-    }
-
-    for entry in instances.values_mut() {
-        entry.longest_matched = entry.gpu.max(entry.cpu).max(entry.disk);
-    }
+    let instances = build_mooncake_overlap_summaries(tiered, block_size, [])
+        .into_iter()
+        .map(|(worker_id, summary)| (worker_id.to_string(), summary))
+        .collect();
 
     ScoreResponse {
         scores,
@@ -477,7 +403,11 @@ async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let all = state.registry.all_indexers_with_block_size();
+    (StatusCode::OK, Json(dump_registry(&state.registry).await))
+}
+
+pub(crate) async fn dump_registry(registry: &WorkerRegistry) -> serde_json::Value {
+    let all = registry.all_indexers_with_block_size();
     let mut handles = Vec::with_capacity(all.len());
 
     for (key, indexer, block_size) in all {
@@ -509,7 +439,7 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             }
         }
     }
-    (StatusCode::OK, Json(serde_json::json!(result)))
+    serde_json::json!(result)
 }
 
 async fn handle_health() -> StatusCode {

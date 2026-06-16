@@ -16,21 +16,19 @@ use crate::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 use crate::sequences::{SequencePublisher, SequenceSubscriber};
 use crate::services::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
 
-use super::registry::SlotTrackerRegistry;
-
 pub(crate) const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 const PEER_COMMAND_CHANNEL_CAPACITY: usize = 64;
 const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SlotReplicaEvent {
+pub(crate) struct ScopedReplicaEvent {
     pub model_name: String,
     pub tenant_id: String,
     pub block_size: u32,
     pub event: ActiveSequenceEvent,
 }
 
-pub(crate) type ReplicaEventSender = mpsc::Sender<SlotReplicaEvent>;
+pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
 
 #[derive(Clone)]
 pub(crate) struct ScopedSequencePublisher {
@@ -75,7 +73,7 @@ impl SequencePublisher for ScopedSequencePublisher {
         let Some(replica) = &self.replica else {
             return future::ready(Ok(()));
         };
-        let envelope = SlotReplicaEvent {
+        let envelope = ScopedReplicaEvent {
             model_name: replica.model_name.to_string(),
             tenant_id: replica.tenant_id.to_string(),
             block_size: replica.block_size,
@@ -150,7 +148,7 @@ pub(crate) fn start_replica_publisher(
     validate_endpoint(bind_endpoint)?;
     let mut socket = create_bound_pub_socket(bind_endpoint)
         .with_context(|| format!("failed to bind replica publisher to `{bind_endpoint}`"))?;
-    let (tx, mut rx) = mpsc::channel::<SlotReplicaEvent>(REPLICA_EVENT_CHANNEL_CAPACITY);
+    let (tx, mut rx) = mpsc::channel::<ScopedReplicaEvent>(REPLICA_EVENT_CHANNEL_CAPACITY);
 
     tokio::spawn(async move {
         loop {
@@ -170,7 +168,7 @@ pub(crate) fn start_replica_publisher(
                 Err(error) => {
                     tracing::error!(
                         request_id = %request_id,
-                        "Failed to encode slot-tracker replica event: {error}"
+                        "Failed to encode active-sequence replica event: {error}"
                     );
                     continue;
                 }
@@ -181,7 +179,7 @@ pub(crate) fn start_replica_publisher(
             {
                 tracing::error!(
                     request_id = %request_id,
-                    "Failed to publish slot-tracker replica event: {error}"
+                    "Failed to publish active-sequence replica event: {error}"
                 );
             }
         }
@@ -191,6 +189,7 @@ pub(crate) fn start_replica_publisher(
 }
 
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 pub(crate) enum PeerError {
     #[error(transparent)]
     InvalidEndpoint(#[from] anyhow::Error),
@@ -203,12 +202,14 @@ pub(crate) enum PeerError {
 }
 
 #[derive(Clone)]
+#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 pub(crate) struct PeerManager {
     command_tx: mpsc::Sender<PeerCommand>,
     peers: Arc<RwLock<HashSet<String>>>,
     advertised_endpoint: Option<Arc<str>>,
 }
 
+#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 enum PeerCommand {
     Register {
         endpoint: String,
@@ -221,12 +222,15 @@ enum PeerCommand {
 }
 
 impl PeerManager {
-    pub(crate) fn start(
-        registry: Arc<SlotTrackerRegistry>,
+    pub(crate) fn start<F>(
         initial_peers: Vec<String>,
         advertised_endpoint: Option<String>,
         cancel_token: CancellationToken,
-    ) -> Result<Self> {
+        handle_event: F,
+    ) -> Result<Self>
+    where
+        F: Fn(ScopedReplicaEvent) + Send + Sync + 'static,
+    {
         let advertised_endpoint = advertised_endpoint.map(Arc::<str>::from);
         if let Some(endpoint) = advertised_endpoint.as_deref() {
             validate_endpoint(endpoint)
@@ -258,9 +262,9 @@ impl PeerManager {
                     }
                     message = socket.recv_multipart() => {
                         match message {
-                            Ok(frames) => handle_replica_message(&registry, frames),
+                            Ok(frames) => handle_replica_message(&handle_event, frames),
                             Err(error) => {
-                                tracing::error!("Failed to receive slot-tracker replica event: {error}");
+                                tracing::error!("Failed to receive active-sequence replica event: {error}");
                             }
                         }
                     }
@@ -275,6 +279,7 @@ impl PeerManager {
         })
     }
 
+    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, PeerError> {
         validate_peer_endpoint(&endpoint, self.advertised_endpoint.as_deref())?;
         let (response, result) = oneshot::channel();
@@ -288,6 +293,7 @@ impl PeerManager {
             .map_err(PeerError::InvalidEndpoint)
     }
 
+    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, PeerError> {
         validate_endpoint(&endpoint).map_err(PeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
@@ -301,6 +307,7 @@ impl PeerManager {
             .map_err(PeerError::InvalidEndpoint)
     }
 
+    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) fn list_peers(&self) -> Vec<String> {
         let mut peers: Vec<_> = self.peers.read().iter().cloned().collect();
         peers.sort();
@@ -356,39 +363,40 @@ fn handle_peer_command(
     }
 }
 
-fn handle_replica_message(
-    registry: &SlotTrackerRegistry,
-    frames: crate::services::zmq::MultipartMessage,
-) {
+fn handle_replica_message<F>(handle_event: &F, frames: crate::services::zmq::MultipartMessage)
+where
+    F: Fn(ScopedReplicaEvent),
+{
     let [topic, payload] = frames.as_slice() else {
         tracing::debug!(
             frame_count = frames.len(),
-            "Dropping malformed slot-tracker replica message"
+            "Dropping malformed active-sequence replica message"
         );
         return;
     };
     if topic.as_slice() != REPLICA_TOPIC {
-        tracing::debug!("Dropping slot-tracker replica message with unexpected topic");
+        tracing::debug!("Dropping active-sequence replica message with unexpected topic");
         return;
     }
-    let event: SlotReplicaEvent = match rmp_serde::from_slice(payload) {
+    let event: ScopedReplicaEvent = match rmp_serde::from_slice(payload) {
         Ok(event) => event,
         Err(error) => {
-            tracing::debug!("Dropping malformed slot-tracker replica payload: {error}");
+            tracing::debug!("Dropping malformed active-sequence replica payload: {error}");
             return;
         }
     };
-    registry.dispatch_replica_event(event);
+    handle_event(event);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
-    use crate::services::slot_tracker::registry::TrackerKey;
+    #[cfg(feature = "standalone-slot-tracker")]
+    use crate::services::slot_tracker::registry::{SlotTrackerRegistry, TrackerKey};
 
-    fn event() -> SlotReplicaEvent {
-        SlotReplicaEvent {
+    fn event() -> ScopedReplicaEvent {
+        ScopedReplicaEvent {
             model_name: "model".to_string(),
             tenant_id: "tenant".to_string(),
             block_size: 16,
@@ -405,7 +413,7 @@ mod tests {
     #[test]
     fn replica_event_round_trips_named_messagepack() {
         let encoded = rmp_serde::to_vec_named(&event()).unwrap();
-        let decoded: SlotReplicaEvent = rmp_serde::from_slice(&encoded).unwrap();
+        let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&encoded).unwrap();
 
         assert_eq!(decoded.model_name, "model");
         assert_eq!(decoded.tenant_id, "tenant");
@@ -443,12 +451,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn peer_manager_registers_and_deregisters_endpoints() {
         let cancel_token = CancellationToken::new();
-        let registry = Arc::new(SlotTrackerRegistry::new(cancel_token.clone()));
         let manager = PeerManager::start(
-            registry,
             Vec::new(),
             Some("tcp://127.0.0.1:8092".to_string()),
             cancel_token.clone(),
+            |_| {},
         )
         .unwrap();
         let endpoint = "tcp://127.0.0.1:8093".to_string();
@@ -463,6 +470,7 @@ mod tests {
         cancel_token.cancel();
     }
 
+    #[cfg(feature = "standalone-slot-tracker")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn zmq_replica_sync_propagates_request_lifecycle() {
         let endpoint_a = reserve_tcp_endpoint();
@@ -480,11 +488,12 @@ mod tests {
             22,
             outbound_b,
         ));
+        let dispatch_registry_b = Arc::clone(&registry_b);
         let _peer_b = PeerManager::start(
-            Arc::clone(&registry_b),
             vec![endpoint_a],
             Some(endpoint_b),
             cancel_token.child_token(),
+            move |event| dispatch_registry_b.dispatch_replica_event(event),
         )
         .unwrap();
         let key = TrackerKey::new("model".to_string(), Some("tenant".to_string()));
@@ -524,6 +533,7 @@ mod tests {
         cancel_token.cancel();
     }
 
+    #[cfg(feature = "standalone-slot-tracker")]
     async fn wait_for_load(
         registry: &SlotTrackerRegistry,
         expected_blocks: usize,

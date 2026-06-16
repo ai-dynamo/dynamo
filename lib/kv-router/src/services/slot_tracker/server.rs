@@ -16,9 +16,9 @@ use serde::{Deserialize, Deserializer};
 
 use crate::protocols::WorkerWithDpRank;
 use crate::sequences::SequenceError;
+use crate::services::replica_sync::{PeerError, PeerManager};
 
 use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry, TrackerKey};
-use super::replica_sync::{PeerError, PeerManager};
 
 pub struct AppState {
     pub registry: Arc<SlotTrackerRegistry>,

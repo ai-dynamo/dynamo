@@ -200,7 +200,7 @@ where
 }
 
 #[cfg(feature = "select-service")]
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(
     name = "python -m dynamo.select_service",
     about = "Runtime-free Dynamo worker selection service"
@@ -213,6 +213,61 @@ struct SelectServiceCli {
     /// Number of KV indexer worker threads
     #[arg(long, default_value_t = 4)]
     threads: usize,
+
+    /// Comma-separated selector/indexer HTTP URLs used for startup KV recovery
+    #[arg(long, value_delimiter = ',')]
+    indexer_peers: Vec<String>,
+
+    /// ZMQ PUB endpoint for active-load replica events
+    #[arg(long)]
+    replica_sync_bind: Option<String>,
+
+    /// Externally reachable local active-load replica endpoint
+    #[arg(long, requires = "replica_sync_bind")]
+    replica_sync_advertise: Option<String>,
+
+    /// Comma-separated ZMQ PUB endpoints for peer selectors
+    #[arg(long, value_delimiter = ',', requires = "replica_sync_bind")]
+    replica_sync_peers: Vec<String>,
+}
+
+#[cfg(all(test, feature = "select-service"))]
+mod select_service_cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_selector_peer_planes() {
+        let cli = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--indexer-peers",
+            "http://indexer-a:8092,http://indexer-b:8092",
+            "--replica-sync-bind",
+            "tcp://0.0.0.0:9000",
+            "--replica-sync-advertise",
+            "tcp://selector-a:9000",
+            "--replica-sync-peers",
+            "tcp://selector-b:9000,tcp://selector-c:9000",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.indexer_peers.len(), 2);
+        assert_eq!(cli.replica_sync_peers.len(), 2);
+    }
+
+    #[test]
+    fn replica_peers_require_bind_endpoint() {
+        let error = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--replica-sync-peers",
+            "tcp://selector-b:9000",
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
 }
 
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -233,6 +288,10 @@ where
         rt.block_on(selection::run_server(SelectionServiceConfig {
             port: cli.port,
             threads: cli.threads,
+            indexer_peers: cli.indexer_peers,
+            replica_sync_bind: cli.replica_sync_bind,
+            replica_sync_advertise: cli.replica_sync_advertise,
+            replica_sync_peers: cli.replica_sync_peers,
             kv_router_config: kv_router_config_from_dynamo_env(),
         }))
     }

@@ -8,7 +8,6 @@
 //! stays independent of Dynamo runtime and LLM-layer dependencies.
 
 pub mod registry;
-mod replica_sync;
 pub mod server;
 
 use std::sync::Arc;
@@ -16,8 +15,8 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use crate::services::replica_sync::{PeerManager, generate_process_id, start_replica_publisher};
 use registry::SlotTrackerRegistry;
-use replica_sync::{PeerManager, generate_process_id, start_replica_publisher};
 use server::{AppState, create_router};
 
 pub struct SlotTrackerConfig {
@@ -44,11 +43,12 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
             process_id,
             outbound_tx,
         ));
+        let dispatch_registry = Arc::clone(&registry);
         let peer_manager = PeerManager::start(
-            Arc::clone(&registry),
             config.replica_sync_peers,
             config.replica_sync_advertise.clone(),
             cancel_token.child_token(),
+            move |event| dispatch_registry.dispatch_replica_event(event),
         )?;
         tracing::info!(
             port = config.port,

@@ -20,9 +20,9 @@ use crate::sequences::{
     SequenceRequest,
 };
 
-use super::replica_sync::{
+use crate::services::replica_sync::{
     ChannelSequenceSubscriber, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
-    ScopedSequencePublisher, SlotReplicaEvent,
+    ScopedReplicaEvent, ScopedSequencePublisher,
 };
 
 fn default_tenant() -> String {
@@ -429,7 +429,7 @@ impl SlotTrackerRegistry {
             .collect())
     }
 
-    pub(crate) fn dispatch_replica_event(&self, envelope: SlotReplicaEvent) {
+    pub(crate) fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {
         if self
             .replica_config
             .as_ref()
@@ -559,8 +559,8 @@ mod tests {
         block_size: u32,
         worker: WorkerWithDpRank,
         router_id: u64,
-    ) -> SlotReplicaEvent {
-        SlotReplicaEvent {
+    ) -> ScopedReplicaEvent {
+        ScopedReplicaEvent {
             model_name: "model".to_string(),
             tenant_id: tenant_id.to_string(),
             block_size,

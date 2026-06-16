@@ -14,6 +14,12 @@ pub(crate) mod zmq;
 pub mod indexer;
 
 #[cfg(feature = "standalone-indexer")]
+pub mod overlap;
+
+#[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
+pub(crate) mod replica_sync;
+
+#[cfg(feature = "standalone-indexer")]
 pub mod shared_cache;
 
 #[cfg(feature = "standalone-selection")]

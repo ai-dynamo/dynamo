@@ -63,7 +63,7 @@ impl ZmqSocket {
         Ok(())
     }
 
-    #[cfg(feature = "standalone-slot-tracker")]
+    #[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
     pub(crate) fn disconnect(&self, endpoint: &str) -> Result<()> {
         self.socket().disconnect(endpoint)?;
         Ok(())
@@ -185,7 +185,11 @@ fn configure_bidirectional_socket(socket: &zmq::Socket) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(feature = "standalone-slot-tracker", test))]
+#[cfg(any(
+    feature = "standalone-slot-tracker",
+    feature = "standalone-selection",
+    test
+))]
 fn configure_send_socket(socket: &zmq::Socket) -> Result<()> {
     configure_common_socket(socket)?;
     socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
@@ -226,7 +230,11 @@ pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<SharedSocket> {
     })?)))
 }
 
-#[cfg(any(feature = "standalone-slot-tracker", test))]
+#[cfg(any(
+    feature = "standalone-slot-tracker",
+    feature = "standalone-selection",
+    test
+))]
 pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
     build_socket(zmq::PUB, |socket| {
         configure_send_socket(socket)?;

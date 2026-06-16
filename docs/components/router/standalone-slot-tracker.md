@@ -74,6 +74,10 @@ after peer registration. There is no acknowledgement, replay, snapshot, or gap r
 that accepted `/add`; replica synchronization provides advisory peer state rather than
 cross-replica lifecycle ownership.
 
+**NOTE:** Output-block updates remain local and are intentionally not replica-synchronized.
+They can occur at high frequency, and broadcasting them would consume disproportionate
+network bandwidth.
+
 Peers may also be managed dynamically:
 
 ```http

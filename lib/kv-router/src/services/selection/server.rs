@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::WorkerId;
+use crate::services::replica_sync::{PeerManager, generate_process_id, start_replica_publisher};
 
 use super::core::{SelectionCore, SelectionServiceConfig};
 use super::types::{
@@ -213,6 +214,10 @@ async fn overlap_scores(
     }
 }
 
+async fn dump_events(State(state): State<Arc<AppState>>) -> Response {
+    Json(state.core.dump_indexer_events().await).into_response()
+}
+
 async fn not_found() -> Response {
     json_error(StatusCode::NOT_FOUND, "route not found")
 }
@@ -261,6 +266,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/loads", get(loads))
         .route("/potential_loads", post(potential_loads))
         .route("/overlap_scores", post(overlap_scores))
+        .route("/dump", get(dump_events))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(axum::extract::DefaultBodyLimit::max(
@@ -278,17 +284,58 @@ pub async fn run_server(config: SelectionServiceConfig) -> anyhow::Result<()> {
         shutdown_token.cancel();
     });
 
+    let replica_runtime = if let Some(bind_endpoint) = &config.replica_sync_bind {
+        let process_id = generate_process_id();
+        let outbound_tx = start_replica_publisher(bind_endpoint, cancel_token.child_token())?;
+        Some((process_id, outbound_tx))
+    } else {
+        if config.replica_sync_advertise.is_some() || !config.replica_sync_peers.is_empty() {
+            anyhow::bail!(
+                "--replica-sync-advertise and --replica-sync-peers require --replica-sync-bind"
+            );
+        }
+        None
+    };
+
     tracing::info!(
         port = config.port,
         threads = config.threads,
+        indexer_peers = config.indexer_peers.len(),
+        replica_sync = replica_runtime.is_some(),
         "Starting Dynamo selection service"
     );
 
-    let core = Arc::new(SelectionCore::new(
+    let core = Arc::new(SelectionCore::new_for_server(
         config.kv_router_config,
         config.threads,
         cancel_token.clone(),
+        replica_runtime,
     ));
+    if !config.indexer_peers.is_empty() {
+        match core.recover_indexer_from_peers(&config.indexer_peers).await {
+            Ok(true) => tracing::info!("Selection indexer recovery completed"),
+            Ok(false) => {
+                tracing::warn!("No reachable selection indexer peers; starting with empty state")
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Selection indexer recovery failed; starting with empty state")
+            }
+        }
+    }
+    core.signal_indexer_ready();
+
+    let _peer_manager = if config.replica_sync_bind.is_some() {
+        let dispatch_core = Arc::clone(&core);
+        Some(PeerManager::start(
+            config.replica_sync_peers,
+            config.replica_sync_advertise,
+            cancel_token.child_token(),
+            move |event| dispatch_core.dispatch_replica_event(event),
+        )?)
+    } else {
+        None
+    };
+
     let app = create_router(Arc::new(AppState { core }));
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     axum::serve(listener, app)
