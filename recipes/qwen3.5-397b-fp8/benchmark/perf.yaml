@@ -15,13 +15,11 @@
 # server/worker pods, which is what guarantees same-node placement.
 # No podAffinity — the hostname pin makes it redundant.
 #
-# Installs aiperf from PyPI pinned at AIPERF_VERSION. Both required
-# PRs — 824 ("add session_id to single-turn for causal ordering") and
-# 903 ("HF Image(decode=False) byte dicts") — landed in the 0.8.0
-# release (2026-05-16), so any 0.8.0+ wheel works. Our sliding-window
-# jsonl writes session_id=user_<N> per row; PR 824 makes single_turn
-# mode honor that ordering so the 3 turns of any one user are issued
-# in causal order and prefix-cache hits across turns actually land.
+# Installs aiperf from PyPI pinned at AIPERF_VERSION (0.8.0+).
+# Our sliding-window jsonl writes session_id=user_<N> per row;
+# aiperf's single_turn mode honors that ordering so the 3 turns of
+# any one user are issued in causal order and prefix-cache hits
+# across turns actually land.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -51,9 +49,8 @@ spec:
 
           apt update && apt install -y --no-install-recommends curl jq git
 
-          # Pin to a released aiperf wheel — 0.8.0+ includes PR 824
-          # (session_id for single-turn) + PR 903 (HF image-byte-dict
-          # fix). Bump AIPERF_VERSION to roll forward.
+          # Pin to a released aiperf wheel (0.8.0+).
+          # Bump AIPERF_VERSION to roll forward.
           pip install --no-cache-dir "aiperf==${AIPERF_VERSION}"
           python -c "import aiperf; print('aiperf', getattr(aiperf, '__version__', '?'), 'OK')"
 
@@ -76,8 +73,8 @@ spec:
           echo "Running benchmark; artifacts → ${RUN_DIR}"
 
           # single_turn (NOT multi_turn): each jsonl row is one request.
-          # PR 824 makes single_turn respect session_id, so the 3 turns
-          # of user_<N> are issued in causal order.
+          # session_id is honored so the 3 turns of user_<N> are issued
+          # in causal order.
           aiperf profile \
             --model "${MODEL_NAME}" \
             --input-file "${INPUT_FILE}" \

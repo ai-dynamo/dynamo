@@ -6,15 +6,14 @@
 # unique images per user (window + turns - 1 = 5 + 3 - 1 = 7), so 210
 # total images; 8000 text tokens per request, 2400x1080 base64-inlined.
 # Each row has session_id=user_<N> so aiperf can issue same-user turns
-# in causal order (requires aiperf PR 824).
+# in causal order.
 #
-# Matches PR 8235's sweep_397b.yaml shape (8K ISL × 5 images per turn ×
-# 1K OSL × conc=30, 3 turns per user): turn-1 is a cold-cache baseline,
-# turns 2-3 each reuse 4-of-5 images from the prior turn. The modest
-# turn count keeps the warm-request fraction at 2/3, so the benchmark
-# reflects fresh-image preprocessing cost rather than a cache-saturated
-# steady state (8-turn pushes warm-fraction to 7/8 and lets the
-# baseline's processor/prefix caches mask the frontend-decoding win).
+# Shape: 8K ISL × 5 images per turn × 1K OSL × conc=30, 3 turns per user.
+# Turn-1 is a cold-cache baseline; turns 2-3 each reuse 4-of-5 images from
+# the prior turn. The modest turn count keeps the warm-request fraction at
+# 2/3, so the benchmark reflects fresh-image preprocessing cost rather than
+# a cache-saturated steady state (8-turn pushes warm-fraction to 7/8 and
+# lets the baseline's processor/prefix caches mask the frontend-decoding win).
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -50,13 +49,12 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           env:
-            # vllm-runtime:1.2.0 may still ship a baked
-            # /workspace/benchmarks/multimodal/jsonl/main.py older than
-            # dynamo PR 8201 (sliding-window strategy). To stay independent
-            # of the image's bundled copy, we always pull a pinned main
-            # SHA of main.py into the pod. Bump DYNAMO_REF when you want
-            # newer generator fixes; drop the pin entirely once 1.2.x+
-            # is confirmed to include the sliding-window subcommand.
+            # The image may ship a baked main.py that predates the
+            # sliding-window subcommand. To stay independent of the image's
+            # bundled copy, we always pull a pinned SHA of main.py into the
+            # pod. Bump DYNAMO_REF when you want newer generator fixes; drop
+            # the pin entirely once the image is confirmed to include the
+            # sliding-window subcommand.
             - name: DYNAMO_REF
               value: "dd298d6006545d1c5a676f03b7d774e3b9590bee"
           command:

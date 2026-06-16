@@ -4,11 +4,9 @@
 # Aggregated Dynamo on a single 8×H100 node with **frontend-decoding ON**.
 # Compared against vllm-serve/ to isolate the frontend-decoding effect.
 #
-# Mirrors the `dynamo-fd` config in PR 8235's 397B sweep
-# (TP=8, expert-parallel, mm-encoder-tp data, max-model-len=32K). The
-# only deliberate divergence from PR 8235 is `--mm-processor-cache-gb 30`
-# (PR 8235 uses 60). Matching the processor cache to vllm-serve makes
-# frontend-decoding the only flag that differs between the two configs.
+# TP=8, expert-parallel, mm-encoder-tp data, max-model-len=32K.
+# `--mm-processor-cache-gb 30` matches vllm-serve so frontend-decoding
+# is the only flag that differs between the two configs.
 #
 # Per-config flag diff:
 #                                              fd          vllm-serve
@@ -43,8 +41,7 @@ spec:
         - name: DYN_REQUEST_PLANE
           value: tcp
         # Multimodal bodies are 5×2400x1080 base64-inlined images per
-        # request; default 50 MiB body limit will reject them. 200 MiB
-        # is the same value PR 8235's sweep_397b.yaml sets.
+        # request; default 50 MiB body limit will reject them.
         - name: DYN_HTTP_BODY_LIMIT_MB
           value: "200"
       extraPodSpec:
@@ -119,7 +116,7 @@ spec:
               value: "1"
             # Relax NCCL watchdog — DeepGEMM JIT + cudagraph capture for
             # 397B at TP=8 can stall NCCL ops longer than the default
-            # heartbeat. Same values PR 8235 uses.
+            # heartbeat.
             - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
               value: "1800"
             - name: NCCL_TIMEOUT

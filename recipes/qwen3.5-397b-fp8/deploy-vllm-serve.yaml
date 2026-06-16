@@ -6,11 +6,10 @@
 # Hub cache is shared across all configs in the namespace, AND at a
 # subPath for the per-model vllm compilation cache.
 #
-# 8×H100 single-node TP=8 deployment. Flags mirror the `vllm-serve`
-# config in PR 8235's 397B sweep (TP=8, expert-parallel, mm-encoder-tp
-# data, max-model-len=32K) with `--mm-processor-cache-gb 30` matched
-# to dynamo-fd so the only flag that differs between the two configs
-# is frontend-decoding itself.
+# 8×H100 single-node TP=8 deployment (TP=8, expert-parallel,
+# mm-encoder-tp data, max-model-len=32K). `--mm-processor-cache-gb 30`
+# matched to dynamo-fd so the only flag that differs between the two
+# configs is frontend-decoding itself.
 ---
 apiVersion: v1
 kind: Service

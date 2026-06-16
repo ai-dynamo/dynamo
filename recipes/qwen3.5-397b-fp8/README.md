@@ -10,12 +10,9 @@ multimodal):
 | `vllm-serve`   | vanilla vLLM  | yes        | n/a               |
 | `dynamo-fd`    | Dynamo + vLLM | on         | on                |
 
-Flags mirror the `vllm-serve` and `dynamo-fd` configs in
-[PR 8235's sweep_397b.yaml](https://github.com/ai-dynamo/dynamo/pull/8235),
-with one deliberate divergence: **`--mm-processor-cache-gb` is set to
-30 GiB on both** (PR 8235 uses 60 GiB on `dynamo-fd`). Matching the
-processor cache across configs makes the only delta `frontend-decoding`,
-which is what we're measuring.
+**`--mm-processor-cache-gb` is set to 30 GiB on both configs.**
+Matching the processor cache across configs makes the only delta
+`frontend-decoding`, which is what we're measuring.
 
 ## Pre-requisites
 
@@ -189,13 +186,10 @@ spec:
 ## aiperf install
 
 The bench pod installs aiperf from a pinned PyPI release
-(`AIPERF_VERSION` env var in `benchmark/perf.yaml`, default `0.9.0`). 0.8.0+
-includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
-(`feat(dataset): add session_id to single-turn for causal ordering`),
-which is what makes aiperf's `single_turn` mode honor the
-`session_id=user_<N>` ordering our sliding-window dataset writes per
-`(user, turn)` row — without it the 3 turns of a user can interleave
-across requests and prefix-cache hits across turns disappear.
+(`AIPERF_VERSION` env var in `benchmark/perf.yaml`, default `0.9.0`).
+Use 0.8.0+: that's when `single_turn` mode gained support for
+`session_id` ordering, which is what ensures the 3 turns of any one
+user are issued in causal order so prefix-cache hits across turns land.
 
 Bump `AIPERF_VERSION` in `benchmark/perf.yaml` when you want newer aiperf
 fixes.
@@ -226,9 +220,9 @@ kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
   fraction at 2/3 (turn-1 cold, turns 2-3 reuse 4-of-5 images), so the
   benchmark exercises fresh-image preprocessing rather than a
   cache-saturated steady state.
-- Each jsonl row carries `session_id=user_<N>`. With aiperf PR 824, the
-  `single_turn` dataset type honors session ordering so the 3 turns of
-  any one user are sent in causal order, letting prefix-cache hits land.
+- Each jsonl row carries `session_id=user_<N>`. aiperf's `single_turn`
+  dataset type honors session ordering so the 3 turns of any one user
+  are sent in causal order, letting prefix-cache hits land.
 - The vllm command in `deploy-<config>.yaml` uses `--tensor-parallel-size 8
   --enable-expert-parallel --mm-encoder-tp-mode data
   --mm-processor-cache-gb 30 --max-model-len 32768
