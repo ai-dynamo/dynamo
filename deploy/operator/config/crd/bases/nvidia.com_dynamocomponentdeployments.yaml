@@ -819,6 +819,74 @@ spec:
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
+                device:
+                  description: |-
+                    Device configures accelerator device requests in a vendor-agnostic way.
+                    When set, the operator copies resources, tolerations, nodeSelector, and
+                    schedulerName directly into the generated pod spec and skips all
+                    NVIDIA-default injections (DRA claim replacement, nvidia.com/gpu
+                    toleration). When absent, existing NVIDIA-default behavior is preserved.
+                  properties:
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      description: 'NodeSelector restricts pod scheduling to matching nodes (e.g. {"gpu": "on"} for HAMi).'
+                      type: object
+                    resources:
+                      additionalProperties:
+                        anyOf:
+                          - type: integer
+                          - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      description: |-
+                        Resources are device resource requests/limits copied directly into the
+                        main container (e.g. "nvidia.com/gpu", "amd.com/gpu",
+                        "nvidia.com/gpumem" for HAMi).
+                      type: object
+                    schedulerName:
+                      description: SchedulerName overrides the default Kubernetes scheduler (e.g. "hami-scheduler").
+                      type: string
+                    tolerations:
+                      description: Tolerations are added to the pod spec for device-specific node taints.
+                      items:
+                        description: |-
+                          The pod this Toleration is attached to tolerates any taint that matches
+                          the triple <key,value,effect> using the matching operator <operator>.
+                        properties:
+                          effect:
+                            description: |-
+                              Effect indicates the taint effect to match. Empty means match all taint effects.
+                              When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                            type: string
+                          key:
+                            description: |-
+                              Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                              If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                            type: string
+                          operator:
+                            description: |-
+                              Operator represents a key's relationship to the value.
+                              Valid operators are Exists and Equal. Defaults to Equal.
+                              Exists is equivalent to wildcard for value, so that a pod can
+                              tolerate all taints of a particular category.
+                            type: string
+                          tolerationSeconds:
+                            description: |-
+                              TolerationSeconds represents the period of time the toleration (which must be
+                              of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                              it is not set, which means tolerate the taint forever (do not evict). Zero and
+                              negative values will be treated as 0 (evict immediately) by the system.
+                            format: int64
+                            type: integer
+                          value:
+                            description: |-
+                              Value is the taint value the toleration matches to.
+                              If the operator is Exists, the value should be empty, otherwise just a regular string.
+                            type: string
+                        type: object
+                      type: array
+                  type: object
                 dynamoNamespace:
                   description: |-
                     DynamoNamespace is deprecated and will be removed in a future version.
@@ -11665,6 +11733,74 @@ spec:
                       type: string
                   required:
                     - pvcName
+                  type: object
+                device:
+                  description: |-
+                    Device configures accelerator device requests in a vendor-agnostic way.
+                    When set, the operator copies resources, tolerations, nodeSelector, and
+                    schedulerName directly into the generated pod spec and skips all
+                    NVIDIA-default injections (DRA claim replacement, nvidia.com/gpu
+                    toleration). When absent, existing NVIDIA-default behavior is preserved.
+                  properties:
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      description: 'NodeSelector restricts pod scheduling to matching nodes (e.g. {"gpu": "on"} for HAMi).'
+                      type: object
+                    resources:
+                      additionalProperties:
+                        anyOf:
+                          - type: integer
+                          - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      description: |-
+                        Resources are device resource requests/limits copied directly into the
+                        main container (e.g. "nvidia.com/gpu", "amd.com/gpu",
+                        "nvidia.com/gpumem" for HAMi).
+                      type: object
+                    schedulerName:
+                      description: SchedulerName overrides the default Kubernetes scheduler (e.g. "hami-scheduler").
+                      type: string
+                    tolerations:
+                      description: Tolerations are added to the pod spec for device-specific node taints.
+                      items:
+                        description: |-
+                          The pod this Toleration is attached to tolerates any taint that matches
+                          the triple <key,value,effect> using the matching operator <operator>.
+                        properties:
+                          effect:
+                            description: |-
+                              Effect indicates the taint effect to match. Empty means match all taint effects.
+                              When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                            type: string
+                          key:
+                            description: |-
+                              Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                              If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                            type: string
+                          operator:
+                            description: |-
+                              Operator represents a key's relationship to the value.
+                              Valid operators are Exists and Equal. Defaults to Equal.
+                              Exists is equivalent to wildcard for value, so that a pod can
+                              tolerate all taints of a particular category.
+                            type: string
+                          tolerationSeconds:
+                            description: |-
+                              TolerationSeconds represents the period of time the toleration (which must be
+                              of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                              it is not set, which means tolerate the taint forever (do not evict). Zero and
+                              negative values will be treated as 0 (evict immediately) by the system.
+                            format: int64
+                            type: integer
+                          value:
+                            description: |-
+                              Value is the taint value the toleration matches to.
+                              If the operator is Exists, the value should be empty, otherwise just a regular string.
+                            type: string
+                        type: object
+                      type: array
                   type: object
                 eppConfig:
                   description: |-
