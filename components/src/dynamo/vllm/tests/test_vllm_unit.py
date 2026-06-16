@@ -27,7 +27,11 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.main import MX_LOAD_FORMATS, is_object_storage_path, should_prefetch_model
+from dynamo.vllm.main import (
+    MX_LOAD_FORMATS,
+    is_object_storage_path,
+    should_prefetch_model,
+)
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
