@@ -600,49 +600,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Webhooks require TLS certificates to serve HTTPS. Register them in a
-	// goroutine that blocks until the cert-controller has written the certs.
-	go func() {
-		certMgr.WaitReady()
+	if err := registerWebhooks(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
+		setupLog.Error(err, "failed to register webhooks")
+		os.Exit(1)
+	}
 
-		// Manual mode returns from WaitReady immediately, so this goroutine can
-		// run before the manager cache is usable. Use the direct client for
-		// manual Secret polling and CRD patches.
-		caInjectorClient := mgr.GetClient()
-		if operatorCfg.Server.Webhook.CertProvisionMode != configv1alpha1.CertProvisionModeAuto {
-			caInjectorClient = directClient
-		}
-		caInjector, err := internalcert.NewCABundleInjector(caInjectorClient, operatorCfg)
-		if err != nil {
-			setupLog.Error(err, "unable to create CA bundle injector")
+	// CA injection and conversion setup must complete before mgr.Start; without
+	// conversion the alpha-only admission handlers would see inconsistent input.
+	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create CA bundle injector")
+		os.Exit(1)
+	}
+	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+		if err := caInjector.InjectAll(mainCtx); err != nil {
+			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
 			os.Exit(1)
 		}
-		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-			if err := caInjector.InjectAll(mainCtx); err != nil {
-				setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
-				os.Exit(1)
-			}
-		} else {
-			// Manual mode gets webhook CA material out-of-band, but CRD conversion
-			// CA bundles are patched here. Register conversion endpoints before
-			// waiting for ca.crt so fresh CRDs fail conversion closed instead of
-			// admitting unconverted objects; existing CA bundles are preserved.
-			if err := caInjector.ConfigureCRDConversionWebhooks(mainCtx); err != nil {
-				setupLog.Error(err, "failed to configure CRD conversion webhooks")
-				os.Exit(1)
-			}
-			if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
-				setupLog.Error(err, "failed to inject CRD conversion CA bundle")
-				os.Exit(1)
-			}
-		}
-
-		if err := registerWebhooks(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
-			setupLog.Error(err, "failed to register webhooks")
+	} else {
+		// Manual mode gets webhook CA material out-of-band, but CRD conversion
+		// CA bundles are patched here. Register conversion endpoints before
+		// waiting for ca.crt so fresh CRDs fail conversion closed instead of
+		// admitting unconverted objects; existing CA bundles are preserved.
+		if err := caInjector.ConfigureCRDConversionWebhooks(mainCtx); err != nil {
+			setupLog.Error(err, "failed to configure CRD conversion webhooks")
 			os.Exit(1)
 		}
-		close(webhooksReady)
-	}()
+		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
+			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
+			os.Exit(1)
+		}
+	}
+	close(webhooksReady)
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(mainCtx); err != nil {
