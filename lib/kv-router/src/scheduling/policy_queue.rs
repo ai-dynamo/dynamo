@@ -245,6 +245,8 @@ impl<T> PolicyQueue<T> {
         let class_count = self.classes.len();
         self.dispatchable.fill(false);
         for offset in 0..class_count {
+            // Rotate the starting point across calls so class vector order
+            // cannot become a permanent scheduling preference.
             let class_index = (self.next_class + offset) % class_count;
             let class = &mut self.classes[class_index];
             let Some(front) = class.pending.peek() else {
@@ -252,19 +254,28 @@ impl<T> PolicyQueue<T> {
                 continue;
             };
             if !is_dispatchable(class_index, &class.config, front.payload()) {
+                // A blocked class retains earned credit but does not accrue
+                // more until its head becomes dispatchable.
                 continue;
             }
 
             self.dispatchable[class_index] = true;
             if front.snapshot.scheduling_cost_tokens <= class.deficit {
+                // Quantum is granted per ring round, not per request. Spend
+                // carried credit before granting this class another quantum.
                 return Some(self.pop_class(class_index));
             }
             class.deficit = class.deficit.saturating_add(class.config.quantum);
             if front.snapshot.scheduling_cost_tokens <= class.deficit {
+                // The normal single-round visit made this head affordable.
                 return Some(self.pop_class(class_index));
             }
         }
 
+        // Fast-forward the minimum number of complete virtual rounds needed
+        // for any dispatchable head to progress, avoiding repeated ring scans
+        // for requests much larger than their class quantum. If every head was
+        // blocked, `min()` returns `None` without changing any deficit.
         let rounds = self
             .dispatchable
             .iter()
@@ -285,6 +296,8 @@ impl<T> PolicyQueue<T> {
                 continue;
             }
             let class = &mut self.classes[class_index];
+            // Applying the same virtual round count preserves weighting
+            // because each class scales the credit by its own quantum.
             class.deficit = class
                 .deficit
                 .saturating_add(class.config.quantum.saturating_mul(rounds));
@@ -320,8 +333,9 @@ impl<T> PolicyQueue<T> {
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
-        // Empty classes discard stale credit. Otherwise retain usable credit
-        // for the same class, or advance the ring when its next head is larger.
+        // Empty classes discard stale credit. A class that can already afford
+        // its next head keeps the cursor and spends its weighted burst;
+        // otherwise the next call starts at the following class.
         if class.pending.is_empty() {
             class.deficit = 0;
             self.next_class = (class_index + 1) % self.classes.len();
