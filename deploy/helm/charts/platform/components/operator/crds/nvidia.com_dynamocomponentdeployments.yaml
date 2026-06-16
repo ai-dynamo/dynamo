@@ -20405,6 +20405,7 @@ spec:
     strategy: Webhook
     webhook:
       clientConfig:
+        # CA will be patched in by the Dynamo operator
         service:
           namespace: system
           name: webhook-service
