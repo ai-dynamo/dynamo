@@ -30,15 +30,16 @@ Usage (see enc_full_prompt_pd.sh for the complete launch script):
 
 from __future__ import annotations
 
-import asyncio
 import logging
+from io import BytesIO
 from typing import List, Optional
 
+import requests
 import torch
+from PIL import Image
 from transformers import AutoImageProcessor, AutoModel
 
 from dynamo.vllm.multimodal_utils.custom_encoder import FullPromptEncoder
-from dynamo.vllm.multimodal_utils.image_loader import ImageLoader
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,6 @@ class QwenVLExampleEncoder(FullPromptEncoder):
     def __init__(self) -> None:
         self.vision_encoder: Optional[torch.nn.Module] = None
         self.image_processor = None
-        self._image_loader = ImageLoader(cache_size=8)
         self._embed_tokens: Optional[torch.nn.Embedding] = None
         self._device = "cpu"
         self._proj_cache: dict = {}
@@ -164,16 +164,14 @@ class QwenVLExampleEncoder(FullPromptEncoder):
             and self._embed_tokens is not None
         ), "call load() before encode()"
 
-        # 1. Download images (synchronous — called via asyncio.to_thread)
-        loop = asyncio.new_event_loop()
-        try:
-            images = loop.run_until_complete(
-                asyncio.gather(
-                    *[self._image_loader.load_image(url) for url in image_urls]
-                )
-            )
-        finally:
-            loop.close()
+        # 1. Download images synchronously — encode() is called via asyncio.to_thread
+        # so sync HTTP is correct here; aiohttp-based loaders require the main event loop.
+        images = []
+        headers = {"User-Agent": "DynamoEncoder/1.0"}
+        for url in image_urls:
+            resp = requests.get(url, timeout=30, headers=headers)
+            resp.raise_for_status()
+            images.append(Image.open(BytesIO(resp.content)).convert("RGB"))
 
         # 2. Preprocess and run ViT
         inputs = self.image_processor(images=list(images), return_tensors="pt")
@@ -182,11 +180,17 @@ class QwenVLExampleEncoder(FullPromptEncoder):
 
         with torch.no_grad():
             if grid_thw is not None:
-                image_embeds = self.vision_encoder(
-                    pixel_values, grid_thw=grid_thw.tolist()
-                )
+                # Pass grid_thw as tensor — the transformers model's rot_pos_emb
+                # calls .tolist() internally and expects a tensor, not a list.
+                grid_thw = grid_thw.to(self._device)
+                out = self.vision_encoder(pixel_values, grid_thw=grid_thw)
             else:
-                image_embeds = self.vision_encoder(pixel_values)
+                out = self.vision_encoder(pixel_values)
+
+        # vision_encoder returns BaseModelOutputWithPooling; extract hidden states.
+        image_embeds = (
+            out.last_hidden_state if hasattr(out, "last_hidden_state") else out
+        )
 
         # Flatten any batch dim: → (n_img_tokens, vit_hidden)
         image_embeds = image_embeds.reshape(-1, image_embeds.shape[-1])

@@ -440,6 +440,7 @@ class FullPromptEncodeWorkerHandler(_BaseEncodeWorkerHandler):
         group.serialized_request = serialized
         group.embeddings_shape = tuple(spliced.shape)
         group.image_grid_thw = None
+        group.is_full_prompt = True
         if group.multimodal_input is not None:
             group.multimodal_input.image_url = None
 

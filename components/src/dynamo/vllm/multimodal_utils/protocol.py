@@ -177,9 +177,13 @@ class MultiModalGroup(BaseModel):
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
-        Union[Tuple[int, int, int], Tuple[int, int, int, int]]
+        Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[TransferRequest] = None
+    # Set by FullPromptEncodeWorkerHandler to signal that the tensor is a full
+    # prompt embedding (text + image spliced), not image-only embeddings.
+    # The PD routes it to EmbedsPrompt directly, bypassing multimodal assembly.
+    is_full_prompt: bool = False
     loaded_embedding: Optional[torch.Tensor] = Field(default=None, exclude=True)
 
 
