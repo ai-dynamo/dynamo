@@ -1017,6 +1017,7 @@ mod tests {
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
         );
+        pr.mark_active_for_test();
         pr.deactivate();
         ws.prefill_router = Some(pr);
         Arc::new(ws)

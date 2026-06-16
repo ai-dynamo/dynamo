@@ -14,7 +14,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{InnerPrefillRouter, PrefillRouter};
+use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::ModelManager,
     kv_router::KvPushRouter,
@@ -41,10 +41,8 @@ impl PrefillRouter {
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
-            worker_monitor: None,      // Disabled router never attaches a client
             is_eagle: false,
-            deactivated: std::sync::atomic::AtomicBool::new(false),
-            activated: std::sync::atomic::AtomicBool::new(false),
+            lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
         })
     }
 
@@ -75,10 +73,8 @@ impl PrefillRouter {
             prefill_load_estimator,
             model_name,
             namespace,
-            worker_monitor,
             is_eagle,
-            deactivated: std::sync::atomic::AtomicBool::new(false),
-            activated: std::sync::atomic::AtomicBool::new(false),
+            lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
         });
 
         // Spawn background task to wait for activation
@@ -97,6 +93,7 @@ impl PrefillRouter {
                         kv_cache_block_size,
                         kv_router_config,
                         router_clone.prefill_load_estimator.clone(),
+                        worker_monitor.as_ref(),
                     ).await {
                         tracing::error!(error = %e, "Failed to activate prefill router");
                     }
@@ -118,13 +115,14 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_monitor: Option<&crate::discovery::KvWorkerMonitor>,
     ) -> Result<()> {
         tracing::info!(
             router_mode = ?self.router_mode,
             "Activating prefill router"
         );
 
-        // Store endpoint_id for later use in resolve_prefill_worker
+        // Store endpoint metadata for bootstrap and topology preparation.
         let _ = self.endpoint_id.set(endpoint.id());
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
@@ -149,7 +147,7 @@ impl PrefillRouter {
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
-            self.attach_prefill_client(&client);
+            Self::attach_prefill_client(worker_monitor, &client);
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -164,7 +162,7 @@ impl PrefillRouter {
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
-            self.attach_prefill_client(&client);
+            Self::attach_prefill_client(worker_monitor, &client);
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -181,7 +179,8 @@ impl PrefillRouter {
 
         // Set the router (ignore error if already set)
         let _ = self.prefill_router.set(inner_router);
-        self.activated.store(true, Ordering::Release);
+        self.lifecycle
+            .store(PrefillLifecycleState::Active as u8, Ordering::Release);
 
         tracing::info!(
             router_mode = ?self.router_mode,
@@ -194,8 +193,11 @@ impl PrefillRouter {
     /// Attach the freshly-created prefill `Client` to this WorkerSet's monitor (handed in
     /// at construction). The monitor then publishes the overloaded set to the prefill pool
     /// and watches the prefill endpoint for metric cleanup. No-op for a disabled router.
-    fn attach_prefill_client(&self, client: &Client) {
-        if let Some(monitor) = self.worker_monitor.as_ref() {
+    fn attach_prefill_client(
+        worker_monitor: Option<&crate::discovery::KvWorkerMonitor>,
+        client: &Client,
+    ) {
+        if let Some(monitor) = worker_monitor {
             monitor.attach_prefill_client(client.clone());
         }
     }
@@ -207,7 +209,16 @@ impl PrefillRouter {
     /// The inner router is preserved so that when workers rejoin (same endpoint/discovery),
     /// the Client's discovery subscription picks them up automatically.
     pub fn deactivate(&self) {
-        self.deactivated.store(true, Ordering::Release);
+        let transition = self.lifecycle.compare_exchange(
+            PrefillLifecycleState::Active as u8,
+            PrefillLifecycleState::Unavailable as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if let Err(current) = transition {
+            PrefillLifecycleState::from_atomic(current);
+            return;
+        }
         tracing::info!(
             model_name = %self.model_name,
             namespace = %self.namespace,
@@ -219,7 +230,7 @@ impl PrefillRouter {
     /// Reactivate a deactivated router. Called when prefill workers rejoin.
     /// The inner router's Client re-discovers workers via its discovery subscription.
     ///
-    /// Note: there is a brief race between flipping `deactivated=false` (making
+    /// Note: there is a brief race between entering `Active` (making
     /// `can_serve_requests()` return true) and the Client actually rediscovering
     /// workers. Requests arriving in this window may fail at prefill resolution.
     /// This is bounded by discovery propagation time (typically sub-second).
@@ -230,7 +241,16 @@ impl PrefillRouter {
     /// new workers. This is acceptable for normal restart scenarios where the
     /// endpoint identity is stable.
     pub fn reactivate(&self) {
-        self.deactivated.store(false, Ordering::Release);
+        let transition = self.lifecycle.compare_exchange(
+            PrefillLifecycleState::Unavailable as u8,
+            PrefillLifecycleState::Active as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if let Err(current) = transition {
+            PrefillLifecycleState::from_atomic(current);
+            return;
+        }
         tracing::info!(
             model_name = %self.model_name,
             namespace = %self.namespace,
@@ -240,29 +260,29 @@ impl PrefillRouter {
 
     /// Whether this router is currently deactivated (prefill workers died).
     pub fn is_deactivated(&self) -> bool {
-        self.deactivated.load(Ordering::Acquire)
+        self.lifecycle_state() == PrefillLifecycleState::Unavailable
+    }
+
+    /// Whether the inner router has initialized, even if workers are unavailable.
+    pub fn is_activated(&self) -> bool {
+        self.lifecycle_state() != PrefillLifecycleState::Pending
+    }
+
+    pub(super) fn lifecycle_state(&self) -> PrefillLifecycleState {
+        PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
     /// Whether this router can serve requests in its current state.
-    /// - !enforce_disagg (aggregated passthrough): always servable unless deactivated
-    /// - enforce_disagg: only servable when prefill has activated AND is not deactivated,
-    ///   so a cold-started strict-disagg model isn't listed before prefill rendezvoused.
+    /// Strict disaggregated routing requires active prefill workers; otherwise
+    /// pending and unavailable routers can use aggregated fallback.
     pub fn can_serve_requests(&self) -> bool {
-        if self.is_deactivated() {
-            return !self.enforce_disagg;
-        }
-
-        if !self.enforce_disagg {
-            return true;
-        }
-
-        self.activated.load(Ordering::Acquire)
+        !self.enforce_disagg || self.lifecycle_state() == PrefillLifecycleState::Active
     }
 
-    /// Mark this router as activated for testing purposes.
-    /// In production, `activate()` sets this flag when the inner router is populated.
+    /// Mark this router as active for testing purposes.
     #[cfg(test)]
-    pub(crate) fn mark_activated_for_test(&self) {
-        self.activated.store(true, Ordering::Release);
+    pub(crate) fn mark_active_for_test(&self) {
+        self.lifecycle
+            .store(PrefillLifecycleState::Active as u8, Ordering::Release);
     }
 }

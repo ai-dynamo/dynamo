@@ -64,10 +64,7 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
 /// RAII handle for one in-flight unit of work charged against
 /// [`RoutingOccupancyState`]. The counter is incremented at construction; the
 /// matching decrement is emitted on drop (or by [`Self::into_tracked_stream`]).
-///
-/// `pub` so `prefill_router` (a separate crate) can hold one across its spawned
-/// prefill task — see [`PushRouter::track_dispatch`].
-pub struct OccupancyPermit {
+struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
     instance_id: u64,
     armed: bool,
@@ -90,13 +87,10 @@ impl OccupancyPermit {
                 inner: stream,
                 state: self.state.clone(),
                 instance_id: self.instance_id,
+                released: false,
             }),
             engine_ctx,
         )
-    }
-
-    fn instance_id(&self) -> u64 {
-        self.instance_id
     }
 }
 
@@ -173,6 +167,12 @@ pub enum RouterMode {
     LeastLoaded,
     /// Device-aware weighted routing for heterogeneous workers.
     DeviceAwareWeighted,
+}
+
+#[derive(Clone, Copy)]
+enum TransportFallback {
+    Allow,
+    Deny,
 }
 
 impl RouterMode {
@@ -539,7 +539,7 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request)
+        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
             .await
     }
 
@@ -561,7 +561,7 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request)
+        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
             .await
     }
 
@@ -580,7 +580,7 @@ where
         let permit = OccupancyPermit::new(state, instance_id);
 
         match self
-            .generate_with_fault_detection(instance_id, request)
+            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
             .await
         {
             Ok(stream) => Ok(permit.into_tracked_stream(stream)),
@@ -619,8 +619,42 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request)
+        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
             .await
+    }
+
+    /// Dispatch to exactly one worker without transport fallback.
+    ///
+    /// The worker is revalidated against the latest discovery and overload
+    /// state immediately before dispatch.
+    pub async fn dispatch_exact(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.generate_with_fault_detection(instance_id, request, TransportFallback::Deny)
+            .await
+    }
+
+    /// Select and book one worker, prepare the request for that exact worker,
+    /// then dispatch without reselection or transport fallback.
+    pub async fn select_and_dispatch_exact<M, F>(
+        &self,
+        mut request: SingleIn<T>,
+        pinned_worker: Option<u64>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let (instance_id, permit) = self.select_exact_target(pinned_worker).await?;
+        let metadata = prepare(&mut request, instance_id)?;
+        let stream = self.dispatch_exact(request, instance_id).await?;
+        let stream = match permit {
+            Some(permit) => permit.into_tracked_stream(stream),
+            None => stream,
+        };
+        Ok((metadata, stream))
     }
 
     /// Issue a request using device-aware weighted routing.
@@ -684,7 +718,7 @@ where
         );
 
         match self
-            .generate_with_fault_detection(instance_id, request)
+            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
             .await
         {
             Ok(stream) => Ok(permit.into_tracked_stream(stream)),
@@ -711,7 +745,7 @@ where
         );
 
         match self
-            .generate_with_fault_detection(instance_id, request)
+            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
             .await
         {
             Ok(stream) => Ok(permit.into_tracked_stream(stream)),
@@ -783,10 +817,25 @@ where
                 &instance_ids,
             )),
             RouterMode::DeviceAwareWeighted => {
-                // Peek only resolves bootstrap_info; device-class partitioning is
-                // applied when the request actually dispatches. Degenerate to
-                // least-loaded, the mode's documented fallback.
-                self.occupancy_state.as_deref()?.peek_min(&instance_ids)
+                let state = self.occupancy_state.as_deref()?;
+                let device_type_map: HashMap<u64, Option<DeviceType>> = self
+                    .client
+                    .instances()
+                    .iter()
+                    .map(|instance| (instance.instance_id, instance.device_type.clone()))
+                    .collect();
+                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value >= 1)
+                    .unwrap_or(8);
+                let candidates = device_aware_candidate_group(
+                    state,
+                    &instance_ids,
+                    &device_type_map,
+                    cuda_to_cpu_ratio,
+                );
+                state.peek_min(&candidates)
             }
             RouterMode::Direct => None,
             RouterMode::KV => {
@@ -798,98 +847,96 @@ where
         }
     }
 
-    /// Commit load to an externally-chosen worker (e.g. from
-    /// [`Self::peek_next_worker`]) and return a permit that decrements on drop.
-    /// Needed because [`Self::direct`], used by callers who pre-pick a worker,
-    /// bypasses load tracking — so it must happen here.
-    ///
-    /// `Some` only for the occupancy-counter modes (LeastLoaded,
-    /// PowerOfTwoChoices, DeviceAwareWeighted). Hold the permit for the
-    /// dispatched request's lifetime.
-    pub fn track_dispatch(&self, instance_id: u64) -> Option<OccupancyPermit> {
-        let state = self.occupancy_state.as_ref()?.clone();
+    async fn select_exact_target(
+        &self,
+        pinned_worker: Option<u64>,
+    ) -> anyhow::Result<(u64, Option<OccupancyPermit>)> {
+        if let Some(instance_id) = pinned_worker {
+            let routing_instances = self.client.routing_instances();
+            if !routing_instances.routable_ids().contains(&instance_id) {
+                return Err(anyhow::anyhow!(
+                    "instance_id={instance_id} not found for endpoint {}",
+                    self.client.endpoint.id()
+                ));
+            }
+            let permit = match self.router_mode {
+                RouterMode::LeastLoaded
+                | RouterMode::PowerOfTwoChoices
+                | RouterMode::DeviceAwareWeighted => {
+                    let state = self.occupancy_state()?;
+                    state.increment(instance_id);
+                    Some(OccupancyPermit::new(state, instance_id))
+                }
+                RouterMode::RoundRobin
+                | RouterMode::Random
+                | RouterMode::Direct
+                | RouterMode::KV => None,
+            };
+            return Ok((instance_id, permit));
+        }
+
         match self.router_mode {
             RouterMode::LeastLoaded
             | RouterMode::PowerOfTwoChoices
             | RouterMode::DeviceAwareWeighted => {
-                state.increment(instance_id);
-                Some(OccupancyPermit::new(state, instance_id))
+                let state = self.occupancy_state()?;
+                let routing_instances = self.client.routing_instances();
+                let instance_ids = routing_instances.free_ids().to_vec();
+                if instance_ids.is_empty() {
+                    return Err(self.empty_free_pool_error(&routing_instances));
+                }
+
+                let instance_id = match self.router_mode {
+                    RouterMode::LeastLoaded => state
+                        .select_exact_min_and_increment(&instance_ids)
+                        .await
+                        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?,
+                    RouterMode::PowerOfTwoChoices => {
+                        let instance_id = p2c_select_from(state.as_ref(), &instance_ids);
+                        state.increment(instance_id);
+                        instance_id
+                    }
+                    RouterMode::DeviceAwareWeighted => {
+                        let device_type_map: HashMap<u64, Option<DeviceType>> = self
+                            .client
+                            .instances()
+                            .iter()
+                            .map(|instance| (instance.instance_id, instance.device_type.clone()))
+                            .collect();
+                        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+                            .ok()
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .filter(|value| *value >= 1)
+                            .unwrap_or(8);
+                        let candidates = device_aware_candidate_group(
+                            state.as_ref(),
+                            &instance_ids,
+                            &device_type_map,
+                            cuda_to_cpu_ratio,
+                        );
+                        state
+                            .select_exact_min_and_increment(&candidates)
+                            .await
+                            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?
+                    }
+                    _ => unreachable!(),
+                };
+                Ok((instance_id, Some(OccupancyPermit::new(state, instance_id))))
             }
-            RouterMode::RoundRobin | RouterMode::Random | RouterMode::Direct | RouterMode::KV => {
-                None
-            }
+            RouterMode::RoundRobin | RouterMode::Random => self
+                .select_next_worker()
+                .map(|instance_id| (instance_id, None))
+                .ok_or_else(|| {
+                    let routing_instances = self.client.routing_instances();
+                    self.empty_free_pool_error(&routing_instances)
+                }),
+            RouterMode::Direct => Err(anyhow::anyhow!(
+                "Worker ID required for exact dispatch in Direct routing mode"
+            )),
+            RouterMode::KV => Err(anyhow::anyhow!(
+                "select_and_dispatch_exact cannot select workers in KV routing mode"
+            )),
         }
-    }
-
-    /// Atomically select a worker AND book its load, returning the worker id plus
-    /// a permit that releases the booking on drop.
-    ///
-    /// This is the booking counterpart of [`Self::peek_next_worker`] for callers
-    /// (e.g. disagg bootstrap) that resolve a worker up front and then dispatch
-    /// via [`Self::direct`] (which bypasses load tracking). Unlike
-    /// `peek_next_worker()` followed by a separate [`Self::track_dispatch`],
-    /// selection and booking happen as a single operation, so concurrent callers
-    /// cannot observe the same minimum and over-subscribe one worker
-    /// (addresses the LL/P2C/DAW bootstrap accounting race).
-    ///
-    /// Mirrors each mode's normal dispatch policy: LeastLoaded uses the locked
-    /// `select_exact_min_and_increment`; DeviceAwareWeighted applies the same
-    /// device-class candidate grouping as [`Self::device_aware_weighted`] before
-    /// the locked min-select (so the device ratio is preserved on the bootstrap
-    /// path, not degenerated to global least-loaded); P2C matches
-    /// [`Self::power_of_two_choices`].
-    ///
-    /// `Some` only for the occupancy-counter modes (LeastLoaded,
-    /// PowerOfTwoChoices, DeviceAwareWeighted); `None` for RoundRobin/Random
-    /// (no occupancy state — callers fall back to `peek_next_worker`), Direct,
-    /// and KV (which tracks load via worker-pushed metrics, not this counter).
-    pub async fn select_and_reserve(&self) -> Option<(u64, OccupancyPermit)> {
-        let state = self.occupancy_state.as_ref()?.clone();
-        let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids().to_vec();
-        if instance_ids.is_empty() {
-            return None;
-        }
-
-        let instance_id = match self.router_mode {
-            RouterMode::LeastLoaded => state.select_exact_min_and_increment(&instance_ids).await?,
-            RouterMode::PowerOfTwoChoices => {
-                // Matches power_of_two_choices(): p2c is inherently approximate,
-                // so it selects then increments without the exact-select lock.
-                let id = p2c_select_from(state.as_ref(), &instance_ids);
-                state.increment(id);
-                id
-            }
-            RouterMode::DeviceAwareWeighted => {
-                // Mirror device_aware_weighted(): partition by device class and
-                // apply the CPU budget, then min-select within the chosen group.
-                let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = self
-                    .client
-                    .instances()
-                    .iter()
-                    .map(|inst| (inst.instance_id, inst.device_type.clone()))
-                    .collect();
-                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .filter(|v| *v >= 1)
-                    .unwrap_or(8);
-                let candidates = device_aware_candidate_group(
-                    state.as_ref(),
-                    &instance_ids,
-                    &device_type_map,
-                    cuda_to_cpu_ratio,
-                );
-                state.select_exact_min_and_increment(&candidates).await?
-            }
-            RouterMode::RoundRobin | RouterMode::Random | RouterMode::Direct | RouterMode::KV => {
-                return None;
-            }
-        };
-
-        // select_exact_min_and_increment / increment above already booked the
-        // load; OccupancyPermit only credits it back on drop (no double-count).
-        Some((instance_id, OccupancyPermit::new(state, instance_id)))
     }
 
     fn occupancy_state(&self) -> anyhow::Result<Arc<RoutingOccupancyState>> {
@@ -915,6 +962,7 @@ where
         &self,
         instance_id: u64,
         request: SingleIn<T>,
+        fallback: TransportFallback,
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
@@ -932,8 +980,7 @@ where
         self.check_workers_available(instance_id, &request_id)?;
 
         let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id)?;
-
+            self.resolve_transport(instance_id, fallback)?;
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
@@ -941,7 +988,7 @@ where
             .observe(route_start.elapsed().as_secs_f64());
 
         let _nvtx_transport = dynamo_nvtx_range!(transport_kind);
-        let stream: anyhow::Result<ManyOut<U>> = self
+        let stream = self
             .addressed
             .generate(request)
             .instrument(route_span)
@@ -1000,6 +1047,7 @@ where
     fn resolve_transport(
         &self,
         instance_id: u64,
+        fallback: TransportFallback,
     ) -> anyhow::Result<(u64, String, &'static str, Instance)> {
         use crate::component::TransportType;
 
@@ -1021,6 +1069,13 @@ where
 
         if let Some((addr, kind, inst)) = lookup(instance_id) {
             return Ok((instance_id, addr, kind, inst));
+        }
+        if matches!(fallback, TransportFallback::Deny) {
+            return Err(anyhow::anyhow!(
+                "Instance {} not found for endpoint {}",
+                instance_id,
+                self.client.endpoint.id()
+            ));
         }
 
         let routing_instances = self.client.routing_instances();
@@ -1193,7 +1248,7 @@ where
 
         self.check_workers_available(instance_id, &request_id)?;
         let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id)?;
+            self.resolve_transport(instance_id, TransportFallback::Allow)?;
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1267,11 +1322,14 @@ struct OccupancyTrackedStream<U: Data> {
     inner: ManyOut<U>,
     state: Arc<RoutingOccupancyState>,
     instance_id: u64,
+    released: bool,
 }
 
 impl<U: Data> Drop for OccupancyTrackedStream<U> {
     fn drop(&mut self) {
-        self.state.decrement(self.instance_id);
+        if !self.released {
+            self.state.decrement(self.instance_id);
+        }
     }
 }
 
@@ -1290,7 +1348,12 @@ impl<U: Data> Stream for OccupancyTrackedStream<U> {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx)
+        let poll = self.inner.as_mut().poll_next(cx);
+        if matches!(poll, Poll::Ready(None)) && !self.released {
+            self.state.decrement(self.instance_id);
+            self.released = true;
+        }
+        poll
     }
 }
 
@@ -1402,6 +1465,25 @@ mod tests {
         assert_eq!(state.load(7), 1);
         drop(stream);
         assert_eq!(state.load(7), 0);
+    }
+
+    #[tokio::test]
+    async fn occupancy_tracked_stream_decrements_on_completion() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        state.increment(7);
+        let permit = OccupancyPermit::new(state.clone(), 7);
+        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let mut stream = permit.into_tracked_stream(ResponseStream::new(
+            Box::pin(tokio_stream::iter(vec![1u64])),
+            ctx,
+        ));
+
+        assert_eq!(stream.next().await, Some(1));
+        assert_eq!(state.load(7), 1);
+        assert_eq!(stream.next().await, None);
+        assert_eq!(state.load(7), 0);
+        drop(stream);
+        assert_eq!(state.load(7), 0, "drop must not release twice after EOF");
     }
 
     #[test]
@@ -1612,8 +1694,8 @@ mod tests {
             .await
             .unwrap();
 
-        // LeastLoaded routes via peek + OccupancyPermit dispatch, so select_next_worker
-        // stays None; peek must resolve the available worker (the disagg-bootstrap fix).
+        // LeastLoaded selection tracks request occupancy, so the advisory API is
+        // separate from select_next_worker().
         assert_eq!(router.select_next_worker(), None);
         assert!(
             router.peek_next_worker().is_some(),
@@ -1624,36 +1706,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn select_and_reserve_books_load_and_credits_on_drop() {
+    async fn exact_selection_releases_occupancy_when_preparation_fails() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
-        let ns = drt.namespace("test_reserve_router".to_string()).unwrap();
+        let ns = drt
+            .namespace("test_exact_prepare_failure".to_string())
+            .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
         let client = endpoint.client().await.unwrap();
-
         endpoint.register_endpoint_instance().await.unwrap();
-        client.wait_for_instances().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
 
         let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
         let state = router.occupancy_state.clone().unwrap();
+        let result = router
+            .select_and_dispatch_exact(SingleIn::new(42), None, |_, _| {
+                Err::<(), _>(anyhow::anyhow!("metadata preparation failed"))
+            })
+            .await;
 
-        // select_and_reserve picks the worker AND books its load atomically, so a
-        // bootstrap-dispatched (direct()) request is reflected in the counter.
-        let (id, permit) = router
-            .select_and_reserve()
+        assert!(result.is_err());
+        assert_eq!(
+            state.load(worker_id),
+            0,
+            "preparation failure must release the selected worker"
+        );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn exact_dispatch_revalidates_overload_after_preparation() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
-            .expect("LeastLoaded reserves the available worker");
-        assert_eq!(state.load(id), 1, "reserve books one in-flight request");
+            .unwrap();
+        let ns = drt
+            .namespace("test_exact_overload_revalidation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
 
-        // The permit credits the booking back on drop (request completed).
-        drop(permit);
-        assert_eq!(state.load(id), 0, "permit releases the booking on drop");
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::LeastLoaded)
+                .await
+                .unwrap();
+        let state = router.occupancy_state.clone().unwrap();
+        let result = router
+            .select_and_dispatch_exact(SingleIn::new(42), Some(worker_id), |_, worker_id| {
+                client.set_overloaded_instances(&[worker_id]);
+                Ok(())
+            })
+            .await;
 
+        assert!(result.is_err());
+        assert_eq!(
+            state.load(worker_id),
+            0,
+            "validation failure must release the selected worker"
+        );
         rt.shutdown();
     }
 
@@ -1981,6 +2099,46 @@ mod tests {
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
             "Expected clear error about missing instance with no fallback, got: {msg}"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn exact_transport_resolution_never_falls_back() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_exact_transport_no_fallback".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let real_id = instances[0].id();
+
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+        let stale_id = real_id.wrapping_add(1);
+        client.override_instance_avail(vec![stale_id, real_id]);
+
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Allow)
+                .is_ok(),
+            "normal dispatch should preserve transport fallback"
+        );
+        let error = router
+            .resolve_transport(stale_id, TransportFallback::Deny)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not found"),
+            "exact dispatch must reject the missing selected worker"
         );
 
         rt.shutdown();

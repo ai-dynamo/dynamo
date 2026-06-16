@@ -454,7 +454,6 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
-        update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
@@ -470,7 +469,6 @@ impl RouterHandles {
             .query_prefill_worker(
                 tokens,
                 block_mm_infos,
-                update_states,
                 lora_name,
                 priority_jump,
                 strict_priority,
@@ -483,13 +481,8 @@ impl RouterHandles {
                 QueryRouterResult::ErrQueryFailed
             })?;
         match outcome {
-            // External-dispatch query: the C caller routes/tracks the worker
-            // itself, so we don't retain the occupancy booking (drop the permit).
-            PrefillQueryOutcome::Routed {
-                worker_id,
-                dp_rank,
-                permit: _,
-            } => Ok((worker_id, dp_rank)),
+            // Advisory only: the external caller owns dispatch and lifecycle state.
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
             PrefillQueryOutcome::Backpressure {
                 reason,
                 queued_isl_tokens,
@@ -1288,7 +1281,6 @@ pub unsafe extern "C" fn route_prefill_request(
             .query_prefill_worker(
                 &tokens,
                 None,
-                false,
                 None,
                 priority_jump,
                 strict_priority,
