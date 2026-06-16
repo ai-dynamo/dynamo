@@ -46,6 +46,7 @@ from dynamo._core import run_slot_tracker as run_slot_tracker
 from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError
+from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 
 
 class RoutedEngine(Protocol):

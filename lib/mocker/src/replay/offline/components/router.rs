@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,12 +13,11 @@ use dynamo_kv_router::protocols::{
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::scheduling::SchedulingContext;
+use dynamo_kv_router::scheduling::{PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot};
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RouterSchedulingPolicy,
-    SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerLoadProjection, WorkerSelector,
-    scheduling::TierOverlapBlocks,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
+    SequenceRequest, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -32,11 +30,9 @@ use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::ReplayRequestHashes;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::router_shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_policy, replay_router_config, replay_selector,
-    replay_slots, replay_worker_config, replay_workers_with_configs,
+    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
+    replay_worker_config, replay_workers_with_configs,
 };
-
-type ReplayQueueKey = <RouterSchedulingPolicy as SchedulingPolicy>::Key;
 
 /// Internal result of a successful ``admit_request`` call: the chosen
 /// worker plus the router's view of prefix-cache overlap, so callers can
@@ -135,6 +131,7 @@ struct PendingRequest {
     expected_output_tokens: Option<u32>,
     priority_jump: f64,
     strict_priority: u32,
+    policy_class: Option<String>,
 }
 
 impl PendingRequest {
@@ -173,6 +170,7 @@ impl PendingRequest {
             lora_name: None,
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
+            policy_class: self.policy_class.clone(),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -183,46 +181,15 @@ impl PendingRequest {
     }
 }
 
-struct QueueEntry {
-    key: ReplayQueueKey,
-    _enqueue_time_ms: f64,
-    enqueue_seq: u64,
-    request: PendingRequest,
-}
-
-impl Eq for QueueEntry {}
-
-impl PartialEq for QueueEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.enqueue_seq == other.enqueue_seq
-    }
-}
-
-impl Ord for QueueEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.key
-            .cmp(&other.key)
-            .then_with(|| other.enqueue_seq.cmp(&self.enqueue_seq))
-    }
-}
-
-impl PartialOrd for QueueEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 pub(crate) struct OfflineReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
-    queue_threshold: Option<f64>,
+    profile: PolicyProfile,
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
     selector: DefaultWorkerSelector,
-    policy: RouterSchedulingPolicy,
-    pending: BinaryHeap<QueueEntry>,
-    next_enqueue_seq: u64,
+    pending: PolicyQueue<PendingRequest>,
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
@@ -240,20 +207,19 @@ impl OfflineReplayRouter {
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector(&config);
-        let policy = replay_policy(&config);
-        let queue_threshold = config.router_queue_threshold;
+        let profile = config
+            .configured_policy_profile()
+            .map_err(anyhow::Error::from)?;
 
         Ok(Self {
             config,
             block_size: args.block_size as u32,
-            queue_threshold,
+            profile: profile.clone(),
             worker_config_template,
             workers_with_configs,
             slots,
             selector,
-            policy,
-            pending: BinaryHeap::new(),
-            next_enqueue_seq: 0,
+            pending: PolicyQueue::new(profile),
             indexer: SyncReplayIndexer::new(args.block_size as u32),
             prefill_load_estimator,
             // This is only a base Instant for converting replay `now_ms` values into
@@ -271,19 +237,27 @@ impl OfflineReplayRouter {
     ) -> Result<RouterEffects> {
         let pending = self.build_pending_request(request, replay_hashes)?;
         let decay_now = self.decay_now(now_ms);
-        let should_queue = self
-            .queue_threshold
-            .is_some_and(|threshold| self.all_workers_busy(threshold, decay_now));
+        let class_index = self
+            .profile
+            .resolve_class_index(pending.policy_class.as_deref());
+        let class = self.profile.class(class_index);
+        let should_queue = class.queueing_enabled()
+            && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
 
         if should_queue {
-            let key = self.enqueue_key(now_ms, &pending);
-            self.pending.push(QueueEntry {
-                key,
-                _enqueue_time_ms: now_ms,
-                enqueue_seq: self.next_enqueue_seq,
-                request: pending,
-            });
-            self.next_enqueue_seq += 1;
+            let snapshot = self.snapshot_for(&pending);
+            let priority_jump = pending.priority_jump;
+            let strict_priority = pending.strict_priority;
+            self.pending
+                .enqueue(
+                    class_index,
+                    snapshot,
+                    now_ms.max(0.0) / 1000.0,
+                    priority_jump,
+                    strict_priority,
+                    pending,
+                )
+                .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
             return Ok(RouterEffects::default());
         }
 
@@ -346,7 +320,7 @@ impl OfflineReplayRouter {
     }
 
     pub(crate) fn pending_count(&self) -> usize {
-        self.pending.len()
+        self.pending.pending_count()
     }
 
     /// Register a new worker with the router without disturbing existing slot state.
@@ -397,10 +371,10 @@ impl OfflineReplayRouter {
         let decay_now = self.decay_now(now_ms);
         let mut pending = self
             .pending
-            .iter()
+            .entries()
             .map(|entry| {
                 let mut overlap_blocks_by_worker = entry
-                    .request
+                    .payload()
                     .overlaps
                     .scores
                     .iter()
@@ -411,7 +385,7 @@ impl OfflineReplayRouter {
                 (
                     entry,
                     OfflinePendingRequestSnapshot {
-                        uuid: entry.request.uuid,
+                        uuid: entry.payload().uuid,
                         overlap_blocks_by_worker,
                     },
                 )
@@ -443,16 +417,6 @@ impl OfflineReplayRouter {
             active_tokens_by_worker,
             indexer: self.indexer.debug_snapshot(),
         }
-    }
-
-    fn enqueue_key(&self, now_ms: f64, request: &PendingRequest) -> ReplayQueueKey {
-        let arrival_offset = Duration::from_secs_f64((now_ms.max(0.0)) / 1000.0);
-        let scheduling_request =
-            request.scheduling_request(self.block_size as usize, FxHashMap::default());
-        self.policy.enqueue_key(
-            arrival_offset,
-            SchedulingContext::new(&scheduling_request, &self.workers_with_configs),
-        )
     }
 
     fn decay_now(&self, now_ms: f64) -> Instant {
@@ -513,6 +477,7 @@ impl OfflineReplayRouter {
             ),
             priority_jump,
             strict_priority,
+            policy_class: request.policy_class.clone(),
         })
     }
 
@@ -568,15 +533,16 @@ impl OfflineReplayRouter {
     }
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
-        let Some(threshold) = self.queue_threshold else {
-            return Ok(Vec::new());
-        };
-
         let mut admissions = Vec::new();
-        while !self.all_workers_busy(threshold, decay_now) {
-            let Some(QueueEntry { request, .. }) = self.pending.pop() else {
+        loop {
+            let active_tokens = self.slots.active_tokens(decay_now);
+            let workers = &self.workers_with_configs;
+            let Some(popped) = self.pending.pop_next(|_, class, _| {
+                !Self::all_workers_busy_with(&active_tokens, workers, class)
+            }) else {
                 break;
             };
+            let request = popped.into_entry().into_payload();
             let uuid = request.uuid;
             let outcome = self.admit_request(request, decay_now)?;
             admissions.push(WorkerAdmission {
@@ -590,22 +556,34 @@ impl OfflineReplayRouter {
         Ok(admissions)
     }
 
-    fn all_workers_busy(&self, threshold: f64, decay_now: Instant) -> bool {
+    fn all_workers_busy(&self, class: &PolicyClassConfig, decay_now: Instant) -> bool {
+        let active_tokens = self.slots.active_tokens(decay_now);
+        Self::all_workers_busy_with(&active_tokens, &self.workers_with_configs, class)
+    }
+
+    fn all_workers_busy_with(
+        active_tokens: &HashMap<WorkerWithDpRank, usize>,
+        workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
+        class: &PolicyClassConfig,
+    ) -> bool {
         let mut checked_any = false;
-        let any_worker_not_busy =
-            self.slots
-                .any_worker_matches_active_tokens(decay_now, |worker, tokens| {
-                    let Some(config) = self.workers_with_configs.get(&worker.worker_id) else {
-                        return false;
-                    };
-                    checked_any = true;
-                    let max_batched = config
-                        .max_num_batched_tokens()
-                        .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-                    (tokens as f64) <= threshold * (max_batched as f64)
-                });
+        let any_worker_not_busy = workers_with_configs.iter().any(|(&worker_id, config)| {
+            checked_any = true;
+            let worker = WorkerWithDpRank::new(worker_id, config.data_parallel_start_rank());
+            let max_batched = config
+                .max_num_batched_tokens()
+                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+            !class.worker_is_busy(tokens, max_batched)
+        });
 
         checked_any && !any_worker_not_busy
+    }
+
+    fn snapshot_for(&self, request: &PendingRequest) -> QueueSnapshot {
+        let cached_tokens = request.overlaps.scores.values().copied().max().unwrap_or(0) as usize
+            * self.block_size as usize;
+        QueueSnapshot::new(request.isl_tokens, cached_tokens)
     }
 
     fn prefill_load_hint_for(
@@ -737,6 +715,7 @@ mod tests {
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
+            policy_class: None,
         }
     }
 
@@ -833,6 +812,83 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Uuid::from_u128(2)]
         );
+    }
+
+    #[test]
+    fn policy_classes_and_model_selection_use_shared_replay_queue_logic() {
+        let path =
+            std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+default_policy_class: root
+policy_classes:
+  - name: root
+    quantum: 1
+models:
+  replay-model:
+    default_policy_class: latency
+    policy_classes:
+      - name: latency
+        quantum: 1
+        prefill_busy_threshold: 0
+        request_queue_limit: 1
+      - name: batch
+        quantum: 4
+        prefill_busy_threshold: 1024
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        }
+        .with_policy_model_name(Some("replay-model".to_string()));
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let mut active = request(1, 1);
+        active.policy_class = Some("latency".to_string());
+        assert_eq!(
+            router
+                .on_request_arrival(&active, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1
+        );
+
+        let mut batch = request(2, 2);
+        batch.policy_class = Some("batch".to_string());
+        assert_eq!(
+            router
+                .on_request_arrival(&batch, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1,
+            "batch class should use its own higher busy threshold"
+        );
+
+        let mut queued = request(3, 3);
+        queued.policy_class = Some("latency".to_string());
+        assert!(
+            router
+                .on_request_arrival(&queued, None, 0.0)
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+
+        let mut rejected = request(4, 4);
+        rejected.policy_class = Some("latency".to_string());
+        let error = router.on_request_arrival(&rejected, None, 0.0).unwrap_err();
+        let rejection = error
+            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .expect("replay should preserve the typed queue rejection");
+        assert_eq!(rejection.policy_class, "latency");
+        assert_eq!(rejection.current, 1);
+        assert_eq!(rejection.limit, 1);
     }
 
     #[test]

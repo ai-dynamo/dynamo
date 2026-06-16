@@ -56,6 +56,8 @@ pub struct MooncakeRow {
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_priority: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_class: Option<String>,
 }
 
 /// One row of an agentic Mooncake replay trace.
@@ -89,6 +91,8 @@ pub struct AgenticMooncakeRow {
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_priority: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_class: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

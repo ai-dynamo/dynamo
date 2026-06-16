@@ -50,6 +50,7 @@ else:
         trace_format="mooncake",
         trace_shared_prefix_ratio=0.0,
         trace_num_prefix_groups=0,
+        model_name=None,
     ):
         return _run_mocker_trace_replay(
             trace_file,
@@ -64,6 +65,7 @@ else:
             trace_format=trace_format,
             trace_shared_prefix_ratio=trace_shared_prefix_ratio,
             trace_num_prefix_groups=trace_num_prefix_groups,
+            model_name=model_name,
         )
 
 

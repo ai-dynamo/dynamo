@@ -15,6 +15,7 @@ use crate::protocols::{
     RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
     WorkerWithDpRank,
 };
+use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -43,6 +44,9 @@ pub enum KvSchedulerError {
         queued_isl_tokens: usize,
         max_queued_isl_tokens: Option<usize>,
     },
+
+    #[error(transparent)]
+    QueueRejected(#[from] QueueRejection),
 
     #[error("all eligible workers are overloaded")]
     AllEligibleWorkersOverloaded,
@@ -97,6 +101,7 @@ pub struct SchedulingRequest {
     pub track_prefill_tokens: bool,
     pub priority_jump: f64,
     pub strict_priority: u32,
+    pub policy_class: Option<String>,
 
     // Overlap and cache signals.
     pub tier_overlap_blocks: TierOverlapBlocks,
@@ -133,7 +138,13 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     }
 
     pub fn best_effective_prefill_tokens(&self) -> usize {
-        let cached_tokens = match self.eligibility.pinned_worker() {
+        self.request
+            .isl_tokens
+            .saturating_sub(self.best_cached_tokens())
+    }
+
+    pub fn best_cached_tokens(&self) -> usize {
+        match self.eligibility.pinned_worker() {
             Some(worker) => self.request.effective_cached_tokens_for(worker),
             None => self
                 .request
@@ -147,9 +158,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
                 .map(|(_, cached_tokens)| *cached_tokens)
                 .max()
                 .unwrap_or(0),
-        };
-
-        self.request.isl_tokens.saturating_sub(cached_tokens)
+        }
     }
 }
 

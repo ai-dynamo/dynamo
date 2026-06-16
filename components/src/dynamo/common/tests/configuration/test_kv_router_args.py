@@ -402,19 +402,32 @@ def test_load_aware_preserves_cache_hit_weights() -> None:
     assert kwargs["disk_cache_hit_weight"] == 0.1
 
 
-def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
+def test_kv_router_kwargs_preserves_policy_config_path() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
     config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
-    config.router_queue_by_incoming_missing_isl = [(0, 2048), (2048, 512)]
+    config.router_policy_config = "/tmp/router-policy.yaml"
 
     kwargs = config.kv_router_kwargs()
 
-    assert kwargs["router_queue_by_incoming_missing_isl"] == [(0, 2048), (2048, 512)]
+    assert kwargs["router_policy_config"] == "/tmp/router-policy.yaml"
 
 
-def test_kv_router_kwargs_uses_unbounded_queue_cap_by_default() -> None:
+def test_policy_config_cli_overrides_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_POLICY_CONFIG", "/tmp/env-policy.yaml")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-policy-config", "/tmp/explicit-policy.yaml"])
+    config = KvRouterConfigBase.from_cli_args(args)
+
+    assert config.kv_router_kwargs()["router_policy_config"] == (
+        "/tmp/explicit-policy.yaml"
+    )
+
+
+def test_kv_router_kwargs_omits_policy_config_by_default() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
@@ -422,7 +435,7 @@ def test_kv_router_kwargs_uses_unbounded_queue_cap_by_default() -> None:
 
     kwargs = config.kv_router_kwargs()
 
-    assert kwargs["router_queue_by_incoming_missing_isl"] is None
+    assert kwargs["router_policy_config"] is None
 
 
 def test_load_aware_clears_predicted_ttl() -> None:

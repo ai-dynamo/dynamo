@@ -1,0 +1,638 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
+use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
+
+use super::config::RouterQueuePolicy;
+use super::policy_config::{PolicyClassConfig, PolicyProfile};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueSnapshot {
+    pub raw_isl_tokens: usize,
+    pub cached_tokens: usize,
+    pub uncached_tokens: usize,
+}
+
+impl QueueSnapshot {
+    pub fn new(raw_isl_tokens: usize, cached_tokens: usize) -> Self {
+        let cached_tokens = cached_tokens.min(raw_isl_tokens);
+        Self {
+            raw_isl_tokens,
+            cached_tokens,
+            uncached_tokens: raw_isl_tokens.saturating_sub(cached_tokens).max(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueLimitKind {
+    Requests,
+    RawIslTokens,
+    CachedTokens,
+}
+
+impl std::fmt::Display for QueueLimitKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Requests => formatter.write_str("requests"),
+            Self::RawIslTokens => formatter.write_str("raw_isl_tokens"),
+            Self::CachedTokens => formatter.write_str("cached_tokens"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error(
+    "router policy class {policy_class:?} queue {limit_kind} limit reached \
+     (current={current}, limit={limit})"
+)]
+pub struct QueueRejection {
+    pub policy_class: String,
+    pub limit_kind: QueueLimitKind,
+    pub current: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PolicyQueueStats {
+    pub requests: usize,
+    pub raw_isl_tokens: usize,
+    pub cached_tokens: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueuePriority {
+    strict_priority: u32,
+    policy_score: OrderedFloat<f64>,
+}
+
+pub struct PolicyQueueEntry<T> {
+    class_index: usize,
+    priority: QueuePriority,
+    enqueue_seq: u64,
+    snapshot: QueueSnapshot,
+    payload: T,
+}
+
+impl<T> PolicyQueueEntry<T> {
+    pub fn class_index(&self) -> usize {
+        self.class_index
+    }
+
+    pub fn snapshot(&self) -> QueueSnapshot {
+        self.snapshot
+    }
+
+    pub fn payload(&self) -> &T {
+        &self.payload
+    }
+
+    pub fn payload_mut(&mut self) -> &mut T {
+        &mut self.payload
+    }
+
+    pub fn into_payload(self) -> T {
+        self.payload
+    }
+}
+
+impl<T> Eq for PolicyQueueEntry<T> {}
+
+impl<T> PartialEq for PolicyQueueEntry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.enqueue_seq == other.enqueue_seq
+    }
+}
+
+impl<T> Ord for PolicyQueueEntry<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.priority
+            .strict_priority
+            .cmp(&other.priority.strict_priority)
+            .then_with(|| self.priority.policy_score.cmp(&other.priority.policy_score))
+            .then_with(|| other.enqueue_seq.cmp(&self.enqueue_seq))
+    }
+}
+
+impl<T> PartialOrd for PolicyQueueEntry<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct PolicyClassQueue<T> {
+    config: PolicyClassConfig,
+    pending: BinaryHeap<PolicyQueueEntry<T>>,
+    stats: PolicyQueueStats,
+    deficit: usize,
+}
+
+pub struct PoppedPolicyQueueEntry<T> {
+    entry: PolicyQueueEntry<T>,
+    deficit_after_charge: usize,
+}
+
+impl<T> PoppedPolicyQueueEntry<T> {
+    pub fn entry(&self) -> &PolicyQueueEntry<T> {
+        &self.entry
+    }
+
+    pub fn entry_mut(&mut self) -> &mut PolicyQueueEntry<T> {
+        &mut self.entry
+    }
+
+    pub fn into_entry(self) -> PolicyQueueEntry<T> {
+        self.entry
+    }
+}
+
+pub struct PolicyQueue<T> {
+    classes: Vec<PolicyClassQueue<T>>,
+    next_class: usize,
+    next_enqueue_seq: u64,
+    pending_count: usize,
+    dispatchable: Vec<bool>,
+}
+
+impl<T> PolicyQueue<T> {
+    pub fn new(profile: PolicyProfile) -> Self {
+        let class_count = profile.classes().len();
+        Self {
+            classes: profile
+                .classes()
+                .iter()
+                .cloned()
+                .map(|config| PolicyClassQueue {
+                    config,
+                    pending: BinaryHeap::new(),
+                    stats: PolicyQueueStats::default(),
+                    deficit: 0,
+                })
+                .collect(),
+            next_class: 0,
+            next_enqueue_seq: 0,
+            pending_count: 0,
+            dispatchable: vec![false; class_count],
+        }
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending_count
+    }
+
+    pub fn class_count(&self) -> usize {
+        self.classes.len()
+    }
+
+    pub fn class_config(&self, class_index: usize) -> &PolicyClassConfig {
+        &self.classes[class_index].config
+    }
+
+    pub fn class_stats(&self, class_index: usize) -> PolicyQueueStats {
+        self.classes[class_index].stats
+    }
+
+    pub fn has_backlog(&self, class_index: usize) -> bool {
+        !self.classes[class_index].pending.is_empty()
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
+        self.classes.iter().flat_map(|class| class.pending.iter())
+    }
+
+    pub fn enqueue(
+        &mut self,
+        class_index: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
+        let class = &mut self.classes[class_index];
+        if let Some(rejection) = queue_rejection(class) {
+            return Err((rejection, payload));
+        }
+
+        let policy_score = match class.config.queue_policy {
+            RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
+            RouterQueuePolicy::Wspt => {
+                (1.0 + priority_jump.max(0.0)) / snapshot.uncached_tokens as f64
+            }
+            RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
+        };
+        let entry = PolicyQueueEntry {
+            class_index,
+            priority: QueuePriority {
+                strict_priority,
+                policy_score: OrderedFloat(policy_score),
+            },
+            enqueue_seq: self.next_enqueue_seq,
+            snapshot,
+            payload,
+        };
+        self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
+        add_stats(&mut class.stats, snapshot);
+        class.pending.push(entry);
+        self.pending_count += 1;
+        Ok(())
+    }
+
+    pub fn pop_next(
+        &mut self,
+        mut is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+    ) -> Option<PoppedPolicyQueueEntry<T>> {
+        if self.pending_count == 0 {
+            return None;
+        }
+
+        let class_count = self.classes.len();
+        self.dispatchable.fill(false);
+        for offset in 0..class_count {
+            let class_index = (self.next_class + offset) % class_count;
+            let class = &mut self.classes[class_index];
+            let Some(front) = class.pending.peek() else {
+                class.deficit = 0;
+                continue;
+            };
+            if !is_dispatchable(class_index, &class.config, front.payload()) {
+                continue;
+            }
+
+            self.dispatchable[class_index] = true;
+            if front.snapshot.uncached_tokens <= class.deficit {
+                return Some(self.pop_class(class_index));
+            }
+            class.deficit = class.deficit.saturating_add(class.config.quantum);
+            if front.snapshot.uncached_tokens <= class.deficit {
+                return Some(self.pop_class(class_index));
+            }
+        }
+
+        let rounds = self
+            .dispatchable
+            .iter()
+            .enumerate()
+            .filter_map(|(class_index, dispatchable)| {
+                if !dispatchable {
+                    return None;
+                }
+                let class = &self.classes[class_index];
+                let cost = class.pending.peek()?.snapshot.uncached_tokens;
+                let missing = cost.saturating_sub(class.deficit);
+                Some(missing.div_ceil(class.config.quantum))
+            })
+            .min()?;
+
+        for (class_index, dispatchable) in self.dispatchable.iter().copied().enumerate() {
+            if !dispatchable {
+                continue;
+            }
+            let class = &mut self.classes[class_index];
+            class.deficit = class
+                .deficit
+                .saturating_add(class.config.quantum.saturating_mul(rounds));
+        }
+
+        for offset in 0..class_count {
+            let class_index = (self.next_class + offset) % class_count;
+            let class = &self.classes[class_index];
+            if self.dispatchable[class_index]
+                && class
+                    .pending
+                    .peek()
+                    .is_some_and(|entry| entry.snapshot.uncached_tokens <= class.deficit)
+            {
+                return Some(self.pop_class(class_index));
+            }
+        }
+
+        None
+    }
+
+    pub fn restore(&mut self, popped: PoppedPolicyQueueEntry<T>) {
+        let class_index = popped.entry.class_index;
+        let class = &mut self.classes[class_index];
+        class.deficit = popped
+            .deficit_after_charge
+            .saturating_add(popped.entry.snapshot.uncached_tokens);
+        add_stats(&mut class.stats, popped.entry.snapshot);
+        class.pending.push(popped.entry);
+        self.pending_count += 1;
+    }
+
+    pub fn drain(self) -> impl Iterator<Item = PolicyQueueEntry<T>> {
+        self.classes
+            .into_iter()
+            .flat_map(|class| class.pending.into_iter())
+    }
+
+    fn pop_class(&mut self, class_index: usize) -> PoppedPolicyQueueEntry<T> {
+        let class = &mut self.classes[class_index];
+        let entry = class.pending.pop().expect("policy class front vanished");
+        class.deficit = class.deficit.saturating_sub(entry.snapshot.uncached_tokens);
+        let deficit_after_charge = class.deficit;
+        subtract_stats(&mut class.stats, entry.snapshot);
+        self.pending_count -= 1;
+        if class.pending.is_empty() {
+            class.deficit = 0;
+            self.next_class = (class_index + 1) % self.classes.len();
+        } else if class
+            .pending
+            .peek()
+            .is_some_and(|next| next.snapshot.uncached_tokens <= class.deficit)
+        {
+            self.next_class = class_index;
+        } else {
+            self.next_class = (class_index + 1) % self.classes.len();
+        }
+        PoppedPolicyQueueEntry {
+            entry,
+            deficit_after_charge,
+        }
+    }
+}
+
+fn queue_rejection<T>(class: &PolicyClassQueue<T>) -> Option<QueueRejection> {
+    for (limit_kind, current, limit) in [
+        (
+            QueueLimitKind::Requests,
+            class.stats.requests,
+            class.config.request_queue_limit,
+        ),
+        (
+            QueueLimitKind::RawIslTokens,
+            class.stats.raw_isl_tokens,
+            class.config.token_queue_limit,
+        ),
+        (
+            QueueLimitKind::CachedTokens,
+            class.stats.cached_tokens,
+            class.config.cached_token_queue_limit,
+        ),
+    ] {
+        if limit.is_some_and(|limit| current >= limit) {
+            return Some(QueueRejection {
+                policy_class: class.config.name.clone(),
+                limit_kind,
+                current,
+                limit: limit.expect("checked as some"),
+            });
+        }
+    }
+
+    None
+}
+
+fn add_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
+    stats.requests += 1;
+    stats.raw_isl_tokens = stats.raw_isl_tokens.saturating_add(snapshot.raw_isl_tokens);
+    stats.cached_tokens = stats.cached_tokens.saturating_add(snapshot.cached_tokens);
+}
+
+fn subtract_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
+    stats.requests = stats.requests.saturating_sub(1);
+    stats.raw_isl_tokens = stats.raw_isl_tokens.saturating_sub(snapshot.raw_isl_tokens);
+    stats.cached_tokens = stats.cached_tokens.saturating_sub(snapshot.cached_tokens);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduling::RouterPolicyConfig;
+
+    fn profile(yaml: &str) -> PolicyProfile {
+        RouterPolicyConfig::from_yaml(yaml)
+            .unwrap()
+            .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+    }
+
+    #[test]
+    fn caps_are_pre_add_and_snapshots_do_not_change() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_class: capped
+policy_classes:
+  - name: capped
+    quantum: 10
+    request_queue_limit: 2
+    token_queue_limit: 10
+    cached_token_queue_limit: 5
+"#,
+        ));
+        queue
+            .enqueue(0, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, "first")
+            .unwrap();
+        queue
+            .enqueue(0, QueueSnapshot::new(100, 100), 1.0, 0.0, 0, "overshoot")
+            .unwrap();
+        let (rejection, payload) = queue
+            .enqueue(0, QueueSnapshot::new(1, 0), 2.0, 0.0, 0, "rejected")
+            .unwrap_err();
+        assert_eq!(payload, "rejected");
+        assert_eq!(rejection.limit_kind, QueueLimitKind::Requests);
+        assert_eq!(rejection.current, 2);
+        assert_eq!(queue.class_stats(0).raw_isl_tokens, 108);
+        assert_eq!(queue.class_stats(0).cached_tokens, 104);
+    }
+
+    #[test]
+    fn token_caps_reject_on_pre_add_state_after_allowing_overshoot() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_class: raw
+policy_classes:
+  - name: raw
+    quantum: 1
+    token_queue_limit: 10
+  - name: cached
+    quantum: 1
+    cached_token_queue_limit: 5
+"#,
+        ));
+        queue
+            .enqueue(0, QueueSnapshot::new(11, 0), 0.0, 0.0, 0, "raw-overshoot")
+            .unwrap();
+        let (raw_rejection, _) = queue
+            .enqueue(0, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "raw-rejected")
+            .unwrap_err();
+        assert_eq!(raw_rejection.limit_kind, QueueLimitKind::RawIslTokens);
+        assert_eq!(raw_rejection.current, 11);
+
+        queue
+            .enqueue(1, QueueSnapshot::new(8, 6), 0.0, 0.0, 0, "cached-overshoot")
+            .unwrap();
+        let (cached_rejection, _) = queue
+            .enqueue(1, QueueSnapshot::new(1, 1), 1.0, 0.0, 0, "cached-rejected")
+            .unwrap_err();
+        assert_eq!(cached_rejection.limit_kind, QueueLimitKind::CachedTokens);
+        assert_eq!(cached_rejection.current, 6);
+    }
+
+    #[test]
+    fn fcfs_and_wspt_order_only_within_each_class() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_class: fcfs
+policy_classes:
+  - name: fcfs
+    queue_policy: fcfs
+    quantum: 50
+  - name: wspt
+    queue_policy: wspt
+    quantum: 50
+"#,
+        ));
+        queue
+            .enqueue(0, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "fcfs-long")
+            .unwrap();
+        queue
+            .enqueue(0, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "fcfs-short")
+            .unwrap();
+        queue
+            .enqueue(1, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "wspt-long")
+            .unwrap();
+        queue
+            .enqueue(1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "wspt-short")
+            .unwrap();
+
+        let first = queue.pop_next(|_, _, _| true).unwrap().into_entry();
+        let second = queue.pop_next(|_, _, _| true).unwrap().into_entry();
+        assert_eq!(first.into_payload(), "fcfs-long");
+        assert_eq!(second.into_payload(), "wspt-short");
+    }
+
+    #[test]
+    fn drr_weights_progress_and_skips_blocked_classes_without_credit() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_class: slow
+policy_classes:
+  - name: slow
+    quantum: 1
+  - name: fast
+    quantum: 3
+"#,
+        ));
+        for index in 0..6 {
+            queue
+                .enqueue(0, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "slow")
+                .unwrap();
+            queue
+                .enqueue(1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "fast")
+                .unwrap();
+        }
+
+        let mut first_six = Vec::new();
+        for _ in 0..6 {
+            first_six.push(
+                queue
+                    .pop_next(|_, _, _| true)
+                    .unwrap()
+                    .into_entry()
+                    .into_payload(),
+            );
+        }
+        assert!(first_six.iter().filter(|value| **value == "fast").count() >= 3);
+
+        let blocked = queue.pop_next(|class, _, _| class == 0).unwrap();
+        assert_eq!(blocked.entry().payload(), &"slow");
+        queue.restore(blocked);
+        let restored = queue.pop_next(|class, _, _| class == 0).unwrap();
+        assert_eq!(restored.into_entry().into_payload(), "slow");
+    }
+
+    #[test]
+    fn drr_serves_exact_quantum_ratio_for_equal_cost_backlogs() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_class: one
+policy_classes:
+  - name: one
+    quantum: 1
+  - name: three
+    quantum: 3
+"#,
+        ));
+        for index in 0..20 {
+            queue
+                .enqueue(0, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "one")
+                .unwrap();
+        }
+        for index in 0..60 {
+            queue
+                .enqueue(1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "three")
+                .unwrap();
+        }
+
+        let dispatches = (0..80)
+            .map(|_| {
+                queue
+                    .pop_next(|_, _, _| true)
+                    .unwrap()
+                    .into_entry()
+                    .into_payload()
+            })
+            .collect::<Vec<_>>();
+        for round in dispatches.chunks_exact(4) {
+            assert_eq!(round, ["one", "three", "three", "three"]);
+        }
+    }
+
+    #[test]
+    fn fully_blocked_ring_returns_without_accruing_deficit() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_class: first
+policy_classes:
+  - name: first
+    quantum: 7
+  - name: second
+    quantum: 11
+"#,
+        ));
+        queue
+            .enqueue(0, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "first")
+            .unwrap();
+        queue
+            .enqueue(1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "second")
+            .unwrap();
+
+        for _ in 0..10_000 {
+            assert!(queue.pop_next(|_, _, _| false).is_none());
+        }
+        assert_eq!(queue.classes[0].deficit, 0);
+        assert_eq!(queue.classes[1].deficit, 0);
+    }
+
+    #[test]
+    fn oversized_heads_bulk_add_deficit_and_make_progress() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_class: large
+policy_classes:
+  - name: large
+    quantum: 4
+  - name: blocked
+    quantum: 100
+"#,
+        ));
+        queue
+            .enqueue(0, QueueSnapshot::new(101, 0), 0.0, 0.0, 0, "large")
+            .unwrap();
+        queue
+            .enqueue(1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "blocked")
+            .unwrap();
+
+        let popped = queue
+            .pop_next(|class, _, _| class == 0)
+            .expect("oversized request should make bounded progress");
+        assert_eq!(popped.into_entry().into_payload(), "large");
+        assert_eq!(queue.pending_count(), 1);
+    }
+}

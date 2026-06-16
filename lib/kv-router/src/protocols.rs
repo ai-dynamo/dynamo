@@ -515,6 +515,9 @@ pub enum RouterResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_queued_isl_tokens: Option<usize>,
     },
+    QueueRejected {
+        rejection: crate::scheduling::QueueRejection,
+    },
     PrefillMarked {
         success: bool,
     },

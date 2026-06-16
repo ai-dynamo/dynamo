@@ -1283,7 +1283,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0, policy_class=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -1295,6 +1295,7 @@ impl KvRouter {
         lora_name: Option<String>,
         routing_constraints: Option<RoutingConstraints>,
         strict_priority: u32,
+        policy_class: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1313,7 +1314,7 @@ impl KvRouter {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let outcome = chooser
-                .find_best_match_details(
+                .find_best_match_details_with_policy_class(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
@@ -1323,6 +1324,7 @@ impl KvRouter {
                     lora_name.clone(),
                     0.0,
                     strict_priority,
+                    policy_class,
                     None,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
@@ -1360,6 +1362,9 @@ impl KvRouter {
                         queued_isl_tokens,
                         max_queued_isl_tokens
                     )));
+                }
+                llm_rs::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                    return Err(crate::errors::queue_rejection_to_pyerr(rejection));
                 }
             };
 

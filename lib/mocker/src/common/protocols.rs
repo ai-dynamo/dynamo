@@ -222,6 +222,8 @@ pub struct DirectRequest {
     /// not affect scheduling inside the selected mock engine.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub strict_priority: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_class: Option<String>,
 }
 
 impl DirectRequest {

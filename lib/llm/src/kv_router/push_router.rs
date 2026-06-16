@@ -69,6 +69,7 @@ impl KvPushRouter {
         is_query_only: bool,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
+        let policy_class = request.metadata().get("policy-class").cloned();
         let routing_parts = RoutingRequestParts::new(request);
         let sticky_worker = match self.sticky.worker_for_phase(request, phase) {
             Some(worker)
@@ -93,6 +94,7 @@ impl KvPushRouter {
                     phase,
                     is_query_only,
                     sticky_worker,
+                    policy_class.clone(),
                 )
                 .instrument(tracing::info_span!("kv_router.select_worker"))
                 .await
@@ -127,6 +129,7 @@ impl KvPushRouter {
                         phase,
                         is_query_only,
                         None,
+                        policy_class,
                     )
                     .instrument(tracing::info_span!("kv_router.select_worker_fallback"))
                     .await

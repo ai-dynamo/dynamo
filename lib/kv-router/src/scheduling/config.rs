@@ -4,6 +4,7 @@
 use std::env::{self, VarError};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use derive_builder::Builder;
@@ -104,8 +105,8 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
         router_track_output_blocks = config.router_track_output_blocks,
         router_track_prefill_tokens = config.router_track_prefill_tokens,
         router_queue_threshold = ?config.router_queue_threshold,
+        router_policy_config = ?config.router_policy_config,
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
-        queue_depth_tiers_unbounded = config.router_queue_by_incoming_missing_isl.is_unbounded(),
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
     config
@@ -169,6 +170,9 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_QUEUE_THRESHOLD") {
         config.router_queue_threshold = Some(value);
+    }
+    if let Some(value) = get_env("DYN_ROUTER_POLICY_CONFIG") {
+        config.router_policy_config = Some(value);
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
         config.router_predicted_ttl_secs = Some(value);
@@ -316,15 +320,17 @@ impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
 
         // Must start with floor 0
         if tiers[0].missing_cache_tokens_floor != 0 {
-            return Err("router_queue_by_incoming_missing_isl: first tier must have missing_cache_tokens_floor == 0".to_string());
+            return Err(
+                "router queue depth tiers: first tier must have missing_cache_tokens_floor == 0"
+                    .to_string(),
+            );
         }
 
         // Floors must be strictly ascending
         for window in tiers.windows(2) {
             if window[1].missing_cache_tokens_floor <= window[0].missing_cache_tokens_floor {
                 return Err(
-                    "router_queue_by_incoming_missing_isl: floors must be strictly ascending"
-                        .to_string(),
+                    "router queue depth tiers: floors must be strictly ascending".to_string(),
                 );
             }
         }
@@ -332,9 +338,7 @@ impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
         // max_queue_depth must be > 0
         for tier in &tiers {
             if tier.max_queue_depth == 0 {
-                return Err(
-                    "router_queue_by_incoming_missing_isl: max_queue_depth must be > 0".to_string(),
-                );
+                return Err("router queue depth tiers: max_queue_depth must be > 0".to_string());
             }
         }
 
@@ -503,7 +507,7 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct KvRouterConfigSerde {
     overlap_score_credit: f64,
     overlap_score_credit_decay: f64,
@@ -525,7 +529,7 @@ struct KvRouterConfigSerde {
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
     #[serde(default)]
-    router_queue_by_incoming_missing_isl: RouterQueueDepthTiers,
+    router_policy_config: Option<String>,
     router_event_threads: u32,
     skip_initial_worker_wait: bool,
     router_queue_policy: RouterQueuePolicy,
@@ -559,7 +563,7 @@ impl Default for KvRouterConfigSerde {
             router_reset_states: config.router_reset_states,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
-            router_queue_by_incoming_missing_isl: config.router_queue_by_incoming_missing_isl,
+            router_policy_config: config.router_policy_config,
             router_event_threads: config.router_event_threads,
             skip_initial_worker_wait: config.skip_initial_worker_wait,
             router_queue_policy: config.router_queue_policy,
@@ -653,31 +657,19 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
-    /// Tiered per-worker pending ISL token caps keyed on incoming missing ISL
-    /// (ISL minus best cached tokens across eligible workers).
-    ///
-    /// For each request, the tier with the highest matched floor wins, and
-    /// that tier's `max_queue_depth * worker_count` is the effective ISL token cap.
-    /// The cap is compared against the sum of ISL tokens for all requests currently
-    /// parked in the pending queue.
-    ///
-    /// Example with 4 workers:
-    ///   [(0, 4194304), (3072, 2097152)]  # 4M and 2M ISL tokens per worker
-    /// - request missing 500 tokens  → matches (0, 4194304)    → cap = 4M*4 = 16M tokens
-    /// - request missing 3500 tokens → matches (3072, 2097152) → cap = 2M*4 = 8M tokens
-    ///
-    /// Semantics across config surfaces:
-    /// - omitted / `None` disables ISL-token capping (unbounded queue cap)
-    /// - when provided, the tier list must be non-empty, start at floor 0,
-    ///   have strictly ascending floors, and use `max_queue_depth > 0`
-    ///
-    /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
-    /// buffers. The TCP request plane has a fixed 1024-slot buffer per
-    /// connection (see `REQUEST_CHANNEL_BUFFER` in tcp_client.rs). Requests
-    /// may accumulate there before reaching the scheduler, so the effective
-    /// end-to-end backlog can exceed the tier caps.
+    /// Optional startup-only YAML policy-class configuration.
     #[serde(default)]
-    pub router_queue_by_incoming_missing_isl: RouterQueueDepthTiers,
+    pub router_policy_config: Option<String>,
+
+    /// Run-level model selector used by offline and online replay.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub policy_model_name: Option<String>,
+
+    /// Parsed startup policy document. This prevents per-model file reloads.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub policy_config_cache: OnceLock<super::policy_config::RouterPolicyConfig>,
 
     /// Number of KV indexer worker threads.
     /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
@@ -745,7 +737,9 @@ impl Default for KvRouterConfig {
             router_reset_states: false,
             router_ttl_secs: 120.0,
             router_queue_threshold: Some(16.0),
-            router_queue_by_incoming_missing_isl: RouterQueueDepthTiers::unbounded_cap(),
+            router_policy_config: None,
+            policy_model_name: None,
+            policy_config_cache: OnceLock::new(),
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
@@ -792,7 +786,9 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
-            router_queue_by_incoming_missing_isl: compat.router_queue_by_incoming_missing_isl,
+            router_policy_config: compat.router_policy_config,
+            policy_model_name: None,
+            policy_config_cache: OnceLock::new(),
             router_event_threads: compat.router_event_threads,
             skip_initial_worker_wait: compat.skip_initial_worker_wait,
             router_queue_policy: compat.router_queue_policy,
@@ -827,13 +823,6 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "router_prefill_load_model requires router_track_prefill_tokens=true",
         ));
     }
-    if config.router_prefill_load_model.is_enabled()
-        && !matches!(config.router_queue_policy, RouterQueuePolicy::Fcfs)
-    {
-        return Err(ValidationError::new(
-            "router_prefill_load_model currently requires router_queue_policy='fcfs'",
-        ));
-    }
     if config.use_remote_indexer && config.serve_indexer {
         return Err(ValidationError::new(
             "use_remote_indexer and serve_indexer are mutually exclusive",
@@ -849,11 +838,61 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "router_predicted_ttl_secs requires use_kv_events=true",
         ));
     }
-    // Validation for router_queue_by_incoming_missing_isl is handled by RouterQueueDepthTiers::try_from
+    if let Err(error) = config.loaded_policy_config() {
+        let mut validation_error = ValidationError::new("router_policy_config");
+        validation_error.message = Some(error.to_string().into());
+        return Err(validation_error);
+    }
     Ok(())
 }
 
 impl KvRouterConfig {
+    fn loaded_policy_config(
+        &self,
+    ) -> Result<
+        Option<&super::policy_config::RouterPolicyConfig>,
+        super::policy_config::RouterPolicyConfigError,
+    > {
+        let Some(path) = self.router_policy_config.as_deref() else {
+            return Ok(None);
+        };
+        if self.policy_config_cache.get().is_none() {
+            let parsed = super::policy_config::RouterPolicyConfig::from_path(path)?;
+            let _ = self.policy_config_cache.set(parsed);
+        }
+        Ok(self.policy_config_cache.get())
+    }
+
+    pub fn policy_profile(
+        &self,
+        model_name: Option<&str>,
+    ) -> Result<super::policy_config::PolicyProfile, super::policy_config::RouterPolicyConfigError>
+    {
+        let Some(policy_config) = self.loaded_policy_config()? else {
+            return Ok(super::policy_config::PolicyProfile::synthetic(
+                self.router_queue_threshold,
+                self.router_queue_policy,
+            ));
+        };
+        Ok(policy_config.resolve_profile(
+            model_name,
+            self.router_queue_threshold,
+            self.router_queue_policy,
+        ))
+    }
+
+    pub fn with_policy_model_name(mut self, model_name: Option<String>) -> Self {
+        self.policy_model_name = model_name;
+        self
+    }
+
+    pub fn configured_policy_profile(
+        &self,
+    ) -> Result<super::policy_config::PolicyProfile, super::policy_config::RouterPolicyConfigError>
+    {
+        self.policy_profile(self.policy_model_name.as_deref())
+    }
+
     pub fn validate_config(&self) -> Result<(), String> {
         self.validate().map_err(|error| error.to_string())
     }
@@ -862,7 +901,9 @@ impl KvRouterConfig {
         const DEFAULT_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
         const PREFILL_LOAD_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 
-        if self.router_prefill_load_model.is_enabled() && self.router_queue_threshold.is_some() {
+        if self.router_prefill_load_model.is_enabled()
+            && (self.router_policy_config.is_some() || self.router_queue_threshold.is_some())
+        {
             return PREFILL_LOAD_RECHECK_INTERVAL;
         }
 
@@ -1156,25 +1197,167 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_router_config_defaults_to_unbounded_queue_cap() {
+    fn test_kv_router_config_defaults_without_policy_path() {
         let config = KvRouterConfig::default();
 
-        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
+        assert_eq!(config.router_policy_config, None);
     }
 
     #[test]
-    fn test_kv_router_config_deserializes_missing_queue_tiers_as_unbounded() {
+    fn test_kv_router_config_deserializes_missing_policy_path() {
         let config: KvRouterConfig = serde_json::from_str(r#"{}"#).unwrap();
 
-        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
+        assert_eq!(config.router_policy_config, None);
     }
 
     #[test]
-    fn test_kv_router_config_deserializes_empty_queue_tiers_as_unbounded() {
-        let config: KvRouterConfig =
-            serde_json::from_str(r#"{"router_queue_by_incoming_missing_isl":[]}"#).unwrap();
+    fn test_kv_router_config_deserializes_policy_path() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "default_policy_class: default\npolicy_classes:\n  - name: default\n    quantum: 1\n",
+        )
+        .unwrap();
+        let encoded = serde_json::json!({
+            "router_policy_config": policy_file.path(),
+        })
+        .to_string();
+        let config: KvRouterConfig = serde_json::from_str(&encoded).unwrap();
 
-        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
+        assert_eq!(
+            config.router_policy_config.as_deref(),
+            Some(policy_file.path().to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn removed_missing_isl_queue_config_is_rejected_as_unknown() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!([{
+                "missing_cache_tokens_floor": 0,
+                "max_queue_depth": 1,
+            }]),
+        ] {
+            let encoded = serde_json::json!({
+                "router_queue_by_incoming_missing_isl": value,
+            })
+            .to_string();
+            let error = serde_json::from_str::<KvRouterConfig>(&encoded).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("unknown field `router_queue_by_incoming_missing_isl`"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_config_is_validated_and_cached_at_startup() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "default_policy_class: stable\npolicy_classes:\n  - name: stable\n    quantum: 7\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        config.validate_config().unwrap();
+        std::fs::write(policy_file.path(), "not: [valid").unwrap();
+
+        let profile = config.policy_profile(None).unwrap();
+        assert_eq!(profile.default_class().name, "stable");
+        assert_eq!(profile.default_class().quantum, 7);
+    }
+
+    #[test]
+    fn invalid_policy_config_fails_config_validation() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy_file.path(), "not: [valid").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        let error = config.validate_config().unwrap_err();
+        assert!(
+            error.contains(policy_file.path().to_str().unwrap()),
+            "{error}"
+        );
+        assert!(
+            error.contains("failed to parse router policy config"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn policy_config_uses_fast_recheck_with_prefill_load_model() {
+        let config = KvRouterConfig {
+            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_policy_config: Some("/tmp/policy.yaml".to_string()),
+            router_queue_threshold: None,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.router_queue_recheck_interval(),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn prefill_load_model_allows_wspt_policy_classes() {
+        let config = KvRouterConfig {
+            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_queue_policy: RouterQueuePolicy::Wspt,
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn configured_policy_profile_uses_transient_replay_model_name() {
+        let path = std::env::temp_dir().join(format!(
+            "dynamo-router-policy-{}.yaml",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+default_policy_class: root
+policy_classes:
+  - name: root
+    quantum: 1
+models:
+  replay-model:
+    default_policy_class: selected
+    policy_classes:
+      - name: selected
+        quantum: 9
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..Default::default()
+        }
+        .with_policy_model_name(Some("replay-model".to_string()));
+
+        let profile = config.configured_policy_profile().unwrap();
+        assert_eq!(profile.default_class().name, "selected");
+        assert_eq!(profile.default_class().quantum, 9);
+        assert!(
+            !serde_json::to_string(&config)
+                .unwrap()
+                .contains("replay-model")
+        );
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

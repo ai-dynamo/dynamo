@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, LocalBlockHash, WorkerId, WorkerWithDpRank,
 };
-use crate::scheduling::policy::RouterSchedulingPolicy;
 use crate::scheduling::selector::DefaultWorkerSelector;
 use crate::scheduling::{LocalScheduler, PotentialLoad};
 use crate::sequences::{
@@ -36,8 +35,7 @@ use super::types::{
     WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };
 
-type SelectionScheduler =
-    LocalScheduler<SelectionSequencePublisher, SelectionWorkerConfig, RouterSchedulingPolicy>;
+type SelectionScheduler = LocalScheduler<SelectionSequencePublisher, SelectionWorkerConfig>;
 
 struct SelectionEntry {
     key: SelectionKey,
@@ -187,7 +185,8 @@ impl SelectionCore {
         }
 
         let reasons = record.missing_schedulable_metadata(
-            self.kv_router_config.router_queue_threshold.is_some(),
+            self.kv_router_config.router_queue_threshold.is_some()
+                || self.kv_router_config.router_policy_config.is_some(),
             self.kv_router_config.use_kv_events,
         );
         if !reasons.is_empty() {
@@ -291,16 +290,18 @@ impl SelectionCore {
         slots.start_periodic_force_expiry_across_all_workers(self.cancel_token.child_token());
 
         let selector = DefaultWorkerSelector::new(Some(self.kv_router_config.clone()), WORKER_TYPE);
-        let scheduler = LocalScheduler::new_without_overlap_refresh(
+        let profile = self
+            .kv_router_config
+            .policy_profile(Some(&key.model_name))
+            .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+        let scheduler = LocalScheduler::new_without_overlap_refresh_with_policy_profile(
             slots,
             workers_rx,
-            self.kv_router_config.router_queue_threshold,
-            self.kv_router_config
-                .router_queue_by_incoming_missing_isl
-                .clone(),
+            profile,
+            crate::config::RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
-            RouterSchedulingPolicy::new(self.kv_router_config.router_queue_policy),
+            None,
             None,
             self.kv_router_config.router_queue_recheck_interval(),
             self.kv_router_config.router_track_prefill_tokens,
@@ -421,12 +422,20 @@ impl SelectionCore {
     }
 
     pub async fn select(&self, req: SelectRequest) -> Result<SelectResponse, SelectionError> {
+        self.select_with_policy_class(req, None).await
+    }
+
+    pub async fn select_with_policy_class(
+        &self,
+        req: SelectRequest,
+        policy_class: Option<String>,
+    ) -> Result<SelectResponse, SelectionError> {
         let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
         let entry = self.ready_entry(&key)?;
         let prepared = self.prepare_selection_inputs(&entry, &req.prompt).await?;
         let response = entry
             .scheduler
-            .schedule_with_block_hashes(
+            .schedule_with_policy_class_and_block_hashes(
                 None,
                 prepared.isl_tokens,
                 Some(prepared.sequence_hashes),
@@ -439,6 +448,7 @@ impl SelectionCore {
                 req.prompt.lora_name.clone(),
                 req.priority_jump.unwrap_or_default(),
                 req.strict_priority.unwrap_or(0),
+                policy_class,
                 req.expected_output_tokens,
                 req.pinned_worker,
                 req.allowed_worker_ids,
@@ -451,7 +461,15 @@ impl SelectionCore {
 
     pub async fn select_and_reserve(
         &self,
+        req: SelectAndReserveRequest,
+    ) -> Result<SelectResponse, SelectionError> {
+        self.select_and_reserve_with_policy_class(req, None).await
+    }
+
+    pub async fn select_and_reserve_with_policy_class(
+        &self,
         mut req: SelectAndReserveRequest,
+        policy_class: Option<String>,
     ) -> Result<SelectResponse, SelectionError> {
         let reservation_id = req
             .reservation_id
@@ -462,7 +480,7 @@ impl SelectionCore {
         let prepared = self.prepare_selection_inputs(&entry, &req.prompt).await?;
         let response = entry
             .scheduler
-            .schedule_with_block_hashes(
+            .schedule_with_policy_class_and_block_hashes(
                 Some(reservation_id.clone()),
                 prepared.isl_tokens,
                 Some(prepared.sequence_hashes),
@@ -475,6 +493,7 @@ impl SelectionCore {
                 req.prompt.lora_name.clone(),
                 req.priority_jump.unwrap_or_default(),
                 req.strict_priority.unwrap_or(0),
+                policy_class,
                 req.expected_output_tokens,
                 req.pinned_worker,
                 req.allowed_worker_ids,
