@@ -14,8 +14,12 @@ Usage::
 
     # customer_encoder.py (in their private Docker image)
     class MyEncoder(FullPromptEncoder):
-        def load(self, checkpoint_path, device): ...
-        def encode(self, image_urls, lm_token_ids, lm_embed_tokens): ...
+        def load(self, checkpoint_path, device):
+            # load ViT, projector, and any text embedding table needed
+            ...
+        def encode(self, image_urls, lm_token_ids):
+            # encode images, embed text tokens, splice, return full tensor
+            ...
 
     # launch
     python -m dynamo.vllm \\
@@ -36,10 +40,10 @@ import torch
 class FullPromptEncoder(ABC):
     """Pluggable vision encoder for the E→PD disaggregated setup (Mode 2).
 
-    The implementor provides the ViT + projector encoding.  Dynamo loads the
-    LM's ``embed_tokens`` weight and passes it in; the implementor is
-    responsible for embedding text tokens and splicing image embeddings at the
-    correct positions.
+    The implementor is responsible for all encoding work: loading the ViT,
+    projector, and any text embedding table needed.  Dynamo passes the raw
+    token IDs from the frontend and expects a single ready-to-use embedding
+    tensor back.
 
     Returned tensor shape: ``(seq_len, lm_hidden_dim)`` — the full prompt,
     ready to feed directly into the PD's transformer layers as ``EmbedsPrompt``.
@@ -47,10 +51,11 @@ class FullPromptEncoder(ABC):
 
     @abstractmethod
     def load(self, checkpoint_path: str, device: str) -> None:
-        """Load vision encoder and projector weights.
+        """Load all weights needed for encoding (ViT, projector, embed_tokens, …).
 
         Args:
             checkpoint_path: Path to the encoder checkpoint (local dir or HF id).
+                Passed verbatim from ``--model`` on the encoder worker.
             device: Target device string, e.g. ``"cuda"``.
         """
         ...
@@ -60,17 +65,13 @@ class FullPromptEncoder(ABC):
         self,
         image_urls: List[str],
         lm_token_ids: List[int],
-        lm_embed_tokens: torch.nn.Embedding,
     ) -> torch.Tensor:
-        """Produce a full prompt embedding by encoding images and splicing with text.
+        """Produce a full prompt embedding: images spliced with text.
 
         Args:
-            image_urls: Image URLs to encode (one per image placeholder in prompt).
-            lm_token_ids: Token IDs as tokenized by the PD model's tokenizer.
-                These come from the Dynamo frontend and are in the LM's token space.
-            lm_embed_tokens: The PD model's embedding layer, loaded by Dynamo.
-                Use this to look up text token embeddings instead of loading
-                the LM a second time.
+            image_urls: Image URLs to encode (one per image in the prompt).
+            lm_token_ids: Token IDs as tokenized by the PD model's tokenizer,
+                forwarded verbatim from the Dynamo frontend.
 
         Returns:
             Tensor of shape ``(seq_len, lm_hidden_dim)`` representing the full

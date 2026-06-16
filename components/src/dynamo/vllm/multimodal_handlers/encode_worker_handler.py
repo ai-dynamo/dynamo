@@ -3,16 +3,13 @@
 
 import asyncio
 import importlib
-import json
 import logging
 import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 import torch
-from safetensors import safe_open
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 
@@ -86,17 +83,21 @@ class _BaseEncodeWorkerHandler:
     async def _check_complete(self, queue: asyncio.Queue) -> None:
         while True:
             transfer_future, _embedding = await queue.get()
-            if transfer_future is None:
+            if transfer_future is None:  # Sentinel value to stop the checker
                 queue.task_done()
                 break
             await transfer_future
             queue.task_done()
 
     def cleanup(self) -> None:
-        self.send_complete_queue.put_nowait((None, None))
+        self.send_complete_queue.put_nowait(
+            (None, None)
+        )  # Send sentinel value to stop the checker
 
     async def async_init(self, runtime: DistributedRuntime) -> None:
         logger.info("Encode worker startup started.")
+        # Create and initialize a dynamo connector for this worker.
+        # We'll needs this to move data between this worker and remote workers efficiently.
         self._connector = connect.Connector()
         logger.info("Encode worker startup completed.")
 
@@ -130,6 +131,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                 getattr(self.vision_model, "config", None), "hidden_size", "unknown"
             )
         logger.debug(f"embedding hidden dim: {hidden_size}")
+        # Get encoder components for the model
         self.vision_encoder, self.projector = get_encoder_components(
             self.model, self.vision_model
         )
@@ -169,6 +171,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
             time_start = time.perf_counter()
 
             with _nvtx.annotate("mm:enc:cache_check", color="cyan"):
+                # Before batch process images, check cache first
                 need_encode_indexes = []
                 embedding_lists: list[EmbeddingItem | None] = [None] * len(
                     request.multimodal_inputs
@@ -201,6 +204,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
             ), time_and_log_code_section(
                 f"[ENCODE] request: {request_id} image loading"
             ):
+                # Load and generate image tensors
                 image_tasks = []
                 image_to_load = []
                 for idx, _ in need_encode_indexes:
@@ -246,6 +250,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                 ), time_and_log_code_section(
                     f"[ENCODE] request: {request_id} encoding"
                 ):
+                    # Encode the image embeddings using model-specific encoder
                     embeddings = await asyncio.to_thread(
                         encode_image_embeddings,
                         model_name=self.model,
@@ -253,6 +258,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                         vision_encoder=self.vision_encoder,
                         projector=self.projector,
                     )
+                    # Sync XPU to ensure kernels complete before NIXL transfer.
                     if embeddings.device.type == "xpu":
                         torch.xpu.synchronize()
 
@@ -283,6 +289,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                         else None
                     )
 
+            # fill in the embedding_lists with new computed embeddings and cache them
             for split_idx, (list_idx, key) in enumerate(need_encode_indexes):
                 embedding_lists[list_idx] = EmbeddingItem(
                     key,
@@ -359,8 +366,8 @@ class FullPromptEncodeWorkerHandler(_BaseEncodeWorkerHandler):
     """Custom-encoder worker: delegates to a FullPromptEncoder, outputs full prompt embeddings.
 
     The customer supplies a FullPromptEncoder subclass via --full-prompt-encoder-class.
-    This handler calls encoder.encode(image_urls, lm_token_ids, lm_embed_tokens) and
-    transfers the resulting (seq_len, lm_hidden_dim) tensor to the PD as EmbedsPrompt.
+    This handler calls encoder.encode(image_urls, lm_token_ids) and transfers the
+    resulting (seq_len, lm_hidden_dim) tensor to the PD as EmbedsPrompt.
     The PD runs transformer layers on it directly — no token expansion, no multimodal
     data assembly.
     """
@@ -376,6 +383,8 @@ class FullPromptEncodeWorkerHandler(_BaseEncodeWorkerHandler):
 
         # Load the customer-supplied FullPromptEncoder subclass.
         # --model is the checkpoint path passed to encoder.load().
+        # The encoder is responsible for loading everything it needs
+        # (ViT, projector, text embedding table, etc.).
         device = "cuda" if torch.cuda.is_available() else "cpu"
         module_path, _, class_name = full_prompt_encoder_class.rpartition(".")
         module = importlib.import_module(module_path)
@@ -387,82 +396,6 @@ class FullPromptEncodeWorkerHandler(_BaseEncodeWorkerHandler):
             self.model,
             device,
         )
-
-        # Load the PD model's embed_tokens so the encoder can look up text
-        # token embeddings. The frontend tokenizes with the LM tokenizer, so
-        # token IDs are in LM space — we need the LM's embedding matrix.
-        # Uses safetensors lazy reads: only the embedding shard is read, not
-        # the full model checkpoint.
-        _smn = engine_args.served_model_name
-        pd_model = _smn[0] if isinstance(_smn, list) and _smn else (_smn or self.model)
-        logger.info("Loading LM embed_tokens from pd_model=%s", pd_model)
-        weight = self._load_embed_tokens_weight(pd_model, dtype=torch.float16)
-        self.lm_embed_tokens = (
-            torch.nn.Embedding(weight.shape[0], weight.shape[1], _weight=weight)
-            .eval()
-            .to(device)
-        )
-
-    @staticmethod
-    def _load_embed_tokens_weight(model_id: str, dtype: torch.dtype) -> torch.Tensor:
-        """Load only embed_tokens.weight from a HF model checkpoint.
-
-        Uses safetensors lazy reads — only the bytes for this one tensor are read
-        from disk, regardless of total checkpoint size.  Works for both local
-        directories and HF hub model IDs (resolved through the HF cache).
-
-        Args:
-            model_id: Local directory path or HF hub model ID (e.g. ``"Qwen/Qwen2.5-1.5B"``).
-            dtype:    Target dtype for the returned tensor.
-
-        Returns:
-            The embedding weight tensor of shape ``(vocab_size, hidden_dim)``.
-
-        Raises:
-            FileNotFoundError: If no safetensors checkpoint or embed_tokens key is found.
-        """
-        # Imported here to avoid a module-level transformers.utils dependency that breaks
-        # the pytest-marker-report pre-commit hook (it stubs `transformers` but not submodules).
-        from transformers.utils import cached_file  # noqa: PLC0415
-
-        try:
-            index_path = cached_file(model_id, "model.safetensors.index.json")
-            model_dir = Path(index_path).parent
-            weight_map: dict[str, str] = json.loads(Path(index_path).read_text())[
-                "weight_map"
-            ]
-            embed_key = next(
-                (k for k in weight_map if k.endswith("embed_tokens.weight")), None
-            )
-            if embed_key is None:
-                raise FileNotFoundError(
-                    f"No embed_tokens.weight key in safetensors index for {model_id}"
-                )
-            shard_path = model_dir / weight_map[embed_key]
-        except (OSError, StopIteration):
-            # Fallback: single-file safetensors model.
-            shard_path = Path(cached_file(model_id, "model.safetensors"))
-            embed_key = None  # scan below
-
-        with safe_open(str(shard_path), framework="pt", device="cpu") as f:
-            if embed_key is None:
-                embed_key = next(
-                    (k for k in f.keys() if k.endswith("embed_tokens.weight")), None
-                )
-            if embed_key is None:
-                raise FileNotFoundError(
-                    f"embed_tokens.weight not found in {shard_path}"
-                )
-            weight = f.get_tensor(embed_key)
-
-        logger.info(
-            "Loaded embed_tokens.weight from shard %s (key=%s): shape=%s dtype=%s",
-            shard_path.name,
-            embed_key,
-            tuple(weight.shape),
-            weight.dtype,
-        )
-        return weight.to(dtype=dtype)
 
     @_nvtx.range_decorator("mm:full_prompt_encode_worker_generate", color="blue")
     async def generate(
@@ -492,9 +425,7 @@ class FullPromptEncodeWorkerHandler(_BaseEncodeWorkerHandler):
             else []
         )
 
-        spliced = await asyncio.to_thread(
-            self.encoder.encode, image_urls, token_ids, self.lm_embed_tokens
-        )
+        spliced = await asyncio.to_thread(self.encoder.encode, image_urls, token_ids)
         spliced = spliced.reshape(-1, spliced.shape[-1])  # ensure 2D
 
         spliced_batched = spliced.unsqueeze(0)  # (1, seq_len, lm_hidden_dim)
