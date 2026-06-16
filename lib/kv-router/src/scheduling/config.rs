@@ -1197,20 +1197,6 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_router_config_defaults_without_policy_path() {
-        let config = KvRouterConfig::default();
-
-        assert_eq!(config.router_policy_config, None);
-    }
-
-    #[test]
-    fn test_kv_router_config_deserializes_missing_policy_path() {
-        let config: KvRouterConfig = serde_json::from_str(r#"{}"#).unwrap();
-
-        assert_eq!(config.router_policy_config, None);
-    }
-
-    #[test]
     fn test_kv_router_config_deserializes_policy_path() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(

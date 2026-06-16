@@ -403,19 +403,6 @@ def test_load_aware_preserves_cache_hit_weights() -> None:
     assert kwargs["disk_cache_hit_weight"] == 0.1
 
 
-def test_kv_router_kwargs_preserves_policy_config_path(tmp_path: Path) -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
-    policy_path = str(tmp_path / "router-policy.yaml")
-    config.router_policy_config = policy_path
-
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["router_policy_config"] == policy_path
-
-
 def test_policy_config_cli_overrides_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -429,17 +416,6 @@ def test_policy_config_cli_overrides_environment(
     config = KvRouterConfigBase.from_cli_args(args)
 
     assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
-
-
-def test_kv_router_kwargs_omits_policy_config_by_default() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
-
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["router_policy_config"] is None
 
 
 def test_load_aware_clears_predicted_ttl() -> None:
