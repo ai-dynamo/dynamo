@@ -476,6 +476,17 @@ jobs:
       pytest_markers: 'vllm and xpu_1'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
 
+  vllm-deploy-xpu:
+    name: vllm-xpu-deploy
+    needs: [resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/xpu-deploy.yaml
+    with:
+      framework: vllm
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
   # ============================================================================

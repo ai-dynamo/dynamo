@@ -1,0 +1,200 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: XPU-Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      framework:
+        description: 'Framework name (vllm)'
+        required: false
+        type: string
+        default: 'vllm'
+      source_ref:
+        description: 'Git ref/SHA to checkout. Empty = current SHA.'
+        required: false
+        type: string
+        default: ''
+      image_tag_suffix:
+        description: 'Suffix appended to the SHA-keyed image tag (e.g. "-nightly").'
+        required: false
+        type: string
+        default: '-nightly'
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework name (vllm)'
+        required: false
+        type: string
+        default: 'vllm'
+      source_ref:
+        description: 'Git ref/SHA to checkout. Empty = caller SHA.'
+        required: false
+        type: string
+        default: ''
+      image_tag_suffix:
+        description: 'Suffix appended to the SHA-keyed image tag (e.g. "-nightly").'
+        required: false
+        type: string
+        default: '-nightly'
+    secrets:
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      HF_TOKEN:
+        required: true
+      DOCKERHUB_LOGIN_USER:
+        required: true
+      DOCKERHUB_ACCESS_TOKEN:
+        required: true
+
+env:
+  FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+  TARGET: runtime
+  DEVICE: xpu
+  PLATFORM: linux/amd64
+  SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+  IMAGE_TAG_SUFFIX: ${{ inputs.image_tag_suffix || '-nightly' }}
+
+jobs:
+  build-xpu:
+    runs-on: xpu
+    permissions:
+      contents: read
+    outputs:
+      image_uri: ${{ steps.tags.outputs.image_uri }}
+      target_tag_plain: ${{ steps.tags.outputs.target_tag_plain }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          lfs: true
+
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "::group::Generating XPU Dockerfile"
+          python3 ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --device=${{ env.DEVICE }} \
+              --platform=${{ env.PLATFORM }} \
+              --show-result \
+              --output-short-filename
+          echo "::endgroup::"
+
+      - name: Calculate image tags
+        id: tags
+        shell: bash
+        env:
+          AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        run: |
+          set -euo pipefail
+          TAG_BUILDER="${FRAMEWORK}-${TARGET}-xpu"
+          SOURCE_SHA="${SOURCE_REF}"
+          TARGET_TAG_PLAIN="${TAG_BUILDER}"
+          IMAGE_TAG="${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
+
+          IMAGE_URI="${AZURE_ACR_HOSTNAME}/ai-dynamo/dynamo:${IMAGE_TAG}"
+          MUTABLE_IMAGE_URI=""
+          if [[ -n "${IMAGE_TAG_SUFFIX}" ]]; then
+            MUTABLE_IMAGE_URI="${AZURE_ACR_HOSTNAME}/ai-dynamo/dynamo:${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
+          fi
+
+          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+          echo "mutable_image_uri=${MUTABLE_IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
+          echo "### 🐳 XPU Image Targets" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image URI | \`${IMAGE_URI}\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "${MUTABLE_IMAGE_URI}" ]]; then
+            echo "| Mutable URI | \`${MUTABLE_IMAGE_URI}\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Build and Push XPU Image
+        shell: bash
+        env:
+          AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        run: |
+          set -euo pipefail
+          LOCAL_IMAGE_TAG="dynamo-${FRAMEWORK}-${TARGET}-${DEVICE}:${SOURCE_REF}"
+          IMAGE_URI="${{ steps.tags.outputs.image_uri }}"
+          MUTABLE_IMAGE_URI="${{ steps.tags.outputs.mutable_image_uri }}"
+
+          docker build \
+            --progress=plain \
+            --tag "${LOCAL_IMAGE_TAG}" \
+            -f ./container/rendered.Dockerfile \
+            . 2>&1 | tee build-xpu.log
+
+          docker tag "${LOCAL_IMAGE_TAG}" "${IMAGE_URI}"
+          docker push "${IMAGE_URI}"
+
+          if [[ -n "${MUTABLE_IMAGE_URI}" ]]; then
+            docker tag "${LOCAL_IMAGE_TAG}" "${MUTABLE_IMAGE_URI}"
+            docker push "${MUTABLE_IMAGE_URI}"
+          fi
+
+  deploy-test-xpu:
+    needs: [build-xpu]
+    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: agg_xpu_dra
+            name: agg
+          - profile: disagg_xpu_dra
+            name: disagg
+    name: ${{ matrix.name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: main-operator
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          vcluster_name: ci-${{ github.run_id }}-${{ matrix.name }}-xpu
+          vcluster_namespace: gh-id-${{ github.run_id }}-${{ matrix.name }}-xpu
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+          vcluster_namespace: ${{ steps.setup.outputs.namespace }}
+      - name: Run XPU Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ steps.setup.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          framework: ${{ inputs.framework || 'vllm' }}
+          profile: ${{ matrix.profile }}
+          image: ${{ needs.build-xpu.outputs.image_uri }}
+          platform_arch: amd64
+          test_name: ${{ inputs.framework || 'vllm' }}-${{ matrix.name }}-xpu
+          extra_pytest_args: -m framework_only
