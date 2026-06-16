@@ -23,7 +23,7 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
-use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector};
+use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds, TraceCollector};
 use anyhow::bail;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RouterEvent;
@@ -212,6 +212,12 @@ impl AggRuntime {
     /// it for the calibration use case this exists to serve.
     pub(in crate::replay) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
         self.max_sim_time_ms = ms;
+        self
+    }
+
+    /// Set the SLA thresholds used to classify goodput in the final report.
+    pub(in crate::replay) fn with_sla_thresholds(mut self, sla: SlaThresholds) -> Self {
+        self.collector.set_sla_thresholds(sla);
         self
     }
 
@@ -661,12 +667,12 @@ impl AggRuntime {
 
             if next_timestamp_ms > until_ms {
                 if until_ms > self.now_ms {
-                    self.now_ms = until_ms;
+                    self.advance_now_ms(until_ms);
                 }
                 break;
             }
 
-            self.now_ms = next_timestamp_ms;
+            self.advance_now_ms(next_timestamp_ms);
             self.drain_current_timestamp()?;
         }
 
@@ -676,6 +682,21 @@ impl AggRuntime {
     /// Current simulated time in milliseconds.
     pub(in crate::replay) fn now_ms(&self) -> f64 {
         self.now_ms
+    }
+
+    /// Advance the sim clock to `new_now_ms`, integrating provisioned
+    /// worker-seconds over the interval just elapsed. `worker_count()` counts
+    /// active + starting-up + draining workers, so this captures the startup
+    /// ramp and the scale-down drain tail. Aggregated replay has no separate
+    /// prefill pool, so it reports through the decode role (prefill = 0).
+    fn advance_now_ms(&mut self, new_now_ms: f64) {
+        let dt_ms = (new_now_ms - self.now_ms).max(0.0);
+        if dt_ms > 0.0 {
+            let decode_worker_seconds = self.engine.worker_count() as f64 * dt_ms / 1000.0;
+            self.collector
+                .add_worker_seconds(0.0, decode_worker_seconds);
+        }
+        self.now_ms = new_now_ms;
     }
 
     /// Number of active (non-pending-removal) workers.
@@ -787,7 +808,7 @@ impl AggRuntime {
             {
                 break;
             }
-            self.now_ms = next_timestamp_ms;
+            self.advance_now_ms(next_timestamp_ms);
             self.drain_current_timestamp()?;
         }
 
@@ -2449,6 +2470,41 @@ mod tests {
         rt.advance_to(expected_ready_ms).unwrap();
         assert_eq!(rt.active_worker_count(), 2); // now active
         assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn test_worker_seconds_counts_startup_ramp() {
+        // 1 worker over [0, 1s], then scale to 2 with a 5s startup delay and
+        // advance to 3s. The second worker is still *starting up* over [1s, 3s]
+        // but is provisioned (holds a GPU), so worker-seconds must count it:
+        //   1 worker × 1s + 2 workers × 2s = 5.0 worker-seconds.
+        // (If it integrated the *active* count it would wrongly be 3.0.)
+        let args = startup_args(5.0);
+        let requests = simple_requests(20, 1000.0);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        rt.advance_to(1000.0).unwrap();
+        rt.apply_scaling(2).unwrap();
+        assert_eq!(rt.active_worker_count(), 1); // 2nd worker still starting
+        assert_eq!(rt.total_worker_count(), 2); // ...but provisioned
+        rt.advance_to(3000.0).unwrap();
+
+        let report = rt.finalize_report();
+        assert!(
+            (report.throughput.decode_worker_seconds - 5.0).abs() < 1e-6,
+            "expected 5.0 provisioned worker-seconds (startup ramp counted), got {}",
+            report.throughput.decode_worker_seconds
+        );
+        assert_eq!(report.throughput.prefill_worker_seconds, 0.0); // agg: decode role only
     }
 
     #[test]
