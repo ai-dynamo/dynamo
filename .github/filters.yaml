@@ -34,7 +34,7 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
-  # Canonical agent skills directory (post-flip); .agents/skills is a symlink here.
+  # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
 
 examples:

@@ -233,6 +233,7 @@ impl KvReplayRouter {
             BlockHashOptions::default(),
             None,
         );
+        let (priority_jump, strict_priority) = request.router_priorities();
         let response = self
             .scheduler
             .schedule(
@@ -245,7 +246,8 @@ impl KvReplayRouter {
                 None,
                 true,
                 None,
-                0.0,
+                priority_jump,
+                strict_priority,
                 Some(
                     u32::try_from(request.max_output_tokens)
                         .context("max_output_tokens does not fit into u32")?,
@@ -389,6 +391,10 @@ impl ReplayRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use dynamo_kv_router::config::RouterQueuePolicy;
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, StorageTier, WorkerWithDpRank,
@@ -396,6 +402,82 @@ mod tests {
     };
 
     use super::*;
+
+    fn priority_request(uuid: u128, priority: i32, strict_priority: u32) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![uuid as u32; 64],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+            priority,
+            strict_priority,
+        }
+    }
+
+    #[tokio::test]
+    async fn online_replay_forwards_priorities_to_scheduler_queue() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(64))
+            .build()
+            .unwrap();
+        let config = KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            router_queue_policy: RouterQueuePolicy::Fcfs,
+            ..KvRouterConfig::default()
+        };
+        let router = Arc::new(ReplayRouter::new(
+            ReplayRouterMode::KvRouter,
+            &args,
+            Some(config),
+            None,
+            1,
+        ));
+
+        let active = priority_request(1, 0, 0);
+        router.select_worker(&active, 1).await.unwrap();
+
+        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+        let low_task = {
+            let router = Arc::clone(&router);
+            let completed_tx = completed_tx.clone();
+            tokio::spawn(async move {
+                let request = priority_request(2, 1_000, 0);
+                router.select_worker(&request, 1).await.unwrap();
+                completed_tx.send(2).unwrap();
+            })
+        };
+        tokio::task::yield_now().await;
+        let high_task = {
+            let router = Arc::clone(&router);
+            tokio::spawn(async move {
+                let request = priority_request(3, 0, 1);
+                router.select_worker(&request, 1).await.unwrap();
+                completed_tx.send(3).unwrap();
+            })
+        };
+        tokio::task::yield_now().await;
+
+        router.on_complete(Uuid::from_u128(1)).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, 3);
+
+        router.on_complete(Uuid::from_u128(3)).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second, 2);
+        router.on_complete(Uuid::from_u128(2)).await.unwrap();
+
+        low_task.await.unwrap();
+        high_task.await.unwrap();
+        router.shutdown().await.unwrap();
+    }
 
     fn store_event(
         worker_id: WorkerId,

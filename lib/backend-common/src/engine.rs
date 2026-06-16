@@ -343,6 +343,45 @@ pub trait LLMEngine: Send + Sync + 'static {
             "message": format!("unsupported engine control: {control}"),
         }))
     }
+
+    /// Semantic engine updates this engine supports. Empty by default.
+    ///
+    /// Updates are a sibling surface to [`supported_controls`](LLMEngine::supported_controls)
+    /// for operations that mutate engine-managed assets (e.g. vLLM dynamic
+    /// LoRA load/unload/list) rather than the engine's serving lifecycle.
+    /// Keeping them separate avoids inflating the control surface. Engines
+    /// advertise update keys and implement them via [`LLMEngine::engine_update`];
+    /// the unified backend maps each key onto an `/engine/update/{key}` route.
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Handle one semantic engine-update request.
+    async fn engine_update(
+        &self,
+        update: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine update: {update}"),
+        }))
+    }
+
+    /// Hand the engine its runtime serving [`Endpoint`](dynamo_runtime::component::Endpoint),
+    /// exactly once, after it exists and before serving begins. Default no-op.
+    ///
+    /// Engines that publish their own discovery records (e.g. vLLM dynamic
+    /// LoRA via `register_model`) stash it here for later use from
+    /// [`engine_update`](LLMEngine::engine_update). Mirrors the
+    /// [`on_publisher_ready`](MetricsBindings::on_publisher_ready) handoff idiom.
+    /// Errors abort startup; `cleanup` runs on the partial state.
+    async fn on_endpoint_ready(
+        &self,
+        _endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
 }
 
 /// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].
