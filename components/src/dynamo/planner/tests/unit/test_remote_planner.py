@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.connectors.clients.remote_client import RemotePlannerClient
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
-from dynamo.planner.connectors.remote_client import RemotePlannerClient
 from dynamo.planner.errors import DeploymentValidationError, EmptyTargetReplicasError
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
@@ -236,7 +236,7 @@ async def test_connector_initialization(connector, connector_runtime):
     ) as mock_client_class:
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
-        await connector._async_init()
+        await connector.async_init()
         mock_client_class.assert_called_once_with(
             connector_runtime, "global-ns", "GlobalPlanner"
         )

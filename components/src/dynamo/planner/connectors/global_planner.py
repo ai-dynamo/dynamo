@@ -13,9 +13,9 @@ from kubernetes.config.config_exception import ConfigException
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.clients.remote_client import RemotePlannerClient
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
-from dynamo.planner.connectors.remote_client import RemotePlannerClient
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
@@ -38,7 +38,7 @@ class GlobalPlannerConnector(PlannerConnector):
     """
     Connector that delegates scaling decisions to a centralized GlobalPlanner.
 
-    This connector wraps RemotePlannerClient and implements the PlannerConnector
+    This connector wraps RemotePlannerClient and implements the InfraScaler
     interface, allowing planner_core.py to treat global-planner environment mode
     consistently with kubernetes and virtual modes.
     """
@@ -78,7 +78,7 @@ class GlobalPlannerConnector(PlannerConnector):
         self._local_k8s_connector: Optional[KubernetesConnector] = None
         self._local_k8s_init_attempted: bool = False
 
-    async def _async_init(self):
+    async def async_init(self):
         """Async initialization - creates RemotePlannerClient"""
         self.remote_client = RemotePlannerClient(
             self.runtime,
@@ -312,6 +312,20 @@ class GlobalPlannerConnector(PlannerConnector):
         if local is None:
             return base_dynamo_namespace
         return local.get_worker_runtime_namespace(base_dynamo_namespace)
+
+    def get_gpu_counts(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Resolve pool-local GPU shape when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return None, None
+        return local.get_gpu_counts(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
 
     def get_worker_info(
         self,

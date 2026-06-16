@@ -10,7 +10,7 @@ FPM-driven scaling integration tests live in the plugin/orchestrator test suite.
 """
 
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -34,6 +34,8 @@ from dynamo.planner.core.perf_model import (
     DecodeRegressionModel,
     PrefillRegressionModel,
 )
+from dynamo.planner.core.types import TrafficObservation
+from dynamo.planner.environment.base import PlannerEnvironmentImpl
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 pytestmark = [
@@ -760,7 +762,7 @@ class TestAggRegressionModel:
 
 
 class TestRefreshWorkerInfoFromConnector:
-    """Tests for NativePlannerBase._refresh_worker_info_from_connector.
+    """Tests for PlannerEnvironmentImpl worker info refresh.
 
     The tick-loop refresh delegates to the connector's ``get_worker_info``,
     which is where each connector implements its own MDC source (K8s CRDs
@@ -803,25 +805,48 @@ class TestRefreshWorkerInfoFromConnector:
                 load_scaling_down_sensitivity=80,
                 load_min_observations=5,
             )
-            planner = NativePlannerBase(None, config)
+            controller = Mock()
+            controller.get_worker_info.return_value = WorkerInfo()
+            controller.get_gpu_counts.return_value = (1, 1)
+            controller.get_actual_worker_counts.return_value = (0, 0, True)
+            controller.get_model_name.return_value = "test-model"
+            environment = PlannerEnvironmentImpl(
+                config=config,
+                controller=controller,
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+            )
+            environment.deployment_state().prefill.info = WorkerInfo()
+            environment.deployment_state().decode.info = WorkerInfo()
+            planner = NativePlannerBase(None, config, environment)
         planner.require_prefill = require_prefill
         planner.require_decode = require_decode
-        planner.prefill_worker_info = WorkerInfo()
-        planner.decode_worker_info = WorkerInfo()
         return planner
 
     def _install_mock_connector(self, planner, **fresh_info_kwargs):
-        """Replace planner.connector with a Mock returning a fresh WorkerInfo."""
+        """Replace environment's controller with a Mock returning fresh WorkerInfo."""
         fresh = WorkerInfo(**fresh_info_kwargs)
         mock_connector = Mock()
         mock_connector.get_worker_info.return_value = fresh
-        planner.connector = mock_connector
+        mock_connector.get_gpu_counts.return_value = (1, 1)
+        mock_connector.get_actual_worker_counts.return_value = (0, 0, True)
+        mock_connector.get_model_name.return_value = "test-model"
+        planner.environment.controller = mock_connector
         return mock_connector
+
+    def _refresh_worker_info(self, planner):
+        planner.environment._refresh_worker_info()
+
+    def _decode_info(self, planner):
+        return planner.environment.deployment_state().decode.info
+
+    def _prefill_info(self, planner):
+        return planner.environment.deployment_state().prefill.info
 
     def test_refresh_populates_missing_fields(self):
         """Connector returns a populated WorkerInfo; missing fields backfill."""
         planner = self._make_planner()
-        assert planner.decode_worker_info.max_num_batched_tokens is None
+        assert self._decode_info(planner).max_num_batched_tokens is None
 
         self._install_mock_connector(
             planner,
@@ -832,24 +857,26 @@ class TestRefreshWorkerInfoFromConnector:
             context_length=4096,
         )
 
-        planner._refresh_worker_info_from_connector()
-        assert planner.decode_worker_info.max_num_batched_tokens == 8192
-        assert planner.decode_worker_info.total_kv_blocks == 1024
-        assert planner.decode_worker_info.max_num_seqs == 256
-        assert planner.decode_worker_info.kv_cache_block_size == 16
-        assert planner.decode_worker_info.context_length == 4096
+        self._refresh_worker_info(planner)
+        assert self._decode_info(planner).max_num_batched_tokens == 8192
+        assert self._decode_info(planner).total_kv_blocks == 1024
+        assert self._decode_info(planner).max_num_seqs == 256
+        assert self._decode_info(planner).kv_cache_block_size == 16
+        assert self._decode_info(planner).context_length == 4096
 
     def test_noop_when_already_set(self):
         """Does not re-query once max_num_batched_tokens is populated."""
         planner = self._make_planner()
-        planner.decode_worker_info = WorkerInfo(max_num_batched_tokens=2048)
+        planner.environment.deployment_state().decode.info = WorkerInfo(
+            max_num_batched_tokens=2048
+        )
 
         mock_connector = self._install_mock_connector(
             planner, max_num_batched_tokens=8192
         )
 
-        planner._refresh_worker_info_from_connector()
-        assert planner.decode_worker_info.max_num_batched_tokens == 2048
+        self._refresh_worker_info(planner)
+        assert self._decode_info(planner).max_num_batched_tokens == 2048
         mock_connector.get_worker_info.assert_not_called()
 
     def test_noop_when_connector_lacks_get_worker_info(self):
@@ -859,36 +886,36 @@ class TestRefreshWorkerInfoFromConnector:
         class _StubConnector:
             pass
 
-        planner.connector = _StubConnector()
-        planner._refresh_worker_info_from_connector()
-        assert planner.decode_worker_info.max_num_batched_tokens is None
+        planner.environment.controller = _StubConnector()
+        self._refresh_worker_info(planner)
+        assert self._decode_info(planner).max_num_batched_tokens is None
 
     def test_noop_when_connector_returns_none_fields(self):
         """Fresh WorkerInfo with None everywhere does not overwrite anything."""
         planner = self._make_planner()
         self._install_mock_connector(planner)  # All Nones
-        planner._refresh_worker_info_from_connector()
-        assert planner.decode_worker_info.max_num_batched_tokens is None
+        self._refresh_worker_info(planner)
+        assert self._decode_info(planner).max_num_batched_tokens is None
 
     def test_exception_does_not_propagate(self):
         """If connector.get_worker_info throws, refresh is a no-op."""
         planner = self._make_planner()
         mock_connector = Mock()
         mock_connector.get_worker_info.side_effect = RuntimeError("boom")
-        planner.connector = mock_connector
+        planner.environment.controller = mock_connector
 
-        planner._refresh_worker_info_from_connector()  # must not raise
-        assert planner.decode_worker_info.max_num_batched_tokens is None
+        self._refresh_worker_info(planner)  # must not raise
+        assert self._decode_info(planner).max_num_batched_tokens is None
 
-    def test_updates_engine_capabilities(self):
+    async def test_updates_engine_capabilities(self):
         """Builtin engine capabilities are refreshed after worker-info discovery."""
         planner = self._make_planner()
         engine = planner._ensure_engine()
 
         self._install_mock_connector(planner, max_num_batched_tokens=4096)
 
-        planner._refresh_worker_info_from_connector()
-        assert planner.decode_worker_info.max_num_batched_tokens == 4096
+        await planner._refresh_and_update_capabilities()
+        assert self._decode_info(planner).max_num_batched_tokens == 4096
         assert engine._scaling_state._capabilities.decode.max_num_batched_tokens == 4096
 
     def test_refresh_skips_unneeded_sub_component(self):
@@ -902,20 +929,23 @@ class TestRefreshWorkerInfoFromConnector:
 
         mock_connector = Mock()
         mock_connector.get_worker_info.side_effect = _side_effect
-        planner.connector = mock_connector
+        planner.environment.controller = mock_connector
 
-        planner._refresh_worker_info_from_connector()
-        assert planner.prefill_worker_info.max_num_batched_tokens is None
-        assert planner.decode_worker_info.max_num_batched_tokens == 4096
+        self._refresh_worker_info(planner)
+        assert self._prefill_info(planner).max_num_batched_tokens is None
+        assert self._decode_info(planner).max_num_batched_tokens == 4096
 
     async def test_load_only_accept_length_missing_returns_observation(self):
         planner = self._make_planner(require_prefill=False, require_decode=True)
-        planner.model_name = "Qwen/Qwen3"
-        planner.decode_worker_info = WorkerInfo(component_name="backend")
-        planner.prometheus_traffic_client = Mock()
-        planner.prometheus_traffic_client.get_avg_kv_hit_rate.return_value = None
-        planner.prometheus_traffic_client.get_avg_spec_decode_accept_length.return_value = (
-            None
+        planner.environment.collect_kv_hit_rate_observation = AsyncMock(
+            return_value=TrafficObservation(
+                duration_s=5,
+                num_req=0,
+                isl=0,
+                osl=0,
+                kv_hit_rate=None,
+                accept_length=None,
+            )
         )
 
         obs = await planner._collect_kv_hit_rate_observation(duration_s=5)
@@ -923,3 +953,4 @@ class TestRefreshWorkerInfoFromConnector:
         assert obs is not None
         assert obs.kv_hit_rate is None
         assert obs.accept_length is None
+        planner.environment.collect_kv_hit_rate_observation.assert_awaited_once_with(5)

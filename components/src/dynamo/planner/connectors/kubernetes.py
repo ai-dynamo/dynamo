@@ -20,7 +20,7 @@ from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.kubernetes_api import (
+from dynamo.planner.connectors.clients.kubernetes_api import (
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
     KubernetesAPI,
@@ -91,6 +91,10 @@ class KubernetesConnector(PlannerConnector):
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
         self.raise_not_ready = raise_not_ready
+
+    async def async_init(self):
+        """Async initialization - creates RemotePlannerClient"""
+        return
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         """Return the Dynamo namespace used by the current worker generation.
@@ -567,6 +571,7 @@ class KubernetesConnector(PlannerConnector):
         )
         return info
 
+    # todo -> how are we handling 3 active 2 more new workers pending?
     def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
