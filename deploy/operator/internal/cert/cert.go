@@ -36,7 +36,7 @@ const (
 	dcdCRDName                       = "dynamocomponentdeployments.nvidia.com"
 	dgdsaCRDName                     = "dynamographdeploymentscalingadapters.nvidia.com"
 	conversionWebhookPath            = "/convert"
-	defaultCABundlePollInterval      = 5 * time.Second
+	defaultCABundlePollInterval      = 500 * time.Millisecond
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
