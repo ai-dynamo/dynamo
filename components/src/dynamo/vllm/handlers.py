@@ -1056,17 +1056,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._deferred_aborts: dict[str, _DeferredAbort] = {}
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
 
-        # Text-only PD + encoder path: projection matrix cache and fast path flag.
-        # Both are set once here so there's no lazy-init / hasattr race in async handlers.
-        self._enc_proj_cache: Dict[tuple, torch.Tensor] = {}
-        # Pre-compute whether this instance is a text-only PD receiving encoder embeds.
-        # Avoids repeated resolve_model_family string-matching on the hot request path.
-        self._is_textonly_pd_with_encoder: bool = (
-            self.embedding_loader is not None
-            and self.model_config is not None
-            and resolve_model_family(config.model) is None
-        )
-
         # Some models (Kimi-K2.5) declare their image modality as
         # "vision_chunk" rather than "image". vLLM's openai entrypoint
         # renames the dict key + wraps images via the chat_utils tracker,
@@ -2407,88 +2396,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         return prompt, sequence_length, embeddings_tensor
 
-    def _build_embeds_prompt_for_textonly_pd(
-        self,
-        multi_modal_data: Dict[str, Any],
-        request_id: str,
-    ) -> tuple[EmbedsPrompt, int, None]:
-        """Wrap encoder embeddings as EmbedsPrompt for a text-only PD model.
-
-        When the PD is a text-only LLM and image embeddings arrive from a
-        separate encoder worker, vLLM's multimodal processor would crash because
-        the text-only renderer has no _mm_req_counter. This method bypasses the
-        multimodal path by submitting the embeddings directly as EmbedsPrompt.
-
-        Projection (enc_hidden → pd_hidden) is done on the encoder side before
-        transfer; the tensor arrives here already in the PD model's hidden space.
-
-        Requires --enable-prompt-embeds on the vLLM engine.
-        """
-        image_data = multi_modal_data.get("image")
-        if image_data is None:
-            raise ValueError("multi_modal_data has no 'image' key")
-
-        # Extract the raw embedding tensor (non-Qwen path returns a plain tensor).
-        # Qwen VL path returns a dict; handle gracefully in case called incorrectly.
-        if isinstance(image_data, dict):
-            embeds: torch.Tensor = image_data["image_embeds"]
-        elif isinstance(image_data, torch.Tensor):
-            embeds = image_data
-        else:
-            raise ValueError(
-                f"Unexpected image data type from encoder: {type(image_data)}"
-            )
-
-        # Normalise to 2D: [N_tokens, enc_hidden].
-        # reshape(-1, H) handles any leading batch dimensions (1-image or
-        # multi-image batch) without silently dropping data.
-        embeds = embeds.reshape(-1, embeds.shape[-1])
-
-        enc_hidden = embeds.shape[-1]
-        pd_hidden: int = self.model_config.hf_config.hidden_size  # type: ignore[union-attr]
-
-        if enc_hidden != pd_hidden:
-            logger.info(
-                "[textonly-pd] %s: projecting encoder embeddings %d → %d "
-                "(random projection; output text is approximate)",
-                request_id,
-                enc_hidden,
-                pd_hidden,
-            )
-            # _enc_proj_cache is pre-allocated in __init__; no lazy-init race.
-            # Key includes device so the cached matrix is always on the right device.
-            cache_key = (enc_hidden, pd_hidden, embeds.dtype, embeds.device)
-            if cache_key not in self._enc_proj_cache:
-                rng = torch.Generator(device=embeds.device)
-                rng.manual_seed(42)
-                proj = torch.randn(
-                    enc_hidden,
-                    pd_hidden,
-                    dtype=embeds.dtype,
-                    device=embeds.device,
-                    generator=rng,
-                ) / (enc_hidden**0.5)
-                self._enc_proj_cache[cache_key] = proj
-            embeds = embeds @ self._enc_proj_cache[cache_key]
-
-        # Cast to the model's configured dtype so vLLM's EmbedsPrompt path gets
-        # the right precision. Fall back to float16 when the config is unavailable.
-        model_dtype = getattr(
-            self.model_config.hf_config, "torch_dtype", torch.float16  # type: ignore[union-attr]
-        )
-        if not isinstance(model_dtype, torch.dtype):
-            model_dtype = torch.float16
-        embeds = embeds.to(dtype=model_dtype)
-
-        seq_len = embeds.shape[0]
-        logger.info(
-            "[textonly-pd] %s: using EmbedsPrompt with %d image tokens "
-            "(text prompt discarded — text-only PD cannot merge text + image tokens)",
-            request_id,
-            seq_len,
-        )
-        return EmbedsPrompt(prompt_embeds=embeds), seq_len, None
-
     async def _try_receive_mm_kwargs(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
@@ -2942,40 +2849,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     },
                 )
         # Text-only PD + encoder-worker path.
-        # When the PD runs a non-VLM model (e.g. Qwen2.5-1.5B) and image
-        # embeddings arrive pre-computed from a dedicated encoder worker,
-        # vLLM's multimodal processor cannot handle them (the HfRenderer for
-        # text-only models has no _mm_req_counter).  Bypass it by projecting
-        # the encoder embeddings to the model's hidden_size and submitting
-        # them as EmbedsPrompt.  The decoded text will be semantically wrong
-        # (different model families) but the system will not crash.
-        # _is_textonly_pd_with_encoder is pre-computed in __init__ so we avoid
-        # repeated resolve_model_family string-matching on every request.
-        if (
-            self._is_textonly_pd_with_encoder
-            and multi_modal_data is not None
-            and "image" in multi_modal_data
-        ):
-            try:
-                return self._build_embeds_prompt_for_textonly_pd(
-                    multi_modal_data, request_id
-                )
-            except Exception as exc:
-                logger.error(
-                    "[textonly-pd] %s: failed to build EmbedsPrompt from "
-                    "encoder embeddings: %s",
-                    request_id,
-                    exc,
-                )
-                return (
-                    None,
-                    None,
-                    {
-                        "finish_reason": f"error: encoder-embeds to EmbedsPrompt failed: {exc}",
-                        "token_ids": [],
-                    },
-                )
-
         # Normal path: use token IDs.
         # Prefer frontend-forwarded mm_hashes for hash consistency with the
         # routing layer. Fall back to computing from loaded image data when
