@@ -12,6 +12,8 @@ import os
 import time
 from argparse import Namespace
 from collections.abc import AsyncGenerator
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
@@ -48,6 +50,339 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _as_builtin(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return _as_builtin(value.model_dump(exclude_none=True))
+    if isinstance(value, dict):
+        return {k: _as_builtin(v) for k, v in value.items() if v is not None}
+    if isinstance(value, (list, tuple)):
+        return [_as_builtin(v) for v in value]
+    return value
+
+
+def _normalize_chat_template_messages(messages: Any) -> Any:
+    messages = _as_builtin(messages)
+    if not isinstance(messages, list):
+        return messages
+
+    normalized_messages = []
+    for message in messages:
+        if not isinstance(message, dict):
+            normalized_messages.append(message)
+            continue
+
+        message = dict(message)
+        tool_calls = message.get("tool_calls")
+        if message.get("role") == "assistant" and isinstance(tool_calls, list):
+            normalized_tool_calls = []
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    normalized_tool_calls.append(tool_call)
+                    continue
+
+                tool_call = dict(tool_call)
+                function = tool_call.get("function")
+                if isinstance(function, dict):
+                    function = dict(function)
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        try:
+                            arguments_obj = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            arguments_obj = arguments
+                        if isinstance(arguments_obj, dict):
+                            function["arguments"] = arguments_obj
+                    tool_call["function"] = function
+                normalized_tool_calls.append(tool_call)
+            message["tool_calls"] = normalized_tool_calls
+
+        normalized_messages.append(message)
+
+    return normalized_messages
+
+
+class _TokenizerShim:
+    def __init__(self, tokenizer: Any):
+        object.__setattr__(self, "_tokenizer", tokenizer)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tokenizer, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._tokenizer, name, value)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._tokenizer(*args, **kwargs)
+
+    def __len__(self) -> int:
+        return len(self._tokenizer)
+
+    def get_lora_tokenizer(self, lora_request: Any = None) -> Any:
+        return self._tokenizer
+
+    async def get_lora_tokenizer_async(self, lora_request: Any = None) -> Any:
+        return self._tokenizer
+
+
+class _TextOnlyChatRenderer:
+    def __init__(self, tokenizer: TokenizerLike):
+        self.tokenizer = tokenizer
+
+    async def render_messages_async(
+        self, messages: Any, params: Any
+    ) -> tuple[str, dict[str, Any]]:
+        kwargs = dict(getattr(params, "chat_template_kwargs", None) or {})
+        # Dynamo tokenizes the rendered text below. Avoid forcing tokenizer-side
+        # tokenization here because that path is mostly needed by multimodal and
+        # Mistral renderers, which still use the full vLLM InputProcessor.
+        kwargs.pop("tokenize", None)
+
+        tools = kwargs.pop("tools", None)
+        if tools is not None:
+            kwargs["tools"] = _as_builtin(tools)
+        documents = kwargs.pop("documents", None)
+        if documents is not None:
+            kwargs["documents"] = _as_builtin(documents)
+
+        chat_template = getattr(params, "chat_template", None)
+        if chat_template is not None:
+            kwargs["chat_template"] = chat_template
+
+        prompt = self.tokenizer.apply_chat_template(
+            _normalize_chat_template_messages(messages),
+            tokenize=False,
+            **kwargs,
+        )
+        return prompt, {"prompt": prompt}
+
+
+def _load_generation_config_fields(local_dir: str) -> dict[str, Any]:
+    path = Path(local_dir) / "generation_config.json"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        logger.warning(
+            "Failed to load generation_config.json from %s", path, exc_info=True
+        )
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    data.pop("_from_model_config", None)
+    data.pop("transformers_version", None)
+    return data
+
+
+def _load_max_model_len(local_dir: str) -> int | None:
+    path = Path(local_dir) / "config.json"
+    if not path.is_file():
+        return None
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        logger.warning("Failed to load config.json from %s", path, exc_info=True)
+        return None
+    for key in (
+        "max_model_len",
+        "max_position_embeddings",
+        "model_max_length",
+        "seq_length",
+    ):
+        value = data.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _tokenizer_eos_token_id(tokenizer: TokenizerLike) -> int | None:
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if isinstance(eos_token_id, int):
+        return eos_token_id
+    eos_token_ids = getattr(tokenizer, "eos_token_ids", None)
+    if isinstance(eos_token_ids, int):
+        return eos_token_ids
+    if eos_token_ids:
+        return list(eos_token_ids)[0]
+    return None
+
+
+def _build_text_only_engine_request(
+    request_id: str,
+    token_ids: list[int],
+    sampling_params: SamplingParams,
+    tokenizer: TokenizerLike,
+    max_model_len: int | None,
+    cache_salt: str | None = None,
+) -> Any:
+    if hasattr(sampling_params, "clone"):
+        sampling_params = sampling_params.clone()
+    if sampling_params.max_tokens is None and max_model_len is not None:
+        sampling_params.max_tokens = max(1, max_model_len - len(token_ids))
+    eos_token_id = _tokenizer_eos_token_id(tokenizer)
+    try:
+        sampling_params.update_from_tokenizer(tokenizer)
+    except Exception:
+        logger.debug("Skipping SamplingParams tokenizer update", exc_info=True)
+
+    fields = set(getattr(EngineCoreRequest, "__struct_fields__", ()))
+    if not fields:
+        return SimpleNamespace(
+            request_id=request_id,
+            external_req_id=None,
+            prompt_token_ids=token_ids,
+            prompt_embeds=None,
+            prompt_is_token_ids=True,
+            lora_request=None,
+            cache_salt=cache_salt,
+            mm_features=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=time.time(),
+            data_parallel_rank=None,
+            client_index=0,
+            current_wave=0,
+            priority=0,
+            trace_headers=None,
+            resumable=False,
+            reasoning_ended=None,
+            reasoning_parser_kwargs=None,
+            abort_immediately=False,
+        )
+
+    values: dict[str, Any] = {
+        "request_id": request_id,
+        "external_req_id": None,
+        "prompt_token_ids": token_ids,
+        "mm_inputs": None,
+        "mm_hashes": None,
+        "mm_placeholders": None,
+        "mm_features": [],
+        "prompt_embeds": None,
+        "sampling_params": sampling_params,
+        "pooling_params": None,
+        "eos_token_id": eos_token_id,
+        "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
+        "arrival_time": time.time(),
+        "lora_request": None,
+        "cache_salt": cache_salt,
+        "data_parallel_rank": None,
+        "prompt_is_token_ids": True,
+        "client_index": 0,
+        "prompt_adapter_request": None,
+        "trace_headers": None,
+        "priority": 0,
+        "current_wave": 0,
+        "resumable": False,
+        "reasoning_ended": None,
+        "reasoning_parser_kwargs": None,
+        "abort_immediately": False,
+    }
+    try:
+        return EngineCoreRequest(**{k: v for k, v in values.items() if k in fields})
+    except TypeError:
+        logger.warning(
+            "Failed to construct vLLM EngineCoreRequest for text-only fallback; "
+            "using attribute-compatible request object instead.",
+            exc_info=True,
+        )
+        return SimpleNamespace(
+            request_id=request_id,
+            external_req_id=None,
+            prompt_token_ids=token_ids,
+            prompt_embeds=None,
+            prompt_is_token_ids=True,
+            lora_request=None,
+            cache_salt=cache_salt,
+            mm_features=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=time.time(),
+            data_parallel_rank=None,
+            client_index=0,
+            current_wave=0,
+            priority=0,
+            trace_headers=None,
+            resumable=False,
+            reasoning_ended=None,
+            reasoning_parser_kwargs=None,
+            abort_immediately=False,
+        )
+
+
+class _TextOnlyInputProcessor:
+    def __init__(self, tokenizer: TokenizerLike, local_dir: str):
+        self._tokenizer = tokenizer
+        self.renderer = _TextOnlyChatRenderer(tokenizer)
+        self.generation_config_fields = _load_generation_config_fields(local_dir)
+        self.max_model_len = _load_max_model_len(local_dir)
+
+    def get_tokenizer(self) -> TokenizerLike:
+        return self._tokenizer
+
+    def process_inputs(
+        self,
+        request_id: str,
+        prompt: dict[str, Any],
+        params: SamplingParams,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if "prompt_token_ids" in prompt:
+            token_ids = list(prompt["prompt_token_ids"])
+        elif "prompt" in prompt:
+            token_ids = list(self._tokenizer.encode(prompt["prompt"]))
+        else:
+            raise ValueError(
+                "text-only vLLM processor requires prompt text or token ids"
+            )
+
+        if hasattr(params, "update_from_generation_config"):
+            params.update_from_generation_config(
+                self.generation_config_fields,
+                _tokenizer_eos_token_id(self._tokenizer),
+            )
+        return _build_text_only_engine_request(
+            request_id,
+            token_ids,
+            params,
+            self._tokenizer,
+            self.max_model_len,
+            cache_salt=prompt.get("cache_salt"),
+        )
+
+
+def _load_text_only_input_processor(
+    local_dir: str,
+    tokenizer_mode: str,
+    trust_remote_code: bool,
+) -> tuple[_TextOnlyInputProcessor, TokenizerLike]:
+    try:
+        from vllm.transformers_utils.tokenizer import get_tokenizer
+
+        raw_tokenizer = get_tokenizer(
+            local_dir,
+            tokenizer_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
+        )
+    except Exception:
+        logger.warning(
+            "vLLM tokenizer helper failed; falling back to transformers AutoTokenizer",
+            exc_info=True,
+        )
+        from transformers import AutoTokenizer
+
+        raw_tokenizer = AutoTokenizer.from_pretrained(
+            local_dir,
+            trust_remote_code=trust_remote_code,
+        )
+
+    tokenizer = _TokenizerShim(raw_tokenizer)
+    return _TextOnlyInputProcessor(tokenizer, local_dir), tokenizer
 
 
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
@@ -122,6 +457,15 @@ def _inject_routing_metadata(
         target["mm_routing_info"] = mm_routing_info
 
 
+def _replace_engine_request(request: Any, **updates: Any) -> Any:
+    try:
+        return msgspec_replace(request, **updates)
+    except TypeError:
+        data = dict(getattr(request, "__dict__", {}))
+        data.update(updates)
+        return SimpleNamespace(**data)
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -190,17 +534,17 @@ class VllmProcessor:
         nixl_transferred = False
 
         rng_routing = _nvtx.start_range("mm_frontend:build_routing_info", color="cyan")
-        if vllm_preproc.mm_features:
+        mm_features = getattr(vllm_preproc, "mm_features", None) or []
+        if mm_features:
             mm_routing_info = build_mm_routing_info_from_features(
-                vllm_preproc.mm_features,
+                mm_features,
                 prompt_token_ids=list(vllm_preproc.prompt_token_ids),
             )
             # Forward mm_hashes to backend for hash consistency — the backend
             # will use these directly instead of recomputing.
-            mm_hashes_list = [f.mm_hash for f in vllm_preproc.mm_features]
+            mm_hashes_list = [f.mm_hash for f in mm_features]
             mm_placeholders_list = [
-                (f.mm_position.offset, f.mm_position.length)
-                for f in vllm_preproc.mm_features
+                (f.mm_position.offset, f.mm_position.length) for f in mm_features
             ]
             # Transport mm_hashes and mm_placeholders to backend via extra_args.
             if "extra_args" not in dynamo_preproc:
@@ -221,14 +565,14 @@ class VllmProcessor:
                 "[mm-routing] Built mm_routing_info: %d mm_features, "
                 "%d hashes, %d total blocks, %d blocks with MM content, "
                 "block_size=%d",
-                len(vllm_preproc.mm_features),
+                len(mm_features),
                 len(mm_hashes_list),
                 n_blocks,
                 n_mm_blocks,
                 self.block_size,
             )
             if logger.isEnabledFor(logging.DEBUG):
-                for i, f in enumerate(vllm_preproc.mm_features):
+                for i, f in enumerate(mm_features):
                     logger.debug(
                         "[mm-routing]   feature[%d]: modality=%s, hash=%s..., "
                         "offset=%d, length=%d",
@@ -260,7 +604,7 @@ class VllmProcessor:
                     # NVTX annotation is owned by MmKwargsSender.prepare via
                     # the subclass's _nvtx_label/_nvtx_color class attrs.
                     extra_update, cleanup_items = await self._sender.prepare(
-                        vllm_preproc.mm_features, modality="image"
+                        mm_features, modality="image"
                     )
                     if extra_update is not None:
                         dynamo_preproc["extra_args"].update(extra_update)
@@ -398,9 +742,9 @@ class VllmProcessor:
         if request_for_sampling.cache_salt is not None:
             prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
         if request_for_sampling.mm_processor_kwargs is not None:
-            prompt_inputs[
-                "mm_processor_kwargs"
-            ] = request_for_sampling.mm_processor_kwargs
+            prompt_inputs["mm_processor_kwargs"] = (
+                request_for_sampling.mm_processor_kwargs
+            )
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
@@ -474,12 +818,9 @@ class VllmProcessor:
             # Only skip when ALL features were transferred — a partial transfer
             # (some features had data=None due to processor cache) still needs
             # URLs for the backend to process the missing features.
-            n_features = (
-                len(vllm_preproc.mm_features) if vllm_preproc.mm_features else 0
-            )
-            n_with_data = sum(
-                1 for f in (vllm_preproc.mm_features or []) if f.data is not None
-            )
+            mm_features = getattr(vllm_preproc, "mm_features", None) or []
+            n_features = len(mm_features)
+            n_with_data = sum(1 for f in mm_features if f.data is not None)
             all_transferred = nixl_transferred and n_with_data == n_features
             if not all_transferred:
                 mm_data = extract_mm_urls(request.get("messages") or [])
@@ -488,9 +829,9 @@ class VllmProcessor:
 
             # Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
             if request_for_sampling.mm_processor_kwargs is not None:
-                dynamo_preproc[
-                    "mm_processor_kwargs"
-                ] = request_for_sampling.mm_processor_kwargs
+                dynamo_preproc["mm_processor_kwargs"] = (
+                    request_for_sampling.mm_processor_kwargs
+                )
 
             def new_post_processor() -> StreamingPostProcessor:
                 return StreamingPostProcessor(
@@ -559,8 +900,8 @@ class VllmProcessor:
             # https://github.com/vllm-project/vllm/blob/v0.19.1/vllm/v1/engine/output_processor.py
             # https://github.com/vllm-project/vllm/blob/v0.19.1/vllm/v1/engine/parallel_sampling.py
             parent_preproc = vllm_preproc
-            if parent_preproc.external_req_id is None:
-                parent_preproc = msgspec_replace(
+            if getattr(parent_preproc, "external_req_id", None) is None:
+                parent_preproc = _replace_engine_request(
                     parent_preproc, external_req_id=parent_preproc.request_id
                 )
             parent_req = ParentRequest(parent_preproc)
@@ -570,7 +911,7 @@ class VllmProcessor:
                 child_request_id, child_sampling_params = parent_req.get_child_info(
                     output_idx
                 )
-                child_preproc = msgspec_replace(
+                child_preproc = _replace_engine_request(
                     parent_preproc,
                     request_id=child_request_id,
                     sampling_params=child_sampling_params,
@@ -784,38 +1125,54 @@ class EngineFactory:
         trust_remote_code = self.config.trust_remote_code
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
-        model_config = ModelConfig(
-            model=local_dir,
-            tokenizer_mode=tokenizer_mode,
-            config_format=config_format,
-            trust_remote_code=trust_remote_code,
-        )
-        # Use processor_only cache so tensor data persists across requests.
-        # The default "lru" sender cache drops tensor data on cache hits
-        # (designed for disagg where P1 holds tensors), but we need the
-        # data to pickle and send via NIXL on repeated requests.
-        if model_config.multimodal_config is not None:
-            nixl_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
-            if nixl_enabled:
-                model_config.multimodal_config.mm_processor_cache_type = (
-                    "processor_only"
-                )
-        vllm_config = VllmConfig(
-            model_config=model_config,
-            load_config=LoadConfig(load_format=load_format),
-            cache_config=CacheConfig(),
-            # scheduler_config=SchedulerConfig(),
-        )
+        try:
+            model_config = ModelConfig(
+                model=local_dir,
+                tokenizer_mode=tokenizer_mode,
+                config_format=config_format,
+                trust_remote_code=trust_remote_code,
+            )
+            # Use processor_only cache so tensor data persists across requests.
+            # The default "lru" sender cache drops tensor data on cache hits
+            # (designed for disagg where P1 holds tensors), but we need the
+            # data to pickle and send via NIXL on repeated requests.
+            if model_config.multimodal_config is not None:
+                nixl_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
+                if nixl_enabled:
+                    model_config.multimodal_config.mm_processor_cache_type = (
+                        "processor_only"
+                    )
+            vllm_config = VllmConfig(
+                model_config=model_config,
+                load_config=LoadConfig(load_format=load_format),
+                cache_config=CacheConfig(),
+                # scheduler_config=SchedulerConfig(),
+            )
 
-        # Register dynamo's ImageLoader as vLLM's media connector so the
-        # renderer uses our LRU cache + in-flight dedup for image fetching.
-        # This eliminates data URI encoding overhead entirely.
-        if os.environ.get("VLLM_MEDIA_CONNECTOR") != "dynamo":
-            os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
-        import dynamo.common.multimodal.media_connector  # noqa: F401
+            # Register dynamo's ImageLoader as vLLM's media connector so the
+            # renderer uses our LRU cache + in-flight dedup for image fetching.
+            # This eliminates data URI encoding overhead entirely.
+            if os.environ.get("VLLM_MEDIA_CONNECTOR") != "dynamo":
+                os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
+            import dynamo.common.multimodal.media_connector  # noqa: F401
 
-        input_processor = InputProcessor(vllm_config)
-        tokenizer = input_processor.get_tokenizer()
+            input_processor = InputProcessor(vllm_config)
+            tokenizer = input_processor.get_tokenizer()
+        except Exception:
+            if os.environ.get("DYN_VLLM_DISABLE_TEXT_ONLY_FALLBACK") == "1":
+                raise
+            logger.warning(
+                "Failed to initialize vLLM ModelConfig/InputProcessor in the "
+                "frontend; falling back to text-only vLLM chat processing. "
+                "Multimodal requests require the full vLLM InputProcessor and "
+                "will not be supported by this fallback.",
+                exc_info=True,
+            )
+            input_processor, tokenizer = _load_text_only_input_processor(
+                local_dir,
+                tokenizer_mode,
+                trust_remote_code,
+            )
 
         # vLLM's renderer skips its AutoProcessor fallback when tools are present,
         # so tool calls crash unless tokenizer.chat_template is set; load from disk.

@@ -1973,7 +1973,7 @@ impl OpenAIPreprocessor {
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         trace_tokens_enabled: bool,
-        trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
+        trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -1992,7 +1992,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
-            trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
+            trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         }
 
         let state = State {
@@ -2054,7 +2054,7 @@ impl OpenAIPreprocessor {
 
                         let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
 
-                        crate::agents::trace::record_backend_finish_reason_metadata(
+                        crate::request_trace::record_backend_finish_reason_metadata(
                             inner.trace_finish_reason_metadata.as_ref(),
                             backend_output.index,
                             backend_output.finish_reason.as_ref(),
@@ -2115,7 +2115,7 @@ impl OpenAIPreprocessor {
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
                     if inner.trace_tokens_enabled {
-                        crate::agents::trace::record_llm_metric_tokens(
+                        crate::request_trace::record_llm_metric_tokens(
                             tracker.as_deref(),
                             isl,
                             current_osl,
@@ -2198,7 +2198,7 @@ impl OpenAIPreprocessor {
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
                         if inner.trace_tokens_enabled {
-                            crate::agents::trace::record_llm_metric_tokens(
+                            crate::request_trace::record_llm_metric_tokens(
                                 tracker.as_deref(),
                                 Some(usage.prompt_tokens as usize),
                                 usage.completion_tokens as usize,

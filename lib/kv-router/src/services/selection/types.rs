@@ -12,6 +12,7 @@ use crate::protocols::{
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::services::indexer::registry::IndexerKey;
+use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::PromptRequest;
 
@@ -463,6 +464,8 @@ pub struct ReservationRequest {
     pub router_config_override: Option<RouterConfigOverride>,
     #[serde(default)]
     pub expected_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub effective_prefill_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -506,9 +509,9 @@ pub struct SelectResponse {
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub endpoint: String,
-    pub effective_overlap_blocks: f64,
-    pub cached_tokens: usize,
     pub block_size: u32,
+    pub overlap: MooncakeOverlapSummary,
+    pub effective_prefill_tokens: usize,
 }
 
 #[derive(Debug, Serialize)]

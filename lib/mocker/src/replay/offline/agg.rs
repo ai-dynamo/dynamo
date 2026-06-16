@@ -39,6 +39,7 @@ pub(super) struct AggRuntimeStats {
     dispatch_history: Vec<usize>,
     dispatch_order: Vec<Uuid>,
     assigned_worker_by_uuid: HashMap<Uuid, usize>,
+    overlap_history: Vec<u32>,
     max_in_flight_seen: usize,
     prefill_marked_count: usize,
     router_freed_count: usize,
@@ -302,6 +303,8 @@ impl AggRuntime {
         } in admissions
         {
             self.traffic.on_admission(overlap_blocks, isl_blocks);
+            #[cfg(test)]
+            self.stats.overlap_history.push(overlap_blocks);
             let request = self
                 .requests
                 .get_mut(&uuid)
@@ -1776,6 +1779,11 @@ mod tests {
         let report = collector.finish();
         assert_eq!(report.request_counts.completed_requests, 2);
         assert_eq!(stats.dispatch_history.len(), 2);
+        assert_eq!(
+            stats.overlap_history,
+            vec![0, 32],
+            "second identical SGLang request should see all 32 KV blocks cached"
+        );
     }
 
     #[test]

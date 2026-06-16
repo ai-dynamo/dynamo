@@ -641,6 +641,8 @@ pub enum ActiveSequenceEventData {
         #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
+    // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
+    // at high frequency, and broadcasting it would consume disproportionate network bandwidth.
     Free,
     MarkPrefillCompleted,
 }
