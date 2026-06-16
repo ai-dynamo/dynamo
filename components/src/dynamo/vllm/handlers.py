@@ -2412,17 +2412,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         multi_modal_data: Dict[str, Any],
         request_id: str,
     ) -> tuple[EmbedsPrompt, int, None]:
-        """Convert encoder image embeddings to EmbedsPrompt for a text-only PD model.
+        """Wrap encoder embeddings as EmbedsPrompt for a text-only PD model.
 
-        When the PD is a text-only LLM (e.g. Qwen2.5-1.5B) and image embeddings
-        arrive from a separate encoder worker, vLLM's multimodal processor would
-        crash because the text-only renderer has no _mm_req_counter. This method
-        bypasses the multimodal path by projecting the encoder embeddings to the
-        PD model's hidden_size and submitting them as EmbedsPrompt.
+        When the PD is a text-only LLM and image embeddings arrive from a
+        separate encoder worker, vLLM's multimodal processor would crash because
+        the text-only renderer has no _mm_req_counter. This method bypasses the
+        multimodal path by submitting the embeddings directly as EmbedsPrompt.
 
-        NOTE: The projection uses a deterministic random matrix, so the decoded
-        text will be semantically incorrect. The system will not crash, which is
-        the goal of this proof-of-concept path.
+        Projection (enc_hidden → pd_hidden) is done on the encoder side before
+        transfer; the tensor arrives here already in the PD model's hidden space.
 
         Requires --enable-prompt-embeds on the vLLM engine.
         """
