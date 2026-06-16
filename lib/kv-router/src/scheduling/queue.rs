@@ -36,15 +36,13 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
 
 struct ClassQueueCounters {
-    policy_class: String,
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
     pending_cached_tokens: AtomicUsize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassQueueStats {
-    pub policy_class: String,
     pub pending_count: usize,
     pub pending_isl_tokens: usize,
     pub pending_cached_tokens: usize,
@@ -227,8 +225,7 @@ impl<
             profile
                 .classes()
                 .iter()
-                .map(|class| ClassQueueCounters {
-                    policy_class: class.name.clone(),
+                .map(|_| ClassQueueCounters {
                     pending_count: AtomicUsize::new(0),
                     pending_isl_tokens: AtomicUsize::new(0),
                     pending_cached_tokens: AtomicUsize::new(0),
@@ -427,16 +424,13 @@ impl<
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
 
-    pub fn class_queue_stats(&self) -> Vec<ClassQueueStats> {
-        self.class_counters
-            .iter()
-            .map(|counters| ClassQueueStats {
-                policy_class: counters.policy_class.clone(),
-                pending_count: counters.pending_count.load(AtomicOrdering::Relaxed),
-                pending_isl_tokens: counters.pending_isl_tokens.load(AtomicOrdering::Relaxed),
-                pending_cached_tokens: counters.pending_cached_tokens.load(AtomicOrdering::Relaxed),
-            })
-            .collect()
+    pub fn class_queue_stats(&self, class_index: usize) -> Option<ClassQueueStats> {
+        let counters = self.class_counters.get(class_index)?;
+        Some(ClassQueueStats {
+            pending_count: counters.pending_count.load(AtomicOrdering::Relaxed),
+            pending_isl_tokens: counters.pending_isl_tokens.load(AtomicOrdering::Relaxed),
+            pending_cached_tokens: counters.pending_cached_tokens.load(AtomicOrdering::Relaxed),
+        })
     }
 
     pub fn supports_overlap_refresh(&self) -> bool {
@@ -510,7 +504,7 @@ impl<
         let class_index = self
             .profile
             .resolve_class_index(request.policy_class.as_deref());
-        let class = self.profile.class(class_index).clone();
+        let class = self.profile.class(class_index);
 
         if !class.queueing_enabled() {
             self.admit_one(request, decay_now);
@@ -523,7 +517,7 @@ impl<
         }
 
         let should_queue = self.pending.has_backlog(class_index)
-            || self.all_workers_prefill_busy(&class, request.eligibility(), decay_now);
+            || self.all_workers_prefill_busy(class, request.eligibility(), decay_now);
         if should_queue {
             let snapshot = {
                 let workers = self.workers_with_configs.borrow();
@@ -1877,13 +1871,12 @@ policy_classes:
         assert!(!error.is_overload());
 
         assert_eq!(
-            queue.class_queue_stats(),
-            vec![ClassQueueStats {
-                policy_class: "capped".to_string(),
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
                 pending_count: 1,
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 0,
-            }]
+            })
         );
     }
 
@@ -2461,7 +2454,10 @@ policy_classes:
             .enqueue_with_block_hashes(req2, Some(vec![LocalBlockHash(42)]))
             .await;
         assert_eq!(queue.pending_count(), 1);
-        assert_eq!(queue.class_queue_stats()[0].pending_cached_tokens, 64);
+        assert_eq!(
+            queue.class_queue_stats(0).unwrap().pending_cached_tokens,
+            64
+        );
 
         slots
             .mark_prefill_completed(&"req-1".to_string(), decay_now())
@@ -2483,7 +2479,7 @@ policy_classes:
             "DRR-selected request must be removed before refresh"
         );
         assert_eq!(
-            queue.class_queue_stats()[0].pending_cached_tokens,
+            queue.class_queue_stats(0).unwrap().pending_cached_tokens,
             0,
             "queue counters must reflect the irrevocable dequeue"
         );

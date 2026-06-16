@@ -410,8 +410,8 @@ where
         self.queue.pending_isl_tokens()
     }
 
-    pub fn class_queue_stats(&self) -> Vec<ClassQueueStats> {
-        self.queue.class_queue_stats()
+    pub fn class_queue_stats(&self, class_index: usize) -> Option<ClassQueueStats> {
+        self.queue.class_queue_stats(class_index)
     }
 
     pub fn supports_overlap_refresh(&self) -> bool {

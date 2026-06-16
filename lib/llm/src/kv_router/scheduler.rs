@@ -37,7 +37,8 @@ where
     RF: OverlapScoresRefresh,
 {
     inner: Arc<LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, Sel, RF>>,
-    queue_metrics: HashMap<String, RouterQueueMetricHandles>,
+    queue_metrics: Vec<RouterQueueMetricHandles>,
+    queue_metric_indices: HashMap<String, usize>,
 }
 
 impl<Sel, RF> KvScheduler<Sel, RF>
@@ -86,13 +87,14 @@ where
         let queue_metrics = profile
             .classes()
             .iter()
-            .map(|class| {
-                (
-                    class.name.clone(),
-                    ROUTER_QUEUE_METRICS.handles(metric_model, worker_type, &class.name),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+            .map(|class| ROUTER_QUEUE_METRICS.handles(metric_model, worker_type, &class.name))
+            .collect::<Vec<_>>();
+        let queue_metric_indices = profile
+            .classes()
+            .iter()
+            .enumerate()
+            .map(|(index, class)| (class.name.clone(), index))
+            .collect();
 
         let inner = Arc::new(LocalScheduler::new_with_policy_profile(
             slots,
@@ -117,7 +119,9 @@ where
         let mut queue_updates = inner.subscribe_queue_updates();
         tokio::spawn(async move {
             let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
-            update_queue_metrics(metrics_scheduler.class_queue_stats(), &background_metrics);
+            update_queue_metrics(&background_metrics, |class_index| {
+                metrics_scheduler.class_queue_stats(class_index)
+            });
 
             loop {
                 tokio::select! {
@@ -126,10 +130,14 @@ where
                         if result.is_err() {
                             break;
                         }
-                        update_queue_metrics(metrics_scheduler.class_queue_stats(), &background_metrics);
+                        update_queue_metrics(&background_metrics, |class_index| {
+                            metrics_scheduler.class_queue_stats(class_index)
+                        });
                     }
                     _ = recheck_interval.tick() => {
-                        update_queue_metrics(metrics_scheduler.class_queue_stats(), &background_metrics);
+                        update_queue_metrics(&background_metrics, |class_index| {
+                            metrics_scheduler.class_queue_stats(class_index)
+                        });
                     }
                 }
             }
@@ -138,6 +146,7 @@ where
         Ok(Self {
             inner,
             queue_metrics,
+            queue_metric_indices,
         })
     }
 
@@ -277,14 +286,18 @@ where
             .await;
         match &response {
             Err(KvSchedulerError::Backpressure { reason, .. }) => {
-                if let Some(metrics) = self.queue_metrics.values().next()
+                if let Some(metrics) = self.queue_metrics.first()
                     && router_backpressure_reason_label(reason) == "max_queued_isl_tokens_exceeded"
                 {
                     metrics.legacy_backpressure_rejections.inc();
                 }
             }
             Err(KvSchedulerError::QueueRejected(rejection)) => {
-                if let Some(metrics) = self.queue_metrics.get(&rejection.policy_class) {
+                if let Some(metrics) = self
+                    .queue_metric_indices
+                    .get(&rejection.policy_class)
+                    .and_then(|index| self.queue_metrics.get(*index))
+                {
                     match rejection.limit_kind {
                         dynamo_kv_router::scheduling::QueueLimitKind::Requests => {
                             metrics.request_limit_rejections.inc();
@@ -300,7 +313,7 @@ where
             }
             _ => {}
         }
-        update_queue_metrics(self.inner.class_queue_stats(), &self.queue_metrics);
+        self.update_queue_metrics();
         response
     }
 
@@ -314,13 +327,13 @@ where
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.inner.mark_prefill_completed(request_id).await?;
-        update_queue_metrics(self.inner.class_queue_stats(), &self.queue_metrics);
+        self.update_queue_metrics();
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.inner.free(request_id).await?;
-        update_queue_metrics(self.inner.class_queue_stats(), &self.queue_metrics);
+        self.update_queue_metrics();
         Ok(())
     }
 
@@ -366,6 +379,12 @@ where
     pub fn supports_overlap_refresh(&self) -> bool {
         self.inner.supports_overlap_refresh()
     }
+
+    fn update_queue_metrics(&self) {
+        update_queue_metrics(&self.queue_metrics, |class_index| {
+            self.inner.class_queue_stats(class_index)
+        });
+    }
 }
 
 fn router_backpressure_reason_label(reason: &RouterBackpressureReason) -> &'static str {
@@ -375,11 +394,15 @@ fn router_backpressure_reason_label(reason: &RouterBackpressureReason) -> &'stat
 }
 
 fn update_queue_metrics(
-    stats: Vec<dynamo_kv_router::queue::ClassQueueStats>,
-    handles: &HashMap<String, RouterQueueMetricHandles>,
+    handles: &[RouterQueueMetricHandles],
+    mut stats_for: impl FnMut(usize) -> Option<dynamo_kv_router::queue::ClassQueueStats>,
 ) {
-    for stats in stats {
-        let Some(handles) = handles.get(&stats.policy_class) else {
+    for (class_index, handles) in handles.iter().enumerate() {
+        let Some(stats) = stats_for(class_index) else {
+            debug_assert!(
+                false,
+                "missing queue counters for policy class {class_index}"
+            );
             continue;
         };
         handles.pending_requests.set(stats.pending_count as i64);
@@ -407,6 +430,38 @@ mod tests {
         namespace
             .component(format!("test-component-{name}"))
             .unwrap()
+    }
+
+    #[test]
+    fn queue_metrics_are_updated_by_class_index() {
+        let handles = ["latency", "bulk"]
+            .map(|class| ROUTER_QUEUE_METRICS.handles("index-test", "decode", class));
+        let stats = [
+            dynamo_kv_router::queue::ClassQueueStats {
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 64,
+            },
+            dynamo_kv_router::queue::ClassQueueStats {
+                pending_count: 3,
+                pending_isl_tokens: 384,
+                pending_cached_tokens: 192,
+            },
+        ];
+
+        update_queue_metrics(&handles, |class_index| stats.get(class_index).copied());
+
+        for (handles, stats) in handles.iter().zip(stats) {
+            assert_eq!(handles.pending_requests.get(), stats.pending_count as i64);
+            assert_eq!(
+                handles.pending_isl_tokens.get(),
+                stats.pending_isl_tokens as i64
+            );
+            assert_eq!(
+                handles.pending_cached_tokens.get(),
+                stats.pending_cached_tokens as i64
+            );
+        }
     }
 
     #[tokio::test]
