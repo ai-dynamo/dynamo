@@ -145,6 +145,7 @@ pub async fn build_preprocessed_routing(
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    enable_multimodal_cache_indexer: bool,
     enforce_disagg: bool,
 ) -> anyhow::Result<PreprocessedRouting> {
     let min_initial_workers = min_initial_workers_from_env()?;
@@ -152,7 +153,13 @@ pub async fn build_preprocessed_routing(
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
-    let embedding_cache_indexer = try_build_cache_indexer(router_client.endpoint.component()).await;
+    let embedding_cache_indexer = if enable_multimodal_cache_indexer
+        && matches!(router_mode, RouterMode::DeviceAwareWeighted)
+    {
+        try_build_cache_indexer(router_client.endpoint.component()).await
+    } else {
+        None
+    };
 
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
