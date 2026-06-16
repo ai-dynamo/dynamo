@@ -565,7 +565,6 @@ mod tests {
             router.mark_active_for_test();
 
             assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
-            assert!(router.is_activated());
             assert!(!router.is_deactivated());
             assert!(router.can_serve_requests());
         }
@@ -582,7 +581,6 @@ mod tests {
 
         for router in [&strict, &fallback] {
             assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
-            assert!(router.is_activated());
             assert!(router.is_deactivated());
         }
         assert!(!strict.can_serve_requests());
@@ -590,26 +588,36 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_transitions_are_idempotent() {
+    fn deactivation_is_idempotent() {
         let router = make_test_router(true);
         router.mark_active_for_test();
         router.deactivate();
         router.deactivate();
         assert!(router.is_deactivated());
-
-        router.reactivate();
-        router.reactivate();
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
-        assert!(router.can_serve_requests());
     }
 
     #[test]
-    fn pending_router_ignores_worker_availability_transitions() {
+    fn pending_router_latches_worker_availability_transitions() {
         let router = make_test_router(true);
         router.deactivate();
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
+
+        router.reactivate();
         router.reactivate();
 
         assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
+    }
+
+    #[test]
+    fn activation_does_not_overwrite_latched_deactivation() {
+        let router = make_test_router(true);
+        router.deactivate();
+
+        assert_eq!(
+            router.complete_activation(),
+            PrefillLifecycleState::Unavailable
+        );
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
     }
 
     #[test]

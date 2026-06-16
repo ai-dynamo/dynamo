@@ -177,17 +177,37 @@ impl PrefillRouter {
             InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
         };
 
-        // Set the router (ignore error if already set)
+        // Set the router (ignore error if already set).
         let _ = self.prefill_router.set(inner_router);
-        self.lifecycle
-            .store(PrefillLifecycleState::Active as u8, Ordering::Release);
-
-        tracing::info!(
-            router_mode = ?self.router_mode,
-            "Prefill router activated successfully"
-        );
+        match self.complete_activation() {
+            PrefillLifecycleState::Active => {
+                tracing::info!(
+                    router_mode = ?self.router_mode,
+                    "Prefill router activated successfully"
+                );
+            }
+            PrefillLifecycleState::Unavailable => {
+                tracing::info!(
+                    router_mode = ?self.router_mode,
+                    "Prefill router initialized after its workers became unavailable"
+                );
+            }
+            PrefillLifecycleState::Pending => unreachable!("activation must leave pending state"),
+        }
 
         Ok(())
+    }
+
+    pub(super) fn complete_activation(&self) -> PrefillLifecycleState {
+        match self.lifecycle.compare_exchange(
+            PrefillLifecycleState::Pending as u8,
+            PrefillLifecycleState::Active as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => PrefillLifecycleState::Active,
+            Err(current) => PrefillLifecycleState::from_atomic(current),
+        }
     }
 
     /// Attach the freshly-created prefill `Client` to this WorkerSet's monitor (handed in
@@ -209,14 +229,17 @@ impl PrefillRouter {
     /// The inner router is preserved so that when workers rejoin (same endpoint/discovery),
     /// the Client's discovery subscription picks them up automatically.
     pub fn deactivate(&self) {
-        let transition = self.lifecycle.compare_exchange(
-            PrefillLifecycleState::Active as u8,
-            PrefillLifecycleState::Unavailable as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        if let Err(current) = transition {
-            PrefillLifecycleState::from_atomic(current);
+        let transition =
+            self.lifecycle
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    match PrefillLifecycleState::from_atomic(current) {
+                        PrefillLifecycleState::Pending | PrefillLifecycleState::Active => {
+                            Some(PrefillLifecycleState::Unavailable as u8)
+                        }
+                        PrefillLifecycleState::Unavailable => None,
+                    }
+                });
+        if transition.is_err() {
             return;
         }
         tracing::info!(
@@ -241,9 +264,15 @@ impl PrefillRouter {
     /// new workers. This is acceptable for normal restart scenarios where the
     /// endpoint identity is stable.
     pub fn reactivate(&self) {
+        let initialized = self.prefill_router.get().is_some();
+        let target = if initialized {
+            PrefillLifecycleState::Active
+        } else {
+            PrefillLifecycleState::Pending
+        };
         let transition = self.lifecycle.compare_exchange(
             PrefillLifecycleState::Unavailable as u8,
-            PrefillLifecycleState::Active as u8,
+            target as u8,
             Ordering::AcqRel,
             Ordering::Acquire,
         );
@@ -251,11 +280,29 @@ impl PrefillRouter {
             PrefillLifecycleState::from_atomic(current);
             return;
         }
-        tracing::info!(
-            model_name = %self.model_name,
-            namespace = %self.namespace,
-            "Prefill router reactivated (prefill workers rejoined)"
-        );
+        let state =
+            if target == PrefillLifecycleState::Pending && self.prefill_router.get().is_some() {
+                self.complete_activation()
+            } else {
+                target
+            };
+        match state {
+            PrefillLifecycleState::Active => {
+                tracing::info!(
+                    model_name = %self.model_name,
+                    namespace = %self.namespace,
+                    "Prefill router reactivated (prefill workers rejoined)"
+                );
+            }
+            PrefillLifecycleState::Pending => {
+                tracing::info!(
+                    model_name = %self.model_name,
+                    namespace = %self.namespace,
+                    "Prefill workers rejoined before router initialization completed"
+                );
+            }
+            PrefillLifecycleState::Unavailable => {}
+        }
     }
 
     /// Whether this router is currently deactivated (prefill workers died).
@@ -265,7 +312,7 @@ impl PrefillRouter {
 
     /// Whether the inner router has initialized, even if workers are unavailable.
     pub fn is_activated(&self) -> bool {
-        self.lifecycle_state() != PrefillLifecycleState::Pending
+        self.prefill_router.get().is_some()
     }
 
     pub(super) fn lifecycle_state(&self) -> PrefillLifecycleState {

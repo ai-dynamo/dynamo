@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use anyhow::Result;
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
 
-use super::{InnerPrefillRouter, PrefillError, PrefillQueryOutcome, PrefillRouter};
+use super::{
+    InnerPrefillRouter, PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter,
+};
 
 impl PrefillRouter {
     /// Query the best prefill worker without executing a request.
@@ -24,6 +26,9 @@ impl PrefillRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillQueryOutcome> {
+        if self.lifecycle_state() != PrefillLifecycleState::Active {
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
         let prefill_router = self
             .prefill_router
             .get()

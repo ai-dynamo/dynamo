@@ -64,15 +64,15 @@ impl PrefillRouter {
             ));
         };
 
-        if let Some(ref tracker) = tracker {
-            tracker.record_prefill_complete();
-        }
-
         if let Some(error) = first_output.err() {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned error in output".to_string(),
                 Some(Box::new(error)),
             ));
+        }
+
+        if let Some(ref tracker) = tracker {
+            tracker.record_prefill_complete();
         }
 
         let mut prompt_tokens_details = first_output
@@ -82,6 +82,12 @@ impl PrefillRouter {
             .and_then(|usage| usage.prompt_tokens_details.clone());
 
         while let Some(next) = prefill_response.next().await {
+            if let Some(error) = next.err() {
+                return Err(PrefillError::PrefillError(
+                    "Prefill router returned error in output stream".to_string(),
+                    Some(Box::new(error)),
+                ));
+            }
             if let Some(output) = next.data.as_ref()
                 && prompt_tokens_details.is_none()
             {
@@ -129,5 +135,60 @@ impl PrefillRouter {
             }
             .instrument(span),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::stream;
+    use serde_json::json;
+
+    use dynamo_runtime::pipeline::{ResponseStream, context::Controller};
+
+    use super::*;
+
+    fn prefill_stream(
+        items: Vec<Annotated<LLMEngineOutput>>,
+    ) -> ManyOut<Annotated<LLMEngineOutput>> {
+        ResponseStream::new(
+            Box::pin(stream::iter(items)),
+            Arc::new(Controller::default()),
+        )
+    }
+
+    fn valid_prefill_output() -> Annotated<LLMEngineOutput> {
+        Annotated::from_data(LLMEngineOutput {
+            disaggregated_params: Some(json!({})),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn first_output_error_does_not_record_prefill_complete() {
+        let tracker = Arc::new(RequestTracker::new());
+        let result = PrefillRouter::consume_prefill_stream(
+            prefill_stream(vec![Annotated::from_error("prefill failed")]),
+            Some(tracker.clone()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(tracker.record_prefill_complete());
+    }
+
+    #[tokio::test]
+    async fn later_output_error_is_propagated_after_prefill_arrival() {
+        let tracker = Arc::new(RequestTracker::new());
+        let result = PrefillRouter::consume_prefill_stream(
+            prefill_stream(vec![
+                valid_prefill_output(),
+                Annotated::from_error("prefill stream failed"),
+            ]),
+            Some(tracker.clone()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!tracker.record_prefill_complete());
     }
 }
