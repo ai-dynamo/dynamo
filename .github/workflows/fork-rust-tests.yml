@@ -1,0 +1,63 @@
+# Fork-owned Rust tests on GitHub-hosted runners.
+#
+# The upstream `pre-merge.yml` rust-tests/clippy jobs target `runs-on: group:
+# Fastchecker` (a self-hosted runner group that exists in ai-dynamo/dynamo but
+# not in this fork) and container images (e.g. `helm-tester`) the fork never
+# published — so they never start. This workflow runs the crates we actually
+# modify on standard `ubuntu-latest` runners so our unit tests genuinely
+# execute on every PR.
+#
+# Scope is intentionally narrow: the crates changed by the
+# preserve-upstream-status work. `dynamo-llm` is built with
+# `--no-default-features` to skip the Linux/CUDA-only `block-manager` feature,
+# which needs NIXL/CUDA toolchains not available on hosted runners.
+name: fork-rust-tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: fork-rust-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fork-rust-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-fork-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-fork-cargo-
+
+      # Note: no repo-wide `cargo fmt --check` here — the inherited tree carries
+      # pre-existing formatting debt in files unrelated to this work, which would
+      # make this job red for the wrong reasons. Formatting of changed files is
+      # verified locally before push.
+
+      # Scoped to the modules this work changes, so the gate is reliable and
+      # doesn't depend on unrelated pre-existing tests (some of which need
+      # GPU/block-manager at runtime). Broaden if/when the fork's full suite
+      # runs cleanly on hosted runners.
+      # Quoted: the `::` module-filter trips the YAML parser unquoted.
+      - name: Test dynamo-runtime (error)
+        run: "cargo test -p dynamo-runtime --lib error::"
+
+      - name: Test dynamo-llm http service (no default features)
+        run: "cargo test -p dynamo-llm --lib --no-default-features http::service::"
