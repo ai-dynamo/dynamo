@@ -14,23 +14,51 @@ use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 use crate::sequences::{SequencePublisher, SequenceSubscriber};
-use crate::services::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
-
-use super::registry::SlotTrackerRegistry;
+use crate::services::common::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
 
 pub(crate) const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 const PEER_COMMAND_CHANNEL_CAPACITY: usize = 64;
 const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SlotReplicaEvent {
+pub(crate) struct ScopedReplicaEvent {
     pub model_name: String,
     pub tenant_id: String,
     pub block_size: u32,
     pub event: ActiveSequenceEvent,
 }
 
-pub(crate) type ReplicaEventSender = mpsc::Sender<SlotReplicaEvent>;
+pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReplicaSyncConfig {
+    process_id: u64,
+    outbound_tx: ReplicaEventSender,
+}
+
+impl ReplicaSyncConfig {
+    pub(crate) fn new(process_id: u64, outbound_tx: ReplicaEventSender) -> Self {
+        Self {
+            process_id,
+            outbound_tx,
+        }
+    }
+
+    pub(crate) fn process_id(&self) -> u64 {
+        self.process_id
+    }
+
+    pub(crate) fn is_self_event(&self, event: &ActiveSequenceEvent) -> bool {
+        event.router_id == self.process_id
+    }
+}
+
+pub(crate) struct ScopedReplicaSync {
+    pub publisher: ScopedSequencePublisher,
+    pub enabled: bool,
+    pub process_id: u64,
+    pub channel: Option<(mpsc::Sender<ActiveSequenceEvent>, ChannelSequenceSubscriber)>,
+}
 
 #[derive(Clone)]
 pub(crate) struct ScopedSequencePublisher {
@@ -75,7 +103,7 @@ impl SequencePublisher for ScopedSequencePublisher {
         let Some(replica) = &self.replica else {
             return future::ready(Ok(()));
         };
-        let envelope = SlotReplicaEvent {
+        let envelope = ScopedReplicaEvent {
             model_name: replica.model_name.to_string(),
             tenant_id: replica.tenant_id.to_string(),
             block_size: replica.block_size,
@@ -134,12 +162,66 @@ impl SequenceSubscriber for ChannelSequenceSubscriber {
     }
 }
 
-pub(crate) fn generate_process_id() -> u64 {
+fn generate_process_id() -> u64 {
     loop {
         let id = rand::random();
         if id != 0 {
             return id;
         }
+    }
+}
+
+fn replica_sync_bind_endpoint(port: u16) -> Result<String> {
+    if port == 0 {
+        anyhow::bail!("replica sync port must be greater than zero");
+    }
+    Ok(format!("tcp://*:{port}"))
+}
+
+pub(crate) fn setup_replica_sync(
+    port: Option<u16>,
+    initial_peers: &[String],
+    cancel_token: CancellationToken,
+) -> Result<Option<ReplicaSyncConfig>> {
+    let Some(port) = port else {
+        if !initial_peers.is_empty() {
+            anyhow::bail!("--replica-sync-peers requires --replica-sync-port");
+        }
+        return Ok(None);
+    };
+
+    let bind_endpoint = replica_sync_bind_endpoint(port)?;
+    let process_id = generate_process_id();
+    let outbound_tx = start_replica_publisher(&bind_endpoint, cancel_token)?;
+    Ok(Some(ReplicaSyncConfig::new(process_id, outbound_tx)))
+}
+
+pub(crate) fn setup_scoped_replica_sync(
+    config: Option<&ReplicaSyncConfig>,
+    model_name: &str,
+    tenant_id: &str,
+    block_size: u32,
+) -> ScopedReplicaSync {
+    let Some(config) = config else {
+        return ScopedReplicaSync {
+            publisher: ScopedSequencePublisher::disabled(),
+            enabled: false,
+            process_id: 0,
+            channel: None,
+        };
+    };
+
+    let (replica_tx, replica_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+    ScopedReplicaSync {
+        publisher: ScopedSequencePublisher::enabled(
+            Arc::from(model_name),
+            Arc::from(tenant_id),
+            block_size,
+            config.outbound_tx.clone(),
+        ),
+        enabled: true,
+        process_id: config.process_id,
+        channel: Some((replica_tx, ChannelSequenceSubscriber::new(replica_rx))),
     }
 }
 
@@ -150,7 +232,7 @@ pub(crate) fn start_replica_publisher(
     validate_endpoint(bind_endpoint)?;
     let mut socket = create_bound_pub_socket(bind_endpoint)
         .with_context(|| format!("failed to bind replica publisher to `{bind_endpoint}`"))?;
-    let (tx, mut rx) = mpsc::channel::<SlotReplicaEvent>(REPLICA_EVENT_CHANNEL_CAPACITY);
+    let (tx, mut rx) = mpsc::channel::<ScopedReplicaEvent>(REPLICA_EVENT_CHANNEL_CAPACITY);
 
     tokio::spawn(async move {
         loop {
@@ -170,7 +252,7 @@ pub(crate) fn start_replica_publisher(
                 Err(error) => {
                     tracing::error!(
                         request_id = %request_id,
-                        "Failed to encode slot-tracker replica event: {error}"
+                        "Failed to encode active-sequence replica event: {error}"
                     );
                     continue;
                 }
@@ -181,7 +263,7 @@ pub(crate) fn start_replica_publisher(
             {
                 tracing::error!(
                     request_id = %request_id,
-                    "Failed to publish slot-tracker replica event: {error}"
+                    "Failed to publish active-sequence replica event: {error}"
                 );
             }
         }
@@ -191,24 +273,23 @@ pub(crate) fn start_replica_publisher(
 }
 
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 pub(crate) enum PeerError {
     #[error(transparent)]
     InvalidEndpoint(#[from] anyhow::Error),
-
-    #[error("peer endpoint matches this replica's advertised endpoint")]
-    SelfEndpoint,
 
     #[error("replica peer manager is unavailable")]
     Unavailable,
 }
 
 #[derive(Clone)]
+#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 pub(crate) struct PeerManager {
     command_tx: mpsc::Sender<PeerCommand>,
     peers: Arc<RwLock<HashSet<String>>>,
-    advertised_endpoint: Option<Arc<str>>,
 }
 
+#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 enum PeerCommand {
     Register {
         endpoint: String,
@@ -221,21 +302,19 @@ enum PeerCommand {
 }
 
 impl PeerManager {
-    pub(crate) fn start(
-        registry: Arc<SlotTrackerRegistry>,
+    pub(crate) fn start<F>(
         initial_peers: Vec<String>,
-        advertised_endpoint: Option<String>,
         cancel_token: CancellationToken,
-    ) -> Result<Self> {
-        let advertised_endpoint = advertised_endpoint.map(Arc::<str>::from);
-        if let Some(endpoint) = advertised_endpoint.as_deref() {
-            validate_endpoint(endpoint)
-                .with_context(|| format!("invalid advertised replica endpoint `{endpoint}`"))?;
-        }
+        handle_event: F,
+    ) -> Result<Self>
+    where
+        F: Fn(ScopedReplicaEvent) + Send + Sync + 'static,
+    {
         let mut socket = create_sub_socket(REPLICA_TOPIC)?;
         let mut configured_peers = HashSet::new();
         for endpoint in initial_peers {
-            validate_peer_endpoint(&endpoint, advertised_endpoint.as_deref())?;
+            validate_endpoint(&endpoint)
+                .with_context(|| format!("invalid replica peer endpoint `{endpoint}`"))?;
             if configured_peers.insert(endpoint.clone()) {
                 socket
                     .connect(&endpoint)
@@ -258,9 +337,9 @@ impl PeerManager {
                     }
                     message = socket.recv_multipart() => {
                         match message {
-                            Ok(frames) => handle_replica_message(&registry, frames),
+                            Ok(frames) => handle_replica_message(&handle_event, frames),
                             Err(error) => {
-                                tracing::error!("Failed to receive slot-tracker replica event: {error}");
+                                tracing::error!("Failed to receive active-sequence replica event: {error}");
                             }
                         }
                     }
@@ -268,15 +347,12 @@ impl PeerManager {
             }
         });
 
-        Ok(Self {
-            command_tx,
-            peers,
-            advertised_endpoint,
-        })
+        Ok(Self { command_tx, peers })
     }
 
+    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, PeerError> {
-        validate_peer_endpoint(&endpoint, self.advertised_endpoint.as_deref())?;
+        validate_endpoint(&endpoint).map_err(PeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
         self.command_tx
             .send(PeerCommand::Register { endpoint, response })
@@ -288,6 +364,7 @@ impl PeerManager {
             .map_err(PeerError::InvalidEndpoint)
     }
 
+    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, PeerError> {
         validate_endpoint(&endpoint).map_err(PeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
@@ -301,6 +378,7 @@ impl PeerManager {
             .map_err(PeerError::InvalidEndpoint)
     }
 
+    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) fn list_peers(&self) -> Vec<String> {
         let mut peers: Vec<_> = self.peers.read().iter().cloned().collect();
         peers.sort();
@@ -308,19 +386,8 @@ impl PeerManager {
     }
 }
 
-fn validate_peer_endpoint(
-    endpoint: &str,
-    advertised_endpoint: Option<&str>,
-) -> Result<(), PeerError> {
-    validate_endpoint(endpoint).map_err(PeerError::InvalidEndpoint)?;
-    if advertised_endpoint.is_some_and(|advertised| endpoint == advertised) {
-        return Err(PeerError::SelfEndpoint);
-    }
-    Ok(())
-}
-
 fn handle_peer_command(
-    socket: &crate::services::zmq::ZmqSocket,
+    socket: &crate::services::common::zmq::ZmqSocket,
     peers: &RwLock<HashSet<String>>,
     command: PeerCommand,
 ) {
@@ -356,39 +423,42 @@ fn handle_peer_command(
     }
 }
 
-fn handle_replica_message(
-    registry: &SlotTrackerRegistry,
-    frames: crate::services::zmq::MultipartMessage,
-) {
+fn handle_replica_message<F>(
+    handle_event: &F,
+    frames: crate::services::common::zmq::MultipartMessage,
+) where
+    F: Fn(ScopedReplicaEvent),
+{
     let [topic, payload] = frames.as_slice() else {
         tracing::debug!(
             frame_count = frames.len(),
-            "Dropping malformed slot-tracker replica message"
+            "Dropping malformed active-sequence replica message"
         );
         return;
     };
     if topic.as_slice() != REPLICA_TOPIC {
-        tracing::debug!("Dropping slot-tracker replica message with unexpected topic");
+        tracing::debug!("Dropping active-sequence replica message with unexpected topic");
         return;
     }
-    let event: SlotReplicaEvent = match rmp_serde::from_slice(payload) {
+    let event: ScopedReplicaEvent = match rmp_serde::from_slice(payload) {
         Ok(event) => event,
         Err(error) => {
-            tracing::debug!("Dropping malformed slot-tracker replica payload: {error}");
+            tracing::debug!("Dropping malformed active-sequence replica payload: {error}");
             return;
         }
     };
-    registry.dispatch_replica_event(event);
+    handle_event(event);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
-    use crate::services::slot_tracker::registry::TrackerKey;
+    #[cfg(feature = "standalone-slot-tracker")]
+    use crate::services::slot_tracker::registry::{SlotTrackerRegistry, TrackerKey};
 
-    fn event() -> SlotReplicaEvent {
-        SlotReplicaEvent {
+    fn event() -> ScopedReplicaEvent {
+        ScopedReplicaEvent {
             model_name: "model".to_string(),
             tenant_id: "tenant".to_string(),
             block_size: 16,
@@ -403,27 +473,25 @@ mod tests {
     }
 
     #[test]
-    fn replica_event_round_trips_named_messagepack() {
-        let encoded = rmp_serde::to_vec_named(&event()).unwrap();
-        let decoded: SlotReplicaEvent = rmp_serde::from_slice(&encoded).unwrap();
-
-        assert_eq!(decoded.model_name, "model");
-        assert_eq!(decoded.tenant_id, "tenant");
-        assert_eq!(decoded.block_size, 16);
-        assert_eq!(decoded.event.request_id, "request");
+    fn replica_sync_port_builds_wildcard_bind_endpoint() {
+        assert_eq!(replica_sync_bind_endpoint(8092).unwrap(), "tcp://*:8092");
+        assert!(replica_sync_bind_endpoint(0).is_err());
     }
 
     #[test]
-    fn process_identity_is_nonzero() {
-        assert_ne!(generate_process_id(), 0);
-    }
+    fn replica_sync_requires_port_for_initial_peers() {
+        let error = setup_replica_sync(
+            None,
+            &["tcp://127.0.0.1:8092".to_string()],
+            CancellationToken::new(),
+        )
+        .unwrap_err();
 
-    #[test]
-    fn advertised_endpoint_cannot_be_registered_as_peer() {
-        let error = validate_peer_endpoint("tcp://127.0.0.1:8092", Some("tcp://127.0.0.1:8092"))
-            .unwrap_err();
-
-        assert!(error.to_string().contains("advertised endpoint"));
+        assert!(
+            error
+                .to_string()
+                .contains("--replica-sync-peers requires --replica-sync-port")
+        );
     }
 
     #[tokio::test]
@@ -441,28 +509,50 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn peer_manager_registers_and_deregisters_endpoints() {
+    async fn dynamic_peer_registration_controls_delivery() {
+        let endpoint = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
-        let registry = Arc::new(SlotTrackerRegistry::new(cancel_token.clone()));
-        let manager = PeerManager::start(
-            registry,
-            Vec::new(),
-            Some("tcp://127.0.0.1:8092".to_string()),
-            cancel_token.clone(),
-        )
-        .unwrap();
-        let endpoint = "tcp://127.0.0.1:8093".to_string();
+        let outbound =
+            start_replica_publisher(&endpoint, cancel_token.child_token()).expect("publisher");
+        let (received_tx, mut received_rx) = mpsc::channel(16);
+        let manager = PeerManager::start(Vec::new(), cancel_token.child_token(), move |event| {
+            let _ = received_tx.try_send(event);
+        })
+        .expect("peer manager");
 
         assert!(manager.register_peer(endpoint.clone()).await.unwrap());
-        assert!(!manager.register_peer(endpoint.clone()).await.unwrap());
-        assert_eq!(manager.list_peers(), vec![endpoint.clone()]);
-        assert!(manager.deregister_peer(endpoint.clone()).await.unwrap());
-        assert!(!manager.deregister_peer(endpoint).await.unwrap());
-        assert!(manager.list_peers().is_empty());
+
+        let mut delivered = false;
+        for attempt in 0..40 {
+            let mut event = event();
+            event.event.request_id = format!("warmup-{attempt}");
+            outbound.send(event).await.unwrap();
+            if tokio::time::timeout(std::time::Duration::from_millis(50), received_rx.recv())
+                .await
+                .is_ok()
+            {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "dynamically registered peer received no events");
+
+        assert!(manager.deregister_peer(endpoint).await.unwrap());
+        while received_rx.try_recv().is_ok() {}
+
+        let mut after_disconnect = event();
+        after_disconnect.event.request_id = "after-disconnect".to_string();
+        outbound.send(after_disconnect).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), received_rx.recv(),)
+                .await
+                .is_err()
+        );
 
         cancel_token.cancel();
     }
 
+    #[cfg(feature = "standalone-slot-tracker")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn zmq_replica_sync_propagates_request_lifecycle() {
         let endpoint_a = reserve_tcp_endpoint();
@@ -472,21 +562,18 @@ mod tests {
         let outbound_b = start_replica_publisher(&endpoint_b, cancel_token.child_token()).unwrap();
         let registry_a = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
-            11,
-            outbound_a,
+            ReplicaSyncConfig::new(11, outbound_a),
         ));
         let registry_b = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
-            22,
-            outbound_b,
+            ReplicaSyncConfig::new(22, outbound_b),
         ));
-        let _peer_b = PeerManager::start(
-            Arc::clone(&registry_b),
-            vec![endpoint_a],
-            Some(endpoint_b),
-            cancel_token.child_token(),
-        )
-        .unwrap();
+        let dispatch_registry_b = Arc::clone(&registry_b);
+        let _peer_b =
+            PeerManager::start(vec![endpoint_a], cancel_token.child_token(), move |event| {
+                dispatch_registry_b.dispatch_replica_event(event)
+            })
+            .unwrap();
         let key = TrackerKey::new("model".to_string(), Some("tenant".to_string()));
         registry_a.register(key.clone(), 1, 16, 0, 1).unwrap();
         registry_b.register(key.clone(), 1, 16, 0, 1).unwrap();
@@ -524,6 +611,7 @@ mod tests {
         cancel_token.cancel();
     }
 
+    #[cfg(feature = "standalone-slot-tracker")]
     async fn wait_for_load(
         registry: &SlotTrackerRegistry,
         expected_blocks: usize,

@@ -18,7 +18,7 @@ use super::overlap_refresh::{
     refresh_overlap,
 };
 use super::policy::{FcfsPolicy, SchedulingPolicy};
-use super::prefill_load::PrefillLoadEstimator;
+use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
@@ -675,11 +675,11 @@ impl<
             return None;
         }
 
-        let prefix = cached_tokens.min(isl_tokens);
-        let effective_isl = isl_tokens.saturating_sub(prefix);
+        let effective_isl = effective_prefill_tokens(isl_tokens, cached_tokens);
         if effective_isl == 0 {
             return None;
         }
+        let prefix = isl_tokens - effective_isl;
 
         let expected_prefill_duration = match &self.prefill_load_estimator {
             Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
@@ -868,11 +868,11 @@ mod tests {
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let load = request.worker_load_for(worker);
                 let potential_prefill_tokens = if request.track_prefill_tokens {
-                    load.active_prefill_tokens.saturating_add(
-                        request
-                            .isl_tokens
-                            .saturating_sub(request.effective_cached_tokens_for(worker)),
-                    )
+                    load.active_prefill_tokens
+                        .saturating_add(effective_prefill_tokens(
+                            request.isl_tokens,
+                            request.effective_cached_tokens_for(worker),
+                        ))
                 } else {
                     0
                 };
