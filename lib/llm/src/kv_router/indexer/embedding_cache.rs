@@ -17,8 +17,7 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
-    publisher::MultimodalEmbeddingCacheEvent,
+    MULTIMODAL_EMBEDDING_CACHE_SUBJECT, publisher::MultimodalEmbeddingCacheEvent,
 };
 
 #[derive(Clone, Default)]
@@ -78,11 +77,10 @@ impl EmbeddingCacheIndexer {
                 .cmp(left_hits)
                 .then_with(|| left_id.cmp(right_id))
         });
-        let worker_ids = worker_ids
+        worker_ids
             .into_iter()
             .map(|(worker_id, _hits)| worker_id)
-            .collect();
-        worker_ids
+            .collect()
     }
 
     pub fn apply_event(&self, event: &MultimodalEmbeddingCacheEvent) {

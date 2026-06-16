@@ -824,25 +824,23 @@ where
             .filter(|v| *v >= 1)
             .unwrap_or(8);
 
-        let (request_cache_keys, cache_matched_candidates) = if let (
-            Some(indexer),
-            Some(extractor),
-        ) = (
-            self.multimodal_cache_indexer.as_ref(),
-            self.multimodal_cache_key_extractor.as_ref(),
-        ) {
-            let request_cache_keys = extractor(request.content());
-            let matched = if request_cache_keys.is_empty() {
-                Vec::new()
+        let (request_cache_keys, cache_matched_candidates) =
+            if let (Some(indexer), Some(extractor)) = (
+                self.multimodal_cache_indexer.as_ref(),
+                self.multimodal_cache_key_extractor.as_ref(),
+            ) {
+                let request_cache_keys = extractor(request.content());
+                let matched = if request_cache_keys.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut matched = indexer.workers_with_any_cache_key(&request_cache_keys);
+                    matched.retain(|id| instance_ids.contains(id));
+                    matched
+                };
+                (request_cache_keys, matched)
             } else {
-                let mut matched = indexer.workers_with_any_cache_key(&request_cache_keys);
-                matched.retain(|id| instance_ids.contains(id));
-                matched
+                (Vec::new(), Vec::new())
             };
-            (request_cache_keys, matched)
-        } else {
-            (Vec::new(), Vec::new())
-        };
 
         let skip_weighted_accounting = !cache_matched_candidates.is_empty();
 
