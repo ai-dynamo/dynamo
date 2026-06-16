@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 
 CACHE_SIZE_MAXIMUM = 8
 
+# [gluo WIP] now it's time to revisit
+# Both embedding transfer suffers from increasing latency as
+# number of concurrent requests increases, NixlPersistentEmbedding transfers
+# scale worse than local. Need to investigate why.
+# [gluo NOTE] default off to benchmark standalone encoder
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 
 
@@ -148,6 +153,16 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
             request.multimodal_inputs is not None
         ), "multimodal_inputs must not be None for encode worker"
 
+        # The following steps encode the requested image and provided useful embeddings.
+        # 1. Open the image from the provided URL.
+        # 2. Process the image using the image processor.
+        # 3. Run the image through the vision model's vision tower.
+        # 4. Run the results of the vision tower through the multi-modal projector.
+        # 5. Create a descriptor for the embeddings.
+        # 6. Create a write operation using the serialized request and the descriptor.
+        # 7. Await for the write operation to complete.
+        # 8. Yield the encode response.
+
         try:
             time_start = time.perf_counter()
 
@@ -162,6 +177,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                         raise ValueError("image_url is required for the encode worker.")
 
                     image_url = group_input.image_url
+                    # see if we have local cache
                     embedding_key = EmbeddingCache.generate_hash_key(image_url)
                     if (
                         self.embedding_cache is not None
@@ -173,7 +189,9 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                         embedding_lists[idx] = EmbeddingItem(
                             embedding_key, image_grid_thw, embeddings
                         )
+                    # compute
                     else:
+                        # keep track of key to avoid recompute of it
                         need_encode_indexes.append((idx, embedding_key))
 
             with _nvtx.annotate(
@@ -237,6 +255,8 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                         torch.xpu.synchronize()
 
                 with _nvtx.annotate("mm:enc:split_embeddings", color="orange"):
+                    # [gluo FIXME] This is specific to qwen vision processing..
+                    # Split concatenated embeddings for each image item.
                     if resolve_model_family(self.model) is ModelFamily.QWEN_VL:
                         merge_size = self.vision_encoder.spatial_merge_size
                         sizes = (
@@ -249,6 +269,9 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                             f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
                         )
                     else:
+                        # Validated on llava (NOTE need to double check on other models) that the
+                        # embeddings already has batch dimension for images, so we can directly
+                        # split by batch dimension
                         logger.debug(f"image embedding shape: {embeddings.shape}")
                         splitted_embeddings = embeddings
 
@@ -264,6 +287,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                     [image_grid_thw[split_idx]] if image_grid_thw else [],
                     splitted_embeddings[split_idx].unsqueeze(0),
                 )
+                # Cache the computed value for future use
                 if self.embedding_cache is not None:
                     self.embedding_cache.set(
                         embedding_lists[list_idx].key,  # type: ignore
@@ -276,6 +300,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
             before_transfer_time = time.perf_counter()
 
             with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
+                # Prepare transfer
                 send_tasks = [
                     asyncio.create_task(
                         self.embedding_sender.send_embeddings(
@@ -295,12 +320,15 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                     logger.debug(
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
+                    # Update request for transfer metadata
                     group = request.multimodal_inputs[idx]
                     assert group.multimodal_input is not None
                     group.multimodal_input.image_url = None
                     group.image_grid_thw = embedding_item.image_grid_thw
                     group.embeddings_shape = tuple(embedding_item.embeddings.shape)  # type: ignore[assignment]
                     group.serialized_request = transfer_request[0]
+
+                    # Keep a reference of the embedding and only drop reference when the transfer is done
                     self.send_complete_queue.put_nowait(
                         (transfer_request[1], embedding_item.embeddings)
                     )
@@ -317,6 +345,7 @@ class EncodeWorkerHandler(_BaseEncodeWorkerHandler):
                 f"transfer preparation: {after_transfer_time - before_transfer_time:.4f}s"
             )
 
+            # Yield transformed request back
             yield payload
 
         except Exception as e:
