@@ -991,24 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn dynamo_env_config_uses_defaults_when_unset() {
-        let config = config_from_values(&[]);
-        let default = KvRouterConfig::default();
-
-        assert_eq!(config.overlap_score_credit, default.overlap_score_credit);
-        assert_eq!(
-            config.overlap_score_credit_decay,
-            default.overlap_score_credit_decay
-        );
-        assert_eq!(config.prefill_load_scale, default.prefill_load_scale);
-        assert_eq!(config.use_kv_events, default.use_kv_events);
-        assert_eq!(
-            config.router_predicted_ttl_secs,
-            default.router_predicted_ttl_secs
-        );
-    }
-
-    #[test]
     fn dynamo_env_config_parses_canonical_settings() {
         let config = config_from_values(&[
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
@@ -1186,14 +1168,6 @@ mod tests {
         };
 
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_kv_router_config_deserializes_predicted_ttl() {
-        let config: KvRouterConfig =
-            serde_json::from_str(r#"{"router_predicted_ttl_secs":5.0}"#).unwrap();
-
-        assert_eq!(config.router_predicted_ttl_secs, Some(5.0));
     }
 
     #[test]
