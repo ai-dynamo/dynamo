@@ -242,19 +242,27 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// scheduler to cancel compute early).
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Predicate: are all engine-internal resources safe to release?
+    /// Optional early-exit signal for the prefill drain: is the engine
+    /// quiescent — are in-flight KV transfers done so cleanup can release GPU
+    /// memory?
     ///
-    /// `Worker` polls this between the grace-period sleep and
-    /// [`cleanup`](LLMEngine::cleanup) and proceeds to cleanup when it
-    /// returns `Ok(true)` OR the post-grace shutdown budget expires.
-    /// Engines that hold KV blocks for in-flight NIXL pulls should
-    /// return `false` until the connector reports the transfer is done.
-    /// Default `Ok(true)` opts out of waiting.
+    /// Reports engine **state**; the framework owns the **policy**. Polled
+    /// **only for prefill workers** (the framework skips drain for
+    /// aggregated/decode), between the grace-period sleep and
+    /// [`cleanup`](LLMEngine::cleanup). The drain loop exits early on
+    /// `Ok(Some(true))` (quiescent); on `Ok(Some(false))` (busy) it keeps
+    /// polling; on `Ok(None)` (no introspection — the default) it also keeps
+    /// polling until the budget expires, then proceeds to cleanup regardless.
     ///
-    /// Failures are logged and treated as `false`; the loop continues
-    /// until the deadline.
-    async fn is_idle(&self) -> Result<bool, DynamoError> {
-        Ok(true)
+    /// So the default `Ok(None)` is safe-by-default: a prefill engine that
+    /// can't introspect waits the full budget and never frees KV early.
+    /// Engines that can confirm quiescence (e.g. polling a connector / engine
+    /// scheduler) override this to return `Some(true)`/`Some(false)`.
+    ///
+    /// Failures are logged and treated like `None`; the loop continues until
+    /// the deadline.
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
     }
 
     /// Release all engine resources. Called exactly once.

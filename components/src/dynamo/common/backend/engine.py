@@ -174,17 +174,25 @@ class LLMEngine(ABC):
         ``context.metadata`` during :meth:`generate` are not visible here.
         """
 
-    async def is_idle(self) -> bool:
-        """Predicate: are all engine-internal resources safe to release?
+    async def is_quiescent(self) -> Optional[bool]:
+        """Optional early-exit signal for the prefill drain: is the engine
+        quiescent — are in-flight KV transfers done so :meth:`cleanup` can
+        release GPU memory?
 
-        The Rust ``Worker`` polls this between the grace-period sleep and
-        :meth:`cleanup` and proceeds to cleanup when it returns ``True``
-        OR the drain budget (``DYN_PREFILL_DRAIN_TIMEOUT_S``) expires.
-        Prefill workers holding KV blocks for in-flight NIXL pulls should
-        return ``False`` until the connector reports the transfer is done.
-        Default ``True`` opts out of waiting.
+        Reports engine **state**; the framework owns the **policy**. Polled by
+        the Rust ``Worker`` **only for prefill workers** (the framework skips
+        drain for aggregated/decode), between the grace-period sleep and
+        :meth:`cleanup`. The drain loop exits early on ``True`` (quiescent); on
+        ``False`` (busy) it keeps polling; on ``None`` (no introspection — the
+        default) it also keeps polling until the drain budget
+        (``DYN_PREFILL_DRAIN_TIMEOUT_S``) expires, then proceeds to cleanup.
+
+        So the default ``None`` is safe-by-default: an engine that can't
+        introspect waits the full budget and never frees KV early. Engines that
+        can confirm quiescence (e.g. polling a connector / engine scheduler)
+        override this to return ``True``/``False``.
         """
-        return True
+        return None
 
     @abstractmethod
     async def cleanup(self) -> None:

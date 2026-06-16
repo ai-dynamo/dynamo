@@ -12,6 +12,7 @@ from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
+    run_prefill_drain_deployment,
     run_serve_deployment,
 )
 from tests.utils.constants import DefaultPort
@@ -651,6 +652,75 @@ def test_deployment(
         }
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+# ---------------------------------------------------------------------------
+# Prefill drain on graceful shutdown (#7319), unified entry point. A concurrent
+# burst keeps the prefill worker busy; the prefill worker is SIGTERMed
+# mid-flight, and the test asserts the Rust Worker drove a graceful shutdown
+# (drain -> cleanup) to completion. TRT-LLM's `llm.shutdown()` aborts the MPI
+# job if it races the executor with disaggregated KV transfers still pending,
+# so the drain budget must give those transfers time to finish before cleanup;
+# the burst is sized small (see the call site) so they reliably do.
+# ---------------------------------------------------------------------------
+_PREFILL_DRAIN_CONFIG = TRTLLMConfig(
+    name="prefill_drain_unified",
+    directory=trtllm_dir,
+    script_name="disagg_same_gpu.sh",
+    script_args=["--unified"],
+    marks=[],  # applied on the test function below
+    model="Qwen/Qwen3-0.6B",
+    delayed_start=10,
+    health_check_workers=True,
+    env={
+        "MODEL_PATH": "Qwen/Qwen3-0.6B",
+        "SERVED_MODEL_NAME": "Qwen/Qwen3-0.6B",
+        "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
+        "DYN_PREFILL_DRAIN_TIMEOUT_S": "30",
+        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "60",
+        "DYN_SYSTEM_STARTING_HEALTH_STATUS": "ready",
+    },
+    request_payloads=[chat_payload_default()],
+)
+
+
+@pytest.mark.trtllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(6.6)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
+@pytest.mark.timeout(432)
+@pytest.mark.post_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_prefill_drain_unified(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Burst + mid-flight prefill SIGTERM; assert the Rust Worker drove
+    graceful shutdown (drain -> cleanup) to completion without the engine
+    teardown aborting."""
+    config = dataclasses.replace(
+        _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    # TRT-LLM's MPI teardown aborts the job if `llm.shutdown()` races the
+    # executor while disaggregated KV transfers are still pending, and the abort
+    # likelihood scales with how much is still in flight at cleanup. TRT-LLM has
+    # no reliable quiescence signal (see `TrtllmLLMEngine`), so it waits the full
+    # drain budget rather than exiting early — the robust fix is to keep the
+    # burst small with short decode so decode drains *all* the KV well within the
+    # budget, leaving little-to-nothing in flight at cleanup. The burst is still
+    # large enough (vs the client-side in-flight gate) to engage the drain.
+    run_prefill_drain_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        burst_size=12,
+        burst_max_tokens=16,
+    )
 
 
 # TODO make this a normal guy

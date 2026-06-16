@@ -9,7 +9,6 @@ and feature gap details.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 import logging
@@ -67,11 +66,6 @@ if TYPE_CHECKING:
     from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
 logger = logging.getLogger(__name__)
-
-# `get_stats_async` raises TimeoutError when no stats are fresh and
-# StopAsyncIteration when the iterator is exhausted; both are benign
-# "try again" signals. RuntimeError covers the test stub.
-_BENIGN_POLL_EXC = (asyncio.TimeoutError, StopAsyncIteration, RuntimeError)
 
 # 1021 is the largest 10-bit prime — spreads machine_ids more evenly
 # under modulo than 1024 would. Matches legacy
@@ -797,24 +791,19 @@ class TrtllmLLMEngine(LLMEngine):
             extras={"priority": 1.0},
         )
 
-    async def is_idle(self) -> bool:
-        """Prefill-only predicate. Single poll of TRT-LLM's stats stream:
-        idle when active + queued == 0. Aggregated and decode roles
-        report idle immediately."""
-        if (
-            self._engine is None
-            or self.disaggregation_mode != DisaggregationMode.PREFILL
-        ):
-            return True
-        try:
-            stats_iter = self._engine.llm.get_stats_async(timeout=2)
-            stat = await asyncio.wait_for(anext(stats_iter), timeout=2)
-            active = stat.get("numActiveRequests", 0)
-            queued = stat.get("numQueuedRequests", 0)
-            return active + queued == 0
-        except _BENIGN_POLL_EXC as e:
-            logger.debug("is_idle stats poll failed: %s", e)
-            return False
+    # NOTE: TRT-LLM intentionally does *not* override `is_quiescent`; it inherits
+    # the base default (`None`), which tells the framework "I can't introspect —
+    # wait the full drain budget." TRT-LLM has no reliable signal for "all
+    # pending disaggregated KV transfers are done" on a prefill worker:
+    #   - iteration stats (`get_stats`) are emitted *per iteration*, so once the
+    #     worker is idle (just holding KV for transfer) no fresh sample arrives
+    #     and `active == 0` is never observed; and
+    #   - `_active_requests` is popped at handoff (see `generate`), *before*
+    #     decode pulls the KV, so it can't represent the transfer window either.
+    # The safe behavior is therefore to wait the budget; a generous budget gives
+    # decode time to drain all transfers before cleanup. Contrast SGLang, whose
+    # prefill worker awaits stream consumption and can count it (see
+    # `SGLangLLMEngine.is_quiescent`).
 
     async def cleanup(self) -> None:
         # Stop the publisher threads BEFORE engine shutdown so they don't
@@ -827,6 +816,18 @@ class TrtllmLLMEngine(LLMEngine):
         self._kv_events_thread = None
         self._metrics_thread = None
         self._kv_publishers.clear()
+        # Abort any requests still tracked at teardown so `llm.shutdown()` runs
+        # on an idle engine. For a prefill worker this is usually a no-op (the
+        # request is popped at handoff); it matters for decode/aggregated workers
+        # that may still be mid-generation. It does NOT cover executor-internal
+        # pending KV transfers (those aren't request-level state) — the prefill
+        # drain budget is what gives those time to complete before we get here.
+        for result in list(self._active_requests.values()):
+            try:
+                result.abort()
+            except Exception:
+                logger.debug("abort during cleanup failed", exc_info=True)
+        self._active_requests.clear()
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")

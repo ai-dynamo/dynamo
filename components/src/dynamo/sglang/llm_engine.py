@@ -106,6 +106,12 @@ class SglangLLMEngine(LLMEngine):
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
+        # Count of prefill streams still draining their KV transfer, across
+        # BOTH the Bootstrap path (awaited inline in generate()) and the
+        # Completed path (spawned task). is_quiescent() gates on this so graceful
+        # shutdown waits for in-flight NIXL transfers regardless of routing
+        # path. Single-threaded asyncio mutation, no lock needed.
+        self._inflight_prefill_streams: int = 0
         # Set by attach_snapshot_publisher when component_metrics_dp_ranks
         # is non-empty. `_metrics_pull_loop` pushes ComponentSnapshots into
         # it on every ZMQ message — event-driven, no framework polling.
@@ -144,6 +150,14 @@ class SglangLLMEngine(LLMEngine):
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id  # SGLang bootstrap uses host/port/room triples
 
+        # NOTE: SGLang's tokenizer_manager claims SIGTERM/SIGINT via
+        # loop.add_signal_handler() in auto_create_handle_loop() (lazily, on
+        # warmup / first request), which would override the Rust Worker's
+        # graceful-shutdown handlers and bypass the prefill drain (#7319). The
+        # unified Worker shim suppresses those registrations centrally for all
+        # backends — see worker.py::_guard_loop_signal_handlers — so nothing is
+        # needed here. SGLang teardown still happens in cleanup() via
+        # engine.shutdown().
         self.engine = sgl.Engine(server_args=self.server_args)
 
         tokenizer = (
@@ -333,6 +347,13 @@ class SglangLLMEngine(LLMEngine):
                 "index": 0,
                 "disaggregated_params": dict(bootstrap_kwargs),
             }
+            # Mark this prefill stream in-flight *now*, synchronously, before
+            # the spawn/await below. Incrementing inside _consume_prefill_stream
+            # would leave a create_task -> task-first-run window (Completed path)
+            # where is_quiescent() observes 0 and the drain loop exits early,
+            # letting cleanup cancel a still-pending KV transfer (#7319). The
+            # matching decrement is in _consume_prefill_stream's finally.
+            self._inflight_prefill_streams += 1
             # Bootstrap path (router-populated bootstrap_info): drain
             # inline so cancellation propagates to engine.abort().
             # Completed path: router awaits our stream end before
@@ -410,15 +431,20 @@ class SglangLLMEngine(LLMEngine):
             tokenizer_manager.abort_request(rid=rid, abort_all=False)
             logger.debug("Aborted request %s", rid)
 
-    async def is_idle(self) -> bool:
-        """Prefill-only predicate. SGLang's ``engine.async_generate``
-        stream stays alive through the KV transfer; idle when every
-        background consume task has completed."""
-        return all(t.done() for t in self._prefill_consume_tasks)
+    async def is_quiescent(self) -> Optional[bool]:
+        """Quiescent when no prefill stream is still draining its KV transfer.
+        SGLang's ``engine.async_generate`` stream stays alive through the KV
+        transfer; we count streams on BOTH the Bootstrap path (awaited inline
+        in ``generate``) and the Completed path (spawned task) — a plain
+        ``done()`` check over ``_prefill_consume_tasks`` would miss the
+        inline-awaited bootstrap streams and report quiescent while a NIXL
+        transfer is still in flight."""
+        return self._inflight_prefill_streams == 0
 
     async def cleanup(self) -> None:
-        # Anything still running here either timed out in drain() or was
-        # never drained (e.g. start failed). Force-cancel.
+        # Anything still running here either outlasted the drain loop (the
+        # is_quiescent budget expired) or was never drained (e.g. start
+        # failed). Force-cancel.
         for task in self._prefill_consume_tasks:
             if not task.done():
                 task.cancel()
@@ -533,6 +559,10 @@ class SglangLLMEngine(LLMEngine):
         On stream failure (NIXL transport error, engine crash) abort the
         SGLang request so the decode peer's NIXL connect fails fast
         instead of hanging on a KV transfer that will not arrive.
+
+        ``_inflight_prefill_streams`` is incremented by the caller
+        (``generate``) before this runs — see the note there — and decremented
+        here in ``finally`` so the count is balanced across both call paths.
         """
         try:
             async for _ in stream:
@@ -550,6 +580,8 @@ class SglangLLMEngine(LLMEngine):
                 exc_info=True,
             )
             self._abort_sglang_request(rid)
+        finally:
+            self._inflight_prefill_streams -= 1
 
     def _abort_sglang_request(self, rid: Optional[str]) -> None:
         """Best-effort abort. Failures here are swallowed — SGLang is

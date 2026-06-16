@@ -6,7 +6,7 @@ Two-class abstraction: `Worker` (runtime integration) and
 ## Engine Lifecycle
 
 ```
-from_args -> start -> register_prometheus -> component_metrics_dp_ranks -> attach_snapshot_publisher -> generate/abort -> drain -> cleanup
+from_args -> start -> register_prometheus -> component_metrics_dp_ranks -> attach_snapshot_publisher -> generate/abort -> is_quiescent -> cleanup
      |          |              |                       |                              |                          |             |        |
   parse args, start engine, vendor registry      declare dp_ranks            engine stashes publisher,   serve requests  drain in-flight,
   return     return        bridge (optional)     for component gauges        pushes ComponentSnapshot    (concurrent)    then cleanup,
@@ -47,9 +47,14 @@ Python engine authors keep the split API.)
    written); `0.0` is a legitimate zero-hit measurement.
 6. `generate(request, context)` -- streaming inference, called concurrently.
 7. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-8. `drain()` -- backend-side drain before cleanup (optional, default no-op).
-   Called after the discovery unregister + grace period; use it for in-flight
-   NIXL transfers (issue #7319) that must complete while the runtime is alive.
+8. `is_quiescent()` -- optional early-exit signal for the prefill drain
+   (default `None`). The `Worker` drains **prefill workers** after the
+   discovery unregister + grace period and before cleanup, waiting the full
+   drain budget by default; it polls `is_quiescent` only to exit early. Return
+   `True` once in-flight NIXL transfers are done (issue #7319), `False` while
+   they're pulling, or `None` (default) if the engine can't introspect (waits
+   the budget). Aggregated/decode workers are never polled (drain is
+   prefill-only).
 9. `cleanup()` -- called exactly once. Runs after `start()` succeeded
    on shutdown, **and** after `start()` raised — so implementations
    must be null-safe against partial state (inner engine handle,
@@ -149,10 +154,11 @@ What the **engine** does with the mode (consumed in each backend's
   engine's resume-from-KV-transfer call.
 - `Aggregated`: existing path, no branching.
 
-`drain()` is the prefill-shutdown hook: prefill engines should poll
-their scheduler until in-flight NIXL transfers finish before GPU
-memory is released (issue #7319). Aggregated/decode engines leave the
-default no-op.
+`is_quiescent()` is the prefill-shutdown early-exit signal: the `Worker`
+drains prefill workers by default and polls `is_quiescent` to exit early
+once in-flight NIXL transfers finish, before GPU memory is released (issue
+#7319). Engines that can't introspect leave the default `None` (wait the
+budget); aggregated/decode workers are never drained.
 
 `disagg.py` ships `enforce_prefill_max_tokens`, `extract_prefill_result`,
 and `require_prefill_result` — small helpers backends call from inside

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import warnings
 from dataclasses import dataclass, field
 from enum import Enum
@@ -33,6 +34,42 @@ from .engine import LLMEngine
 from .health_check import parse_health_check_payload_cli
 
 logger = logging.getLogger(__name__)
+
+
+def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
+    """Stop the wrapped engine from claiming SIGTERM/SIGINT via
+    ``loop.add_signal_handler``.
+
+    The Rust ``Worker`` owns graceful shutdown (discovery unregister -> grace
+    period -> ``is_quiescent`` drain loop -> ``cleanup``, issue #7319) through its
+    own OS-level signal handlers, and the unified-backend contract is that
+    engines do teardown in ``cleanup()`` — not in a signal handler. Some
+    engines register loop signal handlers during ``start()`` anyway (SGLang's
+    ``tokenizer_manager.auto_create_handle_loop`` does, lazily on warmup /
+    first request); asyncio's ``add_signal_handler`` reinstalls the process
+    ``sigaction``, which silently overrides the Worker's handler and bypasses
+    the drain. Suppressing SIGTERM/SIGINT registrations here keeps the Worker
+    in control for every backend (and any future one) from a single place,
+    rather than each engine re-discovering the conflict.
+
+    Installed once for the loop's lifetime; only SIGTERM/SIGINT are suppressed,
+    so an engine remains free to register handlers for other signals (e.g.
+    SGLang's SIGQUIT child-failure watchdog).
+    """
+    orig_add_signal_handler = loop.add_signal_handler
+    owned = frozenset({signal.SIGINT, signal.SIGTERM})
+
+    def add_signal_handler(sig, callback, *args):
+        if sig in owned:
+            logger.info(
+                "Suppressed engine loop.add_signal_handler(%s); the Rust Worker "
+                "owns graceful shutdown.",
+                sig,
+            )
+            return None
+        return orig_add_signal_handler(sig, callback, *args)
+
+    loop.add_signal_handler = add_signal_handler  # type: ignore[assignment]
 
 # Map the user-facing `dynamo.common.constants.DisaggregationMode` (which
 # carries 4 modes including ENCODE) to the 3-mode Rust enum. ENCODE is not
@@ -233,5 +270,6 @@ class Worker:
         )
 
         loop = asyncio.get_running_loop()
+        _guard_loop_signal_handlers(loop)
         worker = _backend.Worker(self.engine, worker_cfg, loop)
         await worker.run()

@@ -430,17 +430,11 @@ class VllmLLMEngine(LLMEngine):
             await self.engine_client.abort(request_id)
             logger.debug("Aborted request %s", request_id)
 
-    async def is_idle(self) -> bool:
-        """Prefill-only predicate. vLLM exposes no connector-aware idle
-        signal, so we return ``False`` and let the Rust drain loop run
-        out its deadline. Aggregated and decode roles report idle
-        immediately."""
-        if (
-            self.engine_client is None
-            or self.disaggregation_mode != DisaggregationMode.PREFILL
-        ):
-            return True
-        return False
+    # No is_quiescent() override: vLLM's NixlConnector exposes no idle signal,
+    # so the engine inherits the base default (None = "no introspection") and
+    # the framework drains prefill workers for the full budget — the
+    # conservative, safe-by-default behavior. The framework skips drain for
+    # aggregated/decode.
 
     async def health_check_payload(self) -> Optional[dict[str, Any]]:
         if self.disaggregation_mode == DisaggregationMode.DECODE:

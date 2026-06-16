@@ -841,20 +841,19 @@ impl LLMEngine for PyLLMEngine {
         }
     }
 
-    async fn is_idle(&self) -> Result<bool, DynamoError> {
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         let py_obj = self
-            .call_method0_async("is_idle")
+            .call_method0_async("is_quiescent")
             .await
             .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<bool> {
+        Python::with_gil(|py| -> PyResult<Option<bool>> {
             let bound = py_obj.bind(py);
-            // None from Python (e.g. an engine that ignored the contract)
-            // is conservative — treat as "not idle" so the loop keeps
-            // polling until the deadline.
+            // `None` from Python => "no introspection" — the drain loop keeps
+            // polling until the deadline (same as Some(false)).
             if bound.is_none() {
-                return Ok(false);
+                return Ok(None);
             }
-            bound.extract::<bool>()
+            Ok(Some(bound.extract::<bool>()?))
         })
         .map_err(py_err_to_dynamo)
     }
