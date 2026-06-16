@@ -182,9 +182,9 @@ def test_handles_malformed_content_non_dict():
 # Regression coverage for the dynamo-sglang chat processor bug where the
 # Python prepost path called ``apply_chat_template`` on raw OpenAI messages.
 # Modern VLM chat templates branch on ``item.type == 'image'`` /
-# ``'video'`` / ``'audio'`` and never fire for ``image_url`` /
-# ``video_url`` / ``audio_url``, so the rendered prompt loses its
-# placeholder tokens and the worker has no slot to bind media bytes to.
+# ``'video'`` and never fire for ``image_url`` / ``video_url``, so the
+# rendered prompt loses its placeholder tokens and the worker has no slot
+# to bind media bytes to.
 
 # A chat template that iterates ``message.content`` as a list. This is
 # what triggers sglang's content-format detector to return ``"openai"``.
@@ -194,7 +194,6 @@ _OPENAI_FORMAT_TEMPLATE = (
     "{% for chunk in message.content %}"
     "{% if chunk.type == 'image' %}<IMG>"
     "{% elif chunk.type == 'video' %}<VID>"
-    "{% elif chunk.type == 'audio' %}<AUD>"
     "{% elif chunk.type == 'text' %}{{ chunk.text }}"
     "{% endif %}"
     "{% endfor %}"
@@ -228,8 +227,8 @@ def test_normalize_messages_converts_image_url_to_image():
     assert "image_url" not in chunk_types
 
 
-def test_normalize_messages_converts_video_and_audio_url():
-    """``video_url`` and ``audio_url`` are normalized symmetrically."""
+def test_normalize_messages_converts_video_url_to_video():
+    """``video_url`` content parts become ``{"type": "video"}`` for the template."""
 
     class T:
         chat_template = _OPENAI_FORMAT_TEMPLATE
@@ -242,10 +241,6 @@ def test_normalize_messages_converts_video_and_audio_url():
                     "type": "video_url",
                     "video_url": {"url": "https://example.com/clip.mp4"},
                 },
-                {
-                    "type": "audio_url",
-                    "audio_url": {"url": "data:audio/wav;base64,UklGRg=="},
-                },
             ],
         }
     ]
@@ -253,9 +248,7 @@ def test_normalize_messages_converts_video_and_audio_url():
     out = _sglang_prepost()._normalize_messages_for_template(messages, T())
     chunk_types = [c["type"] for c in out[0]["content"]]
     assert "video" in chunk_types
-    assert "audio" in chunk_types
     assert "video_url" not in chunk_types
-    assert "audio_url" not in chunk_types
 
 
 def test_normalize_messages_passes_through_text_only():

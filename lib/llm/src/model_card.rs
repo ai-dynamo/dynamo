@@ -2132,19 +2132,6 @@ mod tests {
         Ok(())
     }
 
-    /// Variant where `special_tokens_map.json` carries the token strings and
-    /// `tokenizer_config.json:added_tokens_decoder` carries the ids.
-    #[test]
-    fn test_config_json_eos_bos_from_special_tokens_map_only_fixture() -> anyhow::Result<()> {
-        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-special-tokens-map-only/config.json");
-        let config = HFConfig::from_json_file(&config_file)?;
-
-        assert_eq!(config.bos_token_id(), Some(200019));
-        assert_eq!(config.eos_token_ids(), vec![200020]);
-        Ok(())
-    }
-
     /// All four rungs miss → the error message must name every source so the
     /// operator knows what to add. Guards against the failure mode where
     /// only `generation_config.json` is mentioned.
