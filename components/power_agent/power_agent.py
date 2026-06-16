@@ -14,8 +14,12 @@ Runs as a privileged DaemonSet (hostPID: true) on each GPU node. Every 15s:
 Scope is opt-in: the agent only ever caps a GPU whose pod carries the
 dynamo.nvidia.com/gpu-power-limit annotation (set by the planner on
 prefill/decode worker pods). A GPU running only unannotated pods — a
-non-Dynamo workload, or a Dynamo worker not yet annotated — is left at its
-hardware default and never touched. See ``_build_uid_to_annotation``.
+non-Dynamo workload, or a Dynamo worker not yet annotated — that the agent
+never capped is left at its hardware default and untouched. If the agent had
+previously capped that GPU and the opted-in pod is now gone (a non-managed
+workload reuses it, or the planner removed the annotation), the cap is
+released back to default so it does not strand on the new tenant. See
+``_build_uid_to_annotation`` and ``_release_managed_gpu``.
 
 SIGTERM handler: restores default TDP on all managed GPUs before shutdown.
 Cold-start orphan recovery: UUID-gated (persisted to /var/lib/dynamo-power-agent/).
@@ -291,6 +295,63 @@ def _apply_cap(
             e,
         )
         metrics.apply_failures_total.inc()
+
+
+def _release_managed_gpu(handle, gpu_idx: int) -> None:
+    """Restore default TGP on a GPU we previously capped, and unmanage it.
+
+    Runtime counterpart to ``_handle_sigterm`` / ``_restore_orphaned_gpus_on_startup``.
+    Invoked from steady-state reconcile when a GPU we previously capped is now
+    running only unannotated / non-K8s processes — i.e. the opted-in pod is gone
+    and a non-managed workload owns the GPU (or the planner removed the
+    annotation to release it). Without this, the agent's last cap would strand
+    on the reused GPU until the next agent shutdown (startup orphan recovery
+    skips busy GPUs), silently throttling the new tenant. This implements the
+    "planner owns cap lifecycle via annotation removal/update" contract at
+    runtime.
+
+    Eligibility is UUID-gated so caps set by other tooling are never touched.
+    A GPU is "ours" if it is in ``_managed_gpu_indices`` (capped in THIS process)
+    OR its UUID is in the persisted ``_previously_managed`` set (capped in a
+    prior process). The latter is essential across restarts: ``_managed_gpu_indices``
+    is in-memory and empty after a restart, while ``_previously_managed`` is
+    loaded from disk — without it, a GPU capped before the restart and now busy
+    with only unannotated work would keep the stale cap (startup orphan recovery
+    only restores *idle* GPUs).
+
+    The idle case (no processes at all) is intentionally NOT handled here;
+    ``_reconcile_gpu``'s ``not procs`` branch keeps the cap for a briefly-exited
+    worker that will return to the same GPU.
+    """
+    try:
+        uuid = _nvml_uuid(handle)
+    except Exception as e:
+        logger.warning(
+            "Failed to read UUID for GPU %d during release check: %s", gpu_idx, e
+        )
+        return
+    if gpu_idx not in _managed_gpu_indices and uuid not in _previously_managed:
+        return  # not a GPU this agent capped — leave it alone (UUID-gating)
+    try:
+        default_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
+        current_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+        if current_mw < default_mw:
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
+            logger.info(
+                "Released cap on GPU %d (%d W → %d W): previously managed, now "
+                "running only unannotated/non-K8s processes.",
+                gpu_idx,
+                current_mw // 1000,
+                default_mw // 1000,
+            )
+    except Exception as e:
+        # Leave the GPU in the managed set so a later cycle retries the release.
+        logger.warning("Failed to release cap on GPU %d: %s", gpu_idx, e)
+        return
+    _managed_gpu_indices.discard(gpu_idx)
+    if uuid in _previously_managed:
+        _previously_managed.discard(uuid)
+        _persist_managed_gpus(_previously_managed)
 
 
 # ---------------------------------------------------------------------------
@@ -579,15 +640,17 @@ class PowerAgent:
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
         procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
         if not procs:
-            # No K8s workload on this GPU this cycle. We deliberately DO NOT
-            # restore the cap to default TDP here — caps are persistent by
-            # design. A managed worker may exit briefly (OOM, reschedule) and
-            # return to the same GPU; restoring during that gap would violate
-            # the planner's power budget, and the planner owns cap lifecycle
-            # via annotation removal/update. The cap is only restored to
-            # default by ``_handle_sigterm`` (agent shutdown) and
-            # ``_restore_orphaned_gpus_on_startup`` (previously-managed +
-            # now-idle GPUs at agent start). Per PR #9682 @sttts review.
+            # No process on this GPU this cycle. We deliberately DO NOT restore
+            # the cap to default TDP here — caps are persistent by design while
+            # the GPU is idle. A managed worker may exit briefly (OOM,
+            # reschedule) and return to the same GPU; restoring during that gap
+            # would violate the planner's power budget. An idle previously-
+            # managed GPU is restored by ``_handle_sigterm`` (agent shutdown)
+            # and ``_restore_orphaned_gpus_on_startup`` (at agent start). A
+            # previously-managed GPU that is *busy* with only unannotated work
+            # is released below via ``_release_managed_gpu`` (the opted-in pod
+            # is gone, so a stale cap must not strand on the new tenant). Per
+            # PR #9682 @sttts review.
             return
 
         # Deduplicate by pod UID before building ``pod_annotations``. A
@@ -615,9 +678,17 @@ class PowerAgent:
 
         if not pod_annotations:
             # No opted-in pod owns this GPU (every process is either non-K8s or
-            # belongs to a pod without POWER_ANNOTATION_KEY). Leave the GPU
-            # untouched — see _build_uid_to_annotation for why this is the
-            # scope boundary.
+            # belongs to a pod without POWER_ANNOTATION_KEY). Two sub-cases,
+            # both handled by _release_managed_gpu's UUID-gated eligibility:
+            #   * never managed by us → left at hardware default (the scope
+            #     boundary — see _build_uid_to_annotation).
+            #   * previously managed by us (this process OR a prior one, via the
+            #     persisted UUID set) → the opted-in pod is gone and a
+            #     non-managed workload now runs here, so release our cap rather
+            #     than strand it on the new tenant until shutdown.
+            # The idle case (no processes) is handled by the `not procs` branch
+            # above, which keeps the cap for a briefly-exited worker.
+            _release_managed_gpu(handle, gpu_idx)
             return
 
         cap_w = _resolve_cap_for_gpu(

@@ -17,6 +17,7 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
+import power_agent
 import pytest
 from power_agent import POWER_ANNOTATION_KEY, PowerAgent
 
@@ -72,6 +73,14 @@ class TestBuildUidToAnnotationScope(unittest.TestCase):
 
 
 class TestReconcileScope(unittest.TestCase):
+    def setUp(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def tearDown(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
     def test_unannotated_gpu_active_pod_is_left_untouched(self):
         """A GPU whose only live process belongs to an unannotated pod gets
         NO NVML write — not even the safe default."""
@@ -108,6 +117,94 @@ class TestReconcileScope(unittest.TestCase):
         args = mock_apply.call_args.args
         self.assertEqual(args[1], 0)
         self.assertEqual(args[2], 480)
+
+
+class TestReleaseOnReuse(unittest.TestCase):
+    """A previously-managed GPU now running only unannotated work is released
+    back to default, instead of stranding a stale cap on the new tenant."""
+
+    def setUp(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def tearDown(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def _run_reconcile_with_unannotated_pod(self, current_mw, default_mw):
+        agent = _make_agent(device_count=1)
+        pods = [_pod("bystander", {"team.example.com/foo": "bar"})]
+        uid_to_annotation = agent._build_uid_to_annotation(pods)
+
+        with patch("power_agent.pynvml") as mock_nvml, patch(
+            "power_agent._extract_pod_uid_from_cgroup", return_value="bystander"
+        ), patch("power_agent._apply_cap") as mock_apply, patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle-0"
+            mock_nvml.nvmlDeviceGetComputeRunningProcesses.return_value = [_proc(1234)]
+            mock_nvml.nvmlDeviceGetPowerManagementDefaultLimit.return_value = default_mw
+            mock_nvml.nvmlDeviceGetPowerManagementLimit.return_value = current_mw
+            mock_nvml.nvmlDeviceGetUUID.return_value = "GPU-A"
+
+            agent._reconcile_gpu(0, uid_to_annotation)
+
+        return mock_nvml, mock_apply
+
+    def test_previously_managed_gpu_is_released_to_default(self):
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("GPU-A")
+
+        mock_nvml, mock_apply = self._run_reconcile_with_unannotated_pod(
+            current_mw=400_000, default_mw=700_000
+        )
+
+        # Restored to default, never re-capped, and unmanaged.
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
+            "handle-0", 700_000
+        )
+        mock_apply.assert_not_called()
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+        self.assertNotIn("GPU-A", power_agent._previously_managed)
+
+    def test_previously_managed_across_restart_is_released(self):
+        """After a restart `_managed_gpu_indices` is empty; the persisted UUID
+        set is the only signal. A busy GPU we capped before the restart must
+        still be released (startup orphan recovery skips busy GPUs)."""
+        # No _managed_gpu_indices entry (cleared on restart); only persisted UUID.
+        power_agent._previously_managed.add("GPU-A")
+
+        mock_nvml, mock_apply = self._run_reconcile_with_unannotated_pod(
+            current_mw=400_000, default_mw=700_000
+        )
+
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
+            "handle-0", 700_000
+        )
+        mock_apply.assert_not_called()
+        self.assertNotIn("GPU-A", power_agent._previously_managed)
+
+    def test_never_managed_gpu_is_not_touched(self):
+        # Neither in _managed_gpu_indices nor _previously_managed → not ours.
+        mock_nvml, mock_apply = self._run_reconcile_with_unannotated_pod(
+            current_mw=400_000, default_mw=700_000
+        )
+
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_not_called()
+        mock_apply.assert_not_called()
+
+    def test_release_unmanages_even_if_already_at_default(self):
+        """If the cap was already cleared externally, still drop it from the
+        managed set (no redundant NVML write)."""
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("GPU-A")
+
+        mock_nvml, _ = self._run_reconcile_with_unannotated_pod(
+            current_mw=700_000, default_mw=700_000
+        )
+
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_not_called()
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
 
 
 if __name__ == "__main__":
