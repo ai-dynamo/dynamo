@@ -68,30 +68,32 @@ class TestBuildUidToAnnotation(unittest.TestCase):
         result = agent._build_uid_to_annotation([pod])
         self.assertEqual(result, {"uid-1": "300"})
 
-    def test_pod_without_annotation_returns_none(self):
+    def test_pod_without_annotation_is_omitted(self):
+        """Opt-in scope: a pod missing the key is omitted (not mapped to None),
+        so a GPU running only that pod is never managed. Per PR #9682 @sttts."""
         agent = _make_agent()
         pod = _make_pod("uid-1")  # annotation dict present but key absent
         result = agent._build_uid_to_annotation([pod])
-        self.assertEqual(result, {"uid-1": None})
+        self.assertEqual(result, {})
 
-    def test_pod_with_annotations_field_none(self):
-        """pod.metadata.annotations is None (no annotations block at all)."""
+    def test_pod_with_annotations_field_none_is_omitted(self):
+        """pod.metadata.annotations is None (no annotations block) → omitted."""
         agent = _make_agent()
         pod = MagicMock()
         pod.metadata.uid = "uid-1"
         pod.metadata.annotations = None
         result = agent._build_uid_to_annotation([pod])
-        self.assertEqual(result, {"uid-1": None})
+        self.assertEqual(result, {})
 
     def test_multiple_pods_correct_mapping(self):
         agent = _make_agent()
         pods = [
             _make_pod("uid-1", "300"),
             _make_pod("uid-2", "480"),
-            _make_pod("uid-3"),  # no annotation → None
+            _make_pod("uid-3"),  # no annotation → omitted from the map
         ]
         result = agent._build_uid_to_annotation(pods)
-        self.assertEqual(result, {"uid-1": "300", "uid-2": "480", "uid-3": None})
+        self.assertEqual(result, {"uid-1": "300", "uid-2": "480"})
 
     def test_empty_pod_list_returns_empty_dict(self):
         agent = _make_agent()

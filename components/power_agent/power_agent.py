@@ -5,11 +5,17 @@
 """Power Agent DaemonSet — Phase 1 implementation.
 
 Runs as a privileged DaemonSet (hostPID: true) on each GPU node. Every 15s:
-  1. Lists all pods on this node via the K8s API.
+  1. Lists pods on this node via the K8s API.
   2. For each physical GPU: nvmlDeviceGetComputeRunningProcesses() → PID list.
   3. For each PID: reads /proc/{pid}/cgroup → extracts pod UID.
   4. Looks up the pod's dynamo.nvidia.com/gpu-power-limit annotation.
   5. Calls nvmlDeviceSetPowerManagementLimit(handle, watts × 1000).
+
+Scope is opt-in: the agent only ever caps a GPU whose pod carries the
+dynamo.nvidia.com/gpu-power-limit annotation (set by the planner on
+prefill/decode worker pods). A GPU running only unannotated pods — a
+non-Dynamo workload, or a Dynamo worker not yet annotated — is left at its
+hardware default and never touched. See ``_build_uid_to_annotation``.
 
 SIGTERM handler: restores default TDP on all managed GPUs before shutdown.
 Cold-start orphan recovery: UUID-gated (persisted to /var/lib/dynamo-power-agent/).
@@ -510,12 +516,34 @@ class PowerAgent:
             return None
 
     def _build_uid_to_annotation(self, pods: list) -> dict[str, Optional[str]]:
-        """Map pod UID → power-limit annotation value (or None if absent/malformed)."""
+        """Map pod UID → power-limit annotation value, for opted-in pods only.
+
+        Scope-by-annotation-key: a pod is in scope **only** if it actually
+        carries ``POWER_ANNOTATION_KEY``. Pods without the key are omitted
+        from the map entirely.
+
+        This omission is load-bearing on shared/multi-tenant nodes.
+        ``_reconcile_gpu`` decides whether a GPU is managed by testing
+        ``uid in uid_to_annotation``; if an unannotated pod were added here
+        with a ``None`` value, a GPU running only that pod would still build a
+        non-empty ``pod_annotations`` and fall through to the "no parseable
+        annotation → safe default" branch in ``_resolve_cap_for_gpu`` — i.e.
+        the agent would silently power-cap a co-located non-Dynamo workload (or
+        a Dynamo worker the planner has not yet annotated). Gating on key
+        presence is what keeps the agent from touching GPUs it was never asked
+        to manage. The planner is the sole writer of this key and stamps it
+        only on prefill/decode worker pods. Do NOT reintroduce unannotated pods
+        with a ``None`` value.
+
+        A pod that carries the key but with a malformed/empty value IS kept
+        (value as-is) so the safe-default fail-safe still applies to a
+        genuinely-managed pod whose annotation is broken.
+        """
         result: dict[str, Optional[str]] = {}
         for pod in pods:
-            uid = pod.metadata.uid
             annotations = pod.metadata.annotations or {}
-            result[uid] = annotations.get(POWER_ANNOTATION_KEY)
+            if POWER_ANNOTATION_KEY in annotations:
+                result[pod.metadata.uid] = annotations[POWER_ANNOTATION_KEY]
         return result
 
     def reconcile_once(self) -> None:
@@ -581,12 +609,16 @@ class PowerAgent:
                 continue  # non-K8s process — skip
             if uid in seen_uids:
                 continue  # already counted this pod via an earlier PID
-            if uid in uid_to_annotation:
+            if uid in uid_to_annotation:  # opted-in: carries POWER_ANNOTATION_KEY
                 seen_uids.add(uid)
                 pod_annotations.append((uid, uid_to_annotation[uid]))
 
         if not pod_annotations:
-            return  # all processes are non-K8s
+            # No opted-in pod owns this GPU (every process is either non-K8s or
+            # belongs to a pod without POWER_ANNOTATION_KEY). Leave the GPU
+            # untouched — see _build_uid_to_annotation for why this is the
+            # scope boundary.
+            return
 
         cap_w = _resolve_cap_for_gpu(
             gpu_idx, pod_annotations, self.safe_default_watts, self.metrics
