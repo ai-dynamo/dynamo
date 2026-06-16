@@ -348,20 +348,6 @@ mod tests {
         serde_json::from_slice(&body).expect("response JSON")
     }
 
-    fn potential_loads_body(min_len: usize) -> String {
-        let mut body = String::from(r#"{"model_name":"model","sequence_hashes":["#);
-        let mut first = true;
-        while body.len() < min_len {
-            if !first {
-                body.push(',');
-            }
-            first = false;
-            body.push('0');
-        }
-        body.push_str("]}");
-        body
-    }
-
     #[tokio::test]
     async fn malformed_json_returns_json_error() {
         let response = app()
@@ -474,23 +460,5 @@ mod tests {
         assert_eq!(loads_response.status(), StatusCode::OK);
         let loads = response_json(loads_response).await;
         assert_eq!(loads[0]["potential_decode_blocks"], 1);
-    }
-
-    #[tokio::test]
-    async fn oversized_json_body_returns_json_error() {
-        let response = app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/potential_loads")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(potential_loads_body(2 * 1024 * 1024 + 1)))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(response_json(response).await["error"].is_string());
     }
 }

@@ -243,11 +243,6 @@ pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
     })
 }
 
-#[cfg(all(test, feature = "standalone-indexer"))]
-pub(crate) fn bind_pub_socket(endpoint: &str) -> Result<SharedSocket> {
-    Ok(Arc::new(Mutex::new(create_bound_pub_socket(endpoint)?)))
-}
-
 #[cfg(feature = "standalone-indexer")]
 pub(crate) async fn recv_multipart(socket: &SharedSocket) -> Result<MultipartMessage> {
     let mut socket = socket.lock().await;
