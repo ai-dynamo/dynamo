@@ -44,6 +44,14 @@ inputs:
     description: 'Optional newline-separated list of fully-qualified extra image URIs to also tag and push'
     required: false
     default: ''
+  archive_sources:
+    description: |
+      When 'true', build with ENABLE_SOURCE_ARCHIVAL=true and extract
+      /sources/ as a workflow artifact. Off by default — top-level
+      callers opt-in (post-merge-ci.yml sets true for push to main /
+      release branches).
+    required: false
+    default: 'false'
   extra_build_args:
     description: 'Optional newline-separated KEY=VALUE build args'
     required: false
@@ -66,6 +74,10 @@ runs:
         else
           echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT
         fi
+        # Compliance /legal + /sboms are platform-invariant for these Go-only
+        # builds, so the extract steps run on a single platform. Both go@ and
+        # cuda-dl-base@ baselines have an -amd64 variant (snapshot is amd64-only).
+        echo "lint_platform=linux/amd64" >> $GITHUB_OUTPUT
 
     - name: Initialize Dynamo Builder
       uses: ./.github/actions/init-dynamo-builder
@@ -115,7 +127,25 @@ runs:
           TARGET_FLAG="--target ${TARGET}"
         fi
 
+        # Baseline SBOM *stem* used by each component's licenses stage to
+        # subtract upstream-owned components from generated NOTICES. The stage
+        # appends -${TARGETARCH}.cdx.json so each arch subtracts its own floor
+        # (mirrors container/context.yaml's per-template baseline_sbom stems).
+        BASELINE_SBOM_FILE=""
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          BASELINE_SBOM_FILE="go@e86c88d0"
+        elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245"
+        fi
+
+        # Source archival is opt-in per top-level caller (see the
+        # `archive_sources` input above). Default off; post-merge-ci.yml
+        # flips it on for push to main + release/*.*.* branches.
+        ENABLE_SOURCE_ARCHIVAL="${{ inputs.archive_sources }}"
+
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
+        BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=${BASELINE_SBOM_FILE}")
+        BUILD_ARGS+=("--build-arg" "ENABLE_SOURCE_ARCHIVAL=${ENABLE_SOURCE_ARCHIVAL}")
         while IFS= read -r build_arg; do
           if [[ -n "${build_arg}" ]]; then
             BUILD_ARGS+=("--build-arg" "${build_arg}")
@@ -126,6 +156,7 @@ runs:
             --platform ${{ steps.settings.outputs.build_platforms }} \
             "${BUILD_ARGS[@]}" \
             --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
             ${TARGET_FLAG} \
             ${TAGGING_FLAGS} -f Dockerfile .
 
@@ -137,3 +168,90 @@ runs:
         for image_uri in "${IMAGE_URIS[@]}"; do
           echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
         done
+
+    # Inline-compliance extraction: reuses the warm BuildKit cache from the
+    # push step above. Both targets are FROM scratch so the export is a few
+    # MB regardless of runtime image size.
+    - name: Compliance extract
+      if: ${{ inputs.component == 'operator' || inputs.component == 'snapshot' }}
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        mkdir -p /tmp/compliance
+        # Baseline SBOM resolution: mirror the build-and-push step so the
+        # extracted NOTICES reflect subtraction the same way the pushed
+        # image does. Keep these two if-blocks in sync.
+        BASELINE_SBOM_FILE=""
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          BASELINE_SBOM_FILE="go@e86c88d0"
+        elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245"
+        fi
+        # Single FROM-scratch `compliance` stage → the unified tree (flat
+        # NOTICES-<Eco>.txt + osrb-deps.csv + osrb.cdx.json). Extraction runs on
+        # one platform (lint platform), so buildx exports directly into dest.
+        docker buildx build \
+            --platform ${{ steps.settings.outputs.lint_platform }} \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASELINE_SBOM_FILE="${BASELINE_SBOM_FILE}" \
+            --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
+            --target compliance_artifact \
+            --output type=local,dest=/tmp/compliance \
+            --progress=plain \
+            -f Dockerfile .
+        # Name the OSRB files: osrb-<component>-<arch>-<sha8>.{csv,cdx.json}.
+        SHA8=$(echo "${{ github.sha }}" | cut -c1-8); [ -z "${SHA8}" ] && SHA8="nosha"
+        ARCH=$(echo "${{ steps.settings.outputs.lint_platform }}" | sed 's|.*linux/||')
+        [ -f /tmp/compliance/osrb-deps.csv ] && mv /tmp/compliance/osrb-deps.csv "/tmp/compliance/osrb-${{ inputs.component }}-${ARCH}-${SHA8}.csv"
+        [ -f /tmp/compliance/osrb.cdx.json ] && mv /tmp/compliance/osrb.cdx.json "/tmp/compliance/osrb-${{ inputs.component }}-${ARCH}-${SHA8}.cdx.json"
+
+    # /sources/ extraction: opt-in via archive_sources input. PR / on-demand
+    # / nightly leave it false; post-merge-ci.yml sets it true for push to
+    # main + release/*.*.* so RC promotions inherit the archive.
+    - name: Extract /sources/ (opt-in via archive_sources)
+      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && inputs.archive_sources == 'true' }}
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        mkdir -p /tmp/sources
+        BASELINE_SBOM_FILE=""
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          BASELINE_SBOM_FILE="go@e86c88d0"
+        elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245"
+        fi
+        docker buildx build \
+            --platform ${{ steps.settings.outputs.lint_platform }} \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASELINE_SBOM_FILE="${BASELINE_SBOM_FILE}" \
+            --build-arg ENABLE_SOURCE_ARCHIVAL=true \
+            --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
+            --target sources_archive \
+            --output type=local,dest=/tmp/sources \
+            --progress=plain \
+            -f Dockerfile .
+
+    - name: Upload compliance artifact (NOTICES + CSV + CycloneDX)
+      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        # compliance-<git-sha>-<container>. image_tag is already <github.sha>-<container>
+        # (e.g. <sha>-vllm-placeholder, <sha>-operator), matching the framework
+        # images' compliance-<git-sha>-<container> naming from compliance-extract.
+        name: compliance-${{ inputs.image_tag }}
+        path: /tmp/compliance/
+        retention-days: 90
+
+    - name: Upload /sources/ tarball (post-merge / RC / release only)
+      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: compliance-${{ inputs.image_tag }}-sources
+        path: /tmp/sources/sources.zip
+        retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs

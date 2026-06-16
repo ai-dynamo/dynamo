@@ -62,6 +62,11 @@ jobs:
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
+      # Source archival: on for pushes to release/*.*.* branches (RC
+      # cuts need fresh-at-the-cut archives for OSRB). Off for main
+      # pushes — per-merge collection is too frequent; nightly-ci.yml
+      # picks up the continuous-compliance cadence at daily granularity.
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   # ============================================================================
@@ -90,6 +95,7 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+          archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
 
 # ============================================================================
 # Snapshot Agent
@@ -115,6 +121,7 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+          archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
 
   # ============================================================================
   # BUILD JOBS
@@ -131,10 +138,12 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   vllm-dev-build:
@@ -167,10 +176,12 @@ jobs:
       cuda_version: '["13.0"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   sglang-build:
@@ -184,10 +195,12 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   sglang-dev-build:
@@ -220,10 +233,12 @@ jobs:
       cuda_version: '["13.0"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   trtllm-build:
@@ -237,10 +252,12 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   trtllm-dev-build:
@@ -273,10 +290,12 @@ jobs:
       cuda_version: '["13.1"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   planner-build:
@@ -289,10 +308,12 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 45
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-planner' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-planner-{0}', github.sha) || '' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   frontend-build:
@@ -306,10 +327,12 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 45
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-frontend' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-frontend-{0}', github.sha) || '' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   # ============================================================================
@@ -504,68 +527,14 @@ jobs:
       pytest_markers: '(pre_merge or post_merge) and vllm and xpu_1'
 
   # ============================================================================
-  # IMAGE COMPLIANCE JOBS
+  # IMAGE COMPLIANCE
   # ============================================================================
-
-  vllm-compliance:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: vllm
-      target: runtime
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  sglang-compliance:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: sglang
-      target: runtime
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  trtllm-compliance:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: trtllm
-      target: runtime
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  planner-compliance:
-    name: planner # This name overlaps with other planner jobs to group them in the UI
-    needs: [planner-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: dynamo
-      target: planner
-      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  frontend-compliance:
-    name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [frontend-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: dynamo
-      target: frontend
-      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
+  # Compliance extract + verify now runs as an inline step INSIDE each shipped
+  # framework build job (inline_compliance: true above), on the same warm builder
+  # — a cache hit + small scratch export instead of a cold full-image rebuild on a
+  # separate fresh builder. archive_sources is threaded to the build job, so
+  # release branches still emit the /sources.zip OSRB artifact; EFA images are
+  # covered (make_efa flows to the extract). A compliance failure fails the build.
 
   # ============================================================================
   # IMAGE COPY JOBS
