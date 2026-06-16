@@ -484,34 +484,11 @@ $(HELMIFY): $(LOCALBIN)
 helmify-chart: manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
-######################### CRD Reference Docs
-CRD_REF_DOCS_VERSION ?= v0.3.0
-CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
-
-.PHONY: crd-ref-docs
-crd-ref-docs: $(CRD_REF_DOCS) ## Download crd-ref-docs locally if necessary.
-$(CRD_REF_DOCS): $(LOCALBIN)
-	@echo "Installing crd-ref-docs $(CRD_REF_DOCS_VERSION)"
-	@GOBIN=$(LOCALBIN) go install github.com/elastic/crd-ref-docs@$(CRD_REF_DOCS_VERSION)
-	@echo "✅ crd-ref-docs $(CRD_REF_DOCS_VERSION) installed successfully"
-
+######################### API Reference Docs
 .PHONY: generate-api-docs
-generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRDs
-	@echo "📚 Generating CRD API reference documentation..."
-	@mkdir -p docs
-	@$(CRD_REF_DOCS) \
-		--source-path=api \
-		--config=docs/crd-ref-docs-config.yaml \
-		--renderer=markdown \
-		--output-path=./docs/api_reference.md
-	@echo "✅ Generated API reference at ./docs/api_reference.md"
-	# concatenate header.md, api_reference.md, and footer.md
-	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/kubernetes/api-reference.md
-	rm ./docs/api_reference.md
-	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
-	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
-	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
-	python3 docs/fix-api-anchors.py ../../docs/kubernetes/api-reference.md
+generate-api-docs: ## Generate kubectl-doc API reference documentation from CRDs
+	@echo "📚 Generating kubectl-doc API reference documentation..."
+	@$(MAKE) -C ../../fern gen
 
 HELM_CHART_DIR := ../helm/charts/platform
 

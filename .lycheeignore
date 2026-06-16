@@ -21,3 +21,11 @@
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
+
+# Generated Kubernetes API reference pages embed upstream OpenAPI descriptions.
+# Some of those descriptions contain stale example links or escaped newlines
+# that lychee scans as malformed raw URLs in the generated MDX payload.
+^https://examples\.k8s\.io/mysql-cinder-pd/README\.md$
+^https://examples\.k8s\.io/volumes/cephfs/README\.md#how-to-use-it$
+^https://github\.com/kubernetes/kubernetes/issues/108255\./nCannot$
+^https://kubernetes\.io/docs/concepts/containers/images/nThis$
