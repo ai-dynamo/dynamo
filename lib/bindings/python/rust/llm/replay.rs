@@ -1635,6 +1635,7 @@ impl PlannerReplayBridge {
     /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
     #[new]
     #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=512))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         trace_file: PathBuf,
         extra_engine_args: &MockEngineArgs,

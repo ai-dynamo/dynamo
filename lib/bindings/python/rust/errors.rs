@@ -19,9 +19,7 @@ use pyo3::types::PyModule;
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
 pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException);
 
-pub fn queue_rejection_to_pyerr(
-    rejection: dynamo_kv_router::scheduling::QueueRejection,
-) -> PyErr {
+pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRejection) -> PyErr {
     let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
     let attributes = Python::with_gil(|py| -> PyResult<()> {
         let value = error.value(py);
@@ -126,43 +124,6 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
 );
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
-
-    #[test]
-    fn queue_rejection_exception_exposes_structured_attributes() {
-        pyo3::prepare_freethreaded_python();
-        let error = queue_rejection_to_pyerr(QueueRejection {
-            policy_class: "latency".to_string(),
-            limit_kind: QueueLimitKind::RawIslTokens,
-            current: 4096,
-            limit: 2048,
-        });
-
-        Python::with_gil(|py| {
-            let value = error.value(py);
-            assert_eq!(
-                value.getattr("policy_class").unwrap().extract::<String>().unwrap(),
-                "latency"
-            );
-            assert_eq!(
-                value.getattr("limit_kind").unwrap().extract::<String>().unwrap(),
-                "raw_isl_tokens"
-            );
-            assert_eq!(
-                value.getattr("current").unwrap().extract::<usize>().unwrap(),
-                4096
-            );
-            assert_eq!(
-                value.getattr("limit").unwrap().extract::<usize>().unwrap(),
-                2048
-            );
-        });
-    }
-}
-
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
 /// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
@@ -186,4 +147,53 @@ pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, Stri
         })?;
     let message = value.getattr("message").ok()?.extract::<String>().ok()?;
     Some((code, message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
+
+    #[test]
+    fn queue_rejection_exception_exposes_structured_attributes() {
+        pyo3::prepare_freethreaded_python();
+        let error = queue_rejection_to_pyerr(QueueRejection {
+            policy_class: "latency".to_string(),
+            limit_kind: QueueLimitKind::RawIslTokens,
+            current: 4096,
+            limit: 2048,
+        });
+
+        Python::with_gil(|py| {
+            let value = error.value(py);
+            assert_eq!(
+                value
+                    .getattr("policy_class")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "latency"
+            );
+            assert_eq!(
+                value
+                    .getattr("limit_kind")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "raw_isl_tokens"
+            );
+            assert_eq!(
+                value
+                    .getattr("current")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                4096
+            );
+            assert_eq!(
+                value.getattr("limit").unwrap().extract::<usize>().unwrap(),
+                2048
+            );
+        });
+    }
 }
