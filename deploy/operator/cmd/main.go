@@ -624,7 +624,7 @@ func main() {
 		} else {
 			// Configure conversion before waiting for ca.crt. Fresh installs then
 			// fail closed instead of admitting unconverted objects.
-			if err := caInjector.EnsureCRDConversion(mainCtx); err != nil {
+			if err := caInjector.ConfigureCRDConversionWebhooks(mainCtx); err != nil {
 				setupLog.Error(err, "failed to configure CRD conversion webhooks")
 				os.Exit(1)
 			}

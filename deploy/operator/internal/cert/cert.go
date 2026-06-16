@@ -7,7 +7,6 @@ package cert
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -41,8 +40,6 @@ const (
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
 )
-
-var errCABundleMissing = errors.New("ca.crt not found or empty")
 
 // convertibleCRDs is the list of CRDs whose conversion webhook this operator
 // patches at startup. Each of these resources has at least two API versions
@@ -255,7 +252,7 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 	if err := i.injectIntoMutatingWebhooks(ctx, caBundle); err != nil {
 		return err
 	}
-	if err := i.ensureCRDConversion(ctx, caBundle); err != nil {
+	if err := i.configureCRDConversionWebhooks(ctx, caBundle); err != nil {
 		return err
 	}
 
@@ -263,12 +260,12 @@ func (i *CABundleInjector) InjectAll(ctx context.Context) error {
 	return nil
 }
 
-// EnsureCRDConversion patches the CRD conversion webhook endpoint. Fresh CRDs
-// get no CA bundle, so conversion fails closed until the CA is injected. If a
-// previous CA bundle already exists, it is preserved to avoid breaking
-// conversion during operator restarts.
-func (i *CABundleInjector) EnsureCRDConversion(ctx context.Context) error {
-	if err := i.ensureCRDConversion(ctx, nil); err != nil {
+// ConfigureCRDConversionWebhooks patches the conversion webhook service
+// reference on each multi-version CRD. Fresh CRDs get no CA bundle, so
+// conversion fails closed until the CA is injected. Existing CA bundles are
+// preserved to keep conversion working during operator restarts.
+func (i *CABundleInjector) ConfigureCRDConversionWebhooks(ctx context.Context) error {
+	if err := i.configureCRDConversionWebhooks(ctx, nil); err != nil {
 		return err
 	}
 	i.logger.Info("CRD conversion webhook configuration ensured")
@@ -282,7 +279,7 @@ func (i *CABundleInjector) InjectCRDConversionCA(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := i.ensureCRDConversion(ctx, caBundle); err != nil {
+	if err := i.configureCRDConversionWebhooks(ctx, caBundle); err != nil {
 		return err
 	}
 	i.logger.Info("CRD conversion webhook CA bundle injected")
@@ -292,19 +289,28 @@ func (i *CABundleInjector) InjectCRDConversionCA(ctx context.Context) error {
 func (i *CABundleInjector) waitForCABundle(ctx context.Context) ([]byte, error) {
 	var caBundle []byte
 	err := wait.PollUntilContextCancel(ctx, i.pollInterval, true, func(ctx context.Context) (bool, error) {
-		var err error
-		caBundle, err = i.readCABundle(ctx)
-		if err == nil {
-			return true, nil
-		}
-		if apierrors.IsNotFound(err) || errors.Is(err, errCABundleMissing) {
+		secret := &corev1.Secret{}
+		err := i.client.Get(ctx, types.NamespacedName{Namespace: i.namespace, Name: i.cfg.Server.Webhook.SecretName}, secret)
+		if apierrors.IsNotFound(err) {
 			i.logger.Info("Waiting for webhook CA bundle",
 				"namespace", i.namespace,
 				"secret", i.cfg.Server.Webhook.SecretName,
 				"error", err.Error())
 			return false, nil
 		}
-		return false, err
+		if err != nil {
+			return false, err
+		}
+		ca, ok := secret.Data["ca.crt"]
+		if !ok || len(ca) == 0 {
+			i.logger.Info("Waiting for webhook CA bundle",
+				"namespace", i.namespace,
+				"secret", i.cfg.Server.Webhook.SecretName,
+				"error", "ca.crt not found or empty")
+			return false, nil
+		}
+		caBundle = ca
+		return true, nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("waiting for CA bundle in secret %s/%s: %w", i.namespace, i.cfg.Server.Webhook.SecretName, err)
@@ -319,7 +325,7 @@ func (i *CABundleInjector) readCABundle(ctx context.Context) ([]byte, error) {
 	}
 	ca, ok := secret.Data["ca.crt"]
 	if !ok || len(ca) == 0 {
-		return nil, fmt.Errorf("%w in secret %s/%s", errCABundleMissing, i.namespace, i.cfg.Server.Webhook.SecretName)
+		return nil, fmt.Errorf("ca.crt not found or empty in secret %s/%s", i.namespace, i.cfg.Server.Webhook.SecretName)
 	}
 	return ca, nil
 }
@@ -369,21 +375,20 @@ func (i *CABundleInjector) injectIntoMutatingWebhooks(ctx context.Context, caBun
 	return nil
 }
 
-// ensureCRDConversion patches each multi-version CRD owned by this operator
-// with the conversion webhook configuration, setting the CA bundle and service
-// reference to this operator's webhook service. Missing CRDs are tolerated with
-// an info-level log so that a standalone operator image can be brought up
-// before the CRDs are installed (helm install idempotency).
-func (i *CABundleInjector) ensureCRDConversion(ctx context.Context, caBundle []byte) error {
+// configureCRDConversionWebhooks patches each multi-version CRD owned by this
+// operator with the conversion webhook configuration. Missing CRDs are
+// tolerated with an info-level log so that a standalone operator image can be
+// brought up before the CRDs are installed (helm install idempotency).
+func (i *CABundleInjector) configureCRDConversionWebhooks(ctx context.Context, caBundle []byte) error {
 	for _, name := range convertibleCRDs {
-		if err := i.patchConversion(ctx, name, caBundle); err != nil {
+		if err := i.patchCRDConversionWebhook(ctx, name, caBundle); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (i *CABundleInjector) patchConversion(ctx context.Context, crdName string, caBundle []byte) error {
+func (i *CABundleInjector) patchCRDConversionWebhook(ctx context.Context, crdName string, caBundle []byte) error {
 	crd := &apiextensionsv1.CustomResourceDefinition{}
 	if err := i.client.Get(ctx, types.NamespacedName{Name: crdName}, crd); err != nil {
 		if apierrors.IsNotFound(err) {
