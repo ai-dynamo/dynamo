@@ -404,6 +404,7 @@ const RECIPE_CSS = `
 }
 
 .dynamo-model-card {
+    position: relative;
     display: flex;
     flex-direction: column;
     min-height: 138px;
@@ -418,6 +419,22 @@ const RECIPE_CSS = `
 .dynamo-model-card:hover {
     border-color: var(--nv-color-green);
     text-decoration: none;
+}
+
+/* Stretched-link: the card is a <div> (so its data-* still drive the CSS
+   filter and the rich markup is never reprocessed); this single inner link
+   covers the whole tile and is the one Fern-resolved, version-safe href. */
+.dynamo-card-link {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    font-size: 0;
+    color: transparent;
+}
+
+.dynamo-card-link:focus-visible {
+    outline: 2px solid var(--nv-color-green);
+    outline-offset: 2px;
 }
 
 .dynamo-model-card-link {
