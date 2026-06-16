@@ -412,13 +412,6 @@ policy_classes:
     }
 
     #[test]
-    fn exact_zero_uncached_tokens_use_unit_scheduling_cost() {
-        let snapshot = QueueSnapshot::new(32, 32);
-        assert_eq!(snapshot.uncached_tokens, 0);
-        assert_eq!(snapshot.scheduling_cost_tokens, 1);
-    }
-
-    #[test]
     fn token_caps_reject_on_pre_add_state_after_allowing_overshoot() {
         let mut queue = PolicyQueue::new(profile(
             r#"

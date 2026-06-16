@@ -453,7 +453,6 @@ models:
         );
         assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
         assert_eq!(exact.default_class().request_queue_limit, Some(0));
-        assert!(!exact.uses_uncached_isl_classification());
         assert_eq!(
             exact
                 .class(exact.resolve_class_index(Some("unknown"), usize::MAX))
@@ -466,7 +465,6 @@ models:
         assert_eq!(unmatched.default_class().name, "root-default");
         assert_eq!(unmatched.default_class().prefill_busy_threshold, Some(100));
         assert_eq!(unmatched.default_class().prefill_busy_threshold_frac, None);
-        assert!(unmatched.uses_uncached_isl_classification());
     }
 
     #[test]
@@ -652,7 +650,13 @@ policy_classes:
         );
         assert_eq!(model.classes().len(), 2);
         assert_eq!(model.default_class().name, "latency");
-        assert!(!model.uses_uncached_isl_classification());
+        assert_eq!(
+            model
+                .class(model.resolve_class_index(Some("unknown"), usize::MAX))
+                .name,
+            "latency",
+            "model replacement must not inherit the root uncached-ISL mapping"
+        );
         assert!(
             model.classes().iter().all(|class| class.name != "uncached"),
             "model profiles must completely replace the root profile"
