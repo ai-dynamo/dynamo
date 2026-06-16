@@ -1084,3 +1084,90 @@ def test_model_has_auto_map_returns_false_for_malformed_json(tmp_path) -> None:
     (tmp_path / "config.json").write_text("{this is not valid json}")
     result = model_has_auto_map(tmp_path)
     assert result is False
+
+
+def test_auto_inject_trust_remote_code_detects_model_path_flag() -> None:
+    """SGLang uses ``--model-path`` instead of ``--model``; the injector
+    must extract the model from that flag for per-service auto_map detection."""
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("SglangDecodeWorker")
+    cfg["spec"]["services"]["SglangDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ] = ["--model-path", "sglang/custom-model", "--tp", "1"]
+
+    def _auto_map_for_sglang_model(model, *args, **kwargs):
+        return model == "sglang/custom-model"
+
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map",
+        side_effect=_auto_map_for_sglang_model,
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "fallback/model", "sglang")
+
+    assert modified == ["SglangDecodeWorker"]
+
+
+def test_auto_inject_trust_remote_code_detects_equals_form() -> None:
+    """The injector must handle ``--model=value`` and ``--model-path=value``
+    forms used in some DGD templates."""
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ] = ["--model=equals/model", "--tp", "1"]
+
+    def _auto_map_for_equals_model(model, *args, **kwargs):
+        return model == "equals/model"
+
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map",
+        side_effect=_auto_map_for_equals_model,
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "fallback/model", "vllm")
+
+    assert modified == ["VllmDecodeWorker"]
+
+
+def test_auto_inject_trust_remote_code_shell_form_preserves_syntax() -> None:
+    """Shell-form args with shell operators (&&, |, etc.) must not be
+    corrupted by shlex round-tripping."""
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    original_cmd = (
+        "export FOO=bar && python3 -m vllm.entrypoints.openai.api_server "
+        "--model some/model --tp 1"
+    )
+    cfg = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [original_cmd],
+                        },
+                    },
+                },
+            }
+        }
+    }
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+
+    assert modified == ["VllmDecodeWorker"]
+    result_args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert len(result_args) == 1
+    # The original shell syntax (&&, export) must be preserved verbatim.
+    assert result_args[0] == original_cmd + " --trust-remote-code"

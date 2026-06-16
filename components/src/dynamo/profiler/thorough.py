@@ -444,23 +444,6 @@ async def run_thorough(
         len(decode_candidates),
     )
 
-<<<<<<< HEAD
-=======
-    # Auto-inject --trust-remote-code into every candidate DGD.  Must run
-    # after DGD overrides (so user overrides win) and tolerations (order
-    # doesn't matter, but consistent with profile_sla.py).  Uses
-    # per-candidate --model arg extraction so an override-swapped model is
-    # detected correctly.
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
-    )
-
-    for candidate in prefill_candidates + decode_candidates:
-        auto_inject_trust_remote_code(candidate.dgd_config, local_or_hf_model, backend)
-
-    config_modifier = CONFIG_MODIFIERS[backend]
-
->>>>>>> 6f1ff9a9bc (profiler: address PR review comments on auto trust_remote_code injection)
     # --- Stage 2: Benchmarking ---
     ops.current_phase = ProfilingPhase.SweepingPrefill
     write_profiler_status(
