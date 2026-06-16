@@ -368,6 +368,8 @@ navigation:
             path: ../pages-dev/components/router/router-examples.md
           - page: Standalone Indexer
             path: ../pages-dev/components/router/standalone-indexer.md
+          - page: Standalone Selection Service
+            path: ../pages-dev/components/router/standalone-selection.md
           - page: Standalone Slot Tracker
             path: ../pages-dev/components/router/standalone-slot-tracker.md
           - page: KV Event Replay — Dynamo vs vLLM
