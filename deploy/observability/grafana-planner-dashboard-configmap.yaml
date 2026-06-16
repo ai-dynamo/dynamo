@@ -489,6 +489,10 @@ data:
                     "value": "left"
                   },
                   {
+                    "id": "custom.axisLabel",
+                    "value": "TTFT (ms)"
+                  },
+                  {
                     "id": "custom.fillOpacity",
                     "value": 0
                   },
@@ -517,6 +521,10 @@ data:
                   {
                     "id": "custom.axisPlacement",
                     "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "ITL (ms)"
                   },
                   {
                     "id": "custom.fillOpacity",
