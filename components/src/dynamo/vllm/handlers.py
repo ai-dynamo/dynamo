@@ -4,7 +4,6 @@
 import asyncio
 import base64
 import inspect
-import io
 import logging
 import math
 import os
@@ -2728,21 +2727,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # The spliced tensor arrives already in pd_hidden space.
                 spliced = spliced.to("cpu")
 
-                # Serialize for the prompt_embeds wire format that
-                # _create_prompt_from_embeddings expects (handlers.py
-                # → safe_load_prompt_embeds): torch.save → BytesIO → base64.
-                buf = io.BytesIO()
-                torch.save(spliced, buf)
-                request["prompt_embeds"] = base64.b64encode(buf.getvalue()).decode(
-                    "ascii"
-                )
-                # Strip multi_modal_data so the caller doesn't try to attach
-                # it as multimodal — we want _build_prompt_from_request to
-                # take the prompt_embeds branch instead.
+                # Pass the tensor directly via the request dict so
+                # _build_prompt_from_request can create EmbedsPrompt without
+                # a serialize → base64 → deserialize roundtrip.
+                request["__full_prompt_tensor__"] = spliced
                 request["multi_modal_data"] = None
                 logger.debug(
-                    "External-encoder: routed spliced tensor "
-                    "(shape=%s, dtype=%s) into request['prompt_embeds']",
+                    "External-encoder: spliced tensor shape=%s dtype=%s",
                     tuple(spliced.shape),
                     spliced.dtype,
                 )
@@ -2902,6 +2893,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             - On failure: (None, None, error_dict to yield)
         """
         embedding_sequence_length = None
+
+        # Fast path: full prompt tensor from FullPromptEncodeWorkerHandler.
+        # Stored directly in the request dict to avoid serialize/deserialize roundtrip.
+        full_prompt_tensor = request.pop("__full_prompt_tensor__", None)
+        if full_prompt_tensor is not None:
+            seq_len = full_prompt_tensor.shape[0]
+            return EmbedsPrompt(prompt_embeds=full_prompt_tensor), seq_len, None
 
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
