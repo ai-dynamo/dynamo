@@ -37,7 +37,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::min_initial_workers_from_env;
-use crate::services::zmq::validate_endpoint as validate_zmq_endpoint;
+use crate::services::common::zmq::validate_endpoint as validate_zmq_endpoint;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 

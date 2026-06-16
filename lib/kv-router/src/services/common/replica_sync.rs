@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 use crate::sequences::{SequencePublisher, SequenceSubscriber};
-use crate::services::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
+use crate::services::common::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
 
 pub(crate) const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 const PEER_COMMAND_CHANNEL_CAPACITY: usize = 64;
@@ -29,6 +29,11 @@ pub(crate) struct ScopedReplicaEvent {
 }
 
 pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PeerRequest {
+    pub endpoint: String,
+}
 
 #[derive(Clone)]
 pub(crate) struct ScopedSequencePublisher {
@@ -141,6 +146,13 @@ pub(crate) fn generate_process_id() -> u64 {
     }
 }
 
+pub(crate) fn replica_sync_bind_endpoint(port: u16) -> Result<String> {
+    if port == 0 {
+        anyhow::bail!("replica sync port must be greater than zero");
+    }
+    Ok(format!("tcp://*:{port}"))
+}
+
 pub(crate) fn start_replica_publisher(
     bind_endpoint: &str,
     cancel_token: CancellationToken,
@@ -194,9 +206,6 @@ pub(crate) enum PeerError {
     #[error(transparent)]
     InvalidEndpoint(#[from] anyhow::Error),
 
-    #[error("peer endpoint matches this replica's advertised endpoint")]
-    SelfEndpoint,
-
     #[error("replica peer manager is unavailable")]
     Unavailable,
 }
@@ -206,7 +215,6 @@ pub(crate) enum PeerError {
 pub(crate) struct PeerManager {
     command_tx: mpsc::Sender<PeerCommand>,
     peers: Arc<RwLock<HashSet<String>>>,
-    advertised_endpoint: Option<Arc<str>>,
 }
 
 #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
@@ -224,22 +232,17 @@ enum PeerCommand {
 impl PeerManager {
     pub(crate) fn start<F>(
         initial_peers: Vec<String>,
-        advertised_endpoint: Option<String>,
         cancel_token: CancellationToken,
         handle_event: F,
     ) -> Result<Self>
     where
         F: Fn(ScopedReplicaEvent) + Send + Sync + 'static,
     {
-        let advertised_endpoint = advertised_endpoint.map(Arc::<str>::from);
-        if let Some(endpoint) = advertised_endpoint.as_deref() {
-            validate_endpoint(endpoint)
-                .with_context(|| format!("invalid advertised replica endpoint `{endpoint}`"))?;
-        }
         let mut socket = create_sub_socket(REPLICA_TOPIC)?;
         let mut configured_peers = HashSet::new();
         for endpoint in initial_peers {
-            validate_peer_endpoint(&endpoint, advertised_endpoint.as_deref())?;
+            validate_endpoint(&endpoint)
+                .with_context(|| format!("invalid replica peer endpoint `{endpoint}`"))?;
             if configured_peers.insert(endpoint.clone()) {
                 socket
                     .connect(&endpoint)
@@ -272,16 +275,12 @@ impl PeerManager {
             }
         });
 
-        Ok(Self {
-            command_tx,
-            peers,
-            advertised_endpoint,
-        })
+        Ok(Self { command_tx, peers })
     }
 
     #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, PeerError> {
-        validate_peer_endpoint(&endpoint, self.advertised_endpoint.as_deref())?;
+        validate_endpoint(&endpoint).map_err(PeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
         self.command_tx
             .send(PeerCommand::Register { endpoint, response })
@@ -315,19 +314,8 @@ impl PeerManager {
     }
 }
 
-fn validate_peer_endpoint(
-    endpoint: &str,
-    advertised_endpoint: Option<&str>,
-) -> Result<(), PeerError> {
-    validate_endpoint(endpoint).map_err(PeerError::InvalidEndpoint)?;
-    if advertised_endpoint.is_some_and(|advertised| endpoint == advertised) {
-        return Err(PeerError::SelfEndpoint);
-    }
-    Ok(())
-}
-
 fn handle_peer_command(
-    socket: &crate::services::zmq::ZmqSocket,
+    socket: &crate::services::common::zmq::ZmqSocket,
     peers: &RwLock<HashSet<String>>,
     command: PeerCommand,
 ) {
@@ -363,8 +351,10 @@ fn handle_peer_command(
     }
 }
 
-fn handle_replica_message<F>(handle_event: &F, frames: crate::services::zmq::MultipartMessage)
-where
+fn handle_replica_message<F>(
+    handle_event: &F,
+    frames: crate::services::common::zmq::MultipartMessage,
+) where
     F: Fn(ScopedReplicaEvent),
 {
     let [topic, payload] = frames.as_slice() else {
@@ -427,11 +417,9 @@ mod tests {
     }
 
     #[test]
-    fn advertised_endpoint_cannot_be_registered_as_peer() {
-        let error = validate_peer_endpoint("tcp://127.0.0.1:8092", Some("tcp://127.0.0.1:8092"))
-            .unwrap_err();
-
-        assert!(error.to_string().contains("advertised endpoint"));
+    fn replica_sync_port_builds_wildcard_bind_endpoint() {
+        assert_eq!(replica_sync_bind_endpoint(8092).unwrap(), "tcp://*:8092");
+        assert!(replica_sync_bind_endpoint(0).is_err());
     }
 
     #[tokio::test]
@@ -451,13 +439,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn peer_manager_registers_and_deregisters_endpoints() {
         let cancel_token = CancellationToken::new();
-        let manager = PeerManager::start(
-            Vec::new(),
-            Some("tcp://127.0.0.1:8092".to_string()),
-            cancel_token.clone(),
-            |_| {},
-        )
-        .unwrap();
+        let manager = PeerManager::start(Vec::new(), cancel_token.clone(), |_| {}).unwrap();
         let endpoint = "tcp://127.0.0.1:8093".to_string();
 
         assert!(manager.register_peer(endpoint.clone()).await.unwrap());
@@ -466,6 +448,50 @@ mod tests {
         assert!(manager.deregister_peer(endpoint.clone()).await.unwrap());
         assert!(!manager.deregister_peer(endpoint).await.unwrap());
         assert!(manager.list_peers().is_empty());
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dynamic_peer_registration_controls_delivery() {
+        let endpoint = reserve_tcp_endpoint();
+        let cancel_token = CancellationToken::new();
+        let outbound =
+            start_replica_publisher(&endpoint, cancel_token.child_token()).expect("publisher");
+        let (received_tx, mut received_rx) = mpsc::channel(16);
+        let manager = PeerManager::start(Vec::new(), cancel_token.child_token(), move |event| {
+            let _ = received_tx.try_send(event);
+        })
+        .expect("peer manager");
+
+        assert!(manager.register_peer(endpoint.clone()).await.unwrap());
+
+        let mut delivered = false;
+        for attempt in 0..40 {
+            let mut event = event();
+            event.event.request_id = format!("warmup-{attempt}");
+            outbound.send(event).await.unwrap();
+            if tokio::time::timeout(std::time::Duration::from_millis(50), received_rx.recv())
+                .await
+                .is_ok()
+            {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "dynamically registered peer received no events");
+
+        assert!(manager.deregister_peer(endpoint).await.unwrap());
+        while received_rx.try_recv().is_ok() {}
+
+        let mut after_disconnect = event();
+        after_disconnect.event.request_id = "after-disconnect".to_string();
+        outbound.send(after_disconnect).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), received_rx.recv(),)
+                .await
+                .is_err()
+        );
 
         cancel_token.cancel();
     }
@@ -489,13 +515,11 @@ mod tests {
             outbound_b,
         ));
         let dispatch_registry_b = Arc::clone(&registry_b);
-        let _peer_b = PeerManager::start(
-            vec![endpoint_a],
-            Some(endpoint_b),
-            cancel_token.child_token(),
-            move |event| dispatch_registry_b.dispatch_replica_event(event),
-        )
-        .unwrap();
+        let _peer_b =
+            PeerManager::start(vec![endpoint_a], cancel_token.child_token(), move |event| {
+                dispatch_registry_b.dispatch_replica_event(event)
+            })
+            .unwrap();
         let key = TrackerKey::new("model".to_string(), Some("tenant".to_string()));
         registry_a.register(key.clone(), 1, 16, 0, 1).unwrap();
         registry_b.register(key.clone(), 1, 16, 0, 1).unwrap();

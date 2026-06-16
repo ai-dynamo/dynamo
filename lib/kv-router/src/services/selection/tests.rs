@@ -36,7 +36,10 @@ fn app() -> Router {
         1,
         CancellationToken::new(),
     ));
-    create_router(Arc::new(AppState { core }))
+    create_router(Arc::new(AppState {
+        core,
+        peer_manager: None,
+    }))
 }
 
 async fn response_json(response: Response) -> serde_json::Value {
@@ -194,7 +197,10 @@ async fn incomplete_worker_is_accepted_but_not_schedulable() {
     let mut config = test_config();
     config.router_queue_threshold = Some(1.0);
     let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
-    let app = create_router(Arc::new(AppState { core }));
+    let app = create_router(Arc::new(AppState {
+        core,
+        peer_manager: None,
+    }));
 
     let response = post(
         app.clone(),
@@ -525,9 +531,9 @@ async fn explicit_reservation_rejects_unschedulable_worker() {
 async fn selector_replica_sync_propagates_request_lifecycle() {
     let cancel_token = CancellationToken::new();
     let (outbound_a, mut inbound_a) =
-        mpsc::channel(crate::services::replica_sync::REPLICA_EVENT_CHANNEL_CAPACITY);
+        mpsc::channel(crate::services::common::replica_sync::REPLICA_EVENT_CHANNEL_CAPACITY);
     let (outbound_b, mut inbound_b) =
-        mpsc::channel(crate::services::replica_sync::REPLICA_EVENT_CHANNEL_CAPACITY);
+        mpsc::channel(crate::services::common::replica_sync::REPLICA_EVENT_CHANNEL_CAPACITY);
     let core_a = Arc::new(SelectionCore::new_for_server(
         test_config(),
         1,
@@ -558,9 +564,11 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
 
     let app_a = create_router(Arc::new(AppState {
         core: Arc::clone(&core_a),
+        peer_manager: None,
     }));
     let app_b = create_router(Arc::new(AppState {
         core: Arc::clone(&core_b),
+        peer_manager: None,
     }));
     assert_eq!(
         register_worker(app_a.clone(), None).await.status(),
@@ -673,11 +681,107 @@ async fn dump_exposes_compatible_indexer_snapshot() {
 }
 
 #[tokio::test]
+async fn replica_peer_routes_manage_selector_peers() {
+    let disabled_app = app();
+    let peers_response = disabled_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/replica_sync/peers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(peers_response.status(), StatusCode::OK);
+    assert_eq!(response_json(peers_response).await, serde_json::json!([]));
+
+    let disabled_register = post(
+        disabled_app,
+        "/replica_sync/register_peer",
+        r#"{"endpoint":"tcp://127.0.0.1:19092"}"#,
+    )
+    .await;
+    assert_eq!(disabled_register.status(), StatusCode::CONFLICT);
+
+    let cancel_token = CancellationToken::new();
+    let peer_manager = crate::services::common::replica_sync::PeerManager::start(
+        Vec::new(),
+        cancel_token.clone(),
+        |_| {},
+    )
+    .unwrap();
+    let core = Arc::new(SelectionCore::new(test_config(), 1, cancel_token.clone()));
+    let app = create_router(Arc::new(AppState {
+        core,
+        peer_manager: Some(peer_manager),
+    }));
+    let endpoint = "tcp://127.0.0.1:19092";
+    let body = format!(r#"{{"endpoint":"{endpoint}"}}"#);
+
+    assert_eq!(
+        post(app.clone(), "/replica_sync/register_peer", &body)
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        post(app.clone(), "/replica_sync/register_peer", &body)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    let peers_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/replica_sync/peers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response_json(peers_response).await,
+        serde_json::json!([endpoint])
+    );
+
+    assert_eq!(
+        post(
+            app.clone(),
+            "/replica_sync/register_peer",
+            r#"{"endpoint":"invalid"}"#,
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post(app.clone(), "/replica_sync/deregister_peer", &body,)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(app, "/replica_sync/deregister_peer", &body)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    cancel_token.cancel();
+}
+
+#[tokio::test]
 async fn reconcile_rolls_back_partial_listener_registration() {
     let mut config = test_config();
     config.use_kv_events = true;
     let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
-    let app = create_router(Arc::new(AppState { core }));
+    let app = create_router(Arc::new(AppState {
+        core,
+        peer_manager: None,
+    }));
 
     let response = post(
         app.clone(),

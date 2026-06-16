@@ -46,9 +46,8 @@ trusted internal network or place it behind an appropriate network policy.
 | `--port` | `8092` | HTTP server port. |
 | `--threads` | `4` | KV indexer worker threads. |
 | `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. |
-| `--replica-sync-bind` | none | Local ZMQ PUB endpoint for active-load lifecycle events. |
-| `--replica-sync-advertise` | none | Externally reachable form of the local replica-sync endpoint. Requires `--replica-sync-bind`. |
-| `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-bind`. |
+| `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
+| `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
@@ -206,7 +205,7 @@ The selector has two independent peer configurations:
 | Plane | Transport | Flags | Purpose |
 |-------|-----------|-------|---------|
 | Indexer recovery | HTTP | `--indexer-peers` | Fetch a compatible `/dump` during startup and replay KV events into the local indexer. |
-| Replica synchronization | ZMQ | `--replica-sync-bind`, `--replica-sync-advertise`, `--replica-sync-peers` | Share admission, prefill-complete, and free events by model and tenant. |
+| Replica synchronization | ZMQ | `--replica-sync-port`, `--replica-sync-peers` | Share admission, prefill-complete, and free events by model and tenant. |
 
 Example:
 
@@ -214,14 +213,28 @@ Example:
 .venv/bin/python -m dynamo.select_service \
   --port 8092 \
   --indexer-peers http://selector-b:8092 \
-  --replica-sync-bind 'tcp://*:9092' \
-  --replica-sync-advertise 'tcp://selector-a:9092' \
+  --replica-sync-port 9092 \
   --replica-sync-peers 'tcp://selector-b:9092'
 ```
 
 Configure the reverse peer direction on selector B for bidirectional lifecycle
 synchronization. `GET /dump` exposes the selector's current indexer snapshot in
 the same recovery format as the standalone indexer.
+
+Replica-sync peers may also be changed without restarting the selector:
+
+```http
+POST /replica_sync/register_peer
+Content-Type: application/json
+
+{"endpoint":"tcp://selector-b:9092"}
+```
+
+The same body is accepted by `POST /replica_sync/deregister_peer`.
+`GET /replica_sync/peers` returns the sorted configured endpoints. Dynamic
+membership is in-memory; after restart, only peers supplied through
+`--replica-sync-peers` are restored. These routes only manage live ZMQ
+replica-sync peers. They do not alter the HTTP indexer-recovery peers.
 
 ## Consistency Invariants
 
@@ -248,4 +261,3 @@ the same recovery format as the standalone indexer.
 - `POST /potential_loads` estimates worker load for a prompt without selection.
 - `POST /overlap_scores` returns per-worker/per-rank tiered overlap rows.
 - `GET /dump` returns the compatible indexer recovery snapshot.
-

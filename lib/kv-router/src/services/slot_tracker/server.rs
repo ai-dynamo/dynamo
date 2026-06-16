@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::protocols::WorkerWithDpRank;
 use crate::sequences::SequenceError;
-use crate::services::replica_sync::{PeerError, PeerManager};
+use crate::services::common::replica_sync::{PeerError, PeerManager, PeerRequest};
 
 use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry, TrackerKey};
 
@@ -85,11 +85,6 @@ struct PotentialLoadsRequest {
 struct FilterQuery {
     model_name: Option<String>,
     tenant_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct PeerRequest {
-    url: String,
 }
 
 fn deserialize_sequence_hashes<'de, D>(deserializer: D) -> Result<Vec<SequenceHash>, D::Error>
@@ -263,7 +258,7 @@ async fn register_peer(
     let Some(peer_manager) = &state.peer_manager else {
         return json_error(StatusCode::CONFLICT, "replica sync is disabled");
     };
-    match peer_manager.register_peer(req.url).await {
+    match peer_manager.register_peer(req.endpoint).await {
         Ok(true) => json_ok(StatusCode::CREATED),
         Ok(false) => json_ok(StatusCode::OK),
         Err(error) => peer_error(error),
@@ -281,7 +276,7 @@ async fn deregister_peer(
     let Some(peer_manager) = &state.peer_manager else {
         return json_error(StatusCode::CONFLICT, "replica sync is disabled");
     };
-    match peer_manager.deregister_peer(req.url).await {
+    match peer_manager.deregister_peer(req.endpoint).await {
         Ok(true) => json_ok(StatusCode::OK),
         Ok(false) => json_error(StatusCode::NOT_FOUND, "peer not found"),
         Err(error) => peer_error(error),
@@ -360,7 +355,7 @@ fn service_error(error: ServiceError) -> Response {
 
 fn peer_error(error: PeerError) -> Response {
     let status = match &error {
-        PeerError::InvalidEndpoint(_) | PeerError::SelfEndpoint => StatusCode::BAD_REQUEST,
+        PeerError::InvalidEndpoint(_) => StatusCode::BAD_REQUEST,
         PeerError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     json_error(status, error)
@@ -376,9 +371,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/free", post(free))
         .route("/loads", get(list_loads))
         .route("/potential_loads", post(potential_loads))
-        .route("/register_peer", post(register_peer))
-        .route("/deregister_peer", post(deregister_peer))
-        .route("/peers", get(list_peers))
+        .route("/replica_sync/register_peer", post(register_peer))
+        .route("/replica_sync/deregister_peer", post(deregister_peer))
+        .route("/replica_sync/peers", get(list_peers))
         .route("/health", get(health))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -475,7 +470,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/peers")
+                    .uri("/replica_sync/peers")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -488,14 +483,112 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/register_peer")
+                    .uri("/replica_sync/register_peer")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"url":"tcp://127.0.0.1:8092"}"#))
+                    .body(Body::from(r#"{"endpoint":"tcp://127.0.0.1:8092"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(register_response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn peer_routes_manage_replica_sync_endpoints() {
+        let cancel_token = CancellationToken::new();
+        let peer_manager = PeerManager::start(Vec::new(), cancel_token.clone(), |_| {}).unwrap();
+        let app = create_router(Arc::new(AppState {
+            registry: Arc::new(SlotTrackerRegistry::new(cancel_token.clone())),
+            peer_manager: Some(peer_manager),
+        }));
+        let endpoint = "tcp://127.0.0.1:18092";
+        let body = format!(r#"{{"endpoint":"{endpoint}"}}"#);
+
+        let register_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/replica_sync/register_peer")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(register_response.status(), StatusCode::CREATED);
+
+        let duplicate_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/replica_sync/register_peer")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate_response.status(), StatusCode::OK);
+
+        let peers_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/replica_sync/peers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response_json(peers_response).await,
+            serde_json::json!([endpoint])
+        );
+
+        let invalid_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/replica_sync/register_peer")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"endpoint":"invalid"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+
+        let deregister_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/replica_sync/deregister_peer")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deregister_response.status(), StatusCode::OK);
+
+        let missing_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/replica_sync/deregister_peer")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+
+        cancel_token.cancel();
     }
 
     #[tokio::test]

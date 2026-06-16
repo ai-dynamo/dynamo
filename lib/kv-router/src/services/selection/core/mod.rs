@@ -26,14 +26,14 @@ use crate::scheduling::{
 use crate::sequences::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
 };
+use crate::services::common::replica_sync::{
+    ChannelSequenceSubscriber, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
+    ScopedReplicaEvent, ScopedSequencePublisher,
+};
 use crate::services::indexer::backend::Indexer;
 use crate::services::indexer::recovery;
 use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::build_mooncake_overlap_summaries;
-use crate::services::replica_sync::{
-    ChannelSequenceSubscriber, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
-    ScopedReplicaEvent, ScopedSequencePublisher,
-};
 
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
@@ -84,8 +84,7 @@ pub struct SelectionServiceConfig {
     pub port: u16,
     pub threads: usize,
     pub indexer_peers: Vec<String>,
-    pub replica_sync_bind: Option<String>,
-    pub replica_sync_advertise: Option<String>,
+    pub replica_sync_port: Option<u16>,
     pub replica_sync_peers: Vec<String>,
     pub kv_router_config: crate::config::KvRouterConfig,
 }
@@ -461,19 +460,21 @@ impl SelectionCore {
         let mut endpoints: Vec<_> = record.listener_endpoints().into_iter().collect();
         endpoints.sort_by_key(|(dp_rank, _)| *dp_rank);
         for (dp_rank, endpoint) in endpoints {
-            crate::services::zmq::validate_endpoint(&endpoint).map_err(|error| {
+            crate::services::common::zmq::validate_endpoint(&endpoint).map_err(|error| {
                 SelectionError::BadRequest(format!(
                     "invalid kv_events endpoint for worker {} dp_rank {dp_rank}: {error}",
                     record.worker_id
                 ))
             })?;
             if let Some(replay_endpoint) = record.replay_endpoint.as_deref() {
-                crate::services::zmq::validate_endpoint(replay_endpoint).map_err(|error| {
-                    SelectionError::BadRequest(format!(
-                        "invalid replay endpoint for worker {} dp_rank {dp_rank}: {error}",
-                        record.worker_id
-                    ))
-                })?;
+                crate::services::common::zmq::validate_endpoint(replay_endpoint).map_err(
+                    |error| {
+                        SelectionError::BadRequest(format!(
+                            "invalid replay endpoint for worker {} dp_rank {dp_rank}: {error}",
+                            record.worker_id
+                        ))
+                    },
+                )?;
             }
             self.indexer_registry
                 .register(

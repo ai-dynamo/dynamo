@@ -15,14 +15,15 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::services::replica_sync::{PeerManager, generate_process_id, start_replica_publisher};
+use crate::services::common::replica_sync::{
+    PeerManager, generate_process_id, replica_sync_bind_endpoint, start_replica_publisher,
+};
 use registry::SlotTrackerRegistry;
 use server::{AppState, create_router};
 
 pub struct SlotTrackerConfig {
     pub port: u16,
-    pub replica_sync_bind: Option<String>,
-    pub replica_sync_advertise: Option<String>,
+    pub replica_sync_port: Option<u16>,
     pub replica_sync_peers: Vec<String>,
 }
 
@@ -35,9 +36,10 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
         shutdown_token.cancel();
     });
 
-    let (registry, peer_manager) = if let Some(bind_endpoint) = &config.replica_sync_bind {
+    let (registry, peer_manager) = if let Some(replica_sync_port) = config.replica_sync_port {
+        let bind_endpoint = replica_sync_bind_endpoint(replica_sync_port)?;
         let process_id = generate_process_id();
-        let outbound_tx = start_replica_publisher(bind_endpoint, cancel_token.child_token())?;
+        let outbound_tx = start_replica_publisher(&bind_endpoint, cancel_token.child_token())?;
         let registry = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
             process_id,
@@ -46,23 +48,19 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
         let dispatch_registry = Arc::clone(&registry);
         let peer_manager = PeerManager::start(
             config.replica_sync_peers,
-            config.replica_sync_advertise.clone(),
             cancel_token.child_token(),
             move |event| dispatch_registry.dispatch_replica_event(event),
         )?;
         tracing::info!(
             port = config.port,
-            bind_endpoint,
-            advertised_endpoint = config.replica_sync_advertise.as_deref(),
+            replica_sync_port,
             process_id,
             "Starting standalone slot tracker with replica sync"
         );
         (registry, Some(peer_manager))
     } else {
-        if config.replica_sync_advertise.is_some() || !config.replica_sync_peers.is_empty() {
-            anyhow::bail!(
-                "--replica-sync-advertise and --replica-sync-peers require --replica-sync-bind"
-            );
+        if !config.replica_sync_peers.is_empty() {
+            anyhow::bail!("--replica-sync-peers requires --replica-sync-port");
         }
         tracing::info!(
             port = config.port,

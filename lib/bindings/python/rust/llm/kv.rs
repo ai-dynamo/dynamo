@@ -45,6 +45,17 @@ mod demand_driven;
 
 const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
 
+#[cfg(any(feature = "slot-tracker", feature = "select-service"))]
+fn parse_nonzero_port(value: &str) -> Result<u16, String> {
+    let port = value
+        .parse::<u16>()
+        .map_err(|error| format!("invalid port `{value}`: {error}"))?;
+    if port == 0 {
+        return Err("port must be greater than zero".to_string());
+    }
+    Ok(port)
+}
+
 #[derive(Clone, Copy)]
 enum ResponseBufferMode {
     Rendezvous,
@@ -144,7 +155,7 @@ where
 }
 
 #[cfg(feature = "slot-tracker")]
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(
     name = "python -m dynamo.slot_tracker",
     about = "Standalone KV router slot tracker"
@@ -154,17 +165,69 @@ struct SlotTrackerCli {
     #[arg(long, default_value_t = 8091)]
     port: u16,
 
-    /// ZMQ PUB endpoint for replica-sync events
-    #[arg(long)]
-    replica_sync_bind: Option<String>,
-
-    /// Externally reachable local replica-sync endpoint
-    #[arg(long)]
-    replica_sync_advertise: Option<String>,
+    /// Local ZMQ PUB port for replica-sync events
+    #[arg(long, value_parser = parse_nonzero_port)]
+    replica_sync_port: Option<u16>,
 
     /// Comma-separated ZMQ PUB endpoints for peer slot trackers
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', requires = "replica_sync_port")]
     replica_sync_peers: Vec<String>,
+}
+
+#[cfg(all(test, feature = "slot-tracker"))]
+mod slot_tracker_cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_replica_sync_port_and_peers() {
+        let cli = SlotTrackerCli::try_parse_from([
+            "dynamo.slot_tracker",
+            "--replica-sync-port",
+            "9000",
+            "--replica-sync-peers",
+            "tcp://slot-a:9000,tcp://slot-b:9000",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.replica_sync_port, Some(9000));
+        assert_eq!(cli.replica_sync_peers.len(), 2);
+    }
+
+    #[test]
+    fn replica_peers_require_port() {
+        let error = SlotTrackerCli::try_parse_from([
+            "dynamo.slot_tracker",
+            "--replica-sync-peers",
+            "tcp://slot-a:9000",
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn zero_replica_sync_port_is_rejected() {
+        let error =
+            SlotTrackerCli::try_parse_from(["dynamo.slot_tracker", "--replica-sync-port", "0"])
+                .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn removed_replica_sync_bind_is_rejected() {
+        let error = SlotTrackerCli::try_parse_from([
+            "dynamo.slot_tracker",
+            "--replica-sync-bind",
+            "tcp://*:9000",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 }
 
 pub fn run_slot_tracker_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -184,8 +247,7 @@ where
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(slot_tracker::run_server(SlotTrackerConfig {
             port: cli.port,
-            replica_sync_bind: cli.replica_sync_bind,
-            replica_sync_advertise: cli.replica_sync_advertise,
+            replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
         }))
     }
@@ -218,16 +280,12 @@ struct SelectServiceCli {
     #[arg(long, value_delimiter = ',')]
     indexer_peers: Vec<String>,
 
-    /// ZMQ PUB endpoint for active-load replica events
-    #[arg(long)]
-    replica_sync_bind: Option<String>,
-
-    /// Externally reachable local active-load replica endpoint
-    #[arg(long, requires = "replica_sync_bind")]
-    replica_sync_advertise: Option<String>,
+    /// Local ZMQ PUB port for active-load replica events
+    #[arg(long, value_parser = parse_nonzero_port)]
+    replica_sync_port: Option<u16>,
 
     /// Comma-separated ZMQ PUB endpoints for peer selectors
-    #[arg(long, value_delimiter = ',', requires = "replica_sync_bind")]
+    #[arg(long, value_delimiter = ',', requires = "replica_sync_port")]
     replica_sync_peers: Vec<String>,
 }
 
@@ -241,21 +299,20 @@ mod select_service_cli_tests {
             "dynamo.select_service",
             "--indexer-peers",
             "http://indexer-a:8092,http://indexer-b:8092",
-            "--replica-sync-bind",
-            "tcp://0.0.0.0:9000",
-            "--replica-sync-advertise",
-            "tcp://selector-a:9000",
+            "--replica-sync-port",
+            "9000",
             "--replica-sync-peers",
             "tcp://selector-b:9000,tcp://selector-c:9000",
         ])
         .unwrap();
 
         assert_eq!(cli.indexer_peers.len(), 2);
+        assert_eq!(cli.replica_sync_port, Some(9000));
         assert_eq!(cli.replica_sync_peers.len(), 2);
     }
 
     #[test]
-    fn replica_peers_require_bind_endpoint() {
+    fn replica_peers_require_port() {
         let error = SelectServiceCli::try_parse_from([
             "dynamo.select_service",
             "--replica-sync-peers",
@@ -267,6 +324,27 @@ mod select_service_cli_tests {
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
+    }
+
+    #[test]
+    fn zero_replica_sync_port_is_rejected() {
+        let error =
+            SelectServiceCli::try_parse_from(["dynamo.select_service", "--replica-sync-port", "0"])
+                .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn removed_replica_sync_advertise_is_rejected() {
+        let error = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--replica-sync-advertise",
+            "tcp://selector-a:9000",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }
 
@@ -289,8 +367,7 @@ where
             port: cli.port,
             threads: cli.threads,
             indexer_peers: cli.indexer_peers,
-            replica_sync_bind: cli.replica_sync_bind,
-            replica_sync_advertise: cli.replica_sync_advertise,
+            replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
             kv_router_config: kv_router_config_from_dynamo_env(),
         }))

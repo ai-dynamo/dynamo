@@ -20,7 +20,7 @@ use crate::sequences::{
     SequenceRequest,
 };
 
-use crate::services::replica_sync::{
+use crate::services::common::replica_sync::{
     ChannelSequenceSubscriber, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
     ScopedReplicaEvent, ScopedSequencePublisher,
 };
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replica_dispatch_requires_registered_worker_and_matching_configuration() {
+    async fn replica_dispatch_rejects_self_and_requires_matching_registered_worker() {
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
         let registry =
             SlotTrackerRegistry::new_with_replica_sync(CancellationToken::new(), 7, outbound_tx);
