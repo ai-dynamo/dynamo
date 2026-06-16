@@ -202,7 +202,8 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 
 	// device: vendor-agnostic accelerator spec (symmetric field).
 	if src.Device != nil {
-		dst.Device = deviceSpecToHub(src.Device)
+		dst.Device = &v1beta1.DeviceSpec{}
+		ConvertFromDeviceSpec(src.Device, dst.Device)
 	}
 
 	// Resources + envs + probes + mainContainer -> podTemplate.containers[main].
@@ -544,7 +545,8 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 
 	// device: vendor-agnostic accelerator spec (symmetric field).
 	if src.Device != nil {
-		dst.Device = deviceSpecFromHub(src.Device)
+		dst.Device = &DeviceSpec{}
+		ConvertToDeviceSpec(src.Device, dst.Device)
 	}
 
 	// podTemplate -> mainContainer + extraPodSpec + extraPodMetadata +
@@ -2490,60 +2492,37 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 // Device (vendor-agnostic accelerator spec)
 // ---------------------------------------------------------------------------
 
-// deviceSpecToHub converts v1alpha1.DeviceSpec to v1beta1.DeviceSpec.
-func deviceSpecToHub(src *DeviceSpec) *v1beta1.DeviceSpec {
-	if src == nil {
-		return nil
-	}
-	dst := &v1beta1.DeviceSpec{
+// ConvertFromDeviceSpec converts v1alpha1.DeviceSpec to v1beta1.DeviceSpec,
+// following the caller-allocates-dst pattern used by every other nested
+// converter. Backing slices/maps are deep-copied so the caller's dst stays
+// independent of src.
+func ConvertFromDeviceSpec(src *DeviceSpec, dst *v1beta1.DeviceSpec) {
+	*dst = v1beta1.DeviceSpec{
 		SchedulerName: src.SchedulerName,
+		Resources:     src.Resources.DeepCopy(),
+		Tolerations:   copyTolerations(src.Tolerations),
+		NodeSelector:  maps.Clone(src.NodeSelector),
 	}
-	if src.Resources != nil {
-		dst.Resources = make(corev1.ResourceList, len(src.Resources))
-		for k, v := range src.Resources {
-			dst.Resources[k] = v.DeepCopy()
-		}
-	}
-	if src.Tolerations != nil {
-		dst.Tolerations = make([]corev1.Toleration, len(src.Tolerations))
-		for i := range src.Tolerations {
-			src.Tolerations[i].DeepCopyInto(&dst.Tolerations[i])
-		}
-	}
-	if src.NodeSelector != nil {
-		dst.NodeSelector = make(map[string]string, len(src.NodeSelector))
-		for k, v := range src.NodeSelector {
-			dst.NodeSelector[k] = v
-		}
-	}
-	return dst
 }
 
-// deviceSpecFromHub converts v1beta1.DeviceSpec to v1alpha1.DeviceSpec.
-func deviceSpecFromHub(src *v1beta1.DeviceSpec) *DeviceSpec {
-	if src == nil {
+// ConvertToDeviceSpec converts v1beta1.DeviceSpec to v1alpha1.DeviceSpec.
+func ConvertToDeviceSpec(src *v1beta1.DeviceSpec, dst *DeviceSpec) {
+	*dst = DeviceSpec{
+		SchedulerName: src.SchedulerName,
+		Resources:     src.Resources.DeepCopy(),
+		Tolerations:   copyTolerations(src.Tolerations),
+		NodeSelector:  maps.Clone(src.NodeSelector),
+	}
+}
+
+// copyTolerations returns a deep copy of src, or nil if src is empty.
+func copyTolerations(src []corev1.Toleration) []corev1.Toleration {
+	if len(src) == 0 {
 		return nil
 	}
-	dst := &DeviceSpec{
-		SchedulerName: src.SchedulerName,
+	out := make([]corev1.Toleration, len(src))
+	for i := range src {
+		src[i].DeepCopyInto(&out[i])
 	}
-	if src.Resources != nil {
-		dst.Resources = make(corev1.ResourceList, len(src.Resources))
-		for k, v := range src.Resources {
-			dst.Resources[k] = v.DeepCopy()
-		}
-	}
-	if src.Tolerations != nil {
-		dst.Tolerations = make([]corev1.Toleration, len(src.Tolerations))
-		for i := range src.Tolerations {
-			src.Tolerations[i].DeepCopyInto(&dst.Tolerations[i])
-		}
-	}
-	if src.NodeSelector != nil {
-		dst.NodeSelector = make(map[string]string, len(src.NodeSelector))
-		for k, v := range src.NodeSelector {
-			dst.NodeSelector[k] = v
-		}
-	}
-	return dst
+	return out
 }
