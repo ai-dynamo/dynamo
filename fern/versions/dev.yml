@@ -92,6 +92,8 @@ navigation:
             path: ../pages-dev/kubernetes/deployment/dynamomodel-guide.md
           - page: DGDR Reference
             path: ../pages-dev/kubernetes/dgdr.md
+          - page: DGDR Examples
+            path: ../pages-dev/kubernetes/dgdr-examples.md
       - section: Model Loading
         contents:
           - page: Model Caching
