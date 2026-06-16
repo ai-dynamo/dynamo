@@ -2615,13 +2615,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     raise RuntimeError(
                         f"External-encoder family expects 1 image group; got {len(groups)}"
                     )
-                spliced = groups[0].loaded_embedding  # (1, L, hidden) or (L, hidden)
+                spliced = groups[0].loaded_embedding  # (L, hidden)
                 if spliced is None:
                     raise RuntimeError(
                         "External encode worker returned None for loaded_embedding"
                     )
-                if spliced.dim() == 3 and spliced.shape[0] == 1:
-                    spliced = spliced.squeeze(0)
+                if spliced.dim() != 2:
+                    raise RuntimeError(
+                        f"Expected 2D tensor (seq_len, hidden) from encoder, "
+                        f"got shape {tuple(spliced.shape)}"
+                    )
                 # Clone before releasing the NIXL buffer (single-image case
                 # is a view into the receiver-side buffer).
                 spliced = spliced.detach().clone()

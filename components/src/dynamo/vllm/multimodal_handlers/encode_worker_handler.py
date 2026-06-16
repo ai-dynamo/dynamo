@@ -426,16 +426,19 @@ class FullPromptEncodeWorkerHandler(_BaseEncodeWorkerHandler):
         )
 
         spliced = await asyncio.to_thread(self.encoder.encode, image_urls, token_ids)
-        spliced = spliced.reshape(-1, spliced.shape[-1])  # ensure 2D
+        if spliced.dim() != 2:
+            raise ValueError(
+                f"FullPromptEncoder.encode() must return a 2D tensor (seq_len, hidden), "
+                f"got shape {tuple(spliced.shape)}"
+            )
 
-        spliced_batched = spliced.unsqueeze(0)  # (1, seq_len, lm_hidden_dim)
         (serialized, transfer_future) = await self.embedding_sender.send_embeddings(
-            spliced_batched, stage_embeddings=True
+            spliced, stage_embeddings=True
         )
 
         group = request.multimodal_inputs[0]
         group.serialized_request = serialized
-        group.embeddings_shape = tuple(spliced_batched.shape)
+        group.embeddings_shape = tuple(spliced.shape)
         group.image_grid_thw = None
         if group.multimodal_input is not None:
             group.multimodal_input.image_url = None
