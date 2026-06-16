@@ -11,6 +11,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::RouterConfigOverride,
     protocols::{RouterBackpressureReason, RoutingConstraints},
+    scheduling::QueueRejection,
 };
 use dynamo_runtime::{
     pipeline::{
@@ -106,6 +107,9 @@ pub enum PrefillQueryOutcome {
         reason: RouterBackpressureReason,
         queued_isl_tokens: usize,
         max_queued_isl_tokens: Option<usize>,
+    },
+    QueueRejected {
+        rejection: QueueRejection,
     },
 }
 

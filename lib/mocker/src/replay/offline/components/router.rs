@@ -566,18 +566,14 @@ impl OfflineReplayRouter {
         workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
         class: &PolicyClassConfig,
     ) -> bool {
-        let mut checked_any = false;
-        let any_worker_not_busy = workers_with_configs.iter().any(|(&worker_id, config)| {
-            checked_any = true;
+        workers_with_configs.iter().all(|(&worker_id, config)| {
             let worker = WorkerWithDpRank::new(worker_id, config.data_parallel_start_rank());
             let max_batched = config
                 .max_num_batched_tokens()
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
             let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-            !class.worker_is_busy(tokens, max_batched)
-        });
-
-        checked_any && !any_worker_not_busy
+            class.worker_is_busy(tokens, max_batched)
+        })
     }
 
     fn snapshot_for(&self, request: &PendingRequest) -> QueueSnapshot {
@@ -1118,6 +1114,33 @@ models:
         assert_eq!(
             router.debug_snapshot(0.0).active_tokens_by_worker,
             vec![(0, 64), (1, 64)]
+        );
+    }
+
+    #[test]
+    fn no_workers_preserves_pending_requests_during_completion_drain() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        assert_eq!(router.pending_count(), 1);
+
+        router.remove_worker(0).unwrap();
+        let effects = router
+            .on_request_completed(Uuid::from_u128(1), 0.0)
+            .unwrap();
+
+        assert!(effects.admissions.is_empty());
+        assert_eq!(router.pending_count(), 1);
+        assert_eq!(
+            router.debug_snapshot(0.0).pending[0].uuid,
+            Uuid::from_u128(2)
         );
     }
 }

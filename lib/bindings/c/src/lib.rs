@@ -496,6 +496,16 @@ impl RouterHandles {
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
+            PrefillQueryOutcome::QueueRejected { rejection } => {
+                tracing::warn!(
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill query rejected by policy-class queue limit"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
         }
     }
 

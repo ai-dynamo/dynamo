@@ -1735,6 +1735,7 @@ class KvRouterConfig:
         router_predicted_ttl_secs: Optional[float] = None,
         *,
         overlap_score_credit: float = 1.0,
+        overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
         router_policy_config: Optional[str] = None,
     ) -> None:
@@ -1803,6 +1804,11 @@ class KvRouterConfig:
     @overlap_score_credit.setter
     def overlap_score_credit(self, value: float) -> None: ...
     @property
+    def overlap_score_credit_decay(self) -> float: ...
+
+    @overlap_score_credit_decay.setter
+    def overlap_score_credit_decay(self, value: float) -> None: ...
+    @property
     def overlap_score_weight(self) -> float: ...
 
     @overlap_score_weight.setter
@@ -1817,6 +1823,7 @@ class KvRouterConfig:
         overlap_score_weight: Optional[float] = None,
         *,
         overlap_score_credit: Optional[float] = None,
+        overlap_score_credit_decay: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 

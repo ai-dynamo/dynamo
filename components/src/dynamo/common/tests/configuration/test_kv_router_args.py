@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -402,29 +403,32 @@ def test_load_aware_preserves_cache_hit_weights() -> None:
     assert kwargs["disk_cache_hit_weight"] == 0.1
 
 
-def test_kv_router_kwargs_preserves_policy_config_path() -> None:
+def test_kv_router_kwargs_preserves_policy_config_path(tmp_path: Path) -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
     config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
-    config.router_policy_config = "/tmp/router-policy.yaml"
+    policy_path = str(tmp_path / "router-policy.yaml")
+    config.router_policy_config = policy_path
 
     kwargs = config.kv_router_kwargs()
 
-    assert kwargs["router_policy_config"] == "/tmp/router-policy.yaml"
+    assert kwargs["router_policy_config"] == policy_path
 
 
-def test_policy_config_cli_overrides_environment(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_ROUTER_POLICY_CONFIG", "/tmp/env-policy.yaml")
+def test_policy_config_cli_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_policy_path = str(tmp_path / "env-policy.yaml")
+    explicit_policy_path = str(tmp_path / "explicit-policy.yaml")
+    monkeypatch.setenv("DYN_ROUTER_POLICY_CONFIG", env_policy_path)
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--router-policy-config", "/tmp/explicit-policy.yaml"])
+    args = parser.parse_args(["--router-policy-config", explicit_policy_path])
     config = KvRouterConfigBase.from_cli_args(args)
 
-    assert config.kv_router_kwargs()["router_policy_config"] == (
-        "/tmp/explicit-policy.yaml"
-    )
+    assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
 
 
 def test_kv_router_kwargs_omits_policy_config_by_default() -> None:

@@ -71,7 +71,7 @@ impl PrefillRouter {
                         max_queued_isl_tokens,
                     }),
                     crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                        Err(rejection.into())
+                        Ok(PrefillQueryOutcome::QueueRejected { rejection })
                     }
                 }
             }

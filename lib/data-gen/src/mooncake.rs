@@ -637,9 +637,11 @@ mod tests {
         assert_eq!(row.delay, None);
         assert_eq!(row.priority, None);
         assert_eq!(row.strict_priority, None);
+        assert_eq!(row.policy_class, None);
         let rendered: Value = serde_json::to_value(&row).unwrap();
         assert!(rendered.get("priority").is_none());
         assert!(rendered.get("strict_priority").is_none());
+        assert!(rendered.get("policy_class").is_none());
     }
 
     #[test]
@@ -648,15 +650,18 @@ mod tests {
             let raw = json!({
                 "output_length": 2,
                 "priority": priority,
-                "strict_priority": 9
+                "strict_priority": 9,
+                "policy_class": "latency"
             });
             let row: MooncakeRow = serde_json::from_value(raw).unwrap();
             assert_eq!(row.priority, priority);
             assert_eq!(row.strict_priority, Some(9));
+            assert_eq!(row.policy_class.as_deref(), Some("latency"));
 
             let rendered: Value = serde_json::to_value(&row).unwrap();
             assert_eq!(rendered["priority"], json!(priority.unwrap()));
             assert_eq!(rendered["strict_priority"], json!(9));
+            assert_eq!(rendered["policy_class"], json!("latency"));
         }
     }
 
@@ -672,21 +677,25 @@ mod tests {
         assert_eq!(row.dependency_delay_ms(), 0.0);
         assert_eq!(row.priority, None);
         assert_eq!(row.strict_priority, None);
+        assert_eq!(row.policy_class, None);
         let rendered: Value = serde_json::to_value(&row).unwrap();
         assert!(rendered.get("priority").is_none());
         assert!(rendered.get("strict_priority").is_none());
+        assert!(rendered.get("policy_class").is_none());
     }
 
     #[test]
     fn agentic_row_round_trips_priorities() {
-        let raw = r#"{"request_id":"r1","priority":-2,"strict_priority":4}"#;
+        let raw = r#"{"request_id":"r1","priority":-2,"strict_priority":4,"policy_class":"batch"}"#;
         let row: AgenticMooncakeRow = serde_json::from_str(raw).unwrap();
         assert_eq!(row.priority, Some(-2));
         assert_eq!(row.strict_priority, Some(4));
+        assert_eq!(row.policy_class.as_deref(), Some("batch"));
 
         let rendered: Value = serde_json::to_value(&row).unwrap();
         assert_eq!(rendered["priority"], json!(-2));
         assert_eq!(rendered["strict_priority"], json!(4));
+        assert_eq!(rendered["policy_class"], json!("batch"));
     }
 
     #[test]

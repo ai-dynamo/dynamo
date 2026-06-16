@@ -278,6 +278,7 @@ impl KvRouterConfig {
         let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
             PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
+        validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }
 

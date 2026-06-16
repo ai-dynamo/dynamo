@@ -1,7 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
+import pytest
+
 import dynamo.replay.api as replay_api
+from dynamo.llm import KvRouterConfig
+
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 
 def test_replay_api_forwards_policy_model_name(monkeypatch):
@@ -27,3 +39,11 @@ def test_replay_api_forwards_policy_model_name(monkeypatch):
 
     assert calls[0][2]["model_name"] == "model-a"
     assert calls[1][2]["model_name"] == "model-b"
+
+
+def test_router_config_from_json_validates_policy_file(tmp_path):
+    policy_path = tmp_path / "invalid-policy.yaml"
+    policy_path.write_text("not: [valid", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="failed to parse router policy config"):
+        KvRouterConfig.from_json(json.dumps({"router_policy_config": str(policy_path)}))
