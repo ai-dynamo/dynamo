@@ -145,6 +145,35 @@ impl fmt::Display for BackendError {
 pub struct DynamoError {
     error_type: ErrorType,
     message: String,
+    /// The original upstream HTTP status code, when this error originated from
+    /// an HTTP backend (e.g. a `400` validation error from an inference engine).
+    ///
+    /// [`ErrorType`] only categorizes errors; it cannot represent an exact status
+    /// (e.g. it cannot distinguish `429` from `404`). This field preserves the
+    /// precise code so the HTTP frontend can surface the *real* upstream status
+    /// instead of collapsing every streamed backend error to `500`. Defaults to
+    /// `None` for errors that did not originate from an HTTP status.
+    ///
+    /// Serialized only when `Some` (via `skip_serializing_if`); the field is
+    /// omitted otherwise, so peers that predate it deserialize cleanly and
+    /// legacy payloads without it deserialize to `None`.
+    ///
+    /// Contract: backend engines preserve their upstream status by raising
+    /// `dynamo._core.HttpError(code, message)`; the Python→Rust bridge maps that
+    /// into this field. Other exceptions are categorized by [`ErrorType`] and
+    /// leave this `None`.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let err = DynamoError::builder()
+    ///     .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+    ///     .message("validation failed")
+    ///     .http_status(400) // preserved through serialization
+    ///     .build();
+    /// assert_eq!(err.http_status(), Some(400));
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     caused_by: Option<Box<DynamoError>>,
 }
@@ -168,6 +197,14 @@ impl DynamoError {
     /// Returns the error message.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Returns the original upstream HTTP status code, if this error carries one.
+    ///
+    /// See [`DynamoError::http_status`] (the field) for why this is tracked
+    /// separately from [`ErrorType`].
+    pub fn http_status(&self) -> Option<u16> {
+        self.http_status
     }
 }
 
@@ -199,6 +236,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
         Self {
             error_type: ErrorType::Unknown,
             message: err.to_string(),
+            http_status: None,
             caused_by: err.source().map(|s| Box::new(DynamoError::from(s))),
         }
     }
@@ -235,6 +273,7 @@ impl From<Box<dyn std::error::Error + 'static>> for DynamoError {
 pub struct DynamoErrorBuilder {
     error_type: Option<ErrorType>,
     message: Option<String>,
+    http_status: Option<u16>,
     caused_by: Option<Box<DynamoError>>,
 }
 
@@ -248,6 +287,12 @@ impl DynamoErrorBuilder {
     /// Set the error message.
     pub fn message(mut self, message: impl Into<String>) -> Self {
         self.message = Some(message.into());
+        self
+    }
+
+    /// Set the original upstream HTTP status code.
+    pub fn http_status(mut self, status: u16) -> Self {
+        self.http_status = Some(status);
         self
     }
 
@@ -269,6 +314,7 @@ impl DynamoErrorBuilder {
         DynamoError {
             error_type: self.error_type.unwrap_or(ErrorType::Unknown),
             message: self.message.unwrap_or_default(),
+            http_status: self.http_status,
             caused_by: self.caused_by,
         }
     }
@@ -455,6 +501,45 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .unwrap();
         assert_eq!(cause.message(), "inner cause");
+    }
+
+    #[test]
+    fn test_http_status_defaults_to_none() {
+        let err = DynamoError::msg("no status");
+        assert_eq!(err.http_status(), None);
+    }
+
+    #[test]
+    fn test_http_status_preserved_through_builder_and_serde() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("reasoning_effort validation failed")
+            .http_status(400)
+            .build();
+        assert_eq!(err.http_status(), Some(400));
+
+        // Survives a serialization round-trip (worker -> frontend wire path).
+        let json = serde_json::to_string(&err).unwrap();
+        let deserialized: DynamoError = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.http_status(), Some(400));
+        assert_eq!(
+            deserialized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn test_http_status_omitted_from_json_when_none() {
+        // Backward compatibility: errors without a status don't emit the field,
+        // and legacy payloads lacking it deserialize to None.
+        let err = DynamoError::msg("legacy");
+        let json = serde_json::to_string(&err).unwrap();
+        // Parse and assert the field is structurally absent (robust against a
+        // message that happened to contain the substring "http_status").
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("http_status").is_none());
+        let deserialized: DynamoError = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.http_status(), None);
     }
 
     #[test]

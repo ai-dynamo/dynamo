@@ -23,6 +23,7 @@ pub use dynamo_runtime::{
 
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::py_exception_to_backend_error;
+use super::http::HttpError;
 
 /// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -307,6 +308,43 @@ where
                     DynamoError::builder()
                         .error_type(ErrorType::Backend(backend_err))
                         .message(message)
+                        .build(),
+                );
+            }
+
+            // HttpError from a Python HTTP backend (e.g. the openai_backend
+            // worker forwarding an upstream sglang/vLLM response) carries an
+            // explicit HTTP status code. It is a plain Python `Exception` (not a
+            // `DynamoException`), so it isn't recognized above. Preserve the
+            // exact status via `.http_status(code)` so the frontend surfaces the
+            // real upstream code (e.g. a 400 validation error) instead of
+            // collapsing every streamed backend error into a retriable 500. This
+            // path handles errors raised mid-stream by async-generator backends,
+            // after `generate()` has already returned its stream (the unary
+            // `generate()`-time equivalent lives in `http.rs`).
+            //
+            // The `error_type` is a coarse category for internal error-chain
+            // logic; the precise code is always carried by `http_status`. 429
+            // (rate limited) is an overload/retryable condition, not an invalid
+            // argument, so it maps to `ResourceExhausted`.
+            //
+            // Contract: expects the Python exception `dynamo._core.HttpError`
+            // (defined in `dynamo/llm/exceptions.py`) with `code: int` and
+            // `message: str`. `FromPyObject` matches by *attribute*, not class
+            // name, so this is robust to a rename as long as those two
+            // attributes are present; an exception lacking them simply falls
+            // through to the generic mapping below.
+            if let Ok(HttpError { code, message }) = e.value(py).extract::<HttpError>() {
+                let error_type = match code {
+                    429 => ErrorType::ResourceExhausted,
+                    400..=499 => ErrorType::Backend(BackendError::InvalidArgument),
+                    _ => ErrorType::Backend(BackendError::Unknown),
+                };
+                return ResponseProcessingError::Dynamo(
+                    DynamoError::builder()
+                        .error_type(error_type)
+                        .message(message)
+                        .http_status(code)
                         .build(),
                 );
             }

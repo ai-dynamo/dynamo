@@ -34,7 +34,11 @@ use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::StatusCode;
+
+use crate::http::service::error::{HttpError, is_http_error_code};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
+use crate::http::service::openai::classify_error_for_metrics;
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
 
@@ -192,6 +196,26 @@ async fn connection_monitor(
 /// SSE event is received from the backend within the timeout window, the engine context is killed and
 /// the inflight guard is dropped, preventing permanent gauge inflation caused by zombie workers that
 /// hold a live TCP connection but produce no output.
+/// Map an HTTP status code to an OpenAI-style error `type` string for the SSE
+/// error frame.
+fn openai_error_type(code: u16) -> &'static str {
+    match code {
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        429 => "rate_limit_error",
+        // 499 (Client Closed Request) is a cancellation, not a bad request.
+        // Must precede the 400..=499 catch-all (first-match wins).
+        499 => "request_cancelled",
+        // Any other client error (400, 409, 413, 415, 422, ...) is a request
+        // problem, not a server fault — map it to invalid_request_error rather
+        // than mislabeling it internal_server_error.
+        400..=499 => "invalid_request_error",
+        // All 5xx, plus any stray non-error code (shouldn't reach here).
+        _ => "internal_server_error",
+    }
+}
+
 pub fn monitor_for_disconnects(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
@@ -219,8 +243,59 @@ pub fn monitor_for_disconnects(
                             yield event;
                         }
                         Some(Err(err)) => {
-                            // Mark error as internal since it's a streaming error
-                            inflight_guard.mark_error(ErrorType::Internal);
+                            // Recover the structured upstream status if the producer
+                            // attached one as an `HttpError`. `EventConverter` wraps every
+                            // streaming error event this way (code derived from the
+                            // DynamoError's `http_status`/category), so the downcast
+                            // succeeds on the normal path. Genuine internal stream faults
+                            // (worker died, channel dropped — a plain axum/io error) fall
+                            // through the `Err(other)` arm as 500. This is what makes a real
+                            // backend 4xx surface as a 4xx instead of a retriable 500 —
+                            // which previously caused batch clients to retry unrecoverable
+                            // bad-input requests forever.
+                            let (code, message) = match err.into_inner().downcast::<HttpError>() {
+                                Ok(http_err) => {
+                                    let HttpError { code, message } = *http_err;
+                                    (code, message)
+                                }
+                                Err(other) => {
+                                    // No structured status — a genuine internal fault.
+                                    // Log so post-mortems can tell a "lost structured
+                                    // status" from a true internal error.
+                                    tracing::debug!(
+                                        "stream error did not carry a structured HttpError; defaulting to 500: {other}"
+                                    );
+                                    (500u16, other.to_string())
+                                }
+                            };
+                            // Defensive: only emit a genuine HTTP error code. A
+                            // stray non-error code reaching here means a producer
+                            // set an invalid `http_status` upstream — clamp to 500
+                            // but warn so the upstream bug is visible rather than
+                            // silently masked. In normal operation this never
+                            // fires (EventConverter already constrains the code).
+                            let code = if is_http_error_code(code) {
+                                code
+                            } else {
+                                tracing::warn!(
+                                    original_code = code,
+                                    "upstream http_status outside the 4xx/5xx error range; defaulting to 500"
+                                );
+                                500
+                            };
+                            // `from_u16` can't fail here — `code` is clamped to
+                            // 400..600 above; `unwrap_or` only guards future drift.
+                            let status = StatusCode::from_u16(code)
+                                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                            // Metrics bucket. We reuse the canonical classifier so the
+                            // streaming and unary paths bucket identically (404→NotFound,
+                            // 429/503→Overload, 499→Cancelled). Note this is deliberately
+                            // independent of the client-facing `type` string emitted below
+                            // (`openai_error_type`): the metric label follows the existing
+                            // unary convention (e.g. a bare 400 buckets as Internal), while
+                            // the wire `type` follows OpenAI's taxonomy (400→
+                            // invalid_request_error). Different audiences, intentionally.
+                            inflight_guard.mark_error(classify_error_for_metrics(status, &message));
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
@@ -230,9 +305,9 @@ pub fn monitor_for_disconnects(
                             // so naive `data:`-line parsers see both the error and a stream terminator.
                             let err_json = serde_json::json!({
                                 "error": {
-                                    "message": err.to_string(),
-                                    "type": "internal_server_error",
-                                    "code": 500,
+                                    "message": message,
+                                    "type": openai_error_type(code),
+                                    "code": code,
                                 }
                             });
                             yield Event::default().data(err_json.to_string());
@@ -629,5 +704,147 @@ mod tests {
         let body = collect_sse_body(monitored).await;
         cleanup_env();
         assert_fault_contract("python_consumer_drop", &body, expected_message);
+    }
+
+    /// Builds a stream that yields one event then a mid-stream `HttpError`
+    /// carrying an explicit upstream status code (as `EventConverter` does for a
+    /// backend error that preserved its `http_status`).
+    fn simulate_mid_stream_http_error(
+        code: u16,
+        message: &'static str,
+    ) -> impl futures::Stream<Item = Result<axum::response::sse::Event, axum::Error>> {
+        async_stream::try_stream! {
+            yield axum::response::sse::Event::default().data("chunk-0");
+            Err(axum::Error::new(crate::http::service::error::HttpError {
+                code,
+                message: message.to_string(),
+            }))?;
+        }
+    }
+
+    /// A mid-stream `HttpError` carrying a real upstream 4xx (e.g. a backend
+    /// validation error) MUST surface as that 4xx in the SSE error frame — not a
+    /// hardcoded 500 — so batch clients fail fast instead of retrying an
+    /// unrecoverable bad-input request forever. This is the regression guard for
+    /// the `reasoning_effort` retry-storm incident.
+    #[tokio::test]
+    #[serial]
+    async fn test_mid_stream_http_error_preserves_upstream_4xx_status() {
+        let (_metrics, guard, ctx, handle) = setup_test("validation-model", "req-val", "0");
+        // The message is the raw upstream validation text (the Python HttpError's
+        // `.message` field, extracted verbatim by the bridge) — disconnect.rs
+        // forwards this field directly into the SSE frame, it is not the
+        // `HttpError` Display form.
+        let expected_message = "1 validation error: reasoning_effort: Input should be 'low', 'medium', 'high' or 'max'";
+        let stream = simulate_mid_stream_http_error(400, expected_message);
+        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let body = collect_sse_body(monitored).await;
+        cleanup_env();
+
+        let done_pos = body
+            .find("data: [DONE]")
+            .unwrap_or_else(|| panic!("body must terminate with `data: [DONE]`. Body:\n{body}"));
+
+        let (error_line, error_frame) = body
+            .lines()
+            .find_map(|line| {
+                let payload = line.strip_prefix("data: ")?;
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .filter(|v| v.get("error").is_some())
+                    .map(|v| (line, v))
+            })
+            .unwrap_or_else(|| panic!("missing structured error frame. Body:\n{body}"));
+
+        assert!(
+            body.find(error_line).unwrap_or_default() < done_pos,
+            "error frame must precede `[DONE]`. Body:\n{body}"
+        );
+
+        let error = error_frame
+            .get("error")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            error.get("code").and_then(|v| v.as_i64()),
+            Some(400),
+            "upstream 400 must be preserved, not collapsed to 500. Body:\n{body}"
+        );
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some("invalid_request_error"),
+            "400/422 must map to invalid_request_error. Body:\n{body}"
+        );
+        assert_eq!(
+            error.get("message").and_then(|v| v.as_str()),
+            Some(expected_message),
+            "Body:\n{body}"
+        );
+    }
+
+    /// A mid-stream `HttpError(429)` must surface as a 429 with the OpenAI
+    /// `rate_limit_error` type — covering the retryable rate-limit path (the
+    /// bridge categorizes 429 as `ResourceExhausted`, but the exact code is what
+    /// reaches the wire). Confirms 429 isn't lumped in with non-retryable 4xx.
+    #[tokio::test]
+    #[serial]
+    async fn test_mid_stream_http_error_maps_429_to_rate_limit() {
+        let (_metrics, guard, ctx, handle) = setup_test("ratelimit-model", "req-rl", "0");
+        let stream = simulate_mid_stream_http_error(429, "Too many requests; slow down");
+        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let body = collect_sse_body(monitored).await;
+        cleanup_env();
+
+        let error = body
+            .lines()
+            .find_map(|line| {
+                let payload = line.strip_prefix("data: ")?;
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .filter(|v| v.get("error").is_some())
+            })
+            .and_then(|v| v.get("error").and_then(|e| e.as_object()).cloned())
+            .unwrap_or_else(|| panic!("missing structured error frame. Body:\n{body}"));
+
+        assert_eq!(
+            error.get("code").and_then(|v| v.as_i64()),
+            Some(429),
+            "429 must be preserved verbatim. Body:\n{body}"
+        );
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some("rate_limit_error"),
+            "429 must map to rate_limit_error. Body:\n{body}"
+        );
+    }
+
+    /// 499 (Client Closed Request) must map to `request_cancelled`, not the
+    /// `invalid_request_error` catch-all — it's a cancellation, not bad input.
+    #[tokio::test]
+    #[serial]
+    async fn test_mid_stream_http_error_maps_499_to_request_cancelled() {
+        let (_metrics, guard, ctx, handle) = setup_test("cancel-model", "req-cx", "0");
+        let stream = simulate_mid_stream_http_error(499, "client closed request");
+        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let body = collect_sse_body(monitored).await;
+        cleanup_env();
+
+        let error = body
+            .lines()
+            .find_map(|line| {
+                let payload = line.strip_prefix("data: ")?;
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .filter(|v| v.get("error").is_some())
+            })
+            .and_then(|v| v.get("error").and_then(|e| e.as_object()).cloned())
+            .unwrap_or_else(|| panic!("missing structured error frame. Body:\n{body}"));
+
+        assert_eq!(error.get("code").and_then(|v| v.as_i64()), Some(499));
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some("request_cancelled"),
+            "499 must not be lumped into invalid_request_error. Body:\n{body}"
+        );
     }
 }

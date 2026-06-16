@@ -103,7 +103,7 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
 }
 
 /// Classify error for metrics based on status code and message
-fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
+pub(crate) fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
     match code {
         StatusCode::BAD_REQUEST => {
             // 400
@@ -869,6 +869,21 @@ async fn embeddings(
         err_response
     })?;
 
+    // Peek the first event for a backend error before folding. Without this, a
+    // backend error (e.g. a 400 validation error) would make `from_annotated_stream`
+    // fail and collapse into a generic "Failed to fold embeddings stream" 500 —
+    // losing the real status (and triggering batch retry storms on unrecoverable
+    // input). The guard surfaces the true upstream code (preserved via
+    // `http_status`). Embeddings are always non-streaming, so the error returns
+    // as a real HTTP status rather than an SSE error frame.
+    let stream = check_for_backend_error(stream)
+        .await
+        .map_err(|error_response| {
+            tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+            inflight.mark_error(extract_error_type_from_response(&error_response));
+            error_response
+        })?;
+
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
@@ -985,6 +1000,19 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 .unwrap_or_else(|| "Unknown error".to_string())
         };
 
+        // Prefer the exact upstream status preserved on the DynamoError (e.g. a
+        // 400 from a backend HttpError). This mirrors the streaming path and
+        // avoids defaulting to 500 when the message isn't JSON-parseable. Only
+        // trust genuine error statuses (4xx/5xx) — a mis-set 2xx/3xx falls
+        // through to the existing parsing/default logic.
+        if let Some(ref dynamo_err) = event.error
+            && let Some(code) = dynamo_err.http_status()
+            && super::error::is_http_error_code(code)
+            && let Ok(status) = StatusCode::from_u16(code)
+        {
+            return Some((error_str, status));
+        }
+
         // Try to parse as error JSON to extract status code
         if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
             let code = error_payload
@@ -1040,15 +1068,18 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
 
 /// Checks if the first event in the stream is a backend error.
 /// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise.
-pub(super) async fn check_for_backend_error(
-    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
-    + Send
-    + Unpin
-    + 'static,
-) -> Result<
-    impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
-    ErrorResponse,
-> {
+///
+/// Generic over the response payload so every non-streaming aggregating handler
+/// (chat, responses, embeddings) can guard its fold with the same logic — and
+/// benefit from the preserved upstream `http_status` (via
+/// [`extract_backend_error_if_present`]) instead of collapsing a backend error
+/// into a generic 500.
+pub(super) async fn check_for_backend_error<T>(
+    mut stream: impl futures::Stream<Item = Annotated<T>> + Send + Unpin + 'static,
+) -> Result<impl futures::Stream<Item = Annotated<T>> + Send, ErrorResponse>
+where
+    T: serde::Serialize + Send + 'static,
+{
     use futures::stream::StreamExt;
 
     // Peek at the first event
@@ -3415,6 +3446,107 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(error_response.1.message, "prompt > max_seq_len");
             assert_eq!(error_response.1.code, 500);
+        }
+    }
+
+    /// A preserved `http_status` on the DynamoError must take precedence over the
+    /// legacy message/JSON parsing, so a non-streaming backend 400 (plain-text
+    /// message) surfaces as 400 — not the legacy default of 500.
+    #[tokio::test]
+    async fn test_check_for_backend_error_prefers_preserved_http_status() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("reasoning_effort: invalid value")
+                    .http_status(400)
+                    .build(),
+            ),
+        };
+
+        let result = check_for_backend_error(stream::iter(vec![error_event])).await;
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(
+                error_response.0,
+                StatusCode::BAD_REQUEST,
+                "preserved 400 must not be collapsed to 500"
+            );
+            assert_eq!(error_response.1.code, 400);
+            assert_eq!(error_response.1.message, "reasoning_effort: invalid value");
+        }
+    }
+
+    /// `check_for_backend_error` is generic so the embeddings (non-chat) fold path
+    /// is guarded too: a backend error on an embedding payload returns the real
+    /// upstream status instead of a generic "failed to fold" 500.
+    #[tokio::test]
+    async fn test_check_for_backend_error_is_generic_over_embedding_payload() {
+        use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateEmbeddingResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("input exceeds maximum context length")
+                    .http_status(400)
+                    .build(),
+            ),
+        };
+
+        let result = check_for_backend_error(stream::iter(vec![error_event])).await;
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error_response.1.code, 400);
+            assert_eq!(
+                error_response.1.message,
+                "input exceeds maximum context length"
+            );
+        }
+    }
+
+    /// Non-streaming embeddings path with a preserved retryable 429 — the exact
+    /// code must survive so the client can back off rather than fail fast.
+    #[tokio::test]
+    async fn test_check_for_backend_error_embedding_preserves_429() {
+        use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateEmbeddingResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("rate limit exceeded")
+                    .http_status(429)
+                    .build(),
+            ),
+        };
+
+        let result = check_for_backend_error(stream::iter(vec![error_event])).await;
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(error_response.1.code, 429);
         }
     }
 

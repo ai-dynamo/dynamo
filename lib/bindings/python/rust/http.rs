@@ -171,10 +171,17 @@ impl HttpAsyncEngine {
     }
 }
 
+/// Mirror of the Python `dynamo._core.HttpError` exception's public attributes,
+/// used to extract the original upstream HTTP status across the Python→Rust
+/// boundary. Shared by the unary `generate()` path here and the mid-stream
+/// async-generator path in [`crate::engine`].
+///
+/// Distinct from the Rust-side `dynamo_llm::http::service::error::HttpError`,
+/// which is a transport wrapper used further down the SSE pipeline.
 #[derive(FromPyObject)]
-struct HttpError {
-    code: u16,
-    message: String,
+pub(crate) struct HttpError {
+    pub(crate) code: u16,
+    pub(crate) message: String,
 }
 
 #[async_trait]

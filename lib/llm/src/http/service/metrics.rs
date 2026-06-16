@@ -46,6 +46,7 @@ pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
 pub use prometheus::Registry;
 
 use super::RouteDoc;
+use super::error::{HttpError, is_http_error_code};
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
@@ -1556,6 +1557,44 @@ impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
 /// annotated responses to SSE events for streaming responses.
 ///
 /// Returns None for metrics annotation events (events without SSE data payload).
+/// Derive the HTTP status code to report for a streamed backend error.
+///
+/// Prefers the exact upstream status preserved on the [`DynamoError`]
+/// (see `DynamoError::http_status`) so a real `400`/`404`/`429` is surfaced
+/// faithfully. Falls back to a coarse mapping from the error category, and
+/// finally to `500`. This keeps the streaming error path consistent with the
+/// unary path (`ErrorMessage::from_anyhow`).
+fn dynamo_error_status_code(err: &dynamo_runtime::error::DynamoError) -> u16 {
+    use dynamo_runtime::error::{BackendError, ErrorType};
+    // Only trust a preserved status if it's a genuine HTTP error code. A stray
+    // 0 / 2xx / 3xx (mis-set upstream) falls through to the coarse category
+    // mapping below rather than leaking into the SSE error frame.
+    if let Some(code) = err.http_status()
+        && is_http_error_code(code)
+    {
+        return code;
+    }
+    match err.error_type() {
+        ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument) => 400,
+        // `ResourceExhausted` covers both an upstream 429 (whose exact code is
+        // preserved via `http_status` on the primary path, so this fallback is
+        // only hit if that was lost) and local resource rejection. As a category
+        // fallback we use 503 — matching how the unary path maps rejections
+        // (`from_anyhow` via `request_was_rejected`) — since the category alone
+        // can't distinguish a backend rate-limit from local exhaustion.
+        ErrorType::ResourceExhausted => {
+            // Only reached when the exact status was lost (no/out-of-range
+            // http_status); log so a dropped upstream 429 is diagnosable.
+            tracing::debug!(
+                "ResourceExhausted error without a preserved http_status; using 503 fallback"
+            );
+            503
+        }
+        ErrorType::Cancelled | ErrorType::Backend(BackendError::Cancelled) => 499,
+        _ => 500,
+    }
+}
+
 pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
@@ -1609,10 +1648,11 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
-            let error_message = if let Some(ref dynamo_err) = annotated.error
-                && !dynamo_err.message().is_empty()
+            let dynamo_err = annotated.error.as_ref();
+            let error_message = if let Some(err) = dynamo_err
+                && !err.message().is_empty()
             {
-                dynamo_err.message().to_string()
+                err.message().to_string()
             } else if let Some(ref comments) = annotated.comment {
                 let joined = comments.join(" -- ");
                 if joined.trim().is_empty() {
@@ -1623,7 +1663,24 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
             } else {
                 "unspecified error".to_string()
             };
-            return Err(axum::Error::new(error_message));
+            // Carry the structured status downstream as an `HttpError` so the
+            // SSE streaming wrapper (`monitor_for_disconnects`) emits the true
+            // upstream code instead of a hardcoded 500. `axum::Error` boxes
+            // this; `disconnect.rs` downcasts it back. Errors without a
+            // preserved status fall back to 500 (unchanged behavior).
+            let code = match dynamo_err {
+                Some(err) => dynamo_error_status_code(err),
+                None => {
+                    tracing::debug!(
+                        "streaming error event has no DynamoError context; defaulting to HTTP 500"
+                    );
+                    500
+                }
+            };
+            return Err(axum::Error::new(HttpError {
+                code,
+                message: error_message,
+            }));
         }
         event = event.event(msg);
     }
