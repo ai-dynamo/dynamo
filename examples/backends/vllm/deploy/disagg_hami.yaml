@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example: how to ask the operator for HAMi-sliced GPUs through the new
+# `device` field (v1alpha1 schema). This file is a TEMPLATE — it has not
+# been exercised against a real HAMi cluster. Before using in production,
+# validate in a small dev cluster that:
+#   1. hami-scheduler is installed and reachable.
+#   2. The chosen backend (vLLM, SGLang, TRT-LLM) actually supports the
+#      device shape you request.
+#   3. The image you ship below matches a real published image.
+#
+# The v1alpha1 schema is deprecated; prefer examples/backends/vllm/deploy/
+# v1beta1/disagg_hami.yaml. This file is here so v1alpha1 users can also
+# adopt the `device` field.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-hami
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmDecodeWorker:
+      componentType: worker
+      replicas: 1
+      device:
+        resources:
+          nvidia.com/gpu: "1"
+          nvidia.com/gpumem: "3000"
+          nvidia.com/gpucores: "50"
+        schedulerName: hami-scheduler
+        nodeSelector:
+          gpu: "on"
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmPrefillWorker:
+      componentType: worker
+      replicas: 1
+      device:
+        resources:
+          nvidia.com/gpu: "1"
+          nvidia.com/gpumem: "3000"
+          nvidia.com/gpucores: "50"
+        schedulerName: hami-scheduler
+        nodeSelector:
+          gpu: "on"
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag

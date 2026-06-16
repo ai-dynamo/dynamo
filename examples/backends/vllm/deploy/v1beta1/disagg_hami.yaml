@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example: how to ask the operator for HAMi-sliced GPUs through the new
+# `device` field. This file is a TEMPLATE — it has not been exercised against
+# a real HAMi cluster. Before using in production, validate in a small dev
+# cluster that:
+#   1. hami-scheduler is installed and reachable.
+#   2. The chosen backend (vLLM, SGLang, TRT-LLM) actually supports the device
+#      shape you request — e.g. vLLM ROCm is a separate build path and
+#      `--disaggregation-mode` semantics differ across backends.
+#   3. The podTemplate `image` you ship below matches a real published image.
+#
+# Why a template and not a finished recipe: the operator change in
+# #10716 / #10717 only touches how device resources, tolerations, and
+# schedulerName reach the pod spec. It does not change any backend runtime.
+# Whatever backend image you already trust is what you should put here.
+#
+# Compared to examples/backends/vllm/deploy/v1beta1/disagg.yaml, every worker
+# component sets `device` instead of hard-coding nvidia.com/gpu in
+# podTemplate.resources. The operator hands the four Kubernetes primitives
+# through and lets hami-scheduler decide which physical GPU slice to bind the
+# pod to.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-hami
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    device:
+      resources:
+        nvidia.com/gpu: "1"
+        # HAMi-specific extensions: ask the hami-scheduler for a 3 GB
+        # memory slice and 50% of the SMs. See
+        # https://github.com/Project-HAMi/HAMi for the exact key names
+        # supported by your device-plugin version.
+        nvidia.com/gpumem: "3000"
+        nvidia.com/gpucores: "50"
+      schedulerName: hami-scheduler
+      nodeSelector:
+        gpu: "on"
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          # Note: no explicit `resources.limits.nvidia.com/gpu` here. The
+          # operator merges device.resources into the main container at build
+          # time. Users can still override per-key via podTemplate.resources.
+          resources:
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: decode
+  - name: VllmPrefillWorker
+    device:
+      resources:
+        nvidia.com/gpu: "1"
+        nvidia.com/gpumem: "3000"
+        nvidia.com/gpucores: "50"
+      schedulerName: hami-scheduler
+      nodeSelector:
+        gpu: "on"
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: prefill
