@@ -19,6 +19,8 @@ pub struct QueueSnapshot {
 }
 
 impl QueueSnapshot {
+    /// Keeps exact uncached tokens for classification while clamping only the
+    /// scheduling cost so zero-work requests still participate in DRR/WSPT.
     pub fn new(raw_isl_tokens: usize, cached_tokens: usize) -> Self {
         let cached_tokens = cached_tokens.min(raw_isl_tokens);
         Self {
@@ -189,6 +191,8 @@ impl<T> PolicyQueue<T> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Applies class-local, worker-scaled limits against pre-add counters, then
+    /// captures the immutable scheduling key and accounting snapshot.
     pub fn enqueue(
         &mut self,
         class_index: usize,
@@ -228,6 +232,8 @@ impl<T> PolicyQueue<T> {
         Ok(())
     }
 
+    /// Runs one DRR ring pass over dispatchable class heads. If no head has
+    /// enough credit, bulk-adds the minimum complete rounds needed for progress.
     pub fn pop_next(
         &mut self,
         mut is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
@@ -314,6 +320,8 @@ impl<T> PolicyQueue<T> {
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
+        // Empty classes discard stale credit. Otherwise retain usable credit
+        // for the same class, or advance the ring when its next head is larger.
         if class.pending.is_empty() {
             class.deficit = 0;
             self.next_class = (class_index + 1) % self.classes.len();
@@ -331,6 +339,8 @@ impl<T> PolicyQueue<T> {
 }
 
 fn queue_rejection<T>(class: &PolicyClassQueue<T>, worker_count: usize) -> Option<QueueRejection> {
+    // Limits scale from the current discovered endpoint count and intentionally
+    // compare only existing usage; the request that crosses a cap is accepted.
     for (limit_kind, current, limit_per_worker) in [
         (
             QueueLimitKind::Requests,
@@ -389,9 +399,14 @@ mod tests {
     fn per_worker_caps_scale_and_remain_pre_add() {
         let mut queue = PolicyQueue::new(profile(
             r#"
-default_policy_class: capped
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: capped
+    policy_family: capped
+    cache_bucket: all
     quantum: 10
     request_queue_limit_per_worker: 1
     raw_isl_token_queue_limit_per_worker: 5
@@ -419,18 +434,29 @@ policy_classes:
     fn per_worker_token_caps_follow_capacity_without_evicting() {
         let mut queue = PolicyQueue::new(profile(
             r#"
-default_policy_class: raw
+default_policy_family: raw
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: raw
+    policy_family: raw
+    cache_bucket: all
     quantum: 1
     raw_isl_token_queue_limit_per_worker: 10
   - name: cached
+    policy_family: cached
+    cache_bucket: all
     quantum: 1
     cached_token_queue_limit_per_worker: 5
   - name: zero
+    policy_family: zero
+    cache_bucket: all
     quantum: 1
     request_queue_limit_per_worker: 0
   - name: no-workers
+    policy_family: no-workers
+    cache_bucket: all
     quantum: 1
     request_queue_limit_per_worker: 1
 "#,
@@ -506,9 +532,14 @@ policy_classes:
     fn per_worker_limit_multiplication_saturates() {
         let mut queue = PolicyQueue::new(profile(&format!(
             r#"
-default_policy_class: capped
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: capped
+    policy_family: capped
+    cache_bucket: all
     quantum: 1
     request_queue_limit_per_worker: {}
 "#,
@@ -523,12 +554,19 @@ policy_classes:
     fn fcfs_and_wspt_order_only_within_each_class() {
         let mut queue = PolicyQueue::new(profile(
             r#"
-default_policy_class: fcfs
+default_policy_family: fcfs
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: fcfs
+    policy_family: fcfs
+    cache_bucket: all
     queue_policy: fcfs
     quantum: 50
   - name: wspt
+    policy_family: wspt
+    cache_bucket: all
     queue_policy: wspt
     quantum: 50
 "#,
@@ -556,11 +594,18 @@ policy_classes:
     fn drr_weights_progress_and_skips_blocked_classes_without_credit() {
         let mut queue = PolicyQueue::new(profile(
             r#"
-default_policy_class: slow
+default_policy_family: slow
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: slow
+    policy_family: slow
+    cache_bucket: all
     quantum: 1
   - name: fast
+    policy_family: fast
+    cache_bucket: all
     quantum: 3
 "#,
         ));
@@ -589,11 +634,18 @@ policy_classes:
     fn drr_serves_exact_quantum_ratio_for_equal_cost_backlogs() {
         let mut queue = PolicyQueue::new(profile(
             r#"
-default_policy_class: one
+default_policy_family: one
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: one
+    policy_family: one
+    cache_bucket: all
     quantum: 1
   - name: three
+    policy_family: three
+    cache_bucket: all
     quantum: 3
 "#,
         ));
@@ -628,11 +680,18 @@ policy_classes:
     fn fully_blocked_ring_returns_without_accruing_deficit() {
         let mut queue = PolicyQueue::new(profile(
             r#"
-default_policy_class: first
+default_policy_family: first
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: first
+    policy_family: first
+    cache_bucket: all
     quantum: 7
   - name: second
+    policy_family: second
+    cache_bucket: all
     quantum: 11
 "#,
         ));
@@ -654,11 +713,18 @@ policy_classes:
     fn oversized_heads_bulk_add_deficit_and_make_progress() {
         let mut queue = PolicyQueue::new(profile(
             r#"
-default_policy_class: large
+default_policy_family: large
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: large
+    policy_family: large
+    cache_bucket: all
     quantum: 4
   - name: blocked
+    policy_family: blocked
+    cache_bucket: all
     quantum: 100
 "#,
         ));

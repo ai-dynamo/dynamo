@@ -1047,7 +1047,7 @@ mod tests {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),
-            "default_policy_class: default\npolicy_classes:\n  - name: default\n    quantum: 1\n",
+            "default_policy_family: default\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: all\npolicy_classes:\n  - name: default\n    policy_family: default\n    cache_bucket: all\n    quantum: 1\n",
         )
         .unwrap();
         let encoded = serde_json::json!({
@@ -1090,7 +1090,7 @@ mod tests {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),
-            "default_policy_class: stable\npolicy_classes:\n  - name: stable\n    quantum: 7\n",
+            "default_policy_family: stable\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: all\npolicy_classes:\n  - name: stable\n    policy_family: stable\n    cache_bucket: all\n    quantum: 7\n",
         )
         .unwrap();
         let config = KvRouterConfig {
@@ -1161,15 +1161,25 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-default_policy_class: root
+default_policy_family: root
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: root
+    policy_family: root
+    cache_bucket: all
     quantum: 1
 models:
   replay-model:
-    default_policy_class: selected
+    default_policy_family: selected
+    uncached_isl_buckets:
+      - min_tokens: 0
+        bucket: all
     policy_classes:
       - name: selected
+        policy_family: selected
+        cache_bucket: all
         quantum: 9
 "#,
         )

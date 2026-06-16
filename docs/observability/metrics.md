@@ -410,7 +410,7 @@ Gauges track pending work in each router policy class. They are registered by th
 | `dynamo_frontend_router_queue_pending_cached_tokens` | Gauge | Cached-token estimate snapshotted when each request is enqueued |
 | `dynamo_frontend_router_queue_backpressure_total` | Counter | Queue rejections by configured limit reason |
 
-**Labels:** `model`, `worker_type` (`prefill` or `decode`), and `policy_class`. The rejection counter also has `reason`.
+**Labels:** `model`, `worker_type` (`prefill` or `decode`), and `policy_class`. With policy-family/cache-bucket YAML, `policy_class` is the resolved physical queue, not the family requested by the client. The rejection counter also has `reason`.
 
 #### KV Indexer Metrics
 

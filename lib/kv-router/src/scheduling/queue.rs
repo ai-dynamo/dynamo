@@ -52,11 +52,6 @@ struct QueuedRequest {
     block_hashes: Option<Vec<LocalBlockHash>>,
 }
 
-struct ResolvedPolicyClass {
-    class_index: usize,
-    snapshot: Option<QueueSnapshot>,
-}
-
 #[allow(clippy::large_enum_variant)]
 enum AdmissionCommand {
     Enqueue {
@@ -345,9 +340,6 @@ impl<
     /// Enqueue a new request.
     /// If queueing is disabled or workers have capacity, schedule immediately.
     /// Otherwise park in the pending heap.
-    ///
-    /// When `allowed_worker_ids` is set on the request without an exact pin
-    /// (external routing), the capacity check is skipped.
     pub async fn enqueue(&self, request: SchedulingRequest) {
         self.enqueue_with_block_hashes(request, None).await;
     }
@@ -490,30 +482,37 @@ impl<
     ) {
         let eligibility = request.eligibility();
         let decay_now = Instant::now();
-        let ResolvedPolicyClass {
-            class_index,
-            snapshot,
-        } = self.resolve_policy_class(&request);
-        let class = self.profile.class(class_index);
-
-        if !class.queueing_enabled() {
-            self.admit_one(request, decay_now);
-            return;
-        }
-
-        if eligibility.bypasses_capacity_check() {
-            self.admit_one(request, decay_now);
-            return;
-        }
-
-        let should_queue = self.pending.has_backlog(class_index)
-            || self.all_workers_prefill_busy(class, request.eligibility(), decay_now);
+        // Synthetic and explicit selections avoid cache work. Family
+        // classification reuses one worker generation for snapshot and busy checks.
+        let (class_index, snapshot, should_queue) = if let Some(class_index) = self
+            .profile
+            .direct_class_index(request.policy_class.as_deref())
+        {
+            let class = self.profile.class(class_index);
+            let should_queue = self.should_queue(class_index, class, || {
+                self.all_workers_prefill_busy(class, eligibility, decay_now)
+            });
+            (class_index, None, should_queue)
+        } else {
+            let active_tokens = self.slots.active_tokens(decay_now);
+            let workers = self.workers_with_configs.borrow();
+            let snapshot = Self::snapshot_for_with(&request, &workers);
+            let class_index = self
+                .profile
+                .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
+            let class = self.profile.class(class_index);
+            let should_queue = self.should_queue(class_index, class, || {
+                Self::all_workers_prefill_busy_with(&active_tokens, &workers, class, eligibility)
+            });
+            (class_index, Some(snapshot), should_queue)
+        };
         if !should_queue {
             self.admit_one(request, decay_now);
             return;
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
+        let class = self.profile.class(class_index);
         tracing::debug!(policy_class = class.name, "queueing request");
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
@@ -543,35 +542,29 @@ impl<
         self.add_class_counters(class_index, snapshot);
     }
 
-    fn resolve_policy_class(&self, request: &SchedulingRequest) -> ResolvedPolicyClass {
-        if let Some(class_index) = self
-            .profile
-            .explicit_class_index(request.policy_class.as_deref())
-        {
-            return ResolvedPolicyClass {
-                class_index,
-                snapshot: None,
-            };
-        }
-        if !self.profile.uses_uncached_isl_classification() {
-            return ResolvedPolicyClass {
-                class_index: self.profile.resolve_class_index(None, 0),
-                snapshot: None,
-            };
-        }
-
-        let snapshot = self.snapshot_for(request);
-        ResolvedPolicyClass {
-            class_index: self
-                .profile
-                .resolve_class_index(None, snapshot.uncached_tokens),
-            snapshot: Some(snapshot),
-        }
+    fn should_queue(
+        &self,
+        class_index: usize,
+        class: &PolicyClassConfig,
+        all_workers_busy: impl FnOnce() -> bool,
+    ) -> bool {
+        // Preserve backlog anti-bypass and lazily avoid worker scans when an
+        // earlier condition already decides admission.
+        class.queueing_enabled() && (self.pending.has_backlog(class_index) || all_workers_busy())
     }
 
     fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
         let workers = self.workers_with_configs.borrow();
-        let context = SchedulingContext::new(request, &workers);
+        Self::snapshot_for_with(request, &workers)
+    }
+
+    fn snapshot_for_with(
+        request: &SchedulingRequest,
+        workers: &HashMap<WorkerId, C>,
+    ) -> QueueSnapshot {
+        // Cache overlap is sampled once and reused for classification, queue
+        // limits, ordering, DRR cost, and counters.
+        let context = SchedulingContext::new(request, workers);
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
@@ -580,6 +573,8 @@ impl<
             return;
         }
 
+        // Continuation draining stays actor-local; never self-send through the
+        // bounded command channel while processing an update.
         loop {
             let decay_now = Instant::now();
             let active_tokens = self.slots.active_tokens(decay_now);
@@ -1738,12 +1733,19 @@ mod tests {
     async fn policy_classes_apply_independent_thresholds_and_preserve_backlog_order() {
         let profile = policy_profile(
             r#"
-default_policy_class: latency
+default_policy_family: latency
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: latency
+    policy_family: latency
+    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
   - name: bulk
+    policy_family: bulk
+    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 1024
 "#,
@@ -1804,20 +1806,37 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn uncached_isl_mapping_selects_flat_classes_with_trusted_header_override() {
+    async fn policy_families_and_cache_buckets_select_physical_queues() {
         let profile = policy_profile(
             r#"
-default_policy_class: cached
-uncached_isl_policy_class_tiers:
+default_policy_family: standard
+uncached_isl_buckets:
   - min_tokens: 0
-    policy_class: cached
+    bucket: cached
   - min_tokens: 32
-    policy_class: uncached
+    bucket: uncached
 policy_classes:
   - name: cached
+    policy_family: standard
+    cache_bucket: cached
     quantum: 1
     prefill_busy_threshold: 0
   - name: uncached
+    policy_family: standard
+    cache_bucket: uncached
+    quantum: 1
+    prefill_busy_threshold: 0
+  - name: latency_cached
+    policy_family: latency
+    cache_bucket: cached
+    quantum: 1
+    prefill_busy_threshold: 0
+  - name: latency_uncached
+    policy_family: latency
+    cache_bucket: uncached
+    quantum: 1
+    prefill_busy_threshold: 0
+  - name: custom_priority
     quantum: 1
     prefill_busy_threshold: 0
 "#,
@@ -1829,32 +1848,63 @@ policy_classes:
         queue.enqueue(active).await;
         active_rx.await.unwrap().unwrap();
 
-        let (mut mapped_cached, _mapped_cached_rx) = make_request("mapped-cached", 64);
-        mapped_cached.effective_cached_tokens.insert(worker, 64);
-        queue.enqueue(mapped_cached).await;
+        let (mut latency_cached, _latency_cached_rx) = make_request("latency-cached", 64);
+        latency_cached.policy_class = Some("latency".to_string());
+        latency_cached.effective_cached_tokens.insert(worker, 64);
+        queue.enqueue(latency_cached).await;
 
-        let (mapped_uncached, _mapped_uncached_rx) = make_request("mapped-uncached", 64);
-        queue.enqueue(mapped_uncached).await;
+        let (mut latency_uncached, _latency_uncached_rx) = make_request("latency-uncached", 64);
+        latency_uncached.policy_class = Some("latency".to_string());
+        queue.enqueue(latency_uncached).await;
 
         let (mut unknown_cached, _unknown_cached_rx) = make_request("unknown-cached", 64);
         unknown_cached.policy_class = Some("unknown".to_string());
         unknown_cached.effective_cached_tokens.insert(worker, 64);
         queue.enqueue(unknown_cached).await;
 
-        let (mut explicit_cached, _explicit_cached_rx) = make_request("explicit-cached", 64);
-        explicit_cached.policy_class = Some("cached".to_string());
-        queue.enqueue(explicit_cached).await;
+        let (mut ordinary_class_name, _ordinary_class_name_rx) =
+            make_request("ordinary-class-name", 64);
+        ordinary_class_name.policy_class = Some("latency_cached".to_string());
+        queue.enqueue(ordinary_class_name).await;
+
+        let (mut custom, _custom_rx) = make_request("custom", 64);
+        custom.policy_class = Some("custom_priority".to_string());
+        queue.enqueue(custom).await;
 
         assert_eq!(
             queue.class_queue_stats(0),
             Some(ClassQueueStats {
-                pending_count: 3,
-                pending_isl_tokens: 192,
-                pending_cached_tokens: 128,
+                pending_count: 1,
+                pending_isl_tokens: 64,
+                pending_cached_tokens: 64,
             })
         );
         assert_eq!(
             queue.class_queue_stats(1),
+            Some(ClassQueueStats {
+                pending_count: 1,
+                pending_isl_tokens: 64,
+                pending_cached_tokens: 0,
+            })
+        );
+        assert_eq!(
+            queue.class_queue_stats(2),
+            Some(ClassQueueStats {
+                pending_count: 1,
+                pending_isl_tokens: 64,
+                pending_cached_tokens: 64,
+            })
+        );
+        assert_eq!(
+            queue.class_queue_stats(3),
+            Some(ClassQueueStats {
+                pending_count: 1,
+                pending_isl_tokens: 64,
+                pending_cached_tokens: 0,
+            })
+        );
+        assert_eq!(
+            queue.class_queue_stats(4),
             Some(ClassQueueStats {
                 pending_count: 1,
                 pending_isl_tokens: 64,
@@ -1867,9 +1917,14 @@ policy_classes:
     async fn class_local_limit_rejection_is_typed_and_not_overload() {
         let profile = policy_profile(
             r#"
-default_policy_class: capped
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: capped
+    policy_family: capped
+    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 1
@@ -1910,9 +1965,14 @@ policy_classes:
     async fn per_worker_limit_tracks_discovered_worker_count_without_evicting() {
         let profile = policy_profile(
             r#"
-default_policy_class: capped
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: capped
+    policy_family: capped
+    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 1
@@ -2130,74 +2190,66 @@ policy_classes:
         );
     }
 
-    /// Requests with allowed_worker_ids should only route to the specified subset.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_allowed_worker_ids_filter() {
+    async fn allowed_worker_request_joins_backlog_and_dispatches_within_allow_list() {
         let block_size = 16;
         let isl = 256;
+        let (queue, slots) = make_queue(2, block_size, isl, Some(0.0));
 
-        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
+        let (active_a, active_a_rx) = make_request("active-a", isl);
+        queue.enqueue(active_a).await;
+        let active_a_worker = active_a_rx.await.unwrap().unwrap().best_worker.worker_id;
 
-        // Register three workers
-        for worker_id in 1..=3 {
-            slots
-                .upsert_worker(WorkerDpRange::new(worker_id, 0, 1))
-                .unwrap();
-        }
+        let (active_b, active_b_rx) = make_request("active-b", isl);
+        queue.enqueue(active_b).await;
+        active_b_rx.await.unwrap().unwrap();
 
-        let mut configs = HashMap::new();
-        for &id in &[1_u64, 2_u64, 3_u64] {
-            configs.insert(
-                id,
-                SimpleWorkerConfig {
-                    max_num_batched_tokens: Some(isl as u64),
-                    ..Default::default()
-                },
-            );
-        }
-        cfg_tx.send(configs).unwrap();
+        let (backlog_head, backlog_head_rx) = make_request("backlog-head", isl);
+        queue.enqueue(backlog_head).await;
+        assert_eq!(queue.pending_count(), 1);
 
-        // Send a request with allowed_worker_ids = {2} only
-        let mut allowed = std::collections::HashSet::new();
-        allowed.insert(2_u64);
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let req = SchedulingRequest {
-            maybe_request_id: Some("filter-0".to_string()),
-            token_seq: None,
-            isl_tokens: isl,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::new(),
-            effective_cached_tokens: HashMap::new(),
-            worker_loads: FxHashMap::default(),
-            track_prefill_tokens: true,
-            router_config_override: None,
-            update_states: true,
-            lora_name: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            expected_output_tokens: None,
-            pinned_worker: None,
-            allowed_worker_ids: Some(allowed),
-            routing_constraints: crate::protocols::RoutingConstraints::default(),
-            shared_cache_hits: None,
-            resp_tx: Some(tx),
-        };
-        queue.enqueue(req).await;
-        let resp = rx
-            .await
-            .expect("oneshot dropped")
-            .expect("scheduling failed");
-        assert_eq!(
-            resp.best_worker.worker_id, 2,
-            "request must be routed to allowed worker 2, got {}",
-            resp.best_worker.worker_id
-        );
         slots
-            .mark_prefill_completed(&"filter-0".to_string(), decay_now())
+            .mark_prefill_completed(&"active-a".to_string(), decay_now())
             .unwrap();
-        slots.free(&"filter-0".to_string(), decay_now()).unwrap();
+        slots.free(&"active-a".to_string(), decay_now()).unwrap();
+
+        let (mut allowed, mut allowed_rx) = make_request("allowed", isl);
+        allowed.allowed_worker_ids = Some(HashSet::from([active_a_worker]));
+        queue.enqueue(allowed).await;
+        assert_eq!(
+            queue.pending_count(),
+            2,
+            "allow-list request must not bypass the existing class backlog"
+        );
+        assert!(allowed_rx.try_recv().is_err());
+
+        queue.update().await;
+        let backlog_head_worker = backlog_head_rx
+            .await
+            .unwrap()
+            .unwrap()
+            .best_worker
+            .worker_id;
+        assert!(allowed_rx.try_recv().is_err());
+
+        slots
+            .mark_prefill_completed(&"backlog-head".to_string(), decay_now())
+            .unwrap();
+        slots
+            .free(&"backlog-head".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+
+        let allowed_worker = allowed_rx.await.unwrap().unwrap().best_worker.worker_id;
+        assert_eq!(allowed_worker, active_a_worker);
+
+        for request_id in ["active-b", "allowed"] {
+            slots
+                .mark_prefill_completed(&request_id.to_string(), decay_now())
+                .unwrap();
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
+        }
+        assert_eq!(backlog_head_worker, active_a_worker);
     }
 
     #[tokio::test(flavor = "multi_thread")]

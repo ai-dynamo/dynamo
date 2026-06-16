@@ -502,12 +502,19 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-default_policy_class: latency
+default_policy_family: latency
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: latency
+    policy_family: latency
+    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
   - name: batch
+    policy_family: batch
+    cache_bucket: all
     quantum: 4
     prefill_busy_threshold: 1024
 "#,

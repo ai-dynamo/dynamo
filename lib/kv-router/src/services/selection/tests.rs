@@ -390,14 +390,21 @@ async fn standalone_policy_classes_apply_header_thresholds_and_structured_reject
     std::fs::write(
         policy_file.path(),
         r#"
-default_policy_class: latency
+default_policy_family: latency
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
 policy_classes:
   - name: latency
+    policy_family: latency
+    cache_bucket: all
     queue_policy: fcfs
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 0
   - name: batch
+    policy_family: batch
+    cache_bucket: all
     queue_policy: wspt
     quantum: 4
     prefill_busy_threshold: 1024

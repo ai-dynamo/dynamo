@@ -1772,8 +1772,9 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
-            router_policy_config: Startup-only policy-class YAML path. When omitted,
-                router_queue_threshold and router_queue_policy define one default queue.
+            router_policy_config: Startup-only policy-family and cache-bucket queue
+                YAML path. When omitted, router_queue_threshold and
+                router_queue_policy define one default queue.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -2677,6 +2678,9 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
+            policy_class: Requested policy family, or an exact explicit class.
+                          Missing, unknown, and ordinary physical-class names use the
+                          configured default family before cache-bucket resolution.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:

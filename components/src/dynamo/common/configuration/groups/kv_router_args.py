@@ -409,7 +409,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_POLICY_CONFIG",
             default=None,
             help=(
-                "KV Router: Startup-only YAML policy-class configuration. "
+                "KV Router: Startup-only YAML policy-family and cache-bucket "
+                "queue configuration. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "the existing single default queue."
             ),
