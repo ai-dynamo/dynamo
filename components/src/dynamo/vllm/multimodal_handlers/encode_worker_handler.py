@@ -58,66 +58,6 @@ class EmbeddingItem:
     embeddings: torch.Tensor
 
 
-def _load_embed_tokens_weight(model_id: str, dtype: torch.dtype) -> torch.Tensor:
-    """Load only embed_tokens.weight from a HF model checkpoint.
-
-    Uses safetensors lazy reads — only the bytes for this one tensor are read
-    from disk, regardless of total checkpoint size.  Works for both local
-    directories and HF hub model IDs (resolved through the HF cache).
-
-    Args:
-        model_id: Local directory path or HF hub model ID (e.g. ``"Qwen/Qwen2.5-1.5B"``).
-        dtype:    Target dtype for the returned tensor.
-
-    Returns:
-        The embedding weight tensor of shape ``(vocab_size, hidden_dim)``.
-
-    Raises:
-        FileNotFoundError: If no safetensors checkpoint or embed_tokens key is found.
-    """
-    # Resolve the index file — cached_file handles both local paths and HF hub IDs.
-    # Imported here to avoid a module-level transformers.utils dependency that breaks
-    # the pytest-marker-report pre-commit hook (it stubs `transformers` but not submodules).
-    from transformers.utils import cached_file  # noqa: PLC0415
-
-    try:
-        index_path = cached_file(model_id, "model.safetensors.index.json")
-        model_dir = Path(index_path).parent
-        weight_map: dict[str, str] = json.loads(Path(index_path).read_text())[
-            "weight_map"
-        ]
-        embed_key = next(
-            (k for k in weight_map if k.endswith("embed_tokens.weight")), None
-        )
-        if embed_key is None:
-            raise FileNotFoundError(
-                f"No embed_tokens.weight key in safetensors index for {model_id}"
-            )
-        shard_path = model_dir / weight_map[embed_key]
-    except (OSError, StopIteration):
-        # Fallback: single-file safetensors model.
-        shard_path = Path(cached_file(model_id, "model.safetensors"))
-        embed_key = None  # scan below
-
-    with safe_open(str(shard_path), framework="pt", device="cpu") as f:
-        if embed_key is None:
-            embed_key = next(
-                (k for k in f.keys() if k.endswith("embed_tokens.weight")), None
-            )
-        if embed_key is None:
-            raise FileNotFoundError(f"embed_tokens.weight not found in {shard_path}")
-        weight = f.get_tensor(embed_key)
-
-    logger.info(
-        "Loaded embed_tokens.weight from shard %s (key=%s): shape=%s dtype=%s",
-        shard_path.name,
-        embed_key,
-        tuple(weight.shape),
-        weight.dtype,
-    )
-    return weight.to(dtype=dtype)
-
-
 def _make_embedding_sender(
     embedding_transfer_mode: EmbeddingTransferMode,
 ) -> AbstractEmbeddingSender:
@@ -456,12 +396,73 @@ class FullPromptEncodeWorkerHandler(_BaseEncodeWorkerHandler):
         _smn = engine_args.served_model_name
         pd_model = _smn[0] if isinstance(_smn, list) and _smn else (_smn or self.model)
         logger.info("Loading LM embed_tokens from pd_model=%s", pd_model)
-        weight = _load_embed_tokens_weight(pd_model, dtype=torch.float16)
+        weight = self._load_embed_tokens_weight(pd_model, dtype=torch.float16)
         self.lm_embed_tokens = (
             torch.nn.Embedding(weight.shape[0], weight.shape[1], _weight=weight)
             .eval()
             .to(device)
         )
+
+    @staticmethod
+    def _load_embed_tokens_weight(model_id: str, dtype: torch.dtype) -> torch.Tensor:
+        """Load only embed_tokens.weight from a HF model checkpoint.
+
+        Uses safetensors lazy reads — only the bytes for this one tensor are read
+        from disk, regardless of total checkpoint size.  Works for both local
+        directories and HF hub model IDs (resolved through the HF cache).
+
+        Args:
+            model_id: Local directory path or HF hub model ID (e.g. ``"Qwen/Qwen2.5-1.5B"``).
+            dtype:    Target dtype for the returned tensor.
+
+        Returns:
+            The embedding weight tensor of shape ``(vocab_size, hidden_dim)``.
+
+        Raises:
+            FileNotFoundError: If no safetensors checkpoint or embed_tokens key is found.
+        """
+        # Imported here to avoid a module-level transformers.utils dependency that breaks
+        # the pytest-marker-report pre-commit hook (it stubs `transformers` but not submodules).
+        from transformers.utils import cached_file  # noqa: PLC0415
+
+        try:
+            index_path = cached_file(model_id, "model.safetensors.index.json")
+            model_dir = Path(index_path).parent
+            weight_map: dict[str, str] = json.loads(Path(index_path).read_text())[
+                "weight_map"
+            ]
+            embed_key = next(
+                (k for k in weight_map if k.endswith("embed_tokens.weight")), None
+            )
+            if embed_key is None:
+                raise FileNotFoundError(
+                    f"No embed_tokens.weight key in safetensors index for {model_id}"
+                )
+            shard_path = model_dir / weight_map[embed_key]
+        except (OSError, StopIteration):
+            # Fallback: single-file safetensors model.
+            shard_path = Path(cached_file(model_id, "model.safetensors"))
+            embed_key = None  # scan below
+
+        with safe_open(str(shard_path), framework="pt", device="cpu") as f:
+            if embed_key is None:
+                embed_key = next(
+                    (k for k in f.keys() if k.endswith("embed_tokens.weight")), None
+                )
+            if embed_key is None:
+                raise FileNotFoundError(
+                    f"embed_tokens.weight not found in {shard_path}"
+                )
+            weight = f.get_tensor(embed_key)
+
+        logger.info(
+            "Loaded embed_tokens.weight from shard %s (key=%s): shape=%s dtype=%s",
+            shard_path.name,
+            embed_key,
+            tuple(weight.shape),
+            weight.dtype,
+        )
+        return weight.to(dtype=dtype)
 
     @_nvtx.range_decorator("mm:full_prompt_encode_worker_generate", color="blue")
     async def generate(
