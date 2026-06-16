@@ -165,6 +165,41 @@ def test_deprecated_overlap_score_weight_env_flows_to_binding_kwargs(
     assert config.kv_router_kwargs()["overlap_score_weight"] == 2.5
 
 
+@pytest.mark.parametrize(
+    ("canonical_env", "cli_args", "expected_credit", "expected_scale"),
+    [
+        (("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"), [], 1.0, 2.5),
+        (("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.5"), [], 0.5, 1.0),
+        (None, ["--router-prefill-load-scale", "3"], 1.0, 3.0),
+        (None, ["--router-kv-overlap-score-credit", "0.5"], 0.5, 1.0),
+    ],
+    ids=["scale-env", "credit-env", "scale-cli", "credit-cli"],
+)
+def test_deprecated_overlap_score_weight_env_coexists_with_canonical_settings(
+    monkeypatch,
+    canonical_env,
+    cli_args,
+    expected_credit,
+    expected_scale,
+) -> None:
+    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
+    if canonical_env is not None:
+        monkeypatch.setenv(*canonical_env)
+
+    with pytest.warns(FutureWarning, match="deprecated"):
+        parser = argparse.ArgumentParser()
+        KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(cli_args)
+
+    assert args.overlap_score_credit == expected_credit
+    assert args.prefill_load_scale == expected_scale
+    assert args.overlap_score_weight == 0.0
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
+
+
 def test_prefill_load_scale_cli_uses_kv_router_config_field() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
