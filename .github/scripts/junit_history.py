@@ -9,6 +9,7 @@ import argparse
 import collections
 import dataclasses
 import datetime as dt
+import html
 import io
 import os
 import pathlib
@@ -611,102 +612,133 @@ def print_ascii_report(
             f"{conclusion_summary(bucket['conclusions'])}"
         )
 
-    failure_counts: collections.Counter[tuple[str, str]] = collections.Counter()
+    print_top_flakes(stats, top)
+
+
+def flake_history(
+    stats: list[JUnitStats],
+) -> tuple[
+    collections.Counter[tuple[str, str]],
+    dict[tuple[str, str], collections.Counter[str]],
+]:
+    counts: collections.Counter[tuple[str, str]] = collections.Counter()
+    by_day: dict[tuple[str, str], collections.Counter[str]] = collections.defaultdict(
+        collections.Counter
+    )
+
     for item in stats:
+        day = item.run_created_at.date().isoformat()
         for failed_test in item.failed_tests:
-            failure_counts[(item.workflow, failed_test)] += 1
+            key = (item.workflow, failed_test)
+            counts[key] += 1
+            by_day[key][day] += 1
+
+    return counts, by_day
+
+
+def print_top_flakes(stats: list[JUnitStats], top: int) -> None:
+    counts, by_day = flake_history(stats)
 
     print()
-    if not failure_counts:
-        print("Top failures: none")
+    if not counts:
+        print("Top test flakes: none")
         return
 
-    print(f"Top failures/errors by testcase over this window (top {top}):")
-    print(f"{'Count':>5}  {'Workflow':<24} Testcase")
-    print("-" * 96)
-    for (workflow, test_name), count in failure_counts.most_common(top):
-        print(f"{count:>5}  {shorten(workflow, 24):<24} {shorten(test_name, 62)}")
+    print(f"Top test flakes by failure/error occurrence over this window (top {top}):")
+    for rank, ((workflow, test_name), count) in enumerate(counts.most_common(top), 1):
+        days = ", ".join(
+            f"{day}:{n}" for day, n in sorted(by_day[(workflow, test_name)].items())
+        )
+        print(f"{rank:>2}. {count:>4}  [{workflow}] {test_name}")
+        print(f"    days: {days}")
 
 
-def aggregate_daily(stats: list[JUnitStats]) -> dict[str, dict[str, int]]:
-    daily: dict[str, dict[str, int]] = collections.defaultdict(
-        lambda: {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+def write_flake_svg(path: pathlib.Path, stats: list[JUnitStats], top: int) -> None:
+    counts, by_day = flake_history(stats)
+    top_items = counts.most_common(top)
+    dates = sorted({item.run_created_at.date().isoformat() for item in stats})
+
+    if not dates or not top_items:
+        body = '<text x="40" y="80" font-size="16">No JUnit failures/errors matched.</text>'
+        path.write_text(svg_document(980, 180, body), encoding="utf-8")
+        return
+
+    label_width = 520
+    cell_width = 72
+    cell_height = 28
+    top_margin = 72
+    left_margin = label_width + 28
+    right_margin = 24
+    bottom_margin = 56
+    width = left_margin + len(dates) * cell_width + right_margin
+    height = top_margin + len(top_items) * cell_height + bottom_margin
+    max_cell = max(
+        (by_day[key][date] for key, _count in top_items for date in dates), default=1
     )
-    for item in stats:
-        date = item.run_created_at.date().isoformat()
-        daily[date]["tests"] += item.tests
-        daily[date]["failures"] += item.failures
-        daily[date]["errors"] += item.errors
-        daily[date]["skipped"] += item.skipped
-    return daily
+    max_total = max((count for _key, count in top_items), default=1)
 
-
-def write_failure_svg(path: pathlib.Path, stats: list[JUnitStats]) -> None:
-    daily = aggregate_daily(stats)
-    dates = sorted(daily)
-    width = 980
-    height = 360
-    margin_left = 58
-    margin_right = 24
-    margin_top = 28
-    margin_bottom = 70
-    plot_width = width - margin_left - margin_right
-    plot_height = height - margin_top - margin_bottom
-
-    if not dates:
-        body = '<text x="40" y="80" font-size="16">No JUnit data matched.</text>'
-        path.write_text(svg_document(width, height, body), encoding="utf-8")
-        return
-
-    bad_counts = [daily[date]["failures"] + daily[date]["errors"] for date in dates]
-    max_bad = max(max(bad_counts), 1)
-    bar_gap = 4
-    bar_width = max(2, (plot_width - bar_gap * (len(dates) - 1)) / len(dates))
     elements = [
-        f'<text x="{margin_left}" y="18" font-size="15" font-weight="600">'
-        "JUnit failures/errors per day</text>",
-        f'<line x1="{margin_left}" y1="{margin_top + plot_height}" '
-        f'x2="{margin_left + plot_width}" y2="{margin_top + plot_height}" stroke="#222"/>',
-        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" '
-        f'y2="{margin_top + plot_height}" stroke="#222"/>',
+        '<text x="24" y="28" font-size="16" font-weight="600">'
+        "Top test flakes by day</text>",
+        '<text x="24" y="50" font-size="12" fill="#555">'
+        "Cell values are failure/error occurrences in JUnit XML artifacts. Hover for full test names.</text>",
     ]
 
-    for tick in range(0, 5):
-        value = round(max_bad * tick / 4)
-        y = margin_top + plot_height - (value / max_bad * plot_height)
+    for index, date in enumerate(dates):
+        x = left_margin + index * cell_width + cell_width / 2
         elements.append(
-            f'<line x1="{margin_left}" y1="{y:.1f}" x2="{margin_left + plot_width}" '
-            f'y2="{y:.1f}" stroke="#e5e7eb"/>'
-        )
-        elements.append(
-            f'<text x="10" y="{y + 4:.1f}" font-size="11" fill="#555">{value}</text>'
+            f'<text x="{x:.1f}" y="62" font-size="11" text-anchor="middle" fill="#555">'
+            f"{html.escape(date[5:])}</text>"
         )
 
-    for index, date in enumerate(dates):
-        bad = bad_counts[index]
-        x = margin_left + index * (bar_width + bar_gap)
-        bar_height = 0 if bad == 0 else max(2, bad / max_bad * plot_height)
-        y = margin_top + plot_height - bar_height
-        color = "#16a34a" if bad == 0 else "#dc2626"
+    for row, ((workflow, test_name), total) in enumerate(top_items):
+        y = top_margin + row * cell_height
+        label = f"{row + 1}. [{workflow}] {test_name}"
+        visible_label = shorten(label, 74)
         elements.append(
-            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_width:.1f}" '
-            f'height="{bar_height:.1f}" fill="{color}"><title>{date}: {bad} failures/errors, '
-            f'{daily[date]["tests"]} cases</title></rect>'
+            f'<text x="24" y="{y + 18}" font-size="11" fill="#111">'
+            f"{html.escape(visible_label)}"
+            f"<title>{html.escape(label)} total={total}</title></text>"
         )
-        if len(dates) <= 16 or index % max(1, len(dates) // 12) == 0:
-            label = date[5:]
+        total_width = max(2, (total / max_total) * 72)
+        elements.append(
+            f'<rect x="{label_width - 58}" y="{y + 7}" width="{total_width:.1f}" '
+            f'height="8" rx="1" fill="#991b1b"><title>Total failures/errors: {total}</title></rect>'
+        )
+        elements.append(
+            f'<text x="{label_width + 20}" y="{y + 18}" font-size="11" text-anchor="end" fill="#555">'
+            f"{total}</text>"
+        )
+
+        for col, date in enumerate(dates):
+            count = by_day[(workflow, test_name)][date]
+            x = left_margin + col * cell_width
+            color = heat_color(count, max_cell)
             elements.append(
-                f'<text x="{x + bar_width / 2:.1f}" y="{height - 45}" font-size="10" '
-                f'text-anchor="middle" transform="rotate(45 {x + bar_width / 2:.1f},{height - 45})">'
-                f"{label}</text>"
+                f'<rect x="{x + 6:.1f}" y="{y + 4}" width="{cell_width - 12}" height="{cell_height - 8}" '
+                f'rx="2" fill="{color}" stroke="#ffffff">'
+                f"<title>{html.escape(label)}&#10;{date}: {count}</title></rect>"
             )
-        if bad:
             elements.append(
-                f'<text x="{x + bar_width / 2:.1f}" y="{y - 4:.1f}" font-size="10" '
-                f'text-anchor="middle" fill="#7f1d1d">{bad}</text>'
+                f'<text x="{x + cell_width / 2:.1f}" y="{y + 19}" font-size="10" '
+                f'text-anchor="middle" fill="{cell_text_color(count)}">{count}</text>'
             )
 
     path.write_text(svg_document(width, height, "\n".join(elements)), encoding="utf-8")
+
+
+def heat_color(count: int, max_count: int) -> str:
+    if count <= 0:
+        return "#f3f4f6"
+    ratio = min(1.0, count / max(1, max_count))
+    red = 254 - round(99 * ratio)
+    green = 226 - round(198 * ratio)
+    blue = 226 - round(198 * ratio)
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def cell_text_color(count: int) -> str:
+    return "#ffffff" if count >= 4 else "#111111"
 
 
 def svg_document(width: int, height: int, body: str) -> str:
@@ -782,7 +814,9 @@ def parse_args() -> argparse.Namespace:
         help="Do not read or write the artifact cache.",
     )
     parser.add_argument(
-        "--plot", type=pathlib.Path, help="Write a simple SVG failure history plot."
+        "--plot",
+        type=pathlib.Path,
+        help="Write an SVG history plot for the top failing/erroring testcases.",
     )
     parser.add_argument(
         "--top", type=int, default=15, help="Number of failing testcases to show."
@@ -829,7 +863,7 @@ def main() -> int:
     print_ascii_report(args.repo, cutoff, runs, stats, args.top)
 
     if args.plot:
-        write_failure_svg(args.plot, stats)
+        write_flake_svg(args.plot, stats, args.top)
         print(f"\nWrote plot: {args.plot}")
 
     return 0
