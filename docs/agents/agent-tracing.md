@@ -5,9 +5,9 @@ title: Agent Tracing
 subtitle: Attach trajectory identity and export Dynamo request and tool-event telemetry
 ---
 
-Agent tracing records **who** called (`nvext.agent_context`) and **what Dynamo measured** on each LLM request (`request_end`). Tool-call understanding is built in: Dynamo **autodetects** tool calls and finish reasons from the response stream and records them as `finish_reason_metadata` on every request — no harness instrumentation. Richer **harness tool spans** (`tool_*`: tool timing, status, output sizes) are an optional add-on. Context is passive—it does not steer routing or caching. Output is best-effort profiling data, not an audit log.
+Agent tracing records **who** called (`nvext.agent_context`) and **what Dynamo measured** on each eligible LLM request (`request_end`). Tool-call understanding is built in: Dynamo **autodetects** tool calls and finish reasons from the response stream and records them as `finish_reason_metadata` on emitted request rows — no harness instrumentation. Richer **harness tool spans** (`tool_*`: tool timing, status, output sizes) are an optional add-on. Context is passive—it does not steer routing or caching. Output is best-effort profiling data, not an audit log.
 
-**Flow:** Harness sends chat completions with `agent_context` → Dynamo emits `request_end` (with autodetected `finish_reason_metadata`) to trace sinks. *Optionally*, a harness also publishes its own tool events over ZMQ → same sinks.
+**Flow:** Harness sends chat completions with `agent_context` → Dynamo emits a `dynamo.request.trace.v1` `request_end` row for supported request shapes (with autodetected `finish_reason_metadata`) to request trace sinks. *Optionally*, a harness also publishes its own tool events over ZMQ → same sinks.
 
 ## Adding trace context to each LLM call
 
@@ -60,10 +60,10 @@ No Dynamo imports are required in the harness — `agent_context` is plain JSON 
 The fast path is one environment variable:
 
 ```bash
-export DYN_AGENT_TRACE=1
+export DYN_REQUEST_TRACE=1
 ```
 
-That picks `jsonl_gz` output at `/tmp/dynamo-agent-trace.*.jsonl.gz`. Tool-call
+That picks `jsonl_gz` output at `/tmp/dynamo-request-trace.*.jsonl.gz`. Tool-call
 understanding works immediately from `request_end` finish metadata — no harness
 tooling and no sockets (the optional ZMQ tool-event ingress is opt-in; see
 [Tool call observability](#tool-call-observability)). Any of the per-knob variables
@@ -73,46 +73,29 @@ output, add `stderr`, or tune buffers.
 To relocate captures only:
 
 ```bash
-export DYN_AGENT_TRACE=1
-export DYN_AGENT_TRACE_OUTPUT_PATH=/mnt/captures/run-42
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_OUTPUT_PATH=/mnt/captures/run-42/request-trace
 ```
 
-<details>
-<summary>All agent trace environment variables</summary>
-
-| Variable                                   |        Required         | Default (when `DYN_AGENT_TRACE=1`) | Notes                                                                                |
-| ------------------------------------------ | :---------------------: | ---------------------------------- | ------------------------------------------------------------------------------------ |
-| `DYN_AGENT_TRACE`                          |        Master switch    | unset                              | Truthy (`1`, `true`, `on`, `yes`) enables tracing with all defaults below.            |
-| `DYN_AGENT_TRACE_SINKS`                    |           No            | `jsonl_gz`                         | `jsonl`, `jsonl_gz`, `stderr`, or comma-separated (e.g. `jsonl_gz,stderr`).          |
-| `DYN_AGENT_TRACE_OUTPUT_PATH`              |           No            | `/tmp/dynamo-agent-trace`          | File path for `jsonl`; segment **prefix** for `jsonl_gz` → `prefix.NNNNNN.jsonl.gz`. |
-| `DYN_AGENT_TRACE_CAPACITY`                 |           No            | `1024`                             | Trace bus capacity.                                                                  |
-| `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES`       |           No            | `1048576`                          | Buffer / gzip batch threshold.                                                       |
-| `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS`  |           No            | `1000`                             | Flush interval.                                                                      |
-| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES`      |           No            | `268435456`                        | Roll gzip segment by uncompressed bytes.                                             |
-| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES`      |           No            | unset                              | Optional roll by line count.                                                         |
-| `DYN_AGENT_TRACE_REPLAY_HASHES`            |           No            | on                                 | Falsey (`0`, `no`, …) disables `replay` hashes on requests.                          |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |           No            | unset (opt-in)                     | Set a PULL bind address (e.g. `tcp://127.0.0.1:20390`) to enable tool-event ingress. |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |           No            | unset                              | If set, first ZMQ frame must match.                                                  |
-
-Without `DYN_AGENT_TRACE=1`, tracing is off; the other variables only
-take effect once the master switch is on.
-
-</details>
+`DYN_REQUEST_TRACE` is the only trace switch. The same request trace stream
+contains compact replay rows when no `agent_context` is present and enriched
+agent rows when it is. All request trace variables are documented in
+[Request Replay Tracing](../observability/request-tracing.md).
 
 ## Dynamo `request_end` record
 
 Emitted after the response stream finishes or is dropped. Carries `agent_context`,
 `output_tokens`, and the autodetected `finish_reason_metadata` (tool-call names +
 finish reasons). `request_id` correlates with audit rows; the `replay` block feeds
-Mooncake replay (disable with `DYN_AGENT_TRACE_REPLAY_HASHES=0`). Tool-call metadata
-is ids and names only — arguments are intentionally not stored.
+Mooncake replay when Dynamo can represent the request as one replay row. Tool-call
+metadata is ids and names only — arguments are intentionally not stored.
 
 <details>
 <summary>Full <code>request_end</code> record</summary>
 
 ```json
 {
-  "schema": "dynamo.agent.trace.v1",
+  "schema": "dynamo.request.trace.v1",
   "event_type": "request_end",
   "event_time_unix_ms": 1777312801000,
   "event_source": "dynamo",
@@ -159,10 +142,13 @@ is ids and names only — arguments are intentionally not stored.
 `finish_reason_metadata` is optional. `finish_reason` is the final OpenAI-compatible
 reason after parser rewrites (e.g. `tool_calls`); `backend_finish_reason` /
 `stop_reason` come from the backend stop path. Top-level finish fields summarize the
-single-choice case; `choices` keeps per-choice finish fields when `n > 1`. For chat
+emitted single-choice request row. Current request tracing skips unsupported
+multi-choice replay shapes such as `n > 1` and `best_of > 1`, so do not assume
+every trajectory turn is present unless skipped-row warnings are absent. For chat
 streams, finish metadata is recorded after parser/jail rewrites; completion streams
-record the final OpenAI-compatible completion finish reason. See `AgentTraceRecord` /
-`AgentRequestMetrics` in `lib/llm/src/agents/trace/types.rs` for the full Rust schema.
+record the final OpenAI-compatible completion finish reason. See `RequestTraceRecord`
+/ `RequestTraceMetrics` in `lib/llm/src/request_trace/types.rs` for the preferred
+schema.
 
 </details>
 
@@ -171,7 +157,8 @@ record the final OpenAI-compatible completion finish reason. See `AgentTraceReco
 **Default — autodetected, no harness work.** Dynamo parses each response stream and records the
 tool calls the model made into [`request_end.finish_reason_metadata`](#dynamo-request_end-record):
 the per-turn `finish_reason` and each call's `name` and `id` (arguments are never stored). Active
-whenever `DYN_AGENT_TRACE=1` and the worker runs a tool-call parser (`--dyn-tool-call-parser …`).
+whenever `DYN_REQUEST_TRACE=1` and the worker runs a
+tool-call parser (`--dyn-tool-call-parser …`).
 This tells you *what* the agent called and *when each turn ended*.
 
 You can also recover **tool-wait time offline, without any tool events**. Within a trajectory the
@@ -191,18 +178,25 @@ from agent overhead (you get the sum, as the wall-clock union of any parallel ca
 <details>
 <summary>Optional — explicit tool events (ZMQ)</summary>
 
-Opt-in: set `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` to bind the ingress, and have the harness
+Opt-in: set `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` to bind the ingress, and have the harness
 publish. Use it **only** when you need what autodetection and the timing gap can't give: the
 *attribution* of tool time, per-tool `duration_ms`, `status` (succeeded/error/cancelled), and output
 sizes. Nothing emits tool events on its own.
 
-Wire format: `[topic, seq_be_u64, msgpack(AgentTraceRecord)]`. Use a background publisher, bounded queue, monotonic sequence, and PUSH with HWM. **Terminal** `tool_end` / `tool_error` rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`) even if `tool_start` was dropped. Same `agent_context` as the surrounding LLM calls; `tool_call_id` unique per trajectory. Join offline on `session_id`, `trajectory_id`, `tool_call_id`.
+Wire format is `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`; the default
+topic is `agent-tool-events`. Use a
+background publisher, bounded queue, monotonic sequence, and PUSH with HWM.
+**Terminal** `tool_end` / `tool_error`
+rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`)
+even if `tool_start` was dropped. Same `agent_context` as the surrounding LLM
+calls; `tool_call_id` unique per trajectory. Join offline on `session_id`,
+`trajectory_id`, `tool_call_id`.
 
 Example `tool_end`:
 
 ```json
 {
-  "schema": "dynamo.agent.trace.v1",
+  "schema": "dynamo.request.trace.v1",
   "event_type": "tool_end",
   "event_time_unix_ms": 1777312801500,
   "event_source": "harness",
@@ -231,9 +225,10 @@ By default we do not save the input/ouput payloads. In order to view these, use 
 **Audit side-by-side** (same gzip/jsonl machinery):
 
 ```bash
-# enable agent trace sinks
-export DYN_AGENT_TRACE_SINKS=jsonl_gz
-export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-trace
+# enable request trace sinks
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_SINKS=jsonl_gz
+export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-trace
 # enable audit sinks
 export DYN_AUDIT_SINKS=jsonl_gz
 export DYN_AUDIT_OUTPUT_PATH=/tmp/dynamo-audit
@@ -244,7 +239,7 @@ After the run, correlate by id:
 
 ```bash
 gzip -cd /tmp/dynamo-audit.*.jsonl.gz | jq -c '.event' > /tmp/audit.jsonl
-gzip -cd /tmp/dynamo-trace.*.jsonl.gz | jq -c '.event' > /tmp/trace.jsonl
+gzip -cd /tmp/dynamo-trace.*.jsonl.gz | jq -c '.event // .' > /tmp/trace.jsonl
 jq -s 'group_by(.request_id // .request.request_id)' /tmp/audit.jsonl /tmp/trace.jsonl
 ```
 
@@ -253,7 +248,7 @@ The result is a JSONL file where each line wraps the record:
 ```json
 {
   "timestamp": 1234,
-  "event": { "schema": "dynamo.agent.trace.v1", "...": "..." }
+  "event": { "schema": "dynamo.request.trace.v1", "...": "..." }
 }
 ```
 
@@ -261,12 +256,12 @@ The result is a JSONL file where each line wraps the record:
 
 ## Viewing traces in Perfetto
 
-In order to visualize and optimize your agentic graph, we provide a utility to convert the agent trace JSONL files into a [Perfetto](https://ui.perfetto.dev/) trace file. We have found this to be extremely useful to pipeline agents that our team writes!
+In order to visualize and optimize your agentic graph, we provide a utility to convert request trace JSONL files into a [Perfetto](https://ui.perfetto.dev/) trace file. We have found this to be extremely useful to pipeline agents that our team writes!
 
 ```bash
-uv run --no-project python benchmarks/agent_trace/convert_to_perfetto.py \
-  "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz \
-  --output "${DYN_AGENT_TRACE_OUTPUT_PATH}.perfetto.json"
+uv run --no-project python benchmarks/request_trace/convert_to_perfetto.py \
+  "${DYN_REQUEST_TRACE_OUTPUT_PATH}".*.jsonl.gz \
+  --output "${DYN_REQUEST_TRACE_OUTPUT_PATH}.perfetto.json"
 ```
 
 Open in [Perfetto UI](https://ui.perfetto.dev/). Flags: `--include-markers`, `--no-stages`, `--separate-stage-tracks`.
@@ -275,9 +270,9 @@ Request slices include flattened finish metadata when present, such as `finish.f
 `finish.backend_finish_reason`, `finish.stop_reason`, `finish.tool_call_count`,
 `finish.tool_call_names`, and per-choice summaries like `finish.choice_finish_reasons`.
 
-## [Experimental] Replaying agent traces using agentic Mooncake replay
+## [Experimental] Replaying agentic request traces using Mooncake replay
 
-You can convert a collected agent trace into an **agentic Mooncake** trace and replay it with
+You can convert a collected request trace into an **agentic Mooncake** trace and replay it with
 `python -m dynamo.replay`. The converter uses Dynamo `request_end` rows for request timing, token
 lengths, worker placement, and replay hashes. It also uses terminal harness tool rows
 (`tool_end` / `tool_error`) to preserve tool-wait time between dependent LLM requests.
@@ -287,10 +282,10 @@ Perfetto view above when you want to inspect final finish reasons, backend stop
 signals, or complete tool-call metadata inside the trace.
 
 ```bash
-cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
+cargo run -p dynamo-bench --bin request_trace_to_mooncake -- \
   --agentic \
-  --input-path "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz \
-  --output-file /tmp/dynamo-agent-trace.agentic-mooncake.jsonl
+  --input-path "${DYN_REQUEST_TRACE_OUTPUT_PATH}".*.jsonl.gz \
+  --output-file /tmp/dynamo-request-trace.agentic-mooncake.jsonl
 ```
 
 The binary prints **`trace_block_size`**. Use that exact value for replay so hash segmentation
@@ -299,14 +294,14 @@ matches what Dynamo recorded. Align the mock engine block size with the same num
 
 ```bash
 TRACE_BLOCK_SIZE=128
-uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.agentic-mooncake.jsonl \
+uv run --no-sync python -m dynamo.replay /tmp/dynamo-request-trace.agentic-mooncake.jsonl \
   --trace-format agentic_mooncake \
   --trace-block-size "${TRACE_BLOCK_SIZE}" \
   --replay-mode offline \
   --router-mode kv_router \
   --num-workers 4 \
   --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
-  --report-json /tmp/dynamo-agent-trace.replay-report.json
+  --report-json /tmp/dynamo-request-trace.replay-report.json
 ```
 
 `kv_router` needs **at least two** mock workers; for a single-worker smoke test use
@@ -334,7 +329,7 @@ flags and engine settings, see [DynoSim Runs](../dynosim/runs.md).
 <details>
 <summary>ATIF alignment</summary>
 
-Dynamo emits `dynamo.agent.trace.v1`, not full ATIF logs—but identifiers match [ATIF][atif-rfc] / [Harbor](https://github.com/harbor-framework/harbor) so you can join harness trajectories to Dynamo rows on `session_id` + `trajectory_id`. Dynamo omits conversational payload by design.
+Dynamo emits `dynamo.request.trace.v1`, not full ATIF logs—but identifiers match [ATIF][atif-rfc] / [Harbor](https://github.com/harbor-framework/harbor) so you can join harness trajectories to Dynamo rows on `session_id` + `trajectory_id`. Dynamo omits conversational payload by design.
 
 | Dynamo                 | Role                    |
 | ---------------------- | ----------------------- |

@@ -202,7 +202,7 @@ What to keep from each profiling result:
 - Planner settings such as `prefill_engine_num_gpu` or `decode_engine_num_gpu`.
 - Any backend-specific flags that differ across pools.
 
-See [Planner Examples](planner-examples.md) and [Profiler Guide](../profiler/profiler-guide.md) for DGDR details.
+See [DGDR Examples](../../kubernetes/dgdr-examples.md) and [Profiler Guide](../profiler/profiler-guide.md) for DGDR details.
 
 ## Step 2: Create The Control DGD
 
@@ -419,7 +419,7 @@ This keeps profiling and pool selection simple while still giving you one public
 
 - [Planner README](README.md) — Planner overview and quick start
 - [Planner Guide](planner-guide.md) — Planner configuration reference
-- [Planner Examples](planner-examples.md) — DGDR examples for generating per-pool configs
+- [DGDR Examples](../../kubernetes/dgdr-examples.md) — DGDR examples for generating per-pool configs
 - [Profiler Guide](../profiler/profiler-guide.md) — Pre-deployment profiling workflow
 - [Global Planner README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_planner/README.md) — Centralized scale execution
 - [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md) — Cross-pool request routing

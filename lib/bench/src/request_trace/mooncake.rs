@@ -62,7 +62,9 @@ pub fn build_mooncake_rows(mut requests: Vec<RequestEntry>) -> Result<(usize, Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_trace::load::{AgentReplayMetrics, AgentRequestMetrics, RequestEntry};
+    use crate::request_trace::load::{
+        RequestEntry, RequestTraceReplayMetrics, RequestTraceRequestMetrics,
+    };
 
     fn request(
         request_id: &str,
@@ -74,14 +76,14 @@ mod tests {
             start_ms,
             end_ms,
             agent_context: None,
-            request: AgentRequestMetrics {
+            request: RequestTraceRequestMetrics {
                 request_id: request_id.to_string(),
                 output_tokens: Some(5),
                 request_received_ms: Some(start_ms as u64),
                 total_time_ms: Some((end_ms - start_ms) as f64),
                 replay: None,
             },
-            replay: AgentReplayMetrics {
+            replay: RequestTraceReplayMetrics {
                 trace_block_size: 2,
                 input_length: sequence_hashes.len() * 2,
                 input_sequence_hashes: sequence_hashes,
