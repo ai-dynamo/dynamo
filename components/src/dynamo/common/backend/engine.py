@@ -42,9 +42,14 @@ class GenerateRequest(TypedDict, total=False):
     Disaggregated-serving keys (``prefill_result``, ``bootstrap_info``)
     are set by the frontend's PrefillRouter on decode requests; engines
     read them via ``dynamo.common.backend.disagg`` helpers.
+
+    ``model`` carries the requested model name (set by the Rust
+    preprocessor). Engines that support dynamic LoRA read it to route a
+    request to a loaded adapter.
     """
 
     token_ids: Required[list[int]]
+    model: str
     sampling_options: dict[str, Any]
     stop_conditions: dict[str, Any]
     output_options: dict[str, Any]
@@ -273,11 +278,10 @@ class BaseEngine(ABC):
         return None
 
     def supported_controls(self) -> set[str]:
-        """Engine-control capability keys this engine supports.
+        """Return the set of engine-control capability keys this engine supports.
 
-        The unified backend maps these keys to runtime endpoints. Engines only
-        advertise and implement semantic controls; they do not own transport or
-        route registration details.
+        Controls are semantic operations on the engine's serving lifecycle.
+        Engines advertise the keys they implement.
         """
         return set()
 
@@ -289,6 +293,30 @@ class BaseEngine(ABC):
             "status": "error",
             "message": f"unsupported engine control: {control}",
         }
+
+    def supported_updates(self) -> set[str]:
+        """Return the set of engine-update capability keys this engine supports.
+
+        Updates are a sibling surface to :meth:`supported_controls` for
+        operations that mutate engine-managed assets rather than the engine's
+        serving lifecycle. Engines advertise the keys they implement.
+        """
+        return set()
+
+    async def engine_update(self, update: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Handle one advertised engine-update request."""
+        return {
+            "status": "error",
+            "message": f"unsupported engine update: {update}",
+        }
+
+    async def on_endpoint_ready(self, endpoint) -> None:
+        """Receive the runtime serving ``Endpoint`` once, before serving begins.
+
+        Default no-op. Engines that publish their own discovery records stash
+        it for use from :meth:`engine_update`. ``Worker`` calls this exactly
+        once; a raised exception is fatal to startup."""
+        return None
 
 
 class LLMEngine(BaseEngine):

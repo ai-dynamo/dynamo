@@ -454,7 +454,6 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
-        update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
@@ -470,7 +469,6 @@ impl RouterHandles {
             .query_prefill_worker(
                 tokens,
                 block_mm_infos,
-                update_states,
                 lora_name,
                 priority_jump,
                 strict_priority,
@@ -483,6 +481,7 @@ impl RouterHandles {
                 QueryRouterResult::ErrQueryFailed
             })?;
         match outcome {
+            // Advisory only: the external caller owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
             PrefillQueryOutcome::Backpressure {
                 reason,
@@ -822,6 +821,9 @@ pub unsafe extern "C" fn create_routers(
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,
+            // C bindings construct no KvWorkerMonitor; overload publishing is
+            // unused on this path (matches the prior namespace-lookup miss).
+            None,
         );
 
         // Spawn background discovery watcher for prefill workers.
@@ -1279,7 +1281,6 @@ pub unsafe extern "C" fn route_prefill_request(
             .query_prefill_worker(
                 &tokens,
                 None,
-                false,
                 None,
                 priority_jump,
                 strict_priority,
