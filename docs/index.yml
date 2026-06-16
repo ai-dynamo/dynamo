@@ -412,6 +412,8 @@ navigation:
                 path: components/router/router-concepts.md
               - page: Configuration and Tuning
                 path: components/router/router-configuration.md
+              - page: Deficit Round Robin Queue Scheduling
+                path: components/router/deficit-round-robin.md
               - page: Disaggregated Serving
                 path: components/router/router-disaggregated-serving.md
               - page: Topology-Aware KV Transfer

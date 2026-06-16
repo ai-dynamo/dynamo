@@ -64,7 +64,9 @@ rejected with HTTP 503 and the effective total. Worker removal does not evict
 queued requests; new arrivals reject until usage drains or capacity returns.
 DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
 and uncached snapshots remain unchanged for limits, WSPT, counters, and later
-dispatch.
+dispatch. For the ring cursor, deficit charging, weighted bursts, and bounded
+bulk-credit behavior, see
+[Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
 
 Every matrix class must identify both `policy_family` and `cache_bucket`; a
 class with neither field is explicit, while specifying only one is invalid.
