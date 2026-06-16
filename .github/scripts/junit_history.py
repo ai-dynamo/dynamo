@@ -618,26 +618,30 @@ def print_ascii_report(
 def flake_history(
     stats: list[JUnitStats],
 ) -> tuple[
-    collections.Counter[tuple[str, str]],
-    dict[tuple[str, str], collections.Counter[str]],
+    collections.Counter[str],
+    dict[str, collections.Counter[str]],
+    dict[str, collections.Counter[str]],
 ]:
-    counts: collections.Counter[tuple[str, str]] = collections.Counter()
-    by_day: dict[tuple[str, str], collections.Counter[str]] = collections.defaultdict(
+    counts: collections.Counter[str] = collections.Counter()
+    by_day: dict[str, collections.Counter[str]] = collections.defaultdict(
+        collections.Counter
+    )
+    by_workflow: dict[str, collections.Counter[str]] = collections.defaultdict(
         collections.Counter
     )
 
     for item in stats:
         day = item.run_created_at.date().isoformat()
         for failed_test in item.failed_tests:
-            key = (item.workflow, failed_test)
-            counts[key] += 1
-            by_day[key][day] += 1
+            counts[failed_test] += 1
+            by_day[failed_test][day] += 1
+            by_workflow[failed_test][item.workflow] += 1
 
-    return counts, by_day
+    return counts, by_day, by_workflow
 
 
 def print_top_flakes(stats: list[JUnitStats], top: int) -> None:
-    counts, by_day = flake_history(stats)
+    counts, by_day, by_workflow = flake_history(stats)
 
     print()
     if not counts:
@@ -645,16 +649,18 @@ def print_top_flakes(stats: list[JUnitStats], top: int) -> None:
         return
 
     print(f"Top test flakes by failure/error occurrence over this window (top {top}):")
-    for rank, ((workflow, test_name), count) in enumerate(counts.most_common(top), 1):
-        days = ", ".join(
-            f"{day}:{n}" for day, n in sorted(by_day[(workflow, test_name)].items())
+    for rank, (test_name, count) in enumerate(counts.most_common(top), 1):
+        days = ", ".join(f"{day}:{n}" for day, n in sorted(by_day[test_name].items()))
+        workflows = ", ".join(
+            f"{workflow}:{n}" for workflow, n in sorted(by_workflow[test_name].items())
         )
-        print(f"{rank:>2}. {count:>4}  [{workflow}] {test_name}")
+        print(f"{rank:>2}. {count:>4}  {test_name}")
+        print(f"    workflows: {workflows}")
         print(f"    days: {days}")
 
 
 def write_flake_svg(path: pathlib.Path, stats: list[JUnitStats], top: int) -> None:
-    counts, by_day = flake_history(stats)
+    counts, by_day, by_workflow = flake_history(stats)
     top_items = counts.most_common(top)
     dates = sorted({item.run_created_at.date().isoformat() for item in stats})
 
@@ -691,14 +697,17 @@ def write_flake_svg(path: pathlib.Path, stats: list[JUnitStats], top: int) -> No
             f"{html.escape(date[5:])}</text>"
         )
 
-    for row, ((workflow, test_name), total) in enumerate(top_items):
+    for row, (test_name, total) in enumerate(top_items):
         y = top_margin + row * cell_height
-        label = f"{row + 1}. [{workflow}] {test_name}"
+        workflows = ", ".join(
+            f"{workflow}:{n}" for workflow, n in sorted(by_workflow[test_name].items())
+        )
+        label = f"{row + 1}. {test_name}"
         visible_label = shorten(label, 74)
         elements.append(
             f'<text x="24" y="{y + 18}" font-size="11" fill="#111">'
             f"{html.escape(visible_label)}"
-            f"<title>{html.escape(label)} total={total}</title></text>"
+            f"<title>{html.escape(label)} total={total} workflows={html.escape(workflows)}</title></text>"
         )
         total_width = max(2, (total / max_total) * 72)
         elements.append(
@@ -711,13 +720,14 @@ def write_flake_svg(path: pathlib.Path, stats: list[JUnitStats], top: int) -> No
         )
 
         for col, date in enumerate(dates):
-            count = by_day[(workflow, test_name)][date]
+            count = by_day[test_name][date]
             x = left_margin + col * cell_width
             color = heat_color(count, max_cell)
             elements.append(
                 f'<rect x="{x + 6:.1f}" y="{y + 4}" width="{cell_width - 12}" height="{cell_height - 8}" '
                 f'rx="2" fill="{color}" stroke="#ffffff">'
-                f"<title>{html.escape(label)}&#10;{date}: {count}</title></rect>"
+                f"<title>{html.escape(label)}&#10;{date}: {count}"
+                f"&#10;workflows: {html.escape(workflows)}</title></rect>"
             )
             elements.append(
                 f'<text x="{x + cell_width / 2:.1f}" y="{y + 19}" font-size="10" '
