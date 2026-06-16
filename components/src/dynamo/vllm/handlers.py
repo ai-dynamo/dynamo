@@ -2595,7 +2595,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # wraps it as EmbedsPrompt — bypasses vLLM's multimodal renderer
         # which doesn't support text-only LMs (HfRenderer doesn't init
         # _mm_req_counter, see vllm/renderers/base.py:126-146).
-        if self._is_textonly_pd_with_encoder:
+        if (
+            self.embedding_loader is not None
+            and resolve_model_family(self.config.model) is None
+        ):
             image_urls = [
                 item["Url"]
                 for item in mm_map.get(IMAGE_URL_KEY, [])
