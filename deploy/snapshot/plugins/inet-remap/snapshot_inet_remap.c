@@ -157,6 +157,15 @@ rewrite_addr(uint32_t* addr)
   return false;
 }
 
+static bool
+rewrite_v4_mapped_v6_addr(uint32_t* addr)
+{
+  if (addr[0] != 0 || addr[1] != 0 || addr[2] != htonl(0xffff))
+    return false;
+
+  return rewrite_addr(&addr[3]);
+}
+
 static int
 snapshot_update_inetsk(uint32_t family, uint32_t state, uint32_t* src_ip, uint32_t* dst_ip)
 {
@@ -164,11 +173,19 @@ snapshot_update_inetsk(uint32_t family, uint32_t state, uint32_t* src_ip, uint32
 
   (void)state;
 
-  if (remap_count == 0 || family != AF_INET || src_ip == NULL || dst_ip == NULL)
+  if (remap_count == 0 || src_ip == NULL || dst_ip == NULL)
     return -ENOTSUP;
 
-  changed |= rewrite_addr(&src_ip[0]);
-  changed |= rewrite_addr(&dst_ip[0]);
+  if (family == AF_INET) {
+    changed |= rewrite_addr(&src_ip[0]);
+    changed |= rewrite_addr(&dst_ip[0]);
+  } else if (family == AF_INET6) {
+    changed |= rewrite_v4_mapped_v6_addr(src_ip);
+    changed |= rewrite_v4_mapped_v6_addr(dst_ip);
+  } else {
+    return -ENOTSUP;
+  }
+
   if (!changed)
     return -ENOTSUP;
 
