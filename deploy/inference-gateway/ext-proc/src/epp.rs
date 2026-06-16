@@ -341,6 +341,13 @@ impl Router {
                 queued_isl_tokens,
                 max_queued_isl_tokens
             )),
+            PrefillQueryOutcome::QueueRejected { rejection } => Err(anyhow::anyhow!(
+                "Prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
+                rejection.policy_class,
+                rejection.limit_kind,
+                rejection.current,
+                rejection.limit
+            )),
         }
     }
 
