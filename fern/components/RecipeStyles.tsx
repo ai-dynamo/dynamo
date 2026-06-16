@@ -416,6 +416,13 @@ const RECIPE_CSS = `
     text-decoration: none;
 }
 
+/* --nv-color-bg-default does not flip in the dark theme (stays #FFFFFF), so
+   in dark mode the card would be a white tile with light text. Flip the
+   surface to match the other dark-aware components (chip, search box, etc.). */
+.dark .dynamo-model-card {
+    background: var(--nv-dark-grey-2);
+}
+
 .dynamo-model-card:hover {
     border-color: var(--nv-color-green);
     text-decoration: none;
