@@ -1,14 +1,14 @@
-# Agent Trace Utilities
+# Request Trace Utilities
 
-Utilities for working with Dynamo agent trace files emitted by
-`DYN_AGENT_TRACE_SINKS=jsonl` or `jsonl_gz`.
+Utilities for working with Dynamo `dynamo.request.trace.v1` files emitted by
+`DYN_REQUEST_TRACE_SINKS=jsonl` or `jsonl_gz`.
 
 ## Convert to Perfetto
 
 ```bash
-python3 benchmarks/agent_trace/convert_to_perfetto.py \
-  "/tmp/dynamo-agent-trace.*.jsonl.gz" \
-  --output /tmp/dynamo-agent-trace.perfetto.json
+python3 benchmarks/request_trace/convert_to_perfetto.py \
+  "/tmp/dynamo-request-trace.*.jsonl.gz" \
+  --output /tmp/dynamo-request-trace.perfetto.json
 ```
 
 Open the output JSON in [Perfetto UI](https://ui.perfetto.dev/).
@@ -38,14 +38,14 @@ independent metric rounding. Raw timing fields remain available in event args.
 
 ## Convert to Mooncake Replay
 
-Agent traces captured with Dynamo agent tracing include replay hashes by default
-and can be converted to Mooncake JSONL for the Dynamo replay/mocker path. Set
-`DYN_AGENT_TRACE_REPLAY_HASHES=0` only when you need to suppress replay metadata:
+Traces captured with Dynamo request tracing include replay hashes whenever a
+request can be represented as one Mooncake replay row and can be converted to
+Mooncake JSONL for the Dynamo replay/mocker path:
 
 ```bash
-cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
-  --input-path /tmp/dynamo-agent-trace.*.jsonl.gz \
-  --output-file /tmp/dynamo-agent-trace.mooncake.jsonl
+cargo run -p dynamo-bench --bin request_trace_to_mooncake -- \
+  --input-path /tmp/dynamo-request-trace.*.jsonl.gz \
+  --output-file /tmp/dynamo-request-trace.mooncake.jsonl
 ```
 
 The converter accepts `.jsonl`, `.jsonl.gz`, repeated `--input-path` flags, and
@@ -55,10 +55,9 @@ absolute `timestamp` from Dynamo's request-arrival time and no `session_id`.
 Stable trace `input_sequence_hashes` are compacted to Mooncake `hash_ids`
 during conversion.
 
-The same CLI also accepts context-free `dynamo.request.trace.v1` files emitted
-by `DYN_REQUEST_TRACE=1`. Request traces can be converted to ordinary Mooncake
-rows, but are rejected with `--agentic` because they intentionally omit agent
-context and tool events.
+Context-free `dynamo.request.trace.v1` rows convert to ordinary Mooncake rows.
+Rows with `agent_context` can be converted with `--agentic`; context-free rows
+are rejected with `--agentic` because the converter cannot infer trajectories.
 
 Mooncake replay intentionally ignores non-replay request fields such as
 `finish_reason_metadata`. Use the Perfetto converter when you want to inspect
@@ -77,18 +76,36 @@ granularity to match the live backend page size.
 
 ```bash
 TRACE_BLOCK_SIZE=128
-uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.mooncake.jsonl \
+uv run --no-sync python -m dynamo.replay /tmp/dynamo-request-trace.mooncake.jsonl \
   --trace-format mooncake \
   --trace-block-size "${TRACE_BLOCK_SIZE}" \
   --replay-mode offline \
   --router-mode kv_router \
   --num-workers 4 \
   --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
-  --report-json /tmp/dynamo-agent-trace.replay-report.json
+  --report-json /tmp/dynamo-request-trace.replay-report.json
 ```
 
 `kv_router` requires more than one mock worker. For a single aggregated-worker
 sanity check, use `--router-mode round_robin --num-workers 1`.
+
+## Existing Text Traces To Mooncake
+
+There is no generic "arbitrary text trace to Mooncake" CLI today. Current
+helpers are specialized:
+
+- `request_trace_to_mooncake` converts Dynamo request traces that already contain
+  replay hashes.
+- `claude_trace_export` converts local Claude traces into privacy-preserving
+  Mooncake JSONL plus a sidecar.
+- `dynamo-data-gen` owns the shared `MooncakeRow`, `MooncakeJsonlWriter`,
+  `RollingHashIdMapper`, and token-block hashing primitives used by exporters.
+- AIPerf has related hash/trace helpers for benchmark workloads.
+
+A generic converter should be a follow-up: parse JSONL/CSV/text logs, select the
+text/timestamp/session/output-length fields, tokenize with a configured model,
+hash token blocks, write Mooncake JSONL, and report the trace block size needed
+for replay.
 
 ## Validate Converter
 
@@ -96,5 +113,5 @@ The converter has a local self-check that is intentionally not wired into the
 main pytest suite:
 
 ```bash
-python3 benchmarks/agent_trace/validate_convert_to_perfetto.py
+python3 benchmarks/request_trace/validate_convert_to_perfetto.py
 ```

@@ -169,6 +169,9 @@ impl Router {
             model_name.clone(),
             actual_namespace.to_string(),
             enable_eagle,
+            // ext-proc constructs no KvWorkerMonitor; overload publishing is
+            // unused on this path (matches the prior namespace-lookup miss).
+            None,
         );
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
@@ -313,7 +316,6 @@ impl Router {
             .query_prefill_worker(
                 tokens,
                 None,
-                false,
                 None,
                 priority_jump,
                 strict_priority,
@@ -324,6 +326,7 @@ impl Router {
             .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
 
         match outcome {
+            // Advisory only: the gateway owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
             // Surface backpressure as an error so the caller's
             // enforce_disagg / aggregated-fallback logic in `pick()` can

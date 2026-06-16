@@ -3,9 +3,7 @@
 
 //! Source-format records and JSONL/gz loader.
 //!
-//! Local subset of the supported Dynamo request trace schemas. Canonical
-//! producer-side schemas live in `lib/llm/src/agents/trace/types.rs` and
-//! `lib/llm/src/request_trace/types.rs`.
+//! Local subset of Dynamo request trace rows consumed by the Mooncake exporter.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -18,22 +16,20 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct AgentTraceRecord {
+pub(crate) struct RequestTraceRecord {
     pub(crate) schema: TraceSchema,
     pub(crate) event_type: String,
     pub(crate) event_time_unix_ms: u64,
     #[serde(default)]
     pub(crate) agent_context: Option<AgentContextFields>,
     #[serde(default)]
-    pub(crate) request: Option<AgentRequestMetrics>,
+    pub(crate) request: Option<RequestTraceRequestMetrics>,
     #[serde(default)]
-    pub(crate) tool: Option<AgentToolEventMetrics>,
+    pub(crate) tool: Option<RequestTraceToolEventMetrics>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 pub(crate) enum TraceSchema {
-    #[serde(rename = "dynamo.agent.trace.v1")]
-    AgentV1,
     #[serde(rename = "dynamo.request.trace.v1")]
     RequestV1,
 }
@@ -46,7 +42,7 @@ pub(crate) struct AgentContextFields {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct AgentRequestMetrics {
+pub(crate) struct RequestTraceRequestMetrics {
     pub(crate) request_id: String,
     #[serde(default)]
     pub(crate) output_tokens: Option<u64>,
@@ -55,22 +51,20 @@ pub(crate) struct AgentRequestMetrics {
     #[serde(default)]
     pub(crate) total_time_ms: Option<f64>,
     #[serde(default)]
-    pub(crate) replay: Option<AgentReplayMetrics>,
+    pub(crate) replay: Option<RequestTraceReplayMetrics>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct AgentReplayMetrics {
+pub(crate) struct RequestTraceReplayMetrics {
     pub(crate) trace_block_size: usize,
     pub(crate) input_length: usize,
     pub(crate) input_sequence_hashes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct AgentToolEventMetrics {
-    #[serde(default)]
-    pub(crate) tool_call_id: Option<String>,
-    #[serde(default)]
-    pub(crate) tool_class: Option<String>,
+pub(crate) struct RequestTraceToolEventMetrics {
+    pub(crate) tool_call_id: String,
+    pub(crate) tool_class: String,
     #[serde(default)]
     pub(crate) started_at_unix_ms: Option<u64>,
     #[serde(default)]
@@ -92,8 +86,8 @@ pub struct RequestEntry {
     pub(crate) start_ms: i64,
     pub(crate) end_ms: i64,
     pub(crate) agent_context: Option<AgentContextFields>,
-    pub(crate) request: AgentRequestMetrics,
-    pub(crate) replay: AgentReplayMetrics,
+    pub(crate) request: RequestTraceRequestMetrics,
+    pub(crate) replay: RequestTraceReplayMetrics,
 }
 
 #[derive(Debug, Clone)]
@@ -115,15 +109,16 @@ pub struct ToolEntry {
 pub struct LoadedAgentTrace {
     pub requests: Vec<RequestEntry>,
     pub tools: Vec<ToolEntry>,
-    pub contains_request_trace: bool,
 }
 
 impl LoadedAgentTrace {
     pub fn ensure_agentic_compatible(&self) -> Result<()> {
-        if self.contains_request_trace {
-            bail!(
-                "dynamo.request.trace.v1 records do not contain agent context and cannot be converted with --agentic"
-            );
+        if self
+            .requests
+            .iter()
+            .any(|request| request.agent_context.is_none())
+        {
+            bail!("trace records without agent_context cannot be converted with --agentic");
         }
         Ok(())
     }
@@ -131,7 +126,7 @@ impl LoadedAgentTrace {
 
 /// Records other than `request_end` / `tool_end` / `tool_error` are skipped.
 /// Errors if no `request_end` rows were found.
-pub fn load_agent_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
+pub fn load_request_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
     let mut loaded = LoadedAgentTrace::default();
     let mut request_ids = HashSet::new();
 
@@ -149,16 +144,17 @@ pub fn load_agent_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
             else {
                 continue;
             };
-            if record.schema == TraceSchema::RequestV1 {
-                loaded.contains_request_trace = true;
-                if record.event_type != "request_end" {
-                    bail!(
-                        "request trace schema only supports request_end, got {} at {}:{}",
-                        record.event_type,
-                        path.display(),
-                        line_index + 1
-                    );
-                }
+            let _schema = record.schema;
+            if !matches!(
+                record.event_type.as_str(),
+                "request_end" | "tool_start" | "tool_end" | "tool_error"
+            ) {
+                bail!(
+                    "request trace schema only supports request_end/tool_* events, got {} at {}:{}",
+                    record.event_type,
+                    path.display(),
+                    line_index + 1
+                );
             }
             if record.event_type == "request_end" {
                 let entry = request_entry(record).with_context(|| {
@@ -203,7 +199,7 @@ fn open_trace_reader(path: &Path) -> Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(reader)))
 }
 
-fn parse_trace_record(line: &str) -> Result<Option<AgentTraceRecord>> {
+fn parse_trace_record(line: &str) -> Result<Option<RequestTraceRecord>> {
     let value: Value = serde_json::from_str(line)?;
     let event = value.get("event").unwrap_or(&value);
     if !event.is_object() {
@@ -212,8 +208,7 @@ fn parse_trace_record(line: &str) -> Result<Option<AgentTraceRecord>> {
     Ok(Some(serde_json::from_value(event.clone())?))
 }
 
-fn request_entry(record: AgentTraceRecord) -> Result<RequestEntry> {
-    let schema = record.schema;
+fn request_entry(record: RequestTraceRecord) -> Result<RequestEntry> {
     let request = record
         .request
         .ok_or_else(|| anyhow!("request_end record is missing request payload"))?;
@@ -234,13 +229,11 @@ fn request_entry(record: AgentTraceRecord) -> Result<RequestEntry> {
             replay.input_sequence_hashes.len()
         );
     }
-    if schema == TraceSchema::RequestV1 {
-        if request.request_received_ms.is_none() {
-            bail!("request trace is missing request_received_ms");
-        }
-        if request.output_tokens.is_none() {
-            bail!("request trace is missing output_tokens");
-        }
+    if request.request_received_ms.is_none() {
+        bail!("request trace is missing request_received_ms");
+    }
+    if request.output_tokens.is_none() {
+        bail!("request trace is missing output_tokens");
     }
 
     let (start_ms, end_ms) = request_times(record.event_time_unix_ms, &request);
@@ -253,10 +246,7 @@ fn request_entry(record: AgentTraceRecord) -> Result<RequestEntry> {
     })
 }
 
-fn tool_entry(record: AgentTraceRecord, terminal_event: String) -> Option<ToolEntry> {
-    if record.schema != TraceSchema::AgentV1 {
-        return None;
-    }
+fn tool_entry(record: RequestTraceRecord, terminal_event: String) -> Option<ToolEntry> {
     let context = record.agent_context?;
     let tool = record.tool?;
     let end_ms = tool
@@ -288,8 +278,8 @@ fn tool_entry(record: AgentTraceRecord, terminal_event: String) -> Option<ToolEn
         trajectory_id: context.trajectory_id,
         start_ms,
         end_ms,
-        tool_call_id: tool.tool_call_id.unwrap_or_default(),
-        tool_class: tool.tool_class.unwrap_or_default(),
+        tool_call_id: tool.tool_call_id,
+        tool_class: tool.tool_class,
         status,
         duration_ms,
         output_bytes: tool.output_bytes,
@@ -299,7 +289,10 @@ fn tool_entry(record: AgentTraceRecord, terminal_event: String) -> Option<ToolEn
     })
 }
 
-pub(crate) fn request_times(event_time_unix_ms: u64, request: &AgentRequestMetrics) -> (i64, i64) {
+pub(crate) fn request_times(
+    event_time_unix_ms: u64,
+    request: &RequestTraceRequestMetrics,
+) -> (i64, i64) {
     let total_ms = request
         .total_time_ms
         .map(|value| value.max(0.0).round() as u64)
@@ -331,7 +324,7 @@ mod tests {
 
     #[test]
     fn request_times_uses_event_time_when_total_duration_is_missing() {
-        let request = AgentRequestMetrics {
+        let request = RequestTraceRequestMetrics {
             request_id: "req".to_string(),
             output_tokens: Some(1),
             request_received_ms: Some(1_000),
@@ -351,8 +344,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = load_agent_trace_records(&[file.path().to_path_buf()]).unwrap();
-        assert!(loaded.contains_request_trace);
+        let loaded = load_request_trace_records(&[file.path().to_path_buf()]).unwrap();
         assert_eq!(loaded.requests.len(), 1);
         assert!(loaded.requests[0].agent_context.is_none());
         assert_eq!(loaded.requests[0].start_ms, 1_000);
@@ -368,7 +360,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = load_agent_trace_records(&[file.path().to_path_buf()]).unwrap_err();
+        let error = load_request_trace_records(&[file.path().to_path_buf()]).unwrap_err();
         assert!(error.to_string().contains("failed to parse"));
         assert!(format!("{error:#}").contains("unknown variant `dynamo.request.trace.v2`"));
     }
@@ -382,7 +374,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = load_agent_trace_records(&[file.path().to_path_buf()]).unwrap_err();
+        let error = load_request_trace_records(&[file.path().to_path_buf()]).unwrap_err();
         assert!(format!("{error:#}").contains("request trace is missing request_received_ms"));
     }
 
@@ -397,7 +389,7 @@ mod tests {
             .unwrap();
         }
 
-        let error = load_agent_trace_records(&[file.path().to_path_buf()]).unwrap_err();
+        let error = load_request_trace_records(&[file.path().to_path_buf()]).unwrap_err();
         assert!(error.to_string().contains("duplicate request_id req-1"));
     }
 
@@ -410,23 +402,69 @@ mod tests {
         )
         .unwrap();
 
-        let error = load_agent_trace_records(&[file.path().to_path_buf()]).unwrap_err();
+        let error = load_request_trace_records(&[file.path().to_path_buf()]).unwrap_err();
         assert!(format!("{error:#}").contains("requires exactly 1 replay hashes, got 2"));
     }
 
     #[test]
     fn request_trace_is_rejected_for_agentic_conversion() {
+        let request = RequestTraceRequestMetrics {
+            request_id: "req-1".to_string(),
+            output_tokens: Some(1),
+            request_received_ms: Some(1_000),
+            total_time_ms: None,
+            replay: None,
+        };
         let loaded = LoadedAgentTrace {
-            requests: Vec::new(),
+            requests: vec![RequestEntry {
+                start_ms: 1_000,
+                end_ms: 1_100,
+                agent_context: None,
+                request,
+                replay: RequestTraceReplayMetrics {
+                    trace_block_size: 2,
+                    input_length: 2,
+                    input_sequence_hashes: vec![11],
+                },
+            }],
             tools: Vec::new(),
-            contains_request_trace: true,
         };
 
         let error = loaded.ensure_agentic_compatible().unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("cannot be converted with --agentic")
+                .contains("without agent_context cannot be converted with --agentic")
         );
+    }
+
+    #[test]
+    fn loads_agentic_request_trace_rows_and_tool_events() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"event_source":"dynamo","agent_context":{{"session_type_id":"agent_harness","session_id":"run-1","trajectory_id":"root"}},"request":{{"request_id":"req-1","model":"test","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"session_type_id":"agent_harness","session_id":"run-1","trajectory_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
+        )
+        .unwrap();
+
+        let loaded = load_request_trace_records(&[file.path().to_path_buf()]).unwrap();
+        loaded.ensure_agentic_compatible().unwrap();
+        assert_eq!(loaded.requests.len(), 1);
+        assert_eq!(
+            loaded.requests[0]
+                .agent_context
+                .as_ref()
+                .expect("agent context")
+                .trajectory_id,
+            "root"
+        );
+        assert_eq!(loaded.tools.len(), 1);
+        assert_eq!(loaded.tools[0].tool_call_id, "tool-1");
+        assert_eq!(loaded.tools[0].tool_class, "search");
     }
 }

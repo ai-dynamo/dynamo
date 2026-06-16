@@ -373,6 +373,10 @@ impl RequestGuard {
         self.observability.record_metrics();
         self.cleanup.finish().await;
     }
+
+    pub(super) async fn abort(&mut self) {
+        self.cleanup.finish().await;
+    }
 }
 
 impl Drop for RequestGuard {

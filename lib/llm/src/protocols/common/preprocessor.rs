@@ -14,9 +14,9 @@ use utoipa::ToSchema;
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::agents::context::AgentContext;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
+use crate::protocols::openai::nvext::AgentContext;
 
 /// Router-specific parameters carried via `nvext.router`.
 ///

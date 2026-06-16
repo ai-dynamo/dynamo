@@ -52,6 +52,14 @@ pub(crate) fn generate_trace_worker_artifacts(
     args: MockEngineArgs,
     trace: Trace,
 ) -> Result<ReplayWorkerArtifacts> {
+    generate_trace_worker_artifacts_with_visibility(args, trace, None)
+}
+
+pub(crate) fn generate_trace_worker_artifacts_with_visibility(
+    args: MockEngineArgs,
+    trace: Trace,
+    router_event_visibility_override: Option<RouterEventVisibility>,
+) -> Result<ReplayWorkerArtifacts> {
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
     let mut worker = ReplayWorkerCore::new_with_kv_capture(args, WorkerId::default());
@@ -94,7 +102,9 @@ pub(crate) fn generate_trace_worker_artifacts(
         let pass = worker.execute_pass(&mut collector, current_time_ms);
         current_time_ms = pass.end_ms;
 
-        let kv_event_timestamp_us = match pass.router_event_visibility {
+        let router_event_visibility =
+            router_event_visibility_override.unwrap_or(pass.router_event_visibility);
+        let kv_event_timestamp_us = match router_event_visibility {
             RouterEventVisibility::PassStart => timestamp_us_from_ms(pass_start_ms),
             RouterEventVisibility::PassEnd => timestamp_us_from_ms(current_time_ms),
         };

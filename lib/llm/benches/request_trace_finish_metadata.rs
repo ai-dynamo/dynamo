@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use dynamo_llm::agents::trace::SharedFinishReasonMetadata;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::llm_backend::{
     BackendOutput, FinishReason as BackendFinishReason,
 };
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::request_trace::SharedFinishReasonMetadata;
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -36,7 +36,7 @@ struct MockContext {
 impl MockContext {
     fn new() -> Self {
         Self {
-            id: "agent-trace-finish-metadata-bench".to_string(),
+            id: "request-trace-finish-metadata-bench".to_string(),
             stopped: AtomicBool::new(false),
             killed: AtomicBool::new(false),
         }
@@ -171,7 +171,7 @@ fn bench_postprocessor_finish_metadata(c: &mut Criterion) {
         .enable_all()
         .build()
         .expect("tokio runtime should build");
-    let mut group = c.benchmark_group("agent_trace_finish_metadata/postprocessor");
+    let mut group = c.benchmark_group("request_trace_finish_metadata/postprocessor");
     group.throughput(Throughput::Elements(STREAM_CHUNKS as u64));
 
     group.bench_function("finish_metadata_off", |b| {
@@ -190,7 +190,7 @@ fn bench_postprocessor_finish_metadata(c: &mut Criterion) {
 }
 
 fn bench_tool_call_metadata(c: &mut Criterion) {
-    let mut group = c.benchmark_group("agent_trace_finish_metadata/tool_calls");
+    let mut group = c.benchmark_group("request_trace_finish_metadata/tool_calls");
 
     for &count in TOOL_CALL_SIZES {
         group.throughput(Throughput::Elements(count as u64));

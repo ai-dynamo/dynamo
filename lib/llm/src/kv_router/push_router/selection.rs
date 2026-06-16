@@ -290,30 +290,6 @@ impl KvPushRouter {
         );
         true
     }
-
-    pub(crate) async fn validate_sticky_worker_for_phase(
-        &self,
-        context_id: &str,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-        worker: WorkerWithDpRank,
-    ) -> Result<WorkerWithDpRank, Error> {
-        let routing_parts = RoutingRequestParts::new(request);
-        let selection = self
-            .select_worker(
-                context_id,
-                request,
-                routing_parts,
-                phase,
-                true,
-                Some(worker),
-            )
-            .await?;
-        Ok(WorkerWithDpRank::new(
-            selection.instance_id,
-            selection.dp_rank,
-        ))
-    }
 }
 
 fn resolve_pinned_worker_rank(

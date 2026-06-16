@@ -187,7 +187,7 @@ jobs:
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload -- --nocapture
+      run: cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2 -- --nocapture
 
   rust-clippy:
     needs: changed-files
