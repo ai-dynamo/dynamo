@@ -157,9 +157,6 @@ where
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
 
-    /// Optional worker monitor for load/busy-state tracking.
-    worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
-
     /// Optional cache index for direct multimodal embedding cache lookups.
     /// Currently consumed by `RouterMode::DeviceAwareWeighted`.
     multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
@@ -558,7 +555,6 @@ where
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
-            worker_monitor: None,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
             _phantom: PhantomData,
@@ -629,7 +625,6 @@ where
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
-            worker_monitor,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
             _phantom: PhantomData,

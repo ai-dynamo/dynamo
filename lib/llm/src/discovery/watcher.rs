@@ -1113,9 +1113,7 @@ impl ModelWatcher {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_state(
-                    client.clone(), router_config.router_mode, None, None, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
             }
@@ -1124,9 +1122,7 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_state(
-                    client.clone(), router_config.router_mode, None, None, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
             }
@@ -1135,9 +1131,7 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_state(
-                    client.clone(), router_config.router_mode, None, None, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -1146,9 +1140,7 @@ impl ModelWatcher {
                 let audios_router = PushRouter::<
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
-                >::from_client_with_state(
-                    client.clone(), router_config.router_mode, None, None, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }

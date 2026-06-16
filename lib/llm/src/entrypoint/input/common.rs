@@ -59,14 +59,14 @@ fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<Stri
         return Vec::new();
     };
 
-    let mut keys = items
-        .iter()
-        .filter_map(|item| match item {
-            MultimodalData::Url(url) => Some(multimodal_cache_key_from_url(url.as_str())),
-            MultimodalData::RawUrl(url) => Some(multimodal_cache_key_from_url(url)),
-            MultimodalData::Decoded(_) => None,
-        })
-        .collect::<Vec<_>>();
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
+            MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
+            MultimodalData::Decoded(_) => {}
+        }
+    }
     keys.sort();
     keys.dedup();
     keys
