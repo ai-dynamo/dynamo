@@ -605,10 +605,9 @@ func main() {
 	go func() {
 		certMgr.WaitReady()
 
-		// Auto mode reaches this point after cert-controller has created the
-		// Secret and the manager cache is running. Manual mode marks certificates
-		// ready immediately, before the manager cache starts, so use the direct
-		// client for manual Secret polling and CRD patches.
+		// Manual mode returns from WaitReady immediately, so this goroutine can
+		// run before the manager cache is usable. Use the direct client for
+		// manual Secret polling and CRD patches.
 		caInjectorClient := mgr.GetClient()
 		if operatorCfg.Server.Webhook.CertProvisionMode != configv1alpha1.CertProvisionModeAuto {
 			caInjectorClient = directClient
@@ -624,10 +623,10 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
-			// Manual mode gets admission webhook CA bundles from Helm, but CRD
-			// conversion CA bundles are patched here. Register conversion endpoints
-			// before waiting for ca.crt so fresh CRDs fail conversion closed instead
-			// of admitting unconverted objects; existing CA bundles are preserved.
+			// Manual mode gets webhook CA material out-of-band, but CRD conversion
+			// CA bundles are patched here. Register conversion endpoints before
+			// waiting for ca.crt so fresh CRDs fail conversion closed instead of
+			// admitting unconverted objects; existing CA bundles are preserved.
 			if err := caInjector.ConfigureCRDConversionWebhooks(mainCtx); err != nil {
 				setupLog.Error(err, "failed to configure CRD conversion webhooks")
 				os.Exit(1)
