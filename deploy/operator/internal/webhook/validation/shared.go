@@ -87,6 +87,17 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
 	}
 
+	// Validate minAvailable if specified
+	if v.spec.MinAvailable != nil {
+		if *v.spec.MinAvailable < 1 {
+			return nil, fmt.Errorf("%s.minAvailable must be at least 1", v.fieldPath)
+		}
+		if v.spec.Replicas != nil && *v.spec.MinAvailable > *v.spec.Replicas {
+			return nil, fmt.Errorf("%s.minAvailable (%d) must not exceed replicas (%d)",
+				v.fieldPath, *v.spec.MinAvailable, *v.spec.Replicas)
+		}
+	}
+
 	// Validate ingress configuration if enabled
 	if v.spec.Ingress != nil && v.spec.Ingress.Enabled {
 		if err := v.validateIngress(); err != nil {

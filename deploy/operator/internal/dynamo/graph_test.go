@@ -7552,6 +7552,88 @@ func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *t
 	assert.True(t, sawEngineClique, "test setup should produce at least one engine (non-GMS) clique")
 }
 
+// TestGenerateGrovePodCliqueSet_PCSG_MinAvailable_UserOverride verifies that
+// a user-specified MinAvailable on the DGD service spec flows through to the
+// generated PodCliqueScalingGroupConfig.
+func TestGenerateGrovePodCliqueSet_PCSG_MinAvailable_UserOverride(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(5)),
+					MinAvailable:  ptr.To(int32(3)),
+					Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+					Resources:     &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{
+			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
+			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
+		},
+		&controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1,
+		"multinode service should produce exactly one PCSG")
+	pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
+	require.NotNil(t, pcsg.MinAvailable)
+	assert.EqualValues(t, 3, *pcsg.MinAvailable,
+		"PCSG MinAvailable should reflect the user-specified value")
+	assert.EqualValues(t, int32(5), *pcsg.Replicas,
+		"PCSG Replicas should be the user-specified value")
+}
+
+// TestGenerateGrovePodCliqueSet_PCSG_MinAvailable_DefaultsToOne verifies that
+// omitting MinAvailable from the DGD service spec produces the backwards-
+// compatible default of 1 on the PCSG.
+func TestGenerateGrovePodCliqueSet_PCSG_MinAvailable_DefaultsToOne(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(5)),
+					Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+					Resources:     &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{
+			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
+			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
+		},
+		&controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+	pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
+	require.NotNil(t, pcsg.MinAvailable)
+	assert.EqualValues(t, 1, *pcsg.MinAvailable,
+		"PCSG MinAvailable should default to 1 when not specified by the user")
+}
+
 func TestIsWorkerComponent(t *testing.T) {
 	workers := []string{commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode}
 	nonWorkers := []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner, commonconsts.ComponentTypeEPP, "custom", ""}

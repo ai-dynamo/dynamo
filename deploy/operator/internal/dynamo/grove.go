@@ -18,6 +18,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -270,6 +271,16 @@ func specToGroveTopologyConstraint(tc *v1alpha1.SpecTopologyConstraint) *grovev1
 	return &grovev1alpha1.TopologyConstraint{
 		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
 	}
+}
+
+// pcsgMinAvailable returns the PCSG-level MinAvailable for a service.
+// If the user set MinAvailable on the DGD service spec, that value is used;
+// otherwise defaults to 1 for backwards compatibility.
+func pcsgMinAvailable(component *v1alpha1.DynamoComponentDeploymentSharedSpec) *int32 {
+	if component.MinAvailable != nil {
+		return component.MinAvailable
+	}
+	return ptr.To(int32(1))
 }
 
 // toGroveTopologyConstraint converts a service-level TopologyConstraint

@@ -32,11 +32,13 @@ import (
 
 func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	var (
-		validReplicas    = int32(3)
-		negativeReplicas = int32(-1)
-		pvcName          = "test-pvc"
-		trueVal          = true
-		falseVal         = false
+		validReplicas      = int32(3)
+		negativeReplicas   = int32(-1)
+		validMinAvailable  = int32(2)
+		excessMinAvailable = int32(10)
+		pvcName            = "test-pvc"
+		trueVal            = true
+		falseVal           = false
 	)
 
 	tests := []struct {
@@ -96,6 +98,46 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "spec.services[main].replicas must be non-negative",
+		},
+		{
+			name: "valid minAvailable within replicas",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas:     &validReplicas,
+							MinAvailable: &validMinAvailable,
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "minAvailable exceeds replicas",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas:     &validReplicas,
+							MinAvailable: &excessMinAvailable,
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "minAvailable (10) must not exceed replicas (3)",
+			errContains: true,
 		},
 		{
 			name: "service with invalid ingress",

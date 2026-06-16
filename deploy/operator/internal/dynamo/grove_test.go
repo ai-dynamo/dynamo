@@ -1201,3 +1201,38 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 		})
 	}
 }
+
+func TestPcsgMinAvailable(t *testing.T) {
+	tests := []struct {
+		name     string
+		spec     *v1alpha1.DynamoComponentDeploymentSharedSpec
+		expected int32
+	}{
+		{
+			name:     "nil MinAvailable defaults to 1",
+			spec:     &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			expected: 1,
+		},
+		{
+			name:     "user-specified MinAvailable",
+			spec:     &v1alpha1.DynamoComponentDeploymentSharedSpec{MinAvailable: ptr.To(int32(3))},
+			expected: 3,
+		},
+		{
+			name:     "MinAvailable set to 1 explicitly",
+			spec:     &v1alpha1.DynamoComponentDeploymentSharedSpec{MinAvailable: ptr.To(int32(1))},
+			expected: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pcsgMinAvailable(tt.spec)
+			if got == nil {
+				t.Fatal("pcsgMinAvailable returned nil")
+			}
+			if *got != tt.expected {
+				t.Errorf("pcsgMinAvailable() = %d, want %d", *got, tt.expected)
+			}
+		})
+	}
+}

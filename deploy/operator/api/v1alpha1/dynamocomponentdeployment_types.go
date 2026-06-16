@@ -119,6 +119,18 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// MinAvailable is the minimum number of PCSG replicas that must be available
+	// for the service to be considered healthy by Grove. When availability drops
+	// below this threshold, the Unhealthy condition fires and (after terminationDelay)
+	// the gang is torn down and rescheduled.
+	// Only applies to services deployed as PodCliqueScalingGroups (multinode or
+	// inter-pod failover). Ignored for single-node PodClique services.
+	// Defaults to 1 for backwards compatibility.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
+
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.

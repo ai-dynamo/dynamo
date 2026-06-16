@@ -1804,7 +1804,7 @@ func GenerateGrovePodCliqueSet(
 				Name:               strings.ToLower(serviceName),
 				CliqueNames:        cliqueNames,
 				Replicas:           component.Replicas,
-				MinAvailable:       ptr.To(int32(1)),
+				MinAvailable:       pcsgMinAvailable(component),
 				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			}
 			if isInterPodGMS {
