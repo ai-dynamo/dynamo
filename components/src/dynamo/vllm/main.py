@@ -23,6 +23,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.snapshot import fetch_model_in_subprocess, is_checkpoint_enabled
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -181,7 +182,10 @@ async def worker(argv: list[str] | None = None) -> None:
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if should_prefetch_model(config):
-        await fetch_model(config.model)
+        if is_checkpoint_enabled():
+            await fetch_model_in_subprocess(config.model)
+        else:
+            await fetch_model(config.model)
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established

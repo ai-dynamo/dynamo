@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import multiprocessing
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,48 @@ EngineT = TypeVar("EngineT")
 # Poll interval for the snapshot-control directory. Checkpoint and restore
 # latencies are seconds, so 100ms is negligible overhead.
 _SENTINEL_POLL_INTERVAL_SEC = 0.1
+
+
+def is_checkpoint_enabled() -> bool:
+    return bool(os.environ.get(SNAPSHOT_CONTROL_DIR_ENV))
+
+
+def _fetch_model_process_main(remote_name: str, ignore_weights: bool) -> None:
+    from dynamo.llm import fetch_model
+
+    async def fetch_model_async() -> None:
+        await fetch_model(remote_name, ignore_weights)
+
+    asyncio.run(fetch_model_async())
+
+
+async def fetch_model_in_subprocess(
+    remote_name: str,
+    ignore_weights: bool = False,
+) -> None:
+    """Fetch a model in a short-lived process before checkpointing."""
+    logger.info("Fetching model %s in a subprocess", remote_name)
+    ctx = multiprocessing.get_context("spawn")
+    proc = ctx.Process(
+        target=_fetch_model_process_main,
+        args=(remote_name, ignore_weights),
+        name="dynamo-model-fetch",
+    )
+    proc.start()
+    try:
+        while proc.is_alive():
+            await asyncio.sleep(_SENTINEL_POLL_INTERVAL_SEC)
+        proc.join()
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+
+    if proc.exitcode != 0:
+        raise RuntimeError(
+            f"Model fetch subprocess failed for {remote_name!r} "
+            f"with exit code {proc.exitcode}"
+        )
 
 
 class CheckpointConfig:
@@ -99,15 +142,6 @@ class CheckpointConfig:
 
 
 def configure_checkpoint_transport_env() -> None:
-    hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
-    if hf_hub_offline and hf_hub_offline != "1":
-        logger.warning(
-            "Overriding HF_HUB_OFFLINE=%r with '1' for checkpoint mode "
-            "to avoid external Hugging Face connections during checkpoint/restore",
-            hf_hub_offline,
-        )
-    os.environ["HF_HUB_OFFLINE"] = "1"
-
     nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
     if nccl_cumem_enable and nccl_cumem_enable != "0":
         logger.warning(
