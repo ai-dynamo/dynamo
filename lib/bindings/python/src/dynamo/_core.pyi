@@ -690,6 +690,82 @@ class WorkerMetricsPublisher:
         """
         ...
 
+class SelectionService:
+    """
+    In-process handle to a runtime-free Dynamo selection core.
+    """
+
+    def __init__(self, indexer_threads: int = 4) -> None:
+        """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Cancel all background tasks and stop the service.
+
+        Idempotent. The service is also shut down automatically once the Python
+        handle is dropped.
+        """
+        ...
+
+    async def upsert_worker(self, worker: JsonLike) -> JsonLike:
+        """Upsert a worker and subscribe to its live KV events; returns its catalog record."""
+        ...
+
+    async def delete_worker(self, worker_id: int) -> JsonLike:
+        """Remove a worker and tear down its KV-event listener; returns its catalog record."""
+        ...
+
+    def list_workers(
+        self, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> JsonLike:
+        """List catalog records, optionally filtered by model and tenant."""
+        ...
+
+    def ready(self) -> JsonLike:
+        """Readiness: whether at least one worker is schedulable, plus catalog state."""
+        ...
+
+    async def overlap_scores(self, request: JsonLike) -> JsonLike:
+        """Per-worker KV-overlap scores for a prompt."""
+        ...
+
+    async def select(self, request: JsonLike) -> JsonLike:
+        """Select the best worker by KV-overlap + load, without booking."""
+        ...
+
+    async def select_and_reserve(self, request: JsonLike) -> JsonLike:
+        """Select the best worker and book its load."""
+        ...
+
+    async def create_reservation(self, request: JsonLike) -> JsonLike:
+        """Book a request's load against a chosen worker."""
+        ...
+
+    async def prefill_complete(self, reservation_id: str) -> None:
+        """Mark a reservation's prefill complete; its load shifts prefill -> decode."""
+        ...
+
+    def add_output_block(
+        self, reservation_id: str, decay_fraction: Optional[float] = None
+    ) -> None:
+        """Record one decode output block for a reservation, advancing its decode load."""
+        ...
+
+    async def free_reservation(self, reservation_id: str) -> None:
+        """Free a finished reservation, releasing its tracked load."""
+        ...
+
+    def loads(
+        self, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> JsonLike:
+        """Current per-model active load (pending counts + per-worker potential loads)."""
+        ...
+
+    async def potential_loads(self, request: JsonLike) -> JsonLike:
+        """Per-worker potential loads for a prompt, without booking."""
+        ...
+
 class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information

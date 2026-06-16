@@ -19,7 +19,7 @@ import threading
 
 import pytest
 
-from dynamo.llm import RadixTree
+from dynamo.llm import RadixTree, SelectionService
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -192,3 +192,40 @@ def test_radix_tree_thread_safety(
     assert (
         len(blocks_after_removal) == expected_blocks_after_removal
     ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_selects_registered_worker(monkeypatch):
+    monkeypatch.setenv("DYN_USE_KV_EVENTS", "false")
+    service = SelectionService(1)
+
+    try:
+        record = await service.upsert_worker(
+            {
+                "worker_id": 1,
+                "model_name": "model",
+                "endpoint": "http://worker-1:8000",
+                "block_size": 4,
+                "max_num_batched_tokens": 1024,
+            }
+        )
+        assert record["lifecycle"] == "schedulable"
+
+        ready = service.ready()
+        assert ready["ready"] is True
+        assert ready["schedulable_workers"] == 1
+
+        selected = await service.select(
+            {
+                "model_name": "model",
+                "token_ids": [1, 2, 3, 4],
+                "selection_id": "sel-a",
+            }
+        )
+        assert selected["selection_id"] == "sel-a"
+        assert selected["worker_id"] == 1
+        assert selected["dp_rank"] == 0
+        assert selected["endpoint"] == "http://worker-1:8000"
+    finally:
+        service.shutdown()

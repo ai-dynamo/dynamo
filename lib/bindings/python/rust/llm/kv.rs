@@ -26,7 +26,10 @@ use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
-use dynamo_kv_router::services::selection::{self, SelectionServiceConfig};
+use dynamo_kv_router::services::selection::{
+    self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
+    SelectRequest, SelectionCore, SelectionServiceConfig, WorkerRequest,
+};
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
@@ -333,6 +336,220 @@ where
         anyhow::bail!(
             "dynamo.select_service is not available in this build; reinstall with --features select-service"
         )
+    }
+}
+
+/// In-process handle to a runtime-free Dynamo `SelectionCore`.
+#[cfg(feature = "select-service")]
+#[pyclass]
+pub(crate) struct SelectionService {
+    inner: Arc<SelectionCore>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl SelectionService {
+    /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
+    #[new]
+    #[pyo3(signature = (indexer_threads = 4))]
+    fn new(indexer_threads: usize) -> Self {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let inner = Arc::new(SelectionCore::new(
+            kv_router_config_from_dynamo_env(),
+            indexer_threads,
+            cancel.clone(),
+        ));
+        Self { inner, cancel }
+    }
+
+    /// Cancel all background tasks and stop the service.
+    ///
+    /// Idempotent. The service is also shut down automatically once the last
+    /// Python handle is dropped.
+    fn shutdown(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Upsert a worker and subscribe to its live KV events via each `kv_events_endpoints`.
+    fn upsert_worker<'p>(&self, py: Python<'p>, worker: PyObject) -> PyResult<Bound<'p, PyAny>> {
+        let req: WorkerRequest = depythonize(worker.bind(py)).map_err(to_pyerr)?;
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let record = core.upsert_worker(req).await.map_err(to_pyerr)?;
+            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+
+    /// Remove a worker and tear down its KV-event listener.
+    fn delete_worker<'p>(&self, py: Python<'p>, worker_id: u64) -> PyResult<Bound<'p, PyAny>> {
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let record = core.delete_worker(worker_id).await.map_err(to_pyerr)?;
+            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+
+    /// List catalog records, optionally filtered by model and tenant.
+    #[pyo3(signature = (model_name = None, tenant_id = None))]
+    fn list_workers(
+        &self,
+        py: Python<'_>,
+        model_name: Option<String>,
+        tenant_id: Option<String>,
+    ) -> PyResult<PyObject> {
+        let workers = self
+            .inner
+            .list_workers(model_name.as_deref(), tenant_id.as_deref());
+        pythonize(py, &workers)
+            .map(|o| o.unbind())
+            .map_err(to_pyerr)
+    }
+
+    /// Readiness: whether at least one worker is schedulable, plus catalog state.
+    fn ready(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.inner.ready())
+            .map(|o| o.unbind())
+            .map_err(to_pyerr)
+    }
+
+    /// Per-worker KV-overlap scores for a prompt (dict, see `OverlapScoresRequest`).
+    fn overlap_scores<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+        let req: OverlapScoresRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let resp = core.overlap_scores(req).await.map_err(to_pyerr)?;
+            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+
+    /// Select the best worker by KV-overlap + load, no booking (dict, see `SelectRequest`).
+    fn select<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+        let req: SelectRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let resp = core.select(req).await.map_err(to_pyerr)?;
+            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+
+    /// Select the best worker and book its load (dict, see `SelectAndReserveRequest`).
+    fn select_and_reserve<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let req: SelectAndReserveRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let resp = core.select_and_reserve(req).await.map_err(to_pyerr)?;
+            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+
+    /// Book a request's load against a chosen worker (dict, see `ReservationRequest`).
+    fn create_reservation<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let req: ReservationRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let resp = core.create_reservation(req).await.map_err(to_pyerr)?;
+            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+
+    /// Mark a reservation's prefill complete; its load shifts prefill -> decode.
+    fn prefill_complete<'p>(
+        &self,
+        py: Python<'p>,
+        reservation_id: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            core.prefill_complete(&reservation_id)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    /// Record one decode output block for a reservation, advancing its decode load.
+    #[pyo3(signature = (reservation_id, decay_fraction = None))]
+    fn add_output_block(
+        &self,
+        reservation_id: String,
+        decay_fraction: Option<f64>,
+    ) -> PyResult<()> {
+        self.inner
+            .add_output_block(&reservation_id, decay_fraction)
+            .map_err(to_pyerr)
+    }
+
+    /// Free a finished reservation, releasing its tracked load.
+    fn free_reservation<'p>(
+        &self,
+        py: Python<'p>,
+        reservation_id: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            core.free_reservation(&reservation_id)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    /// Current per-model active load (pending counts + per-worker potential loads).
+    #[pyo3(signature = (model_name = None, tenant_id = None))]
+    fn loads(
+        &self,
+        py: Python<'_>,
+        model_name: Option<String>,
+        tenant_id: Option<String>,
+    ) -> PyResult<PyObject> {
+        let loads = self
+            .inner
+            .loads(model_name.as_deref(), tenant_id.as_deref());
+        pythonize(py, &loads).map(|o| o.unbind()).map_err(to_pyerr)
+    }
+
+    /// Per-worker potential loads for a prompt, without booking (dict, see `PotentialLoadsRequest`).
+    fn potential_loads<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
+        let req: PotentialLoadsRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let core = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let resp = core.potential_loads(req).await.map_err(to_pyerr)?;
+            Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+}
+
+#[cfg(all(test, feature = "select-service"))]
+mod selection_service_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn idempotent_shutdown() {
+        let service = SelectionService::new(1);
+        let cancel = service.cancel.clone();
+
+        service.shutdown();
+        assert!(cancel.is_cancelled(), "shutdown() did not cancel the token");
+
+        // Idempotent: a second shutdown and the final drop must not panic.
+        service.shutdown();
+        drop(service);
+    }
+}
+
+#[cfg(feature = "select-service")]
+impl Drop for SelectionService {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
