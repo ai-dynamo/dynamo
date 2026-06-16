@@ -7,6 +7,7 @@ package cert
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"reflect"
@@ -99,8 +100,10 @@ func TestCreatePlaceholderSecretIfNotExists_CreatesWhenMissing(t *testing.T) {
 	if secret.Labels[partOfLabel] != partOfValue {
 		t.Errorf("expected label %s=%s, got %s", partOfLabel, partOfValue, secret.Labels[partOfLabel])
 	}
-	if _, ok := secret.Data["ca.crt"]; !ok {
-		t.Error("expected ca.crt key in secret data")
+	for _, key := range []string{defaultCertName, defaultKeyName, defaultCACertName, defaultCAKeyName} {
+		if _, ok := secret.Data[key]; !ok {
+			t.Errorf("expected %s key in secret data", key)
+		}
 	}
 }
 
@@ -112,9 +115,9 @@ func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"tls.crt": []byte("existing-cert"),
-			"tls.key": []byte("existing-key"),
-			"ca.crt":  []byte("existing-ca"),
+			defaultCertName:   []byte("existing-cert"),
+			defaultKeyName:    []byte("existing-key"),
+			defaultCACertName: []byte("existing-ca"),
 		},
 	}
 	cfg := &configv1alpha1.WebhookServer{SecretName: testSecretName}
@@ -129,7 +132,7 @@ func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 	if err := cm.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testSecretName}, secret); err != nil {
 		t.Fatalf("secret should exist: %v", err)
 	}
-	if string(secret.Data["tls.crt"]) != "existing-cert" {
+	if string(secret.Data[defaultCertName]) != "existing-cert" {
 		t.Error("existing secret data should not be overwritten")
 	}
 }
@@ -172,16 +175,23 @@ func TestCertManager_AutoModeConfiguresRotator(t *testing.T) {
 		t.Fatal("expected provisioner.AddRotator to be called")
 	}
 
+	extKeyUsages := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 	expected := &certrotator.CertRotator{
 		SecretKey: types.NamespacedName{
 			Namespace: testNamespace,
 			Name:      testSecretName,
 		},
-		CertDir:        "/tmp/certs",
-		CAName:         certificateAuthorityName,
-		CAOrganization: certificateAuthorityOrganization,
-		IsReady:        cm.ready,
-		DNSName:        fmt.Sprintf("%s.%s.svc", testServiceName, testNamespace),
+		CertDir:            "/tmp/certs",
+		CAName:             certificateAuthorityName,
+		CAOrganization:     certificateAuthorityOrganization,
+		IsReady:            cm.ready,
+		DNSName:            fmt.Sprintf("%s.%s.svc", testServiceName, testNamespace),
+		ExtKeyUsages:       &extKeyUsages,
+		CaCertDuration:     defaultCACertValidityDuration,
+		ServerCertDuration: defaultServerCertValidity,
+		LookaheadInterval:  defaultLookaheadInterval,
+		CertName:           defaultCertName,
+		KeyName:            defaultKeyName,
 		ExtraDNSNames: []string{
 			testServiceName,
 			fmt.Sprintf("%s.%s", testServiceName, testNamespace),
@@ -197,7 +207,12 @@ func TestCertManager_AutoModeConfiguresRotator(t *testing.T) {
 	// Verify placeholder secret was created
 	secret := &corev1.Secret{}
 	if err := cm.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testSecretName}, secret); err != nil {
-		t.Fatalf("placeholder secret should exist: %v", err)
+		t.Fatalf("webhook TLS secret should exist: %v", err)
+	}
+	for _, key := range []string{defaultCertName, defaultKeyName, defaultCACertName, defaultCAKeyName} {
+		if len(secret.Data[key]) == 0 {
+			t.Errorf("expected %s to be populated before rotator registration", key)
+		}
 	}
 }
 

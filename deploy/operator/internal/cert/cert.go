@@ -7,6 +7,8 @@ package cert
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"strings"
@@ -36,6 +38,13 @@ const (
 	dgdsaCRDName                     = "dynamographdeploymentscalingadapters.nvidia.com"
 	conversionWebhookPath            = "/convert"
 	defaultCABundlePollInterval      = 500 * time.Millisecond
+	defaultCertName                  = "tls.crt"
+	defaultKeyName                   = "tls.key"
+	defaultCACertName                = "ca.crt"
+	defaultCAKeyName                 = "ca.key"
+	defaultCACertValidityDuration    = 10 * 365 * 24 * time.Hour
+	defaultServerCertValidity        = 365 * 24 * time.Hour
+	defaultLookaheadInterval         = 90 * 24 * time.Hour
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
@@ -129,35 +138,101 @@ func (cm *CertManager) setupAutoProvisioning(ctx context.Context, mgr ctrl.Manag
 		return fmt.Errorf("ensuring webhook TLS secret exists: %w", err)
 	}
 
-	dnsName := fmt.Sprintf("%s.%s.svc", cm.cfg.ServiceName, cm.namespace)
+	rotator := cm.newCertRotator()
+	if err := cm.bootstrapCertSecret(ctx, rotator); err != nil {
+		return fmt.Errorf("bootstrapping webhook TLS secret: %w", err)
+	}
 
 	cm.logger.Info("Auto-provisioning certificates using cert-controller",
-		"secretName", cm.cfg.SecretName, "dnsName", dnsName)
+		"secretName", cm.cfg.SecretName, "dnsName", rotator.DNSName)
 
-	rotator := &certrotator.CertRotator{
+	return cm.provisioner.AddRotator(mgr, rotator)
+}
+
+func (cm *CertManager) newCertRotator() *certrotator.CertRotator {
+	dnsName := fmt.Sprintf("%s.%s.svc", cm.cfg.ServiceName, cm.namespace)
+	extKeyUsages := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	return &certrotator.CertRotator{
 		SecretKey: types.NamespacedName{
 			Namespace: cm.namespace,
 			Name:      cm.cfg.SecretName,
 		},
-		CertDir:        cm.cfg.CertDir,
-		CAName:         certificateAuthorityName,
-		CAOrganization: certificateAuthorityOrganization,
-		IsReady:        cm.ready,
-		DNSName:        dnsName,
+		CertDir:            cm.cfg.CertDir,
+		CAName:             certificateAuthorityName,
+		CAOrganization:     certificateAuthorityOrganization,
+		IsReady:            cm.ready,
+		DNSName:            dnsName,
+		ExtKeyUsages:       &extKeyUsages,
+		CaCertDuration:     defaultCACertValidityDuration,
+		ServerCertDuration: defaultServerCertValidity,
+		LookaheadInterval:  defaultLookaheadInterval,
+		CertName:           defaultCertName,
+		KeyName:            defaultKeyName,
 		ExtraDNSNames: []string{
 			cm.cfg.ServiceName,
 			fmt.Sprintf("%s.%s", cm.cfg.ServiceName, cm.namespace),
 			fmt.Sprintf("%s.%s.svc.cluster.local", cm.cfg.ServiceName, cm.namespace),
 		},
 		EnableReadinessCheck: true,
-		// RestartOnSecretRefresh is intentionally false (default). The rotator's
-		// ensureCertsMounted goroutine polls CertDir until the kubelet projects
-		// the updated secret, then closes IsReady. The webhook server is only
-		// started after IsReady fires, so the files are guaranteed to exist.
-		// Setting this to true would call os.Exit immediately after writing the
-		// secret, racing the kubelet volume projection on restart.
+		// RestartOnSecretRefresh is intentionally false (default). Startup
+		// bootstraps the secret before mgr.Start; later rotations must not exit
+		// immediately after updating the secret and race kubelet projection.
 	}
-	return cm.provisioner.AddRotator(mgr, rotator)
+}
+
+func (cm *CertManager) bootstrapCertSecret(ctx context.Context, rotator *certrotator.CertRotator) error {
+	secret := &corev1.Secret{}
+	if err := cm.client.Get(ctx, rotator.SecretKey, secret); err != nil {
+		return fmt.Errorf("getting webhook TLS secret: %w", err)
+	}
+
+	if secret.Data == nil || !validCACert(rotator, secret) {
+		cm.logger.Info("Refreshing webhook CA and server certificate before manager start")
+		return cm.refreshCertSecret(ctx, rotator, secret, true)
+	}
+	if !validServerCert(rotator, secret) {
+		cm.logger.Info("Refreshing webhook server certificate before manager start")
+		return cm.refreshCertSecret(ctx, rotator, secret, false)
+	}
+
+	cm.logger.Info("Webhook certificates are already valid before manager start")
+	return nil
+}
+
+func (cm *CertManager) refreshCertSecret(
+	ctx context.Context,
+	rotator *certrotator.CertRotator,
+	secret *corev1.Secret,
+	refreshCA bool,
+) error {
+	now := time.Now()
+	begin := now.Add(-1 * time.Hour)
+	var caArtifacts *certrotator.KeyPairArtifacts
+	var err error
+	if refreshCA {
+		caArtifacts, err = rotator.CreateCACert(begin, now.Add(rotator.CaCertDuration))
+	} else {
+		caArtifacts, err = buildCAArtifactsFromSecret(secret)
+	}
+	if err != nil {
+		return err
+	}
+
+	cert, key, err := rotator.CreateCertPEM(caArtifacts, begin, now.Add(rotator.ServerCertDuration))
+	if err != nil {
+		return err
+	}
+	if secret.Data == nil {
+		secret.Data = make(map[string][]byte)
+	}
+	secret.Data[defaultCACertName] = caArtifacts.CertPEM
+	secret.Data[defaultCAKeyName] = caArtifacts.KeyPEM
+	secret.Data[rotator.CertName] = cert
+	secret.Data[rotator.KeyName] = key
+	if err := cm.client.Update(ctx, secret); err != nil {
+		return fmt.Errorf("updating webhook TLS secret: %w", err)
+	}
+	return nil
 }
 
 // createPlaceholderSecretIfNotExists creates the webhook TLS secret if it does
@@ -181,9 +256,10 @@ func (cm *CertManager) createPlaceholderSecretIfNotExists(ctx context.Context) e
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"tls.crt": {},
-			"tls.key": {},
-			"ca.crt":  {},
+			defaultCertName:   {},
+			defaultKeyName:    {},
+			defaultCACertName: {},
+			defaultCAKeyName:  {},
 		},
 	}
 	if err := cm.client.Create(ctx, secret); err != nil {
@@ -217,8 +293,8 @@ func WithCABundlePollInterval(interval time.Duration) CABundleInjectorOption {
 	}
 }
 
-// NewCABundleInjector creates a CABundleInjector. The client should be the
-// manager's cached client (available after mgr.Start).
+// NewCABundleInjector creates a CABundleInjector. Use a direct client before
+// mgr.Start and the manager client after its cache is running.
 func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfiguration, opts ...CABundleInjectorOption) (*CABundleInjector, error) {
 	ns, err := getOperatorNamespace()
 	if err != nil {
@@ -301,7 +377,7 @@ func (i *CABundleInjector) waitForCABundle(ctx context.Context) ([]byte, error) 
 		if err != nil {
 			return false, err
 		}
-		ca, ok := secret.Data["ca.crt"]
+		ca, ok := secret.Data[defaultCACertName]
 		if !ok || len(ca) == 0 {
 			i.logger.Info("Waiting for webhook CA bundle",
 				"namespace", i.namespace,
@@ -323,11 +399,71 @@ func (i *CABundleInjector) readCABundle(ctx context.Context) ([]byte, error) {
 	if err := i.client.Get(ctx, types.NamespacedName{Namespace: i.namespace, Name: i.cfg.Server.Webhook.SecretName}, secret); err != nil {
 		return nil, err
 	}
-	ca, ok := secret.Data["ca.crt"]
+	ca, ok := secret.Data[defaultCACertName]
 	if !ok || len(ca) == 0 {
-		return nil, fmt.Errorf("ca.crt not found or empty in secret %s/%s", i.namespace, i.cfg.Server.Webhook.SecretName)
+		return nil, fmt.Errorf("%s not found or empty in secret %s/%s", defaultCACertName, i.namespace, i.cfg.Server.Webhook.SecretName)
 	}
 	return ca, nil
+}
+
+func validCACert(rotator *certrotator.CertRotator, secret *corev1.Secret) bool {
+	valid, err := certrotator.ValidCert(
+		secret.Data[defaultCACertName],
+		secret.Data[defaultCACertName],
+		secret.Data[defaultCAKeyName],
+		rotator.CAName,
+		nil,
+		time.Now().Add(rotator.LookaheadInterval),
+	)
+	return err == nil && valid
+}
+
+func validServerCert(rotator *certrotator.CertRotator, secret *corev1.Secret) bool {
+	valid, err := certrotator.ValidCert(
+		secret.Data[defaultCACertName],
+		secret.Data[rotator.CertName],
+		secret.Data[rotator.KeyName],
+		rotator.DNSName,
+		rotator.ExtKeyUsages,
+		time.Now().Add(rotator.LookaheadInterval),
+	)
+	return err == nil && valid
+}
+
+func buildCAArtifactsFromSecret(secret *corev1.Secret) (*certrotator.KeyPairArtifacts, error) {
+	caPEM, ok := secret.Data[defaultCACertName]
+	if !ok {
+		return nil, fmt.Errorf("webhook TLS secret is missing %s", defaultCACertName)
+	}
+	keyPEM, ok := secret.Data[defaultCAKeyName]
+	if !ok {
+		return nil, fmt.Errorf("webhook TLS secret is missing %s", defaultCAKeyName)
+	}
+
+	caDER, _ := pem.Decode(caPEM)
+	if caDER == nil {
+		return nil, fmt.Errorf("failed to decode %s", defaultCACertName)
+	}
+	caCert, err := x509.ParseCertificate(caDER.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", defaultCACertName, err)
+	}
+
+	keyDER, _ := pem.Decode(keyPEM)
+	if keyDER == nil {
+		return nil, fmt.Errorf("failed to decode %s", defaultCAKeyName)
+	}
+	caKey, err := x509.ParsePKCS1PrivateKey(keyDER.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", defaultCAKeyName, err)
+	}
+
+	return &certrotator.KeyPairArtifacts{
+		Cert:    caCert,
+		Key:     caKey,
+		CertPEM: caPEM,
+		KeyPEM:  keyPEM,
+	}, nil
 }
 
 func (i *CABundleInjector) webhookLabels() client.MatchingLabels {
