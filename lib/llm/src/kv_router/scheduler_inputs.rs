@@ -144,8 +144,8 @@ impl OverlapScoresRefresh for KvRouterOverlapRefresher {
         );
         Some(RefreshedOverlap {
             tier_overlap_blocks,
-            effective_overlap_blocks: estimates.effective_overlap_blocks,
-            effective_cached_tokens: estimates.cached_tokens,
+            effective_overlap_blocks: estimates.effective_overlap_blocks.into_iter().collect(),
+            effective_cached_tokens: estimates.cached_tokens.into_iter().collect(),
         })
     }
 }

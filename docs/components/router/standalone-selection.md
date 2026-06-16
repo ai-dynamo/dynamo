@@ -96,7 +96,9 @@ Select a worker without booking active load:
   "selection_id": "select-123",
   "model_name": "model",
   "tenant_id": "default",
-  "token_ids": [1, 2, 3, 4]
+  "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
+  "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
+  "isl_tokens": 512
 }
 ```
 
@@ -111,7 +113,9 @@ globally unique `reservation_id`, or allow the service to generate one:
   "reservation_id": "request-123",
   "model_name": "model",
   "tenant_id": "default",
-  "token_ids": [1, 2, 3, 4]
+  "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
+  "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
+  "isl_tokens": 512
 }
 ```
 
@@ -172,8 +176,9 @@ Content-Type: application/json
   "tenant_id": "default",
   "worker_id": 1,
   "dp_rank": 0,
-  "token_ids": [1, 2, 3, 4],
-  "effective_prefill_tokens": 4
+  "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
+  "isl_tokens": 512,
+  "effective_prefill_tokens": 384
 }
 ```
 

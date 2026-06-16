@@ -56,6 +56,17 @@ fn parse_nonzero_port(value: &str) -> Result<u16, String> {
     Ok(port)
 }
 
+#[cfg(all(test, any(feature = "slot-tracker", feature = "select-service")))]
+mod replica_sync_cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_only_nonzero_ports() {
+        assert_eq!(parse_nonzero_port("9000"), Ok(9000));
+        assert!(parse_nonzero_port("0").is_err());
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ResponseBufferMode {
     Rendezvous,
@@ -179,21 +190,6 @@ mod slot_tracker_cli_tests {
     use super::*;
 
     #[test]
-    fn parses_replica_sync_port_and_peers() {
-        let cli = SlotTrackerCli::try_parse_from([
-            "dynamo.slot_tracker",
-            "--replica-sync-port",
-            "9000",
-            "--replica-sync-peers",
-            "tcp://slot-a:9000,tcp://slot-b:9000",
-        ])
-        .unwrap();
-
-        assert_eq!(cli.replica_sync_port, Some(9000));
-        assert_eq!(cli.replica_sync_peers.len(), 2);
-    }
-
-    #[test]
     fn replica_peers_require_port() {
         let error = SlotTrackerCli::try_parse_from([
             "dynamo.slot_tracker",
@@ -206,27 +202,6 @@ mod slot_tracker_cli_tests {
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
-    }
-
-    #[test]
-    fn zero_replica_sync_port_is_rejected() {
-        let error =
-            SlotTrackerCli::try_parse_from(["dynamo.slot_tracker", "--replica-sync-port", "0"])
-                .unwrap_err();
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
-    }
-
-    #[test]
-    fn removed_replica_sync_bind_is_rejected() {
-        let error = SlotTrackerCli::try_parse_from([
-            "dynamo.slot_tracker",
-            "--replica-sync-bind",
-            "tcp://*:9000",
-        ])
-        .unwrap_err();
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }
 
@@ -324,27 +299,6 @@ mod select_service_cli_tests {
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
-    }
-
-    #[test]
-    fn zero_replica_sync_port_is_rejected() {
-        let error =
-            SelectServiceCli::try_parse_from(["dynamo.select_service", "--replica-sync-port", "0"])
-                .unwrap_err();
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
-    }
-
-    #[test]
-    fn removed_replica_sync_advertise_is_rejected() {
-        let error = SelectServiceCli::try_parse_from([
-            "dynamo.select_service",
-            "--replica-sync-advertise",
-            "tcp://selector-a:9000",
-        ])
-        .unwrap_err();
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }
 

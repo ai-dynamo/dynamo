@@ -15,10 +15,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::WorkerId;
-use crate::services::common::replica_sync::{
-    PeerError, PeerManager, PeerRequest, generate_process_id, replica_sync_bind_endpoint,
-    start_replica_publisher,
-};
+use crate::services::common::replica_sync::{PeerManager, setup_replica_sync};
+use crate::services::common::replica_sync_http;
 
 use super::core::{SelectionCore, SelectionServiceConfig};
 use super::types::{
@@ -34,7 +32,6 @@ struct FilterQuery {
 
 pub struct AppState {
     pub core: Arc<SelectionCore>,
-    pub(crate) peer_manager: Option<PeerManager>,
 }
 
 async fn create_worker(
@@ -222,53 +219,6 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> Response {
     Json(state.core.dump_indexer_events().await).into_response()
 }
 
-async fn register_peer(
-    State(state): State<Arc<AppState>>,
-    payload: Result<Json<PeerRequest>, JsonRejection>,
-) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
-    let Some(peer_manager) = &state.peer_manager else {
-        return json_error(StatusCode::CONFLICT, "replica sync is disabled");
-    };
-    match peer_manager.register_peer(req.endpoint).await {
-        Ok(true) => json_ok(StatusCode::CREATED),
-        Ok(false) => json_ok(StatusCode::OK),
-        Err(error) => peer_error(error),
-    }
-}
-
-async fn deregister_peer(
-    State(state): State<Arc<AppState>>,
-    payload: Result<Json<PeerRequest>, JsonRejection>,
-) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
-    let Some(peer_manager) = &state.peer_manager else {
-        return json_error(StatusCode::CONFLICT, "replica sync is disabled");
-    };
-    match peer_manager.deregister_peer(req.endpoint).await {
-        Ok(true) => json_ok(StatusCode::OK),
-        Ok(false) => json_error(StatusCode::NOT_FOUND, "peer not found"),
-        Err(error) => peer_error(error),
-    }
-}
-
-async fn list_peers(State(state): State<Arc<AppState>>) -> Response {
-    Json(
-        state
-            .peer_manager
-            .as_ref()
-            .map(PeerManager::list_peers)
-            .unwrap_or_default(),
-    )
-    .into_response()
-}
-
 async fn not_found() -> Response {
     json_error(StatusCode::NOT_FOUND, "route not found")
 }
@@ -293,15 +243,7 @@ fn json_rejection(error: JsonRejection) -> Response {
     json_error(error.status(), error.body_text())
 }
 
-fn peer_error(error: PeerError) -> Response {
-    let status = match &error {
-        PeerError::InvalidEndpoint(_) => StatusCode::BAD_REQUEST,
-        PeerError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-    };
-    json_error(status, error)
-}
-
-pub fn create_router(state: Arc<AppState>) -> Router {
+pub(crate) fn create_router(state: Arc<AppState>, peer_manager: Option<PeerManager>) -> Router {
     Router::new()
         .route("/select", post(select))
         .route("/select_and_reserve", post(select_and_reserve))
@@ -326,15 +268,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/potential_loads", post(potential_loads))
         .route("/overlap_scores", post(overlap_scores))
         .route("/dump", get(dump_events))
-        .route("/replica_sync/register_peer", post(register_peer))
-        .route("/replica_sync/deregister_peer", post(deregister_peer))
-        .route("/replica_sync/peers", get(list_peers))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(axum::extract::DefaultBodyLimit::max(
             REQUEST_BODY_LIMIT_BYTES,
         ))
         .with_state(state)
+        .merge(replica_sync_http::router(peer_manager))
 }
 
 pub async fn run_server(config: SelectionServiceConfig) -> anyhow::Result<()> {
@@ -346,17 +286,11 @@ pub async fn run_server(config: SelectionServiceConfig) -> anyhow::Result<()> {
         shutdown_token.cancel();
     });
 
-    let replica_runtime = if let Some(replica_sync_port) = config.replica_sync_port {
-        let bind_endpoint = replica_sync_bind_endpoint(replica_sync_port)?;
-        let process_id = generate_process_id();
-        let outbound_tx = start_replica_publisher(&bind_endpoint, cancel_token.child_token())?;
-        Some((process_id, outbound_tx))
-    } else {
-        if !config.replica_sync_peers.is_empty() {
-            anyhow::bail!("--replica-sync-peers requires --replica-sync-port");
-        }
-        None
-    };
+    let replica_runtime = setup_replica_sync(
+        config.replica_sync_port,
+        &config.replica_sync_peers,
+        cancel_token.child_token(),
+    )?;
 
     tracing::info!(
         port = config.port,
@@ -396,7 +330,7 @@ pub async fn run_server(config: SelectionServiceConfig) -> anyhow::Result<()> {
         None
     };
 
-    let app = create_router(Arc::new(AppState { core, peer_manager }));
+    let app = create_router(Arc::new(AppState { core }), peer_manager);
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

@@ -479,8 +479,11 @@ where
                 maybe_seq_hashes,
                 block_hashes_for_refresh,
                 tier_overlap_blocks,
-                cache_hit_estimates.effective_overlap_blocks,
-                cache_hit_estimates.cached_tokens,
+                cache_hit_estimates
+                    .effective_overlap_blocks
+                    .into_iter()
+                    .collect(),
+                cache_hit_estimates.cached_tokens.into_iter().collect(),
                 router_config_override,
                 update_states,
                 lora_name,
@@ -831,7 +834,7 @@ where
         Ok(self.scheduler.get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            cache_hit_estimates.cached_tokens,
+            cache_hit_estimates.cached_tokens.into_iter().collect(),
             track_prefill_tokens,
         ))
     }

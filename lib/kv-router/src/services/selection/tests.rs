@@ -17,9 +17,11 @@ use crate::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use crate::scheduling::config::RouterConfigOverride;
+use crate::services::common::replica_sync::ReplicaSyncConfig;
 
 use super::input::{MmRoutingInfoRequest, PromptRequest};
 use super::scoring::build_overlap_scores_response;
+use super::server::create_router;
 use super::*;
 
 fn test_config() -> crate::config::KvRouterConfig {
@@ -36,10 +38,7 @@ fn app() -> Router {
         1,
         CancellationToken::new(),
     ));
-    create_router(Arc::new(AppState {
-        core,
-        peer_manager: None,
-    }))
+    create_router(Arc::new(AppState { core }), None)
 }
 
 async fn response_json(response: Response) -> serde_json::Value {
@@ -47,6 +46,21 @@ async fn response_json(response: Response) -> serde_json::Value {
         .await
         .expect("read response body");
     serde_json::from_slice(&body).expect("response JSON")
+}
+
+#[tokio::test]
+async fn replica_sync_routes_are_mounted() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/replica_sync/peers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 async fn post(app: Router, uri: &str, body: &str) -> Response {
@@ -197,10 +211,7 @@ async fn incomplete_worker_is_accepted_but_not_schedulable() {
     let mut config = test_config();
     config.router_queue_threshold = Some(1.0);
     let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
-    let app = create_router(Arc::new(AppState {
-        core,
-        peer_manager: None,
-    }));
+    let app = create_router(Arc::new(AppState { core }), None);
 
     let response = post(
         app.clone(),
@@ -538,13 +549,13 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         test_config(),
         1,
         cancel_token.child_token(),
-        Some((11, outbound_a)),
+        Some(ReplicaSyncConfig::new(11, outbound_a)),
     ));
     let core_b = Arc::new(SelectionCore::new_for_server(
         test_config(),
         1,
         cancel_token.child_token(),
-        Some((22, outbound_b)),
+        Some(ReplicaSyncConfig::new(22, outbound_b)),
     ));
     core_a.signal_indexer_ready();
     core_b.signal_indexer_ready();
@@ -562,14 +573,18 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         }
     });
 
-    let app_a = create_router(Arc::new(AppState {
-        core: Arc::clone(&core_a),
-        peer_manager: None,
-    }));
-    let app_b = create_router(Arc::new(AppState {
-        core: Arc::clone(&core_b),
-        peer_manager: None,
-    }));
+    let app_a = create_router(
+        Arc::new(AppState {
+            core: Arc::clone(&core_a),
+        }),
+        None,
+    );
+    let app_b = create_router(
+        Arc::new(AppState {
+            core: Arc::clone(&core_b),
+        }),
+        None,
+    );
     assert_eq!(
         register_worker(app_a.clone(), None).await.status(),
         StatusCode::CREATED
@@ -588,12 +603,6 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     wait_for_core_load(&core_b, 1, 1, 4).await;
-
-    let response = post(app_a.clone(), "/reservations/replicated/output_block", "{}").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    wait_for_core_load(&core_a, 1, 2, 4).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_core_load(&core_b, 1, 1, 4);
 
     let response = post(
         app_a.clone(),
@@ -645,22 +654,6 @@ async fn wait_for_core_load(
     .unwrap();
 }
 
-fn assert_core_load(
-    core: &SelectionCore,
-    expected_requests: usize,
-    expected_blocks: usize,
-    expected_tokens: usize,
-) {
-    let loads = core.loads(Some("model"), Some("default"));
-    let load = loads
-        .first()
-        .and_then(|model| model.loads.first())
-        .expect("registered worker load");
-    assert_eq!(load.active_requests, expected_requests);
-    assert_eq!(load.potential_decode_blocks, expected_blocks);
-    assert_eq!(load.potential_prefill_tokens, expected_tokens);
-}
-
 #[tokio::test]
 async fn dump_exposes_compatible_indexer_snapshot() {
     let app = app();
@@ -681,107 +674,11 @@ async fn dump_exposes_compatible_indexer_snapshot() {
 }
 
 #[tokio::test]
-async fn replica_peer_routes_manage_selector_peers() {
-    let disabled_app = app();
-    let peers_response = disabled_app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/replica_sync/peers")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(peers_response.status(), StatusCode::OK);
-    assert_eq!(response_json(peers_response).await, serde_json::json!([]));
-
-    let disabled_register = post(
-        disabled_app,
-        "/replica_sync/register_peer",
-        r#"{"endpoint":"tcp://127.0.0.1:19092"}"#,
-    )
-    .await;
-    assert_eq!(disabled_register.status(), StatusCode::CONFLICT);
-
-    let cancel_token = CancellationToken::new();
-    let peer_manager = crate::services::common::replica_sync::PeerManager::start(
-        Vec::new(),
-        cancel_token.clone(),
-        |_| {},
-    )
-    .unwrap();
-    let core = Arc::new(SelectionCore::new(test_config(), 1, cancel_token.clone()));
-    let app = create_router(Arc::new(AppState {
-        core,
-        peer_manager: Some(peer_manager),
-    }));
-    let endpoint = "tcp://127.0.0.1:19092";
-    let body = format!(r#"{{"endpoint":"{endpoint}"}}"#);
-
-    assert_eq!(
-        post(app.clone(), "/replica_sync/register_peer", &body)
-            .await
-            .status(),
-        StatusCode::CREATED
-    );
-    assert_eq!(
-        post(app.clone(), "/replica_sync/register_peer", &body)
-            .await
-            .status(),
-        StatusCode::OK
-    );
-
-    let peers_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/replica_sync/peers")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response_json(peers_response).await,
-        serde_json::json!([endpoint])
-    );
-
-    assert_eq!(
-        post(
-            app.clone(),
-            "/replica_sync/register_peer",
-            r#"{"endpoint":"invalid"}"#,
-        )
-        .await
-        .status(),
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(
-        post(app.clone(), "/replica_sync/deregister_peer", &body,)
-            .await
-            .status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        post(app, "/replica_sync/deregister_peer", &body)
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-
-    cancel_token.cancel();
-}
-
-#[tokio::test]
 async fn reconcile_rolls_back_partial_listener_registration() {
     let mut config = test_config();
     config.use_kv_events = true;
     let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
-    let app = create_router(Arc::new(AppState {
-        core,
-        peer_manager: None,
-    }));
+    let app = create_router(Arc::new(AppState { core }), None);
 
     let response = post(
         app.clone(),

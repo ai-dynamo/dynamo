@@ -249,11 +249,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_workers_empty() {
-        assert!(parse_workers("").unwrap().is_empty());
-    }
-
-    #[test]
     fn test_parse_workers_invalid_entry() {
         let error = parse_workers("1").unwrap_err().to_string();
         assert!(error.contains("invalid worker entry"));

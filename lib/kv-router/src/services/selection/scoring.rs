@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use rustc_hash::FxHashMap;
 
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{StorageTier, WorkerId, WorkerWithDpRank};
@@ -14,9 +16,9 @@ use super::types::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlap
 #[derive(Default)]
 pub(super) struct OverlapInputs {
     pub(super) tier_overlap_blocks: TierOverlapBlocks,
-    pub(super) effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-    pub(super) effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
-    pub(super) mooncake_summaries: HashMap<WorkerId, MooncakeOverlapSummary>,
+    pub(super) effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+    pub(super) effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
+    pub(super) mooncake_summaries: FxHashMap<WorkerId, MooncakeOverlapSummary>,
 }
 
 pub(super) fn build_overlap_scores_response(

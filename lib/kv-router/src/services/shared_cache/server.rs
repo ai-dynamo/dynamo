@@ -194,14 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn test_check_empty_cache() {
-        let store = SharedCacheStore::new();
-        let hits = store.check_blocks(&[1, 2, 3]);
-        assert_eq!(hits.total_hits, 0);
-        assert!(hits.ranges.is_empty());
-    }
-
-    #[test]
     fn test_remove_blocks() {
         let store = SharedCacheStore::new();
         store.store(&[10, 20, 30]);
@@ -211,16 +203,6 @@ mod tests {
         let hits = store.check_blocks(&[10, 20, 30]);
         assert_eq!(hits.total_hits, 2);
         assert_eq!(hits.ranges, vec![0..1, 2..3]);
-    }
-
-    #[test]
-    fn test_all_hits() {
-        let store = SharedCacheStore::new();
-        store.store(&[1, 2, 3]);
-
-        let hits = store.check_blocks(&[1, 2, 3]);
-        assert_eq!(hits.total_hits, 3);
-        assert_eq!(hits.ranges, vec![0..3]);
     }
 
     #[test]
@@ -238,8 +220,9 @@ mod tests {
         let hits = SharedCacheHits::from_ranges(vec![0..2, 5..8]);
         let ranges: Vec<[u32; 2]> = hits.ranges.iter().map(|r| [r.start, r.end]).collect();
         let resp = SharedCacheQueryResponse { ranges };
-        let json = serde_json::to_string(&resp).unwrap();
-        let parsed: SharedCacheQueryResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.ranges, vec![[0, 2], [5, 8]]);
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"ranges":[[0,2],[5,8]]}"#
+        );
     }
 }

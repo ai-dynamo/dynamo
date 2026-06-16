@@ -27,8 +27,7 @@ use crate::sequences::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
 };
 use crate::services::common::replica_sync::{
-    ChannelSequenceSubscriber, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
-    ScopedReplicaEvent, ScopedSequencePublisher,
+    ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher, setup_scoped_replica_sync,
 };
 use crate::services::indexer::backend::Indexer;
 use crate::services::indexer::recovery;
@@ -89,18 +88,13 @@ pub struct SelectionServiceConfig {
     pub kv_router_config: crate::config::KvRouterConfig,
 }
 
-struct SelectionReplicaConfig {
-    process_id: u64,
-    outbound_tx: ReplicaEventSender,
-}
-
 pub struct SelectionCore {
     catalog: WorkerCatalog,
     entries: RwLock<HashMap<SelectionKey, Arc<SelectionEntry>>>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
     cancel_token: CancellationToken,
-    replica_config: Option<SelectionReplicaConfig>,
+    replica_config: Option<ReplicaSyncConfig>,
 }
 
 impl SelectionCore {
@@ -116,16 +110,13 @@ impl SelectionCore {
         kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
-        replica_config: Option<(u64, ReplicaEventSender)>,
+        replica_config: Option<ReplicaSyncConfig>,
     ) -> Self {
         Self::new_inner(
             kv_router_config,
             indexer_threads,
             cancel_token,
-            replica_config.map(|(process_id, outbound_tx)| SelectionReplicaConfig {
-                process_id,
-                outbound_tx,
-            }),
+            replica_config,
             false,
         )
     }
@@ -134,7 +125,7 @@ impl SelectionCore {
         kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
-        replica_config: Option<SelectionReplicaConfig>,
+        replica_config: Option<ReplicaSyncConfig>,
         signal_indexer_ready: bool,
     ) -> Self {
         let indexer_registry = Arc::new(WorkerRegistry::new(indexer_threads));
@@ -170,7 +161,7 @@ impl SelectionCore {
         if self
             .replica_config
             .as_ref()
-            .is_some_and(|config| envelope.event.router_id == config.process_id)
+            .is_some_and(|config| config.is_self_event(&envelope.event))
         {
             return;
         }
@@ -380,37 +371,23 @@ impl SelectionCore {
         }
 
         let (workers_tx, workers_rx) = watch::channel(HashMap::new());
-        let (publisher, replica_sync, router_id, replica_channel) =
-            if let Some(replica_config) = &self.replica_config {
-                let (replica_tx, replica_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
-                (
-                    ScopedSequencePublisher::enabled(
-                        Arc::from(key.model_name.as_str()),
-                        Arc::from(key.tenant_id.as_str()),
-                        block_size,
-                        replica_config.outbound_tx.clone(),
-                    ),
-                    true,
-                    replica_config.process_id,
-                    Some((replica_tx, replica_rx)),
-                )
-            } else {
-                (ScopedSequencePublisher::disabled(), false, 0, None)
-            };
+        let scoped_replica_sync = setup_scoped_replica_sync(
+            self.replica_config.as_ref(),
+            &key.model_name,
+            &key.tenant_id,
+            block_size,
+        );
         let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
-            publisher,
+            scoped_replica_sync.publisher,
             block_size as usize,
             HashMap::new(),
-            replica_sync,
-            router_id,
+            scoped_replica_sync.enabled,
+            scoped_replica_sync.process_id,
             WORKER_TYPE,
             ReplicaWorkerPolicy::RequireRegistered,
         ));
-        let replica_tx = replica_channel.map(|(replica_tx, replica_rx)| {
-            slots.start_replica_sync(
-                ChannelSequenceSubscriber::new(replica_rx),
-                self.cancel_token.child_token(),
-            );
+        let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
+            slots.start_replica_sync(subscriber, self.cancel_token.child_token());
             replica_tx
         });
         slots.start_periodic_force_expiry_across_all_workers(self.cancel_token.child_token());
@@ -641,8 +618,8 @@ impl SelectionCore {
                 Some(sequence_hashes),
                 None,
                 tier_overlap_blocks,
-                effective_overlap_blocks,
-                effective_cached_tokens,
+                effective_overlap_blocks.into_iter().collect(),
+                effective_cached_tokens.into_iter().collect(),
                 router_config_override.as_ref(),
                 book,
                 prompt.lora_name,
@@ -842,7 +819,11 @@ impl SelectionCore {
         Ok(entry.scheduler.get_potential_loads(
             Some(prepared.sequence_hashes),
             prepared.isl_tokens,
-            prepared.overlap.effective_cached_tokens,
+            prepared
+                .overlap
+                .effective_cached_tokens
+                .into_iter()
+                .collect(),
             track_prefill_tokens,
         ))
     }

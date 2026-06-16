@@ -1,18 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-
 use crate::config::KvRouterConfig;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{StorageTier, WorkerWithDpRank};
+use rustc_hash::FxHashMap;
 
 use super::TierOverlapBlocks;
 
 #[derive(Debug, Clone, Default)]
 pub struct CacheHitEstimates {
-    pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-    pub cached_tokens: HashMap<WorkerWithDpRank, usize>,
+    pub effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+    pub cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 pub fn cache_hit_estimates_from_tiered_matches(
@@ -20,7 +19,7 @@ pub fn cache_hit_estimates_from_tiered_matches(
     block_size: u32,
     tiered_matches: &TieredMatchDetails,
 ) -> CacheHitEstimates {
-    let mut effective_overlap_blocks = HashMap::new();
+    let mut effective_overlap_blocks = FxHashMap::default();
 
     for (worker, overlap) in &tiered_matches.device.overlap_scores.scores {
         effective_overlap_blocks.insert(*worker, *overlap as f64);
@@ -99,6 +98,8 @@ fn cache_hit_weight_for_tier(config: &KvRouterConfig, tier: StorageTier) -> f64 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use crate::indexer::{LowerTierMatchDetails, MatchDetails};
     use crate::protocols::{OverlapScores, WorkerWithDpRank};
 

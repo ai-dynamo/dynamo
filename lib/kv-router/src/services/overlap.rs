@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use crate::indexer::{LowerTierMatchDetails, TieredMatchDetails};
@@ -25,7 +26,7 @@ pub(crate) fn build_mooncake_overlap_summaries(
     tiered: &TieredMatchDetails,
     block_size: u32,
     expected_workers: impl IntoIterator<Item = WorkerWithDpRank>,
-) -> HashMap<WorkerId, MooncakeOverlapSummary> {
+) -> FxHashMap<WorkerId, MooncakeOverlapSummary> {
     let host = tiered.lower_tier.get(&StorageTier::HostPinned);
     let disk = tiered.lower_tier.get(&StorageTier::Disk);
     let external = tiered.lower_tier.get(&StorageTier::External);
@@ -36,7 +37,7 @@ pub(crate) fn build_mooncake_overlap_summaries(
         all_workers.extend(matches.hits.keys().copied());
     }
 
-    let mut summaries = HashMap::<WorkerId, MooncakeOverlapSummary>::new();
+    let mut summaries = FxHashMap::<WorkerId, MooncakeOverlapSummary>::default();
     for worker in all_workers {
         let gpu_blocks = tiered
             .device

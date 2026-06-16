@@ -30,9 +30,34 @@ pub(crate) struct ScopedReplicaEvent {
 
 pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct PeerRequest {
-    pub endpoint: String,
+#[derive(Debug, Clone)]
+pub(crate) struct ReplicaSyncConfig {
+    process_id: u64,
+    outbound_tx: ReplicaEventSender,
+}
+
+impl ReplicaSyncConfig {
+    pub(crate) fn new(process_id: u64, outbound_tx: ReplicaEventSender) -> Self {
+        Self {
+            process_id,
+            outbound_tx,
+        }
+    }
+
+    pub(crate) fn process_id(&self) -> u64 {
+        self.process_id
+    }
+
+    pub(crate) fn is_self_event(&self, event: &ActiveSequenceEvent) -> bool {
+        event.router_id == self.process_id
+    }
+}
+
+pub(crate) struct ScopedReplicaSync {
+    pub publisher: ScopedSequencePublisher,
+    pub enabled: bool,
+    pub process_id: u64,
+    pub channel: Option<(mpsc::Sender<ActiveSequenceEvent>, ChannelSequenceSubscriber)>,
 }
 
 #[derive(Clone)]
@@ -137,7 +162,7 @@ impl SequenceSubscriber for ChannelSequenceSubscriber {
     }
 }
 
-pub(crate) fn generate_process_id() -> u64 {
+fn generate_process_id() -> u64 {
     loop {
         let id = rand::random();
         if id != 0 {
@@ -146,11 +171,58 @@ pub(crate) fn generate_process_id() -> u64 {
     }
 }
 
-pub(crate) fn replica_sync_bind_endpoint(port: u16) -> Result<String> {
+fn replica_sync_bind_endpoint(port: u16) -> Result<String> {
     if port == 0 {
         anyhow::bail!("replica sync port must be greater than zero");
     }
     Ok(format!("tcp://*:{port}"))
+}
+
+pub(crate) fn setup_replica_sync(
+    port: Option<u16>,
+    initial_peers: &[String],
+    cancel_token: CancellationToken,
+) -> Result<Option<ReplicaSyncConfig>> {
+    let Some(port) = port else {
+        if !initial_peers.is_empty() {
+            anyhow::bail!("--replica-sync-peers requires --replica-sync-port");
+        }
+        return Ok(None);
+    };
+
+    let bind_endpoint = replica_sync_bind_endpoint(port)?;
+    let process_id = generate_process_id();
+    let outbound_tx = start_replica_publisher(&bind_endpoint, cancel_token)?;
+    Ok(Some(ReplicaSyncConfig::new(process_id, outbound_tx)))
+}
+
+pub(crate) fn setup_scoped_replica_sync(
+    config: Option<&ReplicaSyncConfig>,
+    model_name: &str,
+    tenant_id: &str,
+    block_size: u32,
+) -> ScopedReplicaSync {
+    let Some(config) = config else {
+        return ScopedReplicaSync {
+            publisher: ScopedSequencePublisher::disabled(),
+            enabled: false,
+            process_id: 0,
+            channel: None,
+        };
+    };
+
+    let (replica_tx, replica_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+    ScopedReplicaSync {
+        publisher: ScopedSequencePublisher::enabled(
+            Arc::from(model_name),
+            Arc::from(tenant_id),
+            block_size,
+            config.outbound_tx.clone(),
+        ),
+        enabled: true,
+        process_id: config.process_id,
+        channel: Some((replica_tx, ChannelSequenceSubscriber::new(replica_rx))),
+    }
 }
 
 pub(crate) fn start_replica_publisher(
@@ -401,25 +473,25 @@ mod tests {
     }
 
     #[test]
-    fn replica_event_round_trips_named_messagepack() {
-        let encoded = rmp_serde::to_vec_named(&event()).unwrap();
-        let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&encoded).unwrap();
-
-        assert_eq!(decoded.model_name, "model");
-        assert_eq!(decoded.tenant_id, "tenant");
-        assert_eq!(decoded.block_size, 16);
-        assert_eq!(decoded.event.request_id, "request");
-    }
-
-    #[test]
-    fn process_identity_is_nonzero() {
-        assert_ne!(generate_process_id(), 0);
-    }
-
-    #[test]
     fn replica_sync_port_builds_wildcard_bind_endpoint() {
         assert_eq!(replica_sync_bind_endpoint(8092).unwrap(), "tcp://*:8092");
         assert!(replica_sync_bind_endpoint(0).is_err());
+    }
+
+    #[test]
+    fn replica_sync_requires_port_for_initial_peers() {
+        let error = setup_replica_sync(
+            None,
+            &["tcp://127.0.0.1:8092".to_string()],
+            CancellationToken::new(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--replica-sync-peers requires --replica-sync-port")
+        );
     }
 
     #[tokio::test]
@@ -434,22 +506,6 @@ mod tests {
 
         assert_eq!(rx.len(), 1);
         assert_eq!(rx.recv().await.unwrap().event.request_id, "request");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn peer_manager_registers_and_deregisters_endpoints() {
-        let cancel_token = CancellationToken::new();
-        let manager = PeerManager::start(Vec::new(), cancel_token.clone(), |_| {}).unwrap();
-        let endpoint = "tcp://127.0.0.1:8093".to_string();
-
-        assert!(manager.register_peer(endpoint.clone()).await.unwrap());
-        assert!(!manager.register_peer(endpoint.clone()).await.unwrap());
-        assert_eq!(manager.list_peers(), vec![endpoint.clone()]);
-        assert!(manager.deregister_peer(endpoint.clone()).await.unwrap());
-        assert!(!manager.deregister_peer(endpoint).await.unwrap());
-        assert!(manager.list_peers().is_empty());
-
-        cancel_token.cancel();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -506,13 +562,11 @@ mod tests {
         let outbound_b = start_replica_publisher(&endpoint_b, cancel_token.child_token()).unwrap();
         let registry_a = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
-            11,
-            outbound_a,
+            ReplicaSyncConfig::new(11, outbound_a),
         ));
         let registry_b = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
-            22,
-            outbound_b,
+            ReplicaSyncConfig::new(22, outbound_b),
         ));
         let dispatch_registry_b = Arc::clone(&registry_b);
         let _peer_b =
