@@ -55,6 +55,16 @@ pub struct TraceThroughputStats {
     /// `prefill_worker_seconds` at 0.0.
     pub prefill_worker_seconds: f64,
     pub decode_worker_seconds: f64,
+    /// GPUs per worker per role, derived from the mocker engine parallelism
+    /// (`MockEngineArgs::aic_gpus_per_worker` = aic_tp × aic_attention_dp); the
+    /// runtime sets it on the collector. 0 when not set (e.g. the online path).
+    pub prefill_gpus_per_worker: usize,
+    pub decode_gpus_per_worker: usize,
+    /// GPU-hours = Σ_role `worker_seconds × gpus_per_worker / 3600` — the
+    /// deployment's provisioned GPU-time (already including the startup ramp and
+    /// drain tail, since `*_worker_seconds` do). Computed in `finish()` straight
+    /// from the mocker's own worker parallelism, so it needs no external config.
+    pub gpu_hours: f64,
 }
 
 /// Goodput: throughput restricted to the requests that satisfy the SLA. Present
@@ -183,7 +193,7 @@ impl Serialize for TraceSimulationReport {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(67))?;
+        let mut map = serializer.serialize_map(Some(70))?;
         map.serialize_entry("num_requests", &self.request_counts.num_requests)?;
         map.serialize_entry(
             "completed_requests",
@@ -223,6 +233,15 @@ impl Serialize for TraceSimulationReport {
             "decode_worker_seconds",
             &self.throughput.decode_worker_seconds,
         )?;
+        map.serialize_entry(
+            "prefill_gpus_per_worker",
+            &self.throughput.prefill_gpus_per_worker,
+        )?;
+        map.serialize_entry(
+            "decode_gpus_per_worker",
+            &self.throughput.decode_gpus_per_worker,
+        )?;
+        map.serialize_entry("gpu_hours", &self.throughput.gpu_hours)?;
         if let Some(goodput) = &self.goodput {
             map.serialize_entry("goodput_completed_requests", &goodput.completed_requests)?;
             map.serialize_entry(
@@ -443,6 +462,10 @@ pub(crate) struct TraceCollector {
     /// integrate). When `Some`, `finish()` derives worker-seconds as
     /// `count × duration_s` instead of using the accumulator.
     static_worker_count: Option<(usize, usize)>,
+    /// GPUs per worker per role, from the mocker engine parallelism. Used in
+    /// `finish()` to turn worker-seconds into gpu_hours.
+    prefill_gpus_per_worker: usize,
+    decode_gpus_per_worker: usize,
 }
 
 impl TraceRequestStats {
@@ -508,6 +531,13 @@ impl TraceCollector {
     /// reports `count × duration_s` worker-seconds.
     pub(crate) fn set_static_worker_count(&mut self, prefill: usize, decode: usize) {
         self.static_worker_count = Some((prefill, decode));
+    }
+
+    /// Set GPUs-per-worker per role (from the mocker engine parallelism). Used
+    /// in `finish()` to derive gpu_hours from the worker-seconds.
+    pub(crate) fn set_gpus_per_worker(&mut self, prefill: usize, decode: usize) {
+        self.prefill_gpus_per_worker = prefill;
+        self.decode_gpus_per_worker = decode;
     }
 
     pub(crate) fn on_arrival(
@@ -619,6 +649,8 @@ impl TraceCollector {
         let static_worker_count = self.static_worker_count;
         let accumulated_prefill_worker_seconds = self.prefill_worker_seconds;
         let accumulated_decode_worker_seconds = self.decode_worker_seconds;
+        let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
+        let decode_gpus_per_worker = self.decode_gpus_per_worker;
         let requests = self.requests;
         let request_count = requests.len();
         let mut ttfts = Vec::with_capacity(request_count);
@@ -691,6 +723,11 @@ impl TraceCollector {
                 accumulated_decode_worker_seconds,
             ),
         };
+        // GPU-hours straight from the mocker's own worker parallelism (no
+        // external GPU-count config). 0 when gpus_per_worker was not set.
+        let gpu_hours = (prefill_worker_seconds * prefill_gpus_per_worker as f64
+            + decode_worker_seconds * decode_gpus_per_worker as f64)
+            / 3600.0;
         let itl_distribution = build_distribution_stats(itls);
         // Goodput only when an SLA was supplied; otherwise it is undefined.
         let goodput = sla.is_set().then(|| TraceGoodputStats {
@@ -715,6 +752,9 @@ impl TraceCollector {
                     / duration_s,
                 prefill_worker_seconds,
                 decode_worker_seconds,
+                prefill_gpus_per_worker,
+                decode_gpus_per_worker,
+                gpu_hours,
             },
             prefix_cache_reused_ratio: if total_input_tokens == 0 {
                 0.0
@@ -1147,6 +1187,21 @@ mod tests {
         let report = static_single.finish();
         assert!(report.throughput.prefill_worker_seconds.abs() < 1e-9);
         assert!((report.throughput.decode_worker_seconds - 0.2).abs() < 1e-9);
+    }
+
+    /// gpu_hours derives from worker-seconds x the per-role GPUs/worker that the
+    /// runtime records from the mocker's own parallelism.
+    #[test]
+    fn gpu_hours_from_worker_seconds_and_gpus_per_worker() {
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(2, 4); // prefill 2 GPUs/worker, decode 4
+        add_completed(&mut collector, 1, 0.0, 2, &[100.0, 200.0]);
+        collector.add_worker_seconds(10.0, 5.0); // prefill_ws=10, decode_ws=5
+        let report = collector.finish();
+        assert_eq!(report.throughput.prefill_gpus_per_worker, 2);
+        assert_eq!(report.throughput.decode_gpus_per_worker, 4);
+        // gpu_hours = (10*2 + 5*4) / 3600 = 40 / 3600
+        assert!((report.throughput.gpu_hours - 40.0 / 3600.0).abs() < 1e-9);
     }
 
     /// Records emerge in arrival-time order, so the JSONL file produced from

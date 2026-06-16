@@ -137,6 +137,7 @@ impl AggRuntime {
         router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
         let args = args.clone().normalized()?;
+        let decode_gpus_per_worker = args.aic_gpus_per_worker();
         let progress = ReplayProgress::new(admission.total_requests(), "offline replay");
         let router = match router_mode {
             ReplayRouterMode::RoundRobin => None,
@@ -163,6 +164,11 @@ impl AggRuntime {
         );
         engine.set_scaling_args(args, capture_kv_events);
 
+        // Aggregated replay has a single (decode) pool; record its GPUs/worker
+        // so the report can express GPU-hours from the mocker's own parallelism.
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(0, decode_gpus_per_worker);
+
         Ok(Self {
             now_ms: 0.0,
             next_worker_idx: 0,
@@ -170,7 +176,7 @@ impl AggRuntime {
             admission,
             requests: FxHashMap::default(),
             engine,
-            collector: TraceCollector::default(),
+            collector,
             events: BinaryHeap::new(),
             router,
             progress,

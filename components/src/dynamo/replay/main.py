@@ -522,23 +522,10 @@ def _run_planner_replay(
                             f"(prefill={len(prefill_fpms)}, decode={len(decode_fpms)})\n"
                         )
 
-    result = adapter.run()
-
-    # Surface true GPU-hours in the JSON report: the time-integrated provisioned
-    # worker-seconds (which already include the startup ramp and drain tail) x
-    # the per-engine GPU count. This is ungated, unlike the diagnostics-only
-    # `_cumulative_gpu_hours` (active-count based). Skipped when the per-engine
-    # GPU counts are not configured — the raw *_worker_seconds remain in the
-    # report for a consumer to scale by its own GPUs-per-worker.
-    gpu_p = planner_config.prefill_engine_num_gpu or 0
-    gpu_d = planner_config.decode_engine_num_gpu or 0
-    if gpu_p or gpu_d:
-        report = result.trace_report
-        result.trace_report["gpu_hours"] = (
-            report.get("prefill_worker_seconds", 0.0) * gpu_p
-            + report.get("decode_worker_seconds", 0.0) * gpu_d
-        ) / 3600.0
-    return result
+    # gpu_hours (and prefill/decode_gpus_per_worker) are computed in the mocker
+    # from its own worker parallelism (aic_tp x aic_attention_dp) and ride the
+    # report dict — no per-engine GPU count from the planner config is needed.
+    return adapter.run()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

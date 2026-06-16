@@ -70,6 +70,7 @@ impl SingleRuntime {
         // `finish()` derives worker-seconds as 1 × duration_s.
         let mut collector = TraceCollector::default();
         collector.set_static_worker_count(0, 1);
+        collector.set_gpus_per_worker(0, args.aic_gpus_per_worker());
         Self {
             current_time_ms: 0.0,
             admission,

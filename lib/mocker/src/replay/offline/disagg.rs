@@ -187,6 +187,14 @@ impl DisaggRuntime {
         );
         decode_engine.set_scaling_args(config.decode_args.clone(), false);
 
+        // Record each pool's GPUs/worker from its engine parallelism so the
+        // report can express GPU-hours from the mocker's own config.
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(
+            config.prefill_args.aic_gpus_per_worker(),
+            config.decode_args.aic_gpus_per_worker(),
+        );
+
         Ok(Self {
             now_ms: 0.0,
             next_prefill_worker_idx: 0,
@@ -198,7 +206,7 @@ impl DisaggRuntime {
             prefill_router,
             decode_router,
             requests: HashMap::new(),
-            collector: TraceCollector::default(),
+            collector,
             events: BinaryHeap::new(),
             progress,
             #[cfg(test)]
