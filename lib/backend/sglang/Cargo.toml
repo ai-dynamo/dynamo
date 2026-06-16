@@ -18,6 +18,7 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+local-ip-address = { version = "0.6.3" }
 prost = { version = "0.13.5" }
 prost-types = { version = "0.13.5" }
 rand = { workspace = true }

@@ -7,7 +7,6 @@
 # GPUs: 2
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
@@ -25,7 +24,11 @@ DECODE_COMPONENT="${DECODE_COMPONENT:-backend}"
 
 print_launch_banner "Launching Disaggregated SGLang gRPC Serving (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
+require_sglang_enable_dynamo
+
 FRONTEND_MODEL_PATH="$(resolve_local_model_dir "$MODEL")"
+
+trap 'echo Cleaning up...; kill 0' EXIT
 
 python3 -m dynamo.frontend \
     --model-name "$MODEL" \

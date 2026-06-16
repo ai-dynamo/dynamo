@@ -81,6 +81,7 @@ impl SglangBackend {
             served_model_name: args.served_model_name,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
+            disaggregation_mode: args.common.disaggregation_mode,
             ..Default::default()
         };
         Ok((engine, config))
@@ -430,9 +431,7 @@ impl LLMEngine for SglangBackend {
             let port = info.bootstrap_port.ok_or_else(|| {
                 backend_error("GetServerInfo.disaggregation_bootstrap_port missing")
             })?;
-            let host = info
-                .bootstrap_host
-                .unwrap_or_else(|| "127.0.0.1".to_string());
+            let host = advertised_bootstrap_host(info.bootstrap_host, local_bootstrap_host());
             let _ = self.bootstrap.set((host, port));
         }
 
@@ -644,6 +643,74 @@ fn truthy_env(name: &str) -> bool {
     )
 }
 
+fn local_bootstrap_host() -> Option<String> {
+    std::env::var("SGLANG_HOST_IP")
+        .ok()
+        .or_else(|| std::env::var("HOST_IP").ok())
+        .and_then(|host| normalize_host(host.trim()))
+        .or_else(|| local_ip_address::local_ip().ok().map(format_ip_host))
+        .or_else(|| local_ip_address::local_ipv6().ok().map(format_ip_host))
+}
+
+fn advertised_bootstrap_host(
+    reported_host: Option<String>,
+    detected_local_host: Option<String>,
+) -> String {
+    let detected = detected_local_host.and_then(|host| normalize_host(host.trim()));
+    if let Some(reported) = reported_host.and_then(|host| normalize_host(host.trim())) {
+        if !is_non_routable_host(&reported) {
+            return reported;
+        }
+        if let Some(local) = detected.filter(|host| !is_non_routable_host(host)) {
+            tracing::warn!(
+                reported_bootstrap_host = %reported,
+                advertised_bootstrap_host = %local,
+                "SGLang reported a non-routable bootstrap host; advertising detected local host"
+            );
+            return local;
+        }
+        return reported;
+    }
+
+    detected.unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn normalize_host(host: &str) -> Option<String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    match host.parse() {
+        Ok(ip) => Some(format_ip_host(ip)),
+        Err(_) => Some(host.to_string()),
+    }
+}
+
+fn format_ip_host(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(_) => ip.to_string(),
+        std::net::IpAddr::V6(_) => format!("[{ip}]"),
+    }
+}
+
+fn is_non_routable_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_unspecified() || ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
 fn invalid_arg(msg: impl Into<String>) -> DynamoError {
     DynamoError::builder()
         .error_type(ErrorType::Backend(BackendError::InvalidArgument))
@@ -703,6 +770,65 @@ mod tests {
 
         assert_eq!(config.model_name, "/models/qwen");
         assert_eq!(config.served_model_name.as_deref(), Some("qwen-public"));
+    }
+
+    #[test]
+    fn backend_args_set_worker_disaggregation_mode() {
+        let (_engine, config) = SglangBackend::from_argv(vec![
+            "dynamo-sglang".to_string(),
+            "--disaggregation-mode".to_string(),
+            "prefill".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(config.disaggregation_mode, DisaggregationMode::Prefill);
+
+        let (_engine, config) = SglangBackend::from_argv(vec![
+            "dynamo-sglang".to_string(),
+            "--disaggregation-mode".to_string(),
+            "decode".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(config.disaggregation_mode, DisaggregationMode::Decode);
+    }
+
+    #[test]
+    fn bootstrap_host_prefers_reported_routable_host() {
+        assert_eq!(
+            advertised_bootstrap_host(Some("10.0.0.8".to_string()), Some("10.0.0.9".to_string())),
+            "10.0.0.8"
+        );
+    }
+
+    #[test]
+    fn bootstrap_host_replaces_unspecified_or_loopback_with_local_host() {
+        for reported in ["0.0.0.0", "127.0.0.1", "localhost", "::", "[::1]"] {
+            assert_eq!(
+                advertised_bootstrap_host(Some(reported.to_string()), Some("10.0.0.9".to_string())),
+                "10.0.0.9"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_host_uses_detected_host_when_sglang_reports_none() {
+        assert_eq!(
+            advertised_bootstrap_host(None, Some("10.0.0.9".to_string())),
+            "10.0.0.9"
+        );
+    }
+
+    #[test]
+    fn bootstrap_host_formats_ipv6_with_brackets() {
+        assert_eq!(
+            advertised_bootstrap_host(Some("2001:db8::1".to_string()), None),
+            "[2001:db8::1]"
+        );
+        assert_eq!(
+            advertised_bootstrap_host(None, Some("2001:db8::2".to_string())),
+            "[2001:db8::2]"
+        );
     }
 }
 

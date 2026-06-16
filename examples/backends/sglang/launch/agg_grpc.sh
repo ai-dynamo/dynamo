@@ -7,7 +7,6 @@
 # GPUs: 1
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
@@ -19,8 +18,12 @@ SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-40000}"
 
 print_launch_banner "Launching Aggregated SGLang gRPC Serving" "$MODEL" "$HTTP_PORT"
 
+require_sglang_enable_dynamo
+
 # dynamo.frontend's preprocessor needs a local dir to load the tokenizer from.
 FRONTEND_MODEL_PATH="$(resolve_local_model_dir "$MODEL")"
+
+trap 'echo Cleaning up...; kill 0' EXIT
 
 python3 -m dynamo.frontend \
     --model-name "$MODEL" \
