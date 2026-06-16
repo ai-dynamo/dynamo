@@ -12,6 +12,11 @@ from dynamo.replay import run_synthetic_trace_replay
 
 from .replay_utils import _write_trace_and_args
 
+# Tests in this file drive the Rust AIC callback, which imports
+# aiconfigurator.sdk.engine (Phase 1.5 compile_engine API). Skip if absent —
+# PyPI aiconfigurator releases predating PR #1200 don't ship it.
+pytest.importorskip("aiconfigurator.sdk.engine")
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,

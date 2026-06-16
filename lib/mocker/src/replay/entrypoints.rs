@@ -18,6 +18,26 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
+use crate::scheduler::RouterEventVisibility;
+
+/// Replay artifact KV-event timestamp visibility override.
+///
+/// This is intended for parity tests that need to normalize event visibility
+/// across mock engines while leaving each engine's production default intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayKvEventVisibility {
+    PassStart,
+    PassEnd,
+}
+
+impl From<ReplayKvEventVisibility> for RouterEventVisibility {
+    fn from(visibility: ReplayKvEventVisibility) -> Self {
+        match visibility {
+            ReplayKvEventVisibility::PassStart => Self::PassStart,
+            ReplayKvEventVisibility::PassEnd => Self::PassEnd,
+        }
+    }
+}
 
 fn load_trace_from_file(
     trace_path: &Path,
@@ -82,6 +102,20 @@ pub fn generate_trace_worker_artifacts_offline(
 ) -> Result<ReplayWorkerArtifacts> {
     let args = args.normalized()?;
     crate::replay::offline::generate_trace_worker_artifacts(args, trace)
+}
+
+/// Generate offline replay artifacts with a test visibility override for KV events.
+pub fn generate_trace_worker_artifacts_offline_with_kv_event_visibility(
+    args: MockEngineArgs,
+    trace: Trace,
+    visibility: ReplayKvEventVisibility,
+) -> Result<ReplayWorkerArtifacts> {
+    let args = args.normalized()?;
+    crate::replay::offline::generate_trace_worker_artifacts_with_visibility(
+        args,
+        trace,
+        Some(visibility.into()),
+    )
 }
 
 pub fn simulate_trace_file(

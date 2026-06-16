@@ -8,7 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.agent_trace.convert_to_perfetto import convert_records  # noqa: E402
+from benchmarks.request_trace.convert_to_perfetto import convert_records  # noqa: E402
 
 
 def check_convert_records_emits_request_stages_and_metadata():
@@ -17,12 +17,12 @@ def check_convert_records_emits_request_stages_and_metadata():
             {
                 "timestamp": 10,
                 "event": {
-                    "schema": "dynamo.agent.trace.v1",
+                    "schema": "dynamo.request.trace.v1",
                     "event_type": "request_end",
                     "event_time_unix_ms": 2000,
                     "event_source": "dynamo",
                     "agent_context": {
-                        "session_type_id": "ms_agent",
+                        "session_type_id": "agent_harness",
                         "session_id": "session-1",
                         "trajectory_id": "session-1:researcher",
                     },
@@ -113,7 +113,7 @@ def check_convert_records_can_emit_stages_on_separate_tracks():
         [
             {
                 "event": {
-                    "schema": "dynamo.agent.trace.v1",
+                    "schema": "dynamo.request.trace.v1",
                     "event_type": "request_end",
                     "event_time_unix_ms": 1050,
                     "agent_context": {
@@ -158,12 +158,100 @@ def check_convert_records_can_emit_stages_on_separate_tracks():
     ]
 
 
+def check_convert_records_accepts_enriched_request_trace_schema():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "request_end",
+                    "event_time_unix_ms": 1050,
+                    "event_source": "dynamo",
+                    "agent_context": {
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:researcher",
+                    },
+                    "request": {
+                        "request_id": "req-1",
+                        "model": "test-model",
+                        "request_received_ms": 1000,
+                        "total_time_ms": 50,
+                        "output_tokens": 4,
+                    },
+                },
+            },
+            {
+                "event": {
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "tool_end",
+                    "event_time_unix_ms": 1100,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "session_id": "session-1",
+                        "trajectory_id": "session-1:researcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "shell",
+                        "started_at_unix_ms": 1060,
+                        "ended_at_unix_ms": 1100,
+                        "status": "succeeded",
+                    },
+                },
+            },
+        ],
+        include_stages=False,
+        include_markers=False,
+    )
+
+    assert converted == 2
+    categories = {event.get("cat") for event in trace["traceEvents"]}
+    assert "dynamo.llm" in categories
+    assert "dynamo.agent.tool" in categories
+
+
+def check_convert_records_accepts_context_free_request_trace_schema():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "request_end",
+                    "event_time_unix_ms": 1050,
+                    "request": {
+                        "request_id": "req-plain",
+                        "model": "test-model",
+                        "request_received_ms": 1000,
+                        "total_time_ms": 50,
+                        "output_tokens": 4,
+                    },
+                },
+            }
+        ],
+        include_stages=False,
+        include_markers=False,
+    )
+
+    assert converted == 1
+    request = next(
+        event for event in trace["traceEvents"] if event.get("cat") == "dynamo.llm"
+    )
+    assert request["name"] == "LLM request: test-model"
+    assert request["args"]["request_id"] == "req-plain"
+    thread_names = [
+        event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event.get("name") == "thread_name"
+    ]
+    assert thread_names == ["request-only"]
+
+
 def check_convert_records_clamps_stage_rounding_overlap():
     trace, _ = convert_records(
         [
             {
                 "event": {
-                    "schema": "dynamo.agent.trace.v1",
+                    "schema": "dynamo.request.trace.v1",
                     "event_type": "request_end",
                     "event_time_unix_ms": 49_743.776002,
                     "agent_context": {
@@ -209,11 +297,11 @@ def check_convert_records_splits_overlapping_trajectory_requests_into_lanes():
     def record(request_id: str, start_ms: int, total_ms: int):
         return {
             "event": {
-                "schema": "dynamo.agent.trace.v1",
+                "schema": "dynamo.request.trace.v1",
                 "event_type": "request_end",
                 "event_time_unix_ms": start_ms + total_ms,
                 "agent_context": {
-                    "session_type_id": "ms_agent",
+                    "session_type_id": "agent_harness",
                     "session_id": "session-1",
                     "trajectory_id": "session-1:searcher",
                 },
@@ -263,12 +351,12 @@ def check_convert_records_emits_tool_duration_slices():
         [
             {
                 "event": {
-                    "schema": "dynamo.agent.trace.v1",
+                    "schema": "dynamo.request.trace.v1",
                     "event_type": "tool_end",
                     "event_time_unix_ms": 1300,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_type_id": "ms_agent",
+                        "session_type_id": "agent_harness",
                         "session_id": "session-1",
                         "trajectory_id": "session-1:searcher",
                     },
@@ -317,7 +405,7 @@ def check_convert_records_pairs_tool_start_and_end_without_duration():
         [
             {
                 "event": {
-                    "schema": "dynamo.agent.trace.v1",
+                    "schema": "dynamo.request.trace.v1",
                     "event_type": "tool_start",
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
@@ -334,7 +422,7 @@ def check_convert_records_pairs_tool_start_and_end_without_duration():
             },
             {
                 "event": {
-                    "schema": "dynamo.agent.trace.v1",
+                    "schema": "dynamo.request.trace.v1",
                     "event_type": "tool_end",
                     "event_time_unix_ms": 1250,
                     "event_source": "harness",
@@ -374,7 +462,7 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
         [
             {
                 "event": {
-                    "schema": "dynamo.agent.trace.v1",
+                    "schema": "dynamo.request.trace.v1",
                     "event_type": "tool_start",
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
@@ -391,7 +479,7 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
             },
             {
                 "event": {
-                    "schema": "dynamo.agent.trace.v1",
+                    "schema": "dynamo.request.trace.v1",
                     "event_type": "tool_end",
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
@@ -434,6 +522,8 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
 CHECKS = [
     check_convert_records_emits_request_stages_and_metadata,
     check_convert_records_can_emit_stages_on_separate_tracks,
+    check_convert_records_accepts_enriched_request_trace_schema,
+    check_convert_records_accepts_context_free_request_trace_schema,
     check_convert_records_clamps_stage_rounding_overlap,
     check_convert_records_splits_overlapping_trajectory_requests_into_lanes,
     check_convert_records_emits_tool_duration_slices,

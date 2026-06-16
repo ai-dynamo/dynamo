@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo LLM integration helpers for agent trace records.
+//! Dynamo LLM integration helpers for agent-context request trace records.
 
 use std::collections::HashMap;
-#[cfg(test)]
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -13,22 +11,19 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
-#[cfg(test)]
-use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 
-use crate::agents::context::AgentContext;
-use crate::agents::trace::{
-    AgentReplayMetrics, AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy,
-    AgentTraceRecord, DEFAULT_TOOL_EVENTS_TOPIC, FinishReasonMetadata, ToolCallMetadata,
-    WorkerInfo,
-};
 use crate::local_model::LocalModel;
 use crate::protocols::common::FinishReason as BackendFinishReason;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
-    chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
+    chat_completions::NvCreateChatCompletionStreamResponse,
+    completions::NvCreateCompletionResponse, nvext::AgentContext,
+};
+use crate::request_trace::{
+    DEFAULT_TOOL_EVENTS_TOPIC, FinishReasonMetadata, RequestReplayMetrics, RequestTraceMetrics,
+    RequestTraceWorkerInfo, ToolCallMetadata, tool_relay::ToolEventRelay,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -54,7 +49,7 @@ impl SharedFinishReasonMetadata {
         self.state.lock()
     }
 
-    #[cfg(feature = "agent-trace-bench")]
+    #[cfg(feature = "request-trace-bench")]
     #[doc(hidden)]
     pub fn record_tool_call_chunk_for_bench(
         &self,
@@ -67,7 +62,7 @@ impl SharedFinishReasonMetadata {
             .record_tool_call_chunk(choice_index, tool_call_index, id, name);
     }
 
-    #[cfg(feature = "agent-trace-bench")]
+    #[cfg(feature = "request-trace-bench")]
     #[doc(hidden)]
     pub fn snapshot_for_bench(&self) -> Option<FinishReasonMetadata> {
         self.lock().snapshot()
@@ -165,7 +160,7 @@ impl FinishReasonMetadataState {
     }
 }
 
-/// Record token counts needed by agent trace request-end records.
+/// Record token counts needed by agent-context request trace records.
 ///
 /// Callers should gate this once per request so the response path only pays a
 /// cheap boolean branch for untraced requests.
@@ -188,7 +183,7 @@ pub(crate) fn record_llm_metric_tokens(
     tracker.record_osl(output_tokens);
 }
 
-static TOOL_EVENT_INGEST_STARTED: AtomicBool = AtomicBool::new(false);
+static REQUEST_TRACE_TOOL_EVENT_INGEST_STARTED: AtomicBool = AtomicBool::new(false);
 static TOOL_EVENT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn request_metrics(
@@ -196,21 +191,23 @@ pub(crate) fn request_metrics(
     x_request_id: Option<String>,
     model: String,
     tracker: Option<&RequestTracker>,
-) -> AgentRequestMetrics {
+) -> RequestTraceMetrics {
     let timing = tracker.map(RequestTracker::get_timing_info);
     let worker = tracker.and_then(|tracker| {
-        tracker.get_worker_info().map(|worker| WorkerInfo {
-            prefill_worker_id: worker.prefill_worker_id,
-            prefill_dp_rank: worker.prefill_dp_rank,
-            decode_worker_id: worker.decode_worker_id,
-            decode_dp_rank: worker.decode_dp_rank,
-        })
+        tracker
+            .get_worker_info()
+            .map(|worker| RequestTraceWorkerInfo {
+                prefill_worker_id: worker.prefill_worker_id,
+                prefill_dp_rank: worker.prefill_dp_rank,
+                decode_worker_id: worker.decode_worker_id,
+                decode_dp_rank: worker.decode_dp_rank,
+            })
     });
 
-    AgentRequestMetrics {
+    RequestTraceMetrics {
         request_id,
         x_request_id,
-        model,
+        model: Some(model),
         input_tokens: tracker.and_then(|tracker| tracker.isl_tokens().map(|v| v as u64)),
         output_tokens: tracker.map(RequestTracker::osl_tokens),
         cached_tokens: tracker.and_then(|tracker| tracker.cached_tokens().map(|v| v as u64)),
@@ -235,24 +232,20 @@ pub(crate) fn request_metrics(
     }
 }
 
-pub(crate) struct AgentTraceRequestEndState {
+#[derive(Clone)]
+pub(crate) struct AgentContextTraceState {
     pub agent_context: AgentContext,
     pub request_model: String,
     pub request_tracker: Option<Arc<RequestTracker>>,
     pub x_request_id: Option<String>,
-    pub replay_metrics: Option<Arc<AgentReplayMetrics>>,
     pub finish_reason_metadata: SharedFinishReasonMetadata,
 }
 
-pub(crate) fn build_agent_trace_request_end_state(
+pub(crate) fn build_agent_context_trace_state(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
-    replay_metrics: Option<Arc<AgentReplayMetrics>>,
-) -> Option<AgentTraceRequestEndState> {
-    if !super::is_enabled() {
-        return None;
-    }
+) -> Option<AgentContextTraceState> {
     let agent_context = common_request.agent_context.clone()?;
     let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
         .and_then(|c| c.x_request_id)
@@ -262,23 +255,13 @@ pub(crate) fn build_agent_trace_request_end_state(
                 .ok()
                 .map(|v| v.as_ref().clone())
         });
-    Some(AgentTraceRequestEndState {
+    Some(AgentContextTraceState {
         agent_context,
         request_model: common_request.model.clone(),
         request_tracker: tracker.clone(),
         x_request_id,
-        replay_metrics,
         finish_reason_metadata: SharedFinishReasonMetadata::default(),
     })
-}
-
-#[cfg(test)]
-pub(crate) fn finish_reason_metadata_handle(
-    trace_state: &Option<AgentTraceRequestEndState>,
-) -> Option<SharedFinishReasonMetadata> {
-    trace_state
-        .as_ref()
-        .map(|state| state.finish_reason_metadata.clone())
 }
 
 pub(crate) fn record_backend_finish_reason_metadata(
@@ -371,16 +354,15 @@ fn snapshot_finish_reason_metadata(
     finish_reason_metadata.lock().snapshot()
 }
 
-pub(crate) fn emit_agent_trace_request_end(
-    trace_state: AgentTraceRequestEndState,
+pub(crate) fn request_metrics_from_agent_state(
+    trace_state: AgentContextTraceState,
     request_id: String,
-) {
-    let AgentTraceRequestEndState {
+) -> (AgentContext, RequestTraceMetrics) {
+    let AgentContextTraceState {
         agent_context,
         request_model,
         request_tracker,
         x_request_id,
-        replay_metrics,
         finish_reason_metadata,
     } = trace_state;
 
@@ -396,88 +378,33 @@ pub(crate) fn emit_agent_trace_request_end(
         request_model,
         request_tracker.as_deref(),
     );
-    metrics.replay = replay_metrics.map(into_owned_replay_metrics);
     metrics.finish_reason_metadata = snapshot_finish_reason_metadata(&finish_reason_metadata);
-    super::emit_request_end(agent_context, metrics);
+    (agent_context, metrics)
 }
 
 pub(crate) fn into_owned_replay_metrics(
-    replay_metrics: Arc<AgentReplayMetrics>,
-) -> AgentReplayMetrics {
+    replay_metrics: Arc<RequestReplayMetrics>,
+) -> RequestReplayMetrics {
     Arc::try_unwrap(replay_metrics).unwrap_or_else(|shared| shared.as_ref().clone())
 }
 
-#[cfg(test)]
-pub(crate) fn wrap_agent_trace_request_end_stream<Resp>(
-    stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
-    trace_state: Option<AgentTraceRequestEndState>,
-    request_id: String,
-) -> Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>
-where
-    Resp: Send + 'static,
-{
-    let Some(trace_state) = trace_state else {
-        return stream;
-    };
-
-    let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(stream);
-    tokio::spawn(async move {
-        done_fut.await;
-        emit_agent_trace_request_end(trace_state, request_id);
-    });
-    stream
-}
-
-#[cfg(test)]
-pub(crate) fn wrap_agent_trace_chat_request_end_stream(
-    stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
-    trace_state: Option<AgentTraceRequestEndState>,
-    request_id: String,
-) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
-    let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
-        return wrap_agent_trace_request_end_stream(stream, trace_state, request_id);
-    };
-
-    let stream = stream.map(move |response| {
-        record_chat_finish_reason_metadata(&finish_reason_metadata, &response);
-        response
-    });
-    wrap_agent_trace_request_end_stream(Box::pin(stream), trace_state, request_id)
-}
-
-#[cfg(test)]
-pub(crate) fn wrap_agent_trace_completion_request_end_stream(
-    stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>,
-    trace_state: Option<AgentTraceRequestEndState>,
-    request_id: String,
-) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>> {
-    let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
-        return wrap_agent_trace_request_end_stream(stream, trace_state, request_id);
-    };
-
-    let stream = stream.map(move |response| {
-        record_completion_finish_reason_metadata(&finish_reason_metadata, &response);
-        response
-    });
-    wrap_agent_trace_request_end_stream(Box::pin(stream), trace_state, request_id)
-}
-
-pub(crate) async fn start_tool_event_ingest_from_policy(
+pub(crate) async fn start_request_trace_tool_event_ingest(
     drt: DistributedRuntime,
     local_model: &LocalModel,
+    zmq_endpoint: Option<String>,
+    zmq_topic: Option<String>,
 ) -> anyhow::Result<()> {
-    let policy = super::policy();
-    if policy.tool_events_zmq_endpoint.is_none() {
+    let Some(zmq_endpoint) = zmq_endpoint else {
         return Ok(());
-    }
+    };
 
-    start_tool_event_relay_from_policy(drt.clone(), local_model, policy).await?;
+    start_tool_event_relay(drt.clone(), local_model, zmq_endpoint, zmq_topic).await?;
 
-    if TOOL_EVENT_INGEST_STARTED
+    if REQUEST_TRACE_TOOL_EVENT_INGEST_STARTED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        tracing::debug!("agent tool event ingest already started");
+        tracing::debug!("request trace tool event ingest already started");
         return Ok(());
     }
 
@@ -486,13 +413,13 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
         let namespace = drt.namespace(namespace_name.clone())?;
         EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
             .await
-            .map(|sub| sub.typed::<AgentTraceRecord>())
+            .map(|sub| sub.typed::<crate::request_trace::RequestTraceRecord>())
     }
     .await
     {
         Ok(subscriber) => subscriber,
         Err(error) => {
-            TOOL_EVENT_INGEST_STARTED.store(false, Ordering::Release);
+            REQUEST_TRACE_TOOL_EVENT_INGEST_STARTED.store(false, Ordering::Release);
             return Err(error);
         }
     };
@@ -502,50 +429,48 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
         tracing::info!(
             namespace = %namespace_name,
             topic = DEFAULT_TOOL_EVENTS_TOPIC,
-            "Agent tool event ingest started"
+            "Request trace tool event ingest started"
         );
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
-                    tracing::debug!("agent tool event ingest stopping");
+                    tracing::debug!("request trace tool event ingest stopping");
                     break;
                 }
                 next = subscriber.next() => {
                     match next {
                         Some(Ok((_envelope, record))) => {
-                            super::publish_tool_record(record);
+                            crate::request_trace::publish_tool_record(record);
                         }
                         Some(Err(error)) => {
-                            tracing::warn!(%error, "agent tool event ingest failed to decode event");
+                            tracing::warn!(%error, "request trace tool event ingest failed to decode event");
                         }
                         None => {
-                            tracing::warn!("agent tool event ingest stream ended");
+                            tracing::warn!("request trace tool event ingest stream ended");
                             break;
                         }
                     }
                 }
             }
         }
-        TOOL_EVENT_INGEST_STARTED.store(false, Ordering::Release);
-        tracing::info!("agent tool event ingest stopped");
+        REQUEST_TRACE_TOOL_EVENT_INGEST_STARTED.store(false, Ordering::Release);
+        tracing::info!("request trace tool event ingest stopped");
     });
 
     Ok(())
 }
 
-async fn start_tool_event_relay_from_policy(
+async fn start_tool_event_relay(
     drt: DistributedRuntime,
     local_model: &LocalModel,
-    policy: &AgentTracePolicy,
+    zmq_endpoint: String,
+    zmq_topic: Option<String>,
 ) -> anyhow::Result<()> {
-    let Some(zmq_endpoint) = policy.tool_events_zmq_endpoint.clone() else {
-        return Ok(());
-    };
     if TOOL_EVENT_RELAY_STARTED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        tracing::debug!("agent tool event relay already started");
+        tracing::debug!("request trace tool event relay already started");
         return Ok(());
     }
 
@@ -553,10 +478,10 @@ async fn start_tool_event_relay_from_policy(
     let relay = match async {
         let namespace = drt.namespace(namespace_name.clone())?;
         let component = namespace.component(local_model.endpoint_id().component.clone())?;
-        AgentToolEventRelay::start(
+        ToolEventRelay::start(
             component,
             zmq_endpoint.clone(),
-            policy.tool_events_zmq_topic.clone(),
+            zmq_topic,
             Some(namespace_name.clone()),
             Some(DEFAULT_TOOL_EVENTS_TOPIC.to_string()),
         )
@@ -576,12 +501,12 @@ async fn start_tool_event_relay_from_policy(
             namespace = %namespace_name,
             topic = DEFAULT_TOOL_EVENTS_TOPIC,
             zmq_endpoint = %zmq_endpoint,
-            "Agent tool event relay started"
+            "Request trace tool event relay started"
         );
         shutdown.cancelled().await;
         relay.shutdown();
         TOOL_EVENT_RELAY_STARTED.store(false, Ordering::Release);
-        tracing::info!("agent tool event relay stopped");
+        tracing::info!("request trace tool event relay stopped");
     });
 
     Ok(())
@@ -598,29 +523,25 @@ fn tool_events_namespace(local_model: &LocalModel) -> String {
 mod tests {
     use std::{thread, time::Duration};
 
-    use dynamo_runtime::protocols::annotated::Annotated;
-    use futures::StreamExt;
-
-    use crate::agents::context::AgentContext;
-    use crate::agents::trace::TraceEventType;
     use crate::protocols::common::{
         self,
         timing::{RequestTracker, WORKER_TYPE_DECODE},
     };
     use crate::protocols::openai::{
         chat_completions::NvCreateChatCompletionStreamResponse,
-        completions::NvCreateCompletionResponse,
+        completions::NvCreateCompletionResponse, nvext::AgentContext,
     };
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
         Choice, CompletionFinishReason, CreateChatCompletionStreamResponse,
         CreateCompletionResponse, FinishReason, FunctionCallStream, StopReason,
     };
+    use dynamo_runtime::protocols::annotated::Annotated;
 
     use super::{
-        AgentTraceRequestEndState, SharedFinishReasonMetadata,
-        record_backend_finish_reason_metadata, request_metrics,
-        wrap_agent_trace_chat_request_end_stream, wrap_agent_trace_completion_request_end_stream,
+        AgentContextTraceState, SharedFinishReasonMetadata, record_backend_finish_reason_metadata,
+        record_chat_finish_reason_metadata, record_completion_finish_reason_metadata,
+        request_metrics, request_metrics_from_agent_state,
     };
 
     #[test]
@@ -649,7 +570,7 @@ mod tests {
 
         assert_eq!(metrics.request_id, "req-1");
         assert_eq!(metrics.x_request_id.as_deref(), Some("llm-call-1"));
-        assert_eq!(metrics.model, "test-model");
+        assert_eq!(metrics.model.as_deref(), Some("test-model"));
         assert_eq!(metrics.input_tokens, Some(128));
         assert_eq!(metrics.output_tokens, Some(5));
         assert_eq!(metrics.cached_tokens, Some(32));
@@ -681,7 +602,7 @@ mod tests {
 
         assert_eq!(metrics.request_id, "req-1");
         assert_eq!(metrics.x_request_id.as_deref(), Some("llm-call-1"));
-        assert_eq!(metrics.model, "test-model");
+        assert_eq!(metrics.model.as_deref(), Some("test-model"));
         assert_eq!(metrics.input_tokens, None);
         assert_eq!(metrics.output_tokens, None);
         assert_eq!(metrics.cached_tokens, None);
@@ -700,9 +621,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_chat_request_end_records_finish_reason_metadata() {
-        super::super::BUS.init(16);
-        let mut rx = super::super::BUS.subscribe();
-
         let finish_reason_metadata = SharedFinishReasonMetadata::default();
         record_backend_finish_reason_metadata(
             Some(&finish_reason_metadata),
@@ -711,9 +629,9 @@ mod tests {
             Some(&StopReason::String("END".to_string())),
         );
 
-        let trace_state = AgentTraceRequestEndState {
+        let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
-                session_type_id: "ms_agent".to_string(),
+                session_type_id: "agent_harness".to_string(),
                 session_id: "run-finish".to_string(),
                 trajectory_id: "run-finish:agent".to_string(),
                 parent_trajectory_id: None,
@@ -722,11 +640,10 @@ mod tests {
             request_model: "test-model".to_string(),
             request_tracker: None,
             x_request_id: Some("llm-call-1".to_string()),
-            replay_metrics: None,
             finish_reason_metadata,
         };
 
-        let stream = futures::stream::iter(vec![
+        let responses = vec![
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
                 inner: CreateChatCompletionStreamResponse {
                     id: "chatcmpl-1".to_string(),
@@ -785,32 +702,13 @@ mod tests {
                 },
                 nvext: None,
             }),
-        ]);
-
-        let wrapped = wrap_agent_trace_chat_request_end_stream(
-            Box::pin(stream),
-            Some(trace_state),
-            "req-finish".to_string(),
-        );
-        let responses: Vec<_> = wrapped.collect().await;
+        ];
+        for response in &responses {
+            record_chat_finish_reason_metadata(&trace_state.finish_reason_metadata, response);
+        }
         assert_eq!(responses.len(), 2);
 
-        let record = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let record = rx.recv().await.expect("trace record should publish");
-                if record.event_type == TraceEventType::RequestEnd
-                    && record
-                        .request
-                        .as_ref()
-                        .is_some_and(|request| request.request_id == "req-finish")
-                {
-                    break record;
-                }
-            }
-        })
-        .await
-        .expect("trace record for req-finish should publish");
-        let request = record.request.expect("request metrics should be present");
+        let (_, request) = request_metrics_from_agent_state(trace_state, "req-finish".to_string());
         let metadata = request
             .finish_reason_metadata
             .expect("finish metadata should be recorded");
@@ -839,9 +737,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_completion_request_end_records_finish_reason_metadata() {
-        super::super::BUS.init(16);
-        let mut rx = super::super::BUS.subscribe();
-
         let finish_reason_metadata = SharedFinishReasonMetadata::default();
         record_backend_finish_reason_metadata(
             Some(&finish_reason_metadata),
@@ -850,9 +745,9 @@ mod tests {
             Some(&StopReason::String("END".to_string())),
         );
 
-        let trace_state = AgentTraceRequestEndState {
+        let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
-                session_type_id: "ms_agent".to_string(),
+                session_type_id: "agent_harness".to_string(),
                 session_id: "run-completion-finish".to_string(),
                 trajectory_id: "run-completion-finish:agent".to_string(),
                 parent_trajectory_id: None,
@@ -861,53 +756,33 @@ mod tests {
             request_model: "test-model".to_string(),
             request_tracker: None,
             x_request_id: Some("completion-call-1".to_string()),
-            replay_metrics: None,
             finish_reason_metadata,
         };
 
-        let stream =
-            futures::stream::iter(vec![Annotated::from_data(NvCreateCompletionResponse {
-                inner: CreateCompletionResponse {
-                    id: "cmpl-1".to_string(),
-                    object: "text_completion".to_string(),
-                    created: 0,
-                    model: "test-model".to_string(),
-                    system_fingerprint: None,
-                    choices: vec![Choice {
-                        text: "".to_string(),
-                        index: 0,
-                        logprobs: None,
-                        finish_reason: Some(CompletionFinishReason::Length),
-                    }],
-                    usage: None,
-                },
-                nvext: None,
-            })]);
-
-        let wrapped = wrap_agent_trace_completion_request_end_stream(
-            Box::pin(stream),
-            Some(trace_state),
-            "req-completion-finish".to_string(),
-        );
-        let responses: Vec<_> = wrapped.collect().await;
+        let responses = vec![Annotated::from_data(NvCreateCompletionResponse {
+            inner: CreateCompletionResponse {
+                id: "cmpl-1".to_string(),
+                object: "text_completion".to_string(),
+                created: 0,
+                model: "test-model".to_string(),
+                system_fingerprint: None,
+                choices: vec![Choice {
+                    text: "".to_string(),
+                    index: 0,
+                    logprobs: None,
+                    finish_reason: Some(CompletionFinishReason::Length),
+                }],
+                usage: None,
+            },
+            nvext: None,
+        })];
+        for response in &responses {
+            record_completion_finish_reason_metadata(&trace_state.finish_reason_metadata, response);
+        }
         assert_eq!(responses.len(), 1);
 
-        let record = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let record = rx.recv().await.expect("trace record should publish");
-                if record.event_type == TraceEventType::RequestEnd
-                    && record
-                        .request
-                        .as_ref()
-                        .is_some_and(|request| request.request_id == "req-completion-finish")
-                {
-                    break record;
-                }
-            }
-        })
-        .await
-        .expect("trace record for req-completion-finish should publish");
-        let request = record.request.expect("request metrics should be present");
+        let (_, request) =
+            request_metrics_from_agent_state(trace_state, "req-completion-finish".to_string());
         let metadata = request
             .finish_reason_metadata
             .expect("finish metadata should be recorded");

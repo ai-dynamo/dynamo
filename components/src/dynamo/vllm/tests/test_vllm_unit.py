@@ -345,6 +345,8 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         model="Qwen/Qwen3-0.6B",
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
         component="backend",
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
     )
     worker_config = object()
 
@@ -416,7 +418,9 @@ async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
     served_model_name = "Qwen/Qwen3-0.6B"
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(num_gpu_blocks=8),
-        model_config=SimpleNamespace(max_model_len=4096),
+        model_config=SimpleNamespace(
+            max_model_len=4096, get_diff_sampling_param=lambda: {}
+        ),
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
             max_num_batched_tokens=8192,
