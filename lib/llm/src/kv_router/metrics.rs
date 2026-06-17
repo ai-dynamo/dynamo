@@ -239,10 +239,6 @@ impl RouterWorkerStatusMetrics {
     }
 }
 
-pub(crate) fn router_worker_status_metrics() -> Option<Arc<RouterWorkerStatusMetrics>> {
-    ROUTER_WORKER_STATUS_METRICS.get().cloned()
-}
-
 // ---------------------------------------------------------------------------
 // Worker load metrics (gauges)
 // ---------------------------------------------------------------------------
