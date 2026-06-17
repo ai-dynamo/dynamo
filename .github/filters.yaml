@@ -118,6 +118,7 @@ core:
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
   - 'components/src/dynamo/tokenspeed/**'
+  - 'components/src/dynamo/squeeze_evolve/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
