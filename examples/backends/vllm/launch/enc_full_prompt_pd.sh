@@ -58,8 +58,8 @@ while [[ $# -gt 0 ]]; do
         --encoder-class)
             ENCODER_CLASS=$2; shift 2 ;;
         --single-gpu)
-            DYN_ENCODE_WORKER_GPU=2
-            DYN_PD_WORKER_GPU=2
+            DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-2}
+            DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
             EXTRA_ENCODER_ARGS="--enforce-eager"
             EXTRA_PD_ARGS="--enforce-eager --max-model-len 2048"
             shift ;;
