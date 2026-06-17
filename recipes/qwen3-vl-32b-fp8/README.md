@@ -85,11 +85,14 @@ curl http://localhost:8000/v1/chat/completions \
 ## Run Performance Benchmarks
 
 ```bash
-# Aggregated mode benchmark
-kubectl apply -f vllm/agg/perf.yaml -n ${NAMESPACE}
+# Benchmark (aggregated and disaggregated share the same template — use envsubst to set BENCH_NAME and BENCH_ENDPOINT)
+# Example for aggregated:
+BENCH_NAME=qwen3-vl-32b-fp8-agg-perf BENCH_ENDPOINT=qwen3-vl-32b-fp8-vllm-agg-frontend:8000 \
+  kubectl apply -f benchmark/perf.yaml -n ${NAMESPACE}
 
-# Disaggregated mode benchmark
-kubectl apply -f vllm/disagg/perf.yaml -n ${NAMESPACE}
+# Example for disaggregated:
+BENCH_NAME=qwen3-vl-32b-fp8-disagg-perf BENCH_ENDPOINT=qwen3-vl-32b-fp8-vllm-disagg-frontend:8000 \
+  kubectl apply -f benchmark/perf.yaml -n ${NAMESPACE}
 
 # Monitor benchmark progress
 kubectl logs -f job/qwen3-vl-32b-fp8-agg-perf -n ${NAMESPACE}
@@ -103,13 +106,12 @@ kubectl logs -f job/qwen3-vl-32b-fp8-agg-perf -n ${NAMESPACE}
 - **Modalities**: Text + Vision (image understanding)
 - **KV Cache**: FP8 dtype for memory efficiency
 - **Context length**: Default model context
-- **Features**: Multimodal inference, tool calling (Hermes parser in disagg mode)
 
 ## Architecture: Disaggregated Mode
 
 The disaggregated configuration separates vision encoding from text decoding:
 
-```
+```text
 Client → Frontend → EncodeWorker (Intel XPU) ──NIXL/RDMA──→ DecodeWorker (NVIDIA GPU) → Response
 ```
 
@@ -123,4 +125,3 @@ Client → Frontend → EncodeWorker (Intel XPU) ──NIXL/RDMA──→ Decode
 - Model download takes approximately 15-30 minutes depending on network speed
 - The disaggregated mode requires RDMA-capable network interfaces between encode and decode nodes
 - `ResourceClaimTemplate` files in `vllm/disagg/` must be applied before the disagg deployment
-- For aggregated mode on clusters using DRA, an optional `resourceclaimtemplate.yaml` is provided in `vllm/agg/`
