@@ -62,6 +62,8 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 |--------|-----------|
 | `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
 | `x-prefill-instance-id` | `prefill_worker_id` |
+| `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
+| `x-prefill-dp-rank` | `prefill_dp_rank` |
 
 ## Agent Context
 
@@ -76,6 +78,7 @@ behavior.
 | `session_id` | `string` | Yes | Top-level agent run/session identifier. |
 | `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
 | `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
+| `trajectory_final` | `bool` | No | Terminal marker for lifecycle-aware consumers; ignored by consumers that do not track trajectory lifecycle. |
 
 ```json
 {
