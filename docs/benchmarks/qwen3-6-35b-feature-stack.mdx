@@ -1,0 +1,117 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3.6 Frontend and Cache Benchmark"
+subtitle: "How do Dynamo frontend-decoding and the embedding cache change a single-GPU multimodal sliding-window benchmark versus vanilla vLLM serve?"
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Three configurations run on the same single-GPU node (H100 or GB200, selected at deploy time), so the only thing that varies is the Dynamo feature set. Each turn shares 4-of-5 images with the previous turn of the same user, so repeated images dominate — exactly the shape the embedding cache is designed for. The full Dynamo stack delivers roughly **+30% RPS and large TTFT reductions** versus vanilla `vllm serve` (H100: +29.8% RPS / −66.4% TTFT avg; GB200: +31.5% / −43.3%).
+
+<div className="dynamo-target-picker static">
+<p className="dynamo-target-picker-title">Benchmark setup</p>
+<div className="dynamo-target-picker-summary">
+<span><b>Model</b> Qwen/Qwen3.6-35B-A3B-FP8</span>
+<span><b>GPUs</b> 1x H100 or GB200 (selected at deploy time)</span>
+<span><b>Runtime</b> vLLM</span>
+<span><b>Workload</b> Sliding-window multimodal dataset: 30 users x 8 turns (240 requests), 5-image window, 8,000 text tokens, max_tokens 1024, concurrency 30</span>
+<span><b>Metrics</b> RPS, TTFT (avg/p50/p90/p99), and ITL</span>
+<span><b>Held constant</b> Model, one-GPU hardware target, generated sliding-window dataset, 240 requests at concurrency 30, and one shared perf.yaml benchmark template</span>
+</div>
+</div>
+
+## Results
+
+Full result tables are reproduced below from the [source study](https://github.com/ai-dynamo/dynamo/blob/main/docs/benchmarks/embedding_cache.md); the headline numbers:
+
+### H100
+
+| Config | RPS | ITL (ms) | TTFT avg (ms) | TTFT p50 | TTFT p90 | TTFT p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vllm-serve` | 0.719 | 21.28 | 18,173 | 18,830 | 26,992 | 48,589 |
+| `dynamo-fd` | 0.811 | 28.42 | 7,193 | 3,567 | 10,991 | 34,901 |
+| `dynamo-fd-ec` | 0.933 | 24.56 | 6,101 | 2,369 | 22,869 | 34,583 |
+
+Δ vs `vllm-serve`: `dynamo-fd` **+12.8% RPS / −60.4% TTFT avg**; `dynamo-fd-ec` **+29.8% RPS / −66.4% TTFT avg** (−87.4% TTFT p50).
+
+### GB200
+
+| Config | RPS | ITL (ms) | TTFT avg (ms) | TTFT p50 | TTFT p90 | TTFT p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `vllm-serve` | 0.940 | 15.37 | 14,954 | 15,391 | 21,660 | 24,221 |
+| `dynamo-fd` | 1.117 | 16.82 | 9,478 | 9,061 | 15,399 | 17,326 |
+| `dynamo-fd-ec` | 1.236 | 15.22 | 8,478 | 8,324 | 13,992 | 16,075 |
+
+Δ vs `vllm-serve`: `dynamo-fd` **+18.8% RPS / −36.6% TTFT avg**; `dynamo-fd-ec` **+31.5% RPS / −43.3% TTFT avg** (−45.9% TTFT p50).
+
+Frontend-decoding alone captures most of the TTFT win; the embedding cache layers on additional throughput and tighter median TTFT. ITL stays roughly flat because the cache shortens the prefill path (skipping the vision encoder for repeated images), not decode.
+
+## Compared Configurations
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Configuration</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role winner">Winner</em></td>
+<td><strong>Dynamo FD + embedding cache</strong><span>Frontend-decoding ON, 8 GiB embedding cache — promoted recipe target</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml">dynamo-fd-ec.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role treatment">Comparison</em></td>
+<td><strong>Dynamo frontend-decoding</strong><span>Frontend-decoding ON, embedding cache OFF — isolates the frontend effect</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/deploy/dynamo-fd.yaml">dynamo-fd.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>Vanilla vLLM serve</strong><span>Plain vLLM Deployment + Service, no Dynamo</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/deploy/vllm-serve.yaml">vllm-serve.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Reproduce
+
+A dataset-generation job writes the sliding-window dataset (`30u_8t_5w_8000word_base64.jsonl`: 30 users x 8 turns, window 5, 2400x1080 base64 images, 8,000 text tokens, one `session_id=user_<N>` row per turn) to the shared PVC. The shared `perf.yaml` wraps this AIPerf command for every configuration:
+
+```bash
+aiperf profile --model Qwen/Qwen3.6-35B-A3B-FP8 \
+  --input-file /perf-cache/datasets/30u_8t_5w_8000word_base64.jsonl \
+  --custom-dataset-type single_turn \
+  --url http://<frontend>:8000 --streaming \
+  --request-count 240 --concurrency 30 --warmup-request-count 2 \
+  --extra-inputs max_tokens:1024 --extra-inputs min_tokens:1024 \
+  --extra-inputs ignore_eos:true
+```
+
+The recipe is driven end-to-end by scripts that template the YAML via `envsubst` (the per-configuration pod name and frontend service are injected at apply time):
+
+```bash
+cd recipes/qwen3.6-35b
+export NAMESPACE=your-namespace
+export HW=gb200   # or h100; fill in your hostname in hw/${HW}.env first
+
+# Run all three configs sequentially (prep + deploy + bench + retrieve + clean per config)
+./run-all-benchmarks.sh -n ${NAMESPACE} --hw ${HW}
+
+# Or one config at a time
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config vllm-serve
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec
+```
+
+Each config's `profile_export_aiperf.json` is retrieved locally and holds the headline metrics.
+
+## Notes
+
+- AIPerf is installed from source pinned to a `main` SHA that includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824), which makes `single_turn` mode honor `session_id` ordering — that causal ordering is what lets prefix-cache hits across a user's turns actually land.
+- The recipe expects a `shared-model-cache` RWX PVC in the namespace; `Qwen/Qwen3.6-35B-A3B-FP8` is public, so no HuggingFace token is required.
+- The vLLM command uses `--mm-processor-cache-gb 30` and `--max-model-len 32768` to handle the 5-image multimodal context.
+- Source: [recipes/qwen3.6-35b](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b)
+
+## Winning Configuration
+
+The `dynamo-fd-ec` configuration is the winning configuration; its deploy assets are above, and a recommended Recipe may be promoted from this benchmark in a future release. The `vllm-serve` baseline and `dynamo-fd` step exist as benchmark controls.

@@ -14,9 +14,10 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::indexer::KvIndexerMetrics;
 use crate::protocols::WorkerId;
 
-use super::backend::{Indexer, create_indexer};
+use super::backend::{Indexer, create_indexer_with_metrics};
 use super::listener::spawn_zmq_listener;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -314,12 +315,20 @@ pub struct WorkerRegistry {
     peers: DashMap<String, ()>,
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
+    indexer_metrics: Arc<KvIndexerMetrics>,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
 }
 
 impl WorkerRegistry {
     pub fn new(num_threads: usize) -> Self {
+        Self::new_with_indexer_metrics(num_threads, Arc::new(KvIndexerMetrics::new_unregistered()))
+    }
+
+    pub fn new_with_indexer_metrics(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+    ) -> Self {
         let (ready_tx, ready_rx) = watch::channel(false);
         Self {
             workers: DashMap::new(),
@@ -327,6 +336,7 @@ impl WorkerRegistry {
             peers: DashMap::new(),
             watermarks: DashMap::new(),
             num_threads,
+            indexer_metrics,
             ready_tx,
             ready_rx,
         }
@@ -405,7 +415,11 @@ impl WorkerRegistry {
                 "Creating new indexer"
             );
             IndexerEntry {
-                indexer: create_indexer(block_size, self.num_threads),
+                indexer: create_indexer_with_metrics(
+                    block_size,
+                    self.num_threads,
+                    self.indexer_metrics.clone(),
+                ),
                 block_size,
             }
         });
@@ -710,7 +724,11 @@ impl WorkerRegistry {
                 "Creating indexer from recovery dump"
             );
             IndexerEntry {
-                indexer: create_indexer(block_size, self.num_threads),
+                indexer: create_indexer_with_metrics(
+                    block_size,
+                    self.num_threads,
+                    self.indexer_metrics.clone(),
+                ),
                 block_size,
             }
         });

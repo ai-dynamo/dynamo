@@ -13,6 +13,8 @@ use axum::{Json, Router};
 use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "metrics")]
+use crate::indexer::KvIndexerMetrics;
 use crate::indexer::TieredMatchDetails;
 #[cfg(test)]
 use crate::protocols::StorageTier;
@@ -44,6 +46,29 @@ pub struct AppState {
     pub registry: Arc<WorkerRegistry>,
     #[cfg(feature = "metrics")]
     pub prom_registry: prometheus::Registry,
+}
+
+impl AppState {
+    pub fn new(indexer_threads: usize) -> anyhow::Result<Self> {
+        #[cfg(feature = "metrics")]
+        {
+            let prom_registry = prometheus::Registry::new();
+            super::metrics::register(&prom_registry)?;
+            let indexer_metrics = KvIndexerMetrics::new_registered(&prom_registry)?;
+            return Ok(Self {
+                registry: Arc::new(WorkerRegistry::new_with_indexer_metrics(
+                    indexer_threads,
+                    indexer_metrics,
+                )),
+                prom_registry,
+            });
+        }
+
+        #[cfg(not(feature = "metrics"))]
+        Ok(Self {
+            registry: Arc::new(WorkerRegistry::new(indexer_threads)),
+        })
+    }
 }
 
 fn default_tenant() -> String {
