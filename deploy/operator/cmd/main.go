@@ -479,7 +479,8 @@ func main() {
 	case *operatorCfg.ServiceMesh.Enabled:
 		if !istioDetected {
 			setupLog.Error(nil,
-				"service mesh is explicitly enabled in config but the networking.istio.io API group was not detected in the cluster",
+				"Service mesh is explicitly enabled in config but the networking.istio.io"+
+					" API group was not detected in the cluster",
 			)
 			os.Exit(1)
 		}

@@ -247,7 +247,7 @@ rules:
   - patch
   - update
   - watch
-{{- if or .Values.istioVirtualServiceEnabled (and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled) }}
+{{- if or .Values.istioVirtualServiceEnabled (and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh (hasKey .Values.dynamo.serviceMesh "enabled") .Values.dynamo.serviceMesh.enabled) }}
 - apiGroups:
   - networking.istio.io
   resources:
