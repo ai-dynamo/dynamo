@@ -32,6 +32,7 @@ import platform
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
 import uuid
@@ -257,7 +258,7 @@ def _node_bin(_tools_cache) -> Path:
 
 
 @pytest.fixture(scope="session")
-def _openresponses_suite(_tools_cache, _bun_binary) -> Path:
+def _openresponses_suite(_tools_cache, _bun_binary, _node_bin) -> Path:
     """Pinned-SHA clone of the OpenResponses compliance suite with bun
     deps installed. A `.installed` sentinel file marks a completed setup
     so an interrupted prior install forces a clean redo."""
@@ -290,10 +291,15 @@ def _openresponses_suite(_tools_cache, _bun_binary) -> Path:
             text=True,
         )
         _patch_openresponses_suite(install_dir)
+        env = {
+            **os.environ,
+            "PATH": f"{_node_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
         _retry_network_op(
             lambda: subprocess.run(
                 [str(_bun_binary), "install", "--frozen-lockfile"],
                 cwd=str(install_dir),
+                env=env,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -509,6 +515,9 @@ def test_frontend_api_surface_compliance(
         "DYN_REQUEST_TRACE_SINKS": "jsonl",
         "DYN_REQUEST_TRACE_OUTPUT_PATH": str(request_trace_path),
         "DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS": "10",
+        # The SGLang launch scripts invoke `python3`; keep them on the same
+        # interpreter environment pytest is running in.
+        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
     }
 
     codex_home = tmp_path / "codex_home"
@@ -554,7 +563,13 @@ def test_frontend_api_surface_compliance(
         )
         _assert_agent_context_in_trace(request_trace_path, "claude_code")
         _wait_for_frontend_healthy(frontend_port)
-        _run_opencode_smoke(_opencode_cli, _node_bin, opencode_home, opencode_cwd)
+        _run_opencode_smoke(
+            _opencode_cli,
+            _node_bin,
+            opencode_home,
+            opencode_cwd,
+            request_trace_path,
+        )
         _assert_agent_context_in_trace(request_trace_path, "opencode")
 
 
@@ -645,9 +660,13 @@ def _read_request_trace_records(path: Path) -> list[dict]:
         if not line.strip():
             continue
         try:
-            records.append(json.loads(line))
+            record = json.loads(line)
         except json.JSONDecodeError:
             logger.debug("Skipping partial request-trace line: %r", line)
+            continue
+        if isinstance(record.get("event"), dict):
+            record = record["event"]
+        records.append(record)
     return records
 
 
@@ -658,14 +677,7 @@ def _assert_agent_context_in_trace(
     last_records: list[dict] = []
     while time.monotonic() < deadline:
         last_records = _read_request_trace_records(trace_path)
-        for record in last_records:
-            agent_context = record.get("agent_context")
-            if not agent_context:
-                continue
-            if agent_context.get("session_type_id") != session_type_id:
-                continue
-            assert agent_context.get("session_id"), agent_context
-            assert agent_context.get("session_id") == agent_context.get("trajectory_id")
+        if _trace_contains_agent_context(last_records, session_type_id):
             return
         time.sleep(0.2)
 
@@ -678,6 +690,19 @@ def _assert_agent_context_in_trace(
         f"request trace did not contain agent_context for {session_type_id!r} "
         f"within {timeout_s}s; saw {seen}"
     )
+
+
+def _trace_contains_agent_context(records: list[dict], session_type_id: str) -> bool:
+    for record in records:
+        agent_context = record.get("agent_context")
+        if not agent_context:
+            continue
+        if agent_context.get("session_type_id") != session_type_id:
+            continue
+        assert agent_context.get("session_id"), agent_context
+        assert agent_context.get("session_id") == agent_context.get("trajectory_id")
+        return True
+    return False
 
 
 def _run_bun_compliance(
@@ -762,13 +787,13 @@ def _write_opencode_config(cwd: Path, frontend_port: int) -> None:
                     COMPLIANCE_MODEL: {
                         "id": COMPLIANCE_MODEL,
                         "name": COMPLIANCE_MODEL,
-                        "limit": {"context": 8192, "output": 4096},
+                        "limit": {"context": 8192, "output": 512},
                         "cost": {"input": 0, "output": 0},
                     }
                 },
                 "options": {"baseURL": f"http://localhost:{frontend_port}/v1"},
             }
-        }
+        },
     }
 
     project_config = cwd / ".opencode"
@@ -934,8 +959,9 @@ def _run_opencode_smoke(
     node_bin: Path,
     opencode_home: Path,
     cwd: Path,
+    request_trace_path: Path,
 ) -> None:
-    """Run `opencode run` against the live Dynamo chat/completions endpoint."""
+    """Run `opencode run` until Dynamo traces its live chat/completions request."""
     logger.info("Running opencode smoke test against cwd=%s", cwd)
 
     extra_env = {
@@ -955,13 +981,45 @@ def _run_opencode_smoke(
         str(cwd),
         "Reply with exactly OK. Do not use tools.",
     ]
-    result = subprocess.run(
+    process = subprocess.Popen(
         cmd,
         cwd=str(cwd),
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=180,
+    )
+
+    trace_seen = False
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if _trace_contains_agent_context(
+            _read_request_trace_records(request_trace_path), "opencode"
+        ):
+            trace_seen = True
+            break
+        if process.poll() is not None:
+            break
+        time.sleep(0.2)
+
+    if process.poll() is None:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+    else:
+        stdout, stderr = process.communicate()
+
+    trace_seen = trace_seen or _trace_contains_agent_context(
+        _read_request_trace_records(request_trace_path), "opencode"
+    )
+    result = subprocess.CompletedProcess(
+        cmd,
+        process.returncode,
+        stdout,
+        stderr,
     )
 
     _attach_subprocess_log(
@@ -976,8 +1034,13 @@ def _run_opencode_smoke(
     if result.stderr:
         logger.info("opencode stderr:\n%s", result.stderr)
 
+    if trace_seen:
+        return
+
     if result.returncode != 0:
         pytest.fail(
             f"opencode run failed (exit={result.returncode}).\n"
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
+
+    pytest.fail("opencode run exited before Dynamo traced an opencode agent_context")
