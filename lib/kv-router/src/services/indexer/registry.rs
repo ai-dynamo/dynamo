@@ -14,9 +14,10 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::indexer::KvIndexerMetrics;
 use crate::protocols::WorkerId;
 
-use super::backend::{Indexer, create_indexer};
+use super::backend::{Indexer, create_indexer_with_metrics};
 use super::listener::spawn_zmq_listener;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -314,12 +315,20 @@ pub struct WorkerRegistry {
     peers: DashMap<String, ()>,
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
+    indexer_metrics: Arc<KvIndexerMetrics>,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
 }
 
 impl WorkerRegistry {
     pub fn new(num_threads: usize) -> Self {
+        Self::new_with_indexer_metrics(num_threads, Arc::new(KvIndexerMetrics::new_unregistered()))
+    }
+
+    pub fn new_with_indexer_metrics(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+    ) -> Self {
         let (ready_tx, ready_rx) = watch::channel(false);
         Self {
             workers: DashMap::new(),
@@ -327,6 +336,7 @@ impl WorkerRegistry {
             peers: DashMap::new(),
             watermarks: DashMap::new(),
             num_threads,
+            indexer_metrics,
             ready_tx,
             ready_rx,
         }
@@ -405,7 +415,11 @@ impl WorkerRegistry {
                 "Creating new indexer"
             );
             IndexerEntry {
-                indexer: create_indexer(block_size, self.num_threads),
+                indexer: create_indexer_with_metrics(
+                    block_size,
+                    self.num_threads,
+                    self.indexer_metrics.clone(),
+                ),
                 block_size,
             }
         });
@@ -710,7 +724,11 @@ impl WorkerRegistry {
                 "Creating indexer from recovery dump"
             );
             IndexerEntry {
-                indexer: create_indexer(block_size, self.num_threads),
+                indexer: create_indexer_with_metrics(
+                    block_size,
+                    self.num_threads,
+                    self.indexer_metrics.clone(),
+                ),
                 block_size,
             }
         });
@@ -940,7 +958,7 @@ mod tests {
     // ── list_filtered tests ───────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn list_filtered_returns_metadata_fields() {
+    async fn list_filtered_returns_metadata_and_applies_filters() {
         let registry = test_registry();
         registry.signal_ready();
 
@@ -963,7 +981,7 @@ mod tests {
                 "tcp://127.0.0.1:15571".to_string(),
                 0,
                 "mistral".to_string(),
-                "acme".to_string(),
+                "other-tenant".to_string(),
                 8,
                 None,
             )
@@ -979,78 +997,11 @@ mod tests {
 
         let mistral = workers.iter().find(|w| w.model_name == "mistral").unwrap();
         assert_eq!(mistral.block_size, 8);
-        assert_eq!(mistral.tenant_id, "acme");
-    }
-
-    #[tokio::test]
-    async fn list_filtered_by_model_name() {
-        let registry = test_registry();
-        registry.signal_ready();
-
-        registry
-            .register(
-                10,
-                "tcp://127.0.0.1:15572".to_string(),
-                0,
-                "llama3".to_string(),
-                "acme".to_string(),
-                4,
-                None,
-            )
-            .await
-            .unwrap();
-
-        registry
-            .register(
-                11,
-                "tcp://127.0.0.1:15573".to_string(),
-                0,
-                "mistral".to_string(),
-                "acme".to_string(),
-                8,
-                None,
-            )
-            .await
-            .unwrap();
+        assert_eq!(mistral.tenant_id, "other-tenant");
 
         let filtered = registry.list_filtered(Some("llama3"), None);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].model_name, "llama3");
-
-        let empty = registry.list_filtered(Some("nonexistent"), None);
-        assert!(empty.is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_filtered_by_tenant_id() {
-        let registry = test_registry();
-        registry.signal_ready();
-
-        registry
-            .register(
-                10,
-                "tcp://127.0.0.1:15574".to_string(),
-                0,
-                "llama3".to_string(),
-                "acme".to_string(),
-                4,
-                None,
-            )
-            .await
-            .unwrap();
-
-        registry
-            .register(
-                11,
-                "tcp://127.0.0.1:15575".to_string(),
-                0,
-                "llama3".to_string(),
-                "other-tenant".to_string(),
-                4,
-                None,
-            )
-            .await
-            .unwrap();
 
         let acme = registry.list_filtered(None, Some("acme"));
         assert_eq!(acme.len(), 1);
@@ -1060,8 +1011,12 @@ mod tests {
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].tenant_id, "other-tenant");
 
-        let both = registry.list_filtered(None, None);
-        assert_eq!(both.len(), 2);
+        assert!(
+            registry
+                .list_filtered(Some("llama3"), Some("other-tenant"))
+                .is_empty()
+        );
+        assert!(registry.list_filtered(Some("nonexistent"), None).is_empty());
     }
 
     #[test]
