@@ -128,7 +128,10 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
         "Starting standalone KV cache indexer (HTTP-only mode)"
     );
 
-    let registry = Arc::new(WorkerRegistry::new(config.threads));
+    let registry = Arc::new(WorkerRegistry::new_with_cancel_token(
+        config.threads,
+        cancel_token.clone(),
+    ));
     run_common(&config, &registry, cancel_token).await
 }
 

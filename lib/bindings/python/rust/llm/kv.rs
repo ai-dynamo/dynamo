@@ -364,7 +364,6 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
 #[pyclass]
 pub(crate) struct SelectionService {
     inner: Arc<SelectionCore>,
-    cancel: tokio_util::sync::CancellationToken,
 }
 
 #[cfg(feature = "select-service")]
@@ -374,13 +373,12 @@ impl SelectionService {
     #[new]
     #[pyo3(signature = (*, indexer_threads = 4))]
     fn new(indexer_threads: usize) -> Self {
-        let cancel = tokio_util::sync::CancellationToken::new();
         let inner = Arc::new(SelectionCore::new(
             kv_router_config_from_dynamo_env(),
             indexer_threads,
-            cancel.clone(),
+            tokio_util::sync::CancellationToken::new(),
         ));
-        Self { inner, cancel }
+        Self { inner }
     }
 
     /// Cancel all background tasks and stop the service.
@@ -388,7 +386,7 @@ impl SelectionService {
     /// Idempotent. The service is also shut down automatically once the last
     /// Python handle is dropped.
     fn shutdown(&self) {
-        self.cancel.cancel();
+        self.inner.shutdown();
     }
 
     /// Upsert a worker and subscribe to its live KV events via each `kv_events_endpoints`.
@@ -573,10 +571,7 @@ mod selection_service_lifecycle_tests {
     #[test]
     fn idempotent_shutdown() {
         let service = SelectionService::new(1);
-        let cancel = service.cancel.clone();
-
         service.shutdown();
-        assert!(cancel.is_cancelled(), "shutdown() did not cancel the token");
 
         // Idempotent: a second shutdown and the final drop must not panic.
         service.shutdown();
@@ -587,7 +582,7 @@ mod selection_service_lifecycle_tests {
 #[cfg(feature = "select-service")]
 impl Drop for SelectionService {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.inner.shutdown();
     }
 }
 

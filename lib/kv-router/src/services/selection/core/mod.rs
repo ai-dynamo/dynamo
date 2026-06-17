@@ -128,7 +128,11 @@ impl SelectionCore {
         replica_config: Option<ReplicaSyncConfig>,
         signal_indexer_ready: bool,
     ) -> Self {
-        let indexer_registry = Arc::new(WorkerRegistry::new(indexer_threads));
+        let cancel_token = cancel_token.child_token();
+        let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
+            indexer_threads,
+            cancel_token.clone(),
+        ));
         if signal_indexer_ready {
             indexer_registry.signal_ready();
         }
@@ -140,6 +144,10 @@ impl SelectionCore {
             cancel_token,
             replica_config,
         }
+    }
+
+    pub fn shutdown(&self) {
+        self.cancel_token.cancel();
     }
 
     pub(crate) async fn recover_indexer_from_peers(
@@ -909,5 +917,93 @@ impl SelectionCore {
             }
         }
         workers
+    }
+}
+
+impl Drop for SelectionCore {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
+        crate::config::KvRouterConfig {
+            use_kv_events,
+            router_queue_threshold: None,
+            ..Default::default()
+        }
+    }
+
+    fn worker_with_kv_events(worker_id: WorkerId) -> WorkerRequest {
+        WorkerRequest {
+            worker_id,
+            model_name: "model".to_string(),
+            tenant_id: "default".to_string(),
+            endpoint: Some(format!("http://worker-{worker_id}:8000")),
+            kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+            kv_events_endpoints: HashMap::new(),
+            replay_endpoint: None,
+            block_size: Some(4),
+            data_parallel_start_rank: None,
+            data_parallel_size: None,
+            max_num_batched_tokens: Some(1024),
+            total_kv_blocks: None,
+            stable_routing_id: None,
+            is_eagle: None,
+            taints: HashSet::new(),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
+        }
+    }
+
+    #[test]
+    fn parent_cancel_cancels_core() {
+        let parent = CancellationToken::new();
+        let core = SelectionCore::new(test_config(false), 1, parent.clone());
+
+        assert!(!core.cancel_token.is_cancelled());
+        parent.cancel();
+        assert!(core.cancel_token.is_cancelled());
+    }
+
+    #[test]
+    fn shutdown_keeps_parent_alive() {
+        let parent = CancellationToken::new();
+        let core = SelectionCore::new(test_config(false), 1, parent.clone());
+
+        core.shutdown();
+
+        assert!(core.cancel_token.is_cancelled());
+        assert!(!parent.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_listeners() {
+        let parent = CancellationToken::new();
+        let core = SelectionCore::new(test_config(true), 1, parent);
+
+        let record = core
+            .upsert_worker(worker_with_kv_events(1))
+            .await
+            .expect("worker upsert");
+        assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
+        assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(false));
+
+        core.shutdown();
+        assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+
+        let record = core
+            .upsert_worker(worker_with_kv_events(2))
+            .await
+            .expect("worker upsert");
+
+        assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
+        assert_eq!(core.indexer_registry.listener_cancelled(2, 0), Some(true));
     }
 }
