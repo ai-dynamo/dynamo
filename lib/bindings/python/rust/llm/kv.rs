@@ -357,7 +357,11 @@ where
     }
 }
 
-#[cfg(any(feature = "kv-indexer", feature = "slot-tracker", feature = "select-service"))]
+#[cfg(any(
+    feature = "kv-indexer",
+    feature = "slot-tracker",
+    feature = "select-service"
+))]
 fn init_standalone_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
