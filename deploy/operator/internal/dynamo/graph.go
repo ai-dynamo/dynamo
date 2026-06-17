@@ -2171,6 +2171,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	clique.Annotations = annotations
 
 	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	injectVolcanoSchedulerIfEnabled(clique, p.runtimeConfig)
 	return clique, nil
 }
 
@@ -2198,26 +2199,26 @@ func resolveGroveClusterTopologyDomains(ctx context.Context, kubeClient ctrlclie
 		return nil, nil
 	}
 	if kubeClient == nil {
-		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopology", kvt.ClusterTopologyName)
+		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopologyBinding", kvt.ClusterTopologyName)
 	}
 
-	ct := &grovev1alpha1.ClusterTopology{}
+	ct := &grovev1alpha1.ClusterTopologyBinding{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
 		if k8serrors.IsNotFound(err) {
-			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopology resource that was not found", kvt.ClusterTopologyName)
+			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopologyBinding resource that was not found", kvt.ClusterTopologyName)
 		}
-		return nil, fmt.Errorf("failed to read ClusterTopology %q for kvTransferPolicy: %w", kvt.ClusterTopologyName, err)
+		return nil, fmt.Errorf("failed to read ClusterTopologyBinding %q for kvTransferPolicy: %w", kvt.ClusterTopologyName, err)
 	}
 
 	domains := topologyDomainsFromClusterTopology(ct)
 	if !topologyDomainsContain(domains, kvt.Domain) {
-		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopology %q; available domains: %v",
+		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopologyBinding %q; available domains: %v",
 			kvt.Domain, kvt.ClusterTopologyName, domains)
 	}
 	return domains, nil
 }
 
-func topologyDomainsFromClusterTopology(ct *grovev1alpha1.ClusterTopology) []v1beta1.TopologyDomain {
+func topologyDomainsFromClusterTopology(ct *grovev1alpha1.ClusterTopologyBinding) []v1beta1.TopologyDomain {
 	if ct == nil {
 		return nil
 	}
@@ -2257,7 +2258,7 @@ func GenerateGrovePodCliqueSet(
 	}
 	gangSet.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
-	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations)
+	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations, runtimeConfig)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
 		PublishNotReadyAddresses: true,
@@ -2271,6 +2272,10 @@ func GenerateGrovePodCliqueSet(
 	// Inject deployment-level topology constraint (PCS template).
 	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
 	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
+
+	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled && runtimeConfig.VolcanoSchedulerEnabled {
+		return nil, fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
+	}
 
 	// Validate kai-scheduler queue once if kai-scheduler is enabled
 	var validatedQueueName string

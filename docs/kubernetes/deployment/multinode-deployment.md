@@ -84,16 +84,23 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
 - The installed orchestrator (Grove or LWS) is automatically selected
 
 #### Scheduler Integration:
-- **With Grove**: Integrates with [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) or Volcano depending on the configured scheduler profile, providing:
-  - Advanced queue management via `nvidia.com/kai-scheduler-queue` annotation
-  - Volcano queue selection via `nvidia.com/volcano-queue` annotation
-  - AI-optimized scheduling policies
-  - Resource-aware workload placement
+- **With Grove**: Dynamo automatically uses Grove when it is available, unless you set `nvidia.com/enable-grove: "false"` on the DGD resource. Scheduler integration is enabled separately through Helm values:
+  - KAI-Scheduler: set `global.kai-scheduler.enabled=true` (or `global.kai-scheduler.install=true`) and select queues with `nvidia.com/kai-scheduler-queue`
+  - Volcano: set `global.volcano-scheduler.enabled=true` and select queues with `nvidia.com/volcano-queue`
+  - KAI-Scheduler and Volcano scheduler integration are mutually exclusive for a single Dynamo operator configuration because both set pod `schedulerName`
 - **With LWS**: Uses Volcano scheduler for gang scheduling and resource coordination
 
 #### Configuration Examples:
 
-**Default (Grove with KAI-Scheduler):**
+**Grove with KAI-Scheduler:**
+```yaml
+global:
+  grove:
+    enabled: true
+  kai-scheduler:
+    enabled: true
+```
+
 ```yaml
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -108,6 +115,14 @@ spec:
 > **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
 
 **Grove with Volcano:**
+```yaml
+global:
+  grove:
+    enabled: true
+  volcano-scheduler:
+    enabled: true
+```
+
 ```yaml
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment

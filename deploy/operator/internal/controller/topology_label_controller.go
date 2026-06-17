@@ -216,11 +216,11 @@ func (r *TopologyLabelReconciler) topologyLabelCopyTargets(ctx context.Context, 
 		targetsCapacity++
 	}
 
-	var ct *grovev1alpha1.ClusterTopology
+	var ct *grovev1alpha1.ClusterTopologyBinding
 	if clusterTopologyName != "" {
-		ct = &grovev1alpha1.ClusterTopology{}
+		ct = &grovev1alpha1.ClusterTopologyBinding{}
 		if err := r.Get(ctx, types.NamespacedName{Name: clusterTopologyName}, ct); err != nil {
-			return nil, fmt.Errorf("get ClusterTopology %s: %w", clusterTopologyName, err)
+			return nil, fmt.Errorf("get ClusterTopologyBinding %s: %w", clusterTopologyName, err)
 		}
 		targetsCapacity += len(ct.Spec.Levels)
 	}

@@ -137,10 +137,22 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 
 After installing them separately, enable Dynamo integration:
 
+Kai Scheduler:
+
 ```yaml
 global:
   kai-scheduler:
     enabled: true   # Enables queue creation and schedulerName injection
+  grove:
+    enabled: true   # Enables multinode orchestration via PodCliqueSets
+```
+
+Volcano:
+
+```yaml
+global:
+  volcano-scheduler:
+    enabled: true   # Enables Volcano schedulerName injection for Grove PodCliqueSets
   grove:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```

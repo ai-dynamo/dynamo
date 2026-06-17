@@ -86,9 +86,9 @@ func TestTopologyLabelReconciler_CopiesClusterTopologyLevelsToDynamoPodLabels(t 
 			},
 		},
 	}
-	ct := &grovev1alpha1.ClusterTopology{
+	ct := &grovev1alpha1.ClusterTopologyBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
-		Spec: grovev1alpha1.ClusterTopologySpec{
+		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovev1alpha1.TopologyLevel{
 				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
 				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
