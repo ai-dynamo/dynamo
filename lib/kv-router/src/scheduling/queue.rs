@@ -18,7 +18,7 @@ use super::overlap_refresh::{
     refresh_overlap,
 };
 use super::policy::{FcfsPolicy, SchedulingPolicy};
-use super::prefill_load::PrefillLoadEstimator;
+use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
@@ -467,6 +467,9 @@ impl<
             return;
         }
 
+        // Strict priority only orders requests parked in `pending`. Preserve
+        // direct admission for eligible arrivals to avoid global head-of-line
+        // blocking across requests with different worker eligibility.
         self.admit_one(request, decay_now);
     }
 
@@ -672,11 +675,11 @@ impl<
             return None;
         }
 
-        let prefix = cached_tokens.min(isl_tokens);
-        let effective_isl = isl_tokens.saturating_sub(prefix);
+        let effective_isl = effective_prefill_tokens(isl_tokens, cached_tokens);
         if effective_isl == 0 {
             return None;
         }
+        let prefix = isl_tokens - effective_isl;
 
         let expected_prefill_duration = match &self.prefill_load_estimator {
             Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
@@ -865,11 +868,11 @@ mod tests {
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let load = request.worker_load_for(worker);
                 let potential_prefill_tokens = if request.track_prefill_tokens {
-                    load.active_prefill_tokens.saturating_add(
-                        request
-                            .isl_tokens
-                            .saturating_sub(request.effective_cached_tokens_for(worker)),
-                    )
+                    load.active_prefill_tokens
+                        .saturating_add(effective_prefill_tokens(
+                            request.isl_tokens,
+                            request.effective_cached_tokens_for(worker),
+                        ))
                 } else {
                     0
                 };
@@ -1277,6 +1280,7 @@ mod tests {
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1308,6 +1312,43 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_strict_priority_drains_before_policy_score() {
+        let isl = 512;
+        let (queue, slots) = make_queue(1, 16, isl, Some(0.0));
+
+        let (first, first_rx) = make_request("first", isl);
+        queue.enqueue(first).await;
+        first_rx.await.unwrap().unwrap();
+
+        let (mut low, mut low_rx) = make_request("low", isl);
+        low.priority_jump = 10_000.0;
+        queue.enqueue(low).await;
+
+        let (mut high, high_rx) = make_request("high", isl);
+        high.strict_priority = 1;
+        queue.enqueue(high).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        slots.free(&"first".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        let high_response = high_rx.await.unwrap().unwrap();
+        assert_eq!(high_response.best_worker, WorkerWithDpRank::new(0, 0));
+        assert!(
+            low_rx.try_recv().is_err(),
+            "lower strict priority should remain queued"
+        );
+
+        slots.free(&"high".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        low_rx.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+
+        slots.free(&"low".to_string(), decay_now()).unwrap();
         slots.assert_completely_drained(decay_now());
     }
 
@@ -1865,6 +1906,7 @@ mod tests {
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: Some(allowed),

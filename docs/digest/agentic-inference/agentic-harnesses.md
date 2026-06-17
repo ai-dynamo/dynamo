@@ -173,7 +173,11 @@ Claude Code and OpenClaw both exercise the Anthropic Messages API rather than on
 - model metadata at both `GET /v1/models` and `GET /v1/models/{model_id}`
 - correct handling of slashed model IDs
 - useful `input_tokens` in `message_start`
-- acceptance of `cache_control`
+- tolerant parsing of Anthropic `cache_control` annotations
+
+That last item is API compatibility: Dynamo should not reject Anthropic-format
+requests that contain `cache_control`, but it does not currently treat those
+annotations as Dynamo cache-pinning or TTL-retention directives.
 
 Once the frontend is reachable and compliant, both harnesses can point at Dynamo's Anthropic-compatible endpoint:
 
@@ -262,7 +266,7 @@ For Dynamo, the implication is that Codex compatibility needs to be evaluated at
 
 ## What's Next
 
-Dynamo now has `nvext.agent_hints`: `latency_sensitivity`, `priority`, `osl`, and `speculative_prefill`. Those fields give the harness a way to say more about the turn than the prompt alone. A session waiting on a user reply is not the same as one working through a long background tool sequence, and the API can now carry some of that difference.
+Dynamo now has `nvext.agent_hints`: `priority`, `osl`, and `speculative_prefill`. Those fields give the harness a way to say more about the turn than the prompt alone. A session waiting on a user reply is not the same as one working through a long background tool sequence, and the API can now carry some of that difference.
 
 In the v1.1.0 line, Dynamo is also making more of the agent stack available as reusable pieces. The protocol, parser, and tokenizer layers are versioned as standalone crates, including `dynamo-protocols`, `dynamo-parsers`, and `dynamo-tokenizers`. That gives teams a way to build or customize a harness-facing serving path without copying Dynamo internals into a separate project.
 

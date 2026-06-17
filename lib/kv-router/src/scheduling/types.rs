@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
+use super::prefill_load::effective_prefill_tokens;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
@@ -96,6 +97,7 @@ pub struct SchedulingRequest {
     pub router_config_override: Option<RouterConfigOverride>,
     pub track_prefill_tokens: bool,
     pub priority_jump: f64,
+    pub strict_priority: u32,
 
     // Overlap and cache signals.
     pub tier_overlap_blocks: TierOverlapBlocks,
@@ -148,7 +150,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
                 .unwrap_or(0),
         };
 
-        self.request.isl_tokens.saturating_sub(cached_tokens)
+        effective_prefill_tokens(self.request.isl_tokens, cached_tokens)
     }
 }
 
