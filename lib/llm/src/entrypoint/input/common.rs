@@ -185,7 +185,7 @@ pub async fn build_preprocessed_routing(
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
         && matches!(router_mode, RouterMode::DeviceAwareWeighted)
     {
-        try_build_cache_indexer(router_client.endpoint.component()).await
+        try_build_cache_indexer(&router_client.endpoint).await
     } else {
         None
     };

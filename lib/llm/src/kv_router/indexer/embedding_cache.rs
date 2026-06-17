@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -12,9 +12,12 @@ use std::{
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_runtime::{
-    component::Component, pipeline::MultimodalCacheIndex, traits::DistributedRuntimeProvider,
+    component::{Component, Endpoint},
+    pipeline::MultimodalCacheIndex,
+    traits::DistributedRuntimeProvider,
     transports::event_plane::EventSubscriber,
 };
+use tokio::sync::Mutex;
 
 use crate::kv_router::{
     MULTIMODAL_EMBEDDING_CACHE_SUBJECT, publisher::MultimodalEmbeddingCacheEvent,
@@ -27,11 +30,28 @@ pub struct EmbeddingCacheIndexer {
     started: Arc<AtomicBool>,
 }
 
+static SHARED_INDEXERS: OnceLock<Mutex<HashMap<String, Arc<dyn MultimodalCacheIndex>>>> =
+    OnceLock::new();
+
 pub async fn try_build_cache_indexer(
-    component: &Component,
+    endpoint: &Endpoint,
 ) -> Option<Arc<dyn MultimodalCacheIndex>> {
-    match EmbeddingCacheIndexer::for_component(component).await {
-        Ok(indexer) => Some(Arc::new(indexer) as Arc<dyn MultimodalCacheIndex>),
+    let endpoint_id = endpoint.id().to_string();
+    let mut indexers = SHARED_INDEXERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .await;
+
+    if let Some(indexer) = indexers.get(&endpoint_id) {
+        return Some(Arc::clone(indexer));
+    }
+
+    match EmbeddingCacheIndexer::for_component(endpoint.component()).await {
+        Ok(indexer) => {
+            let indexer = Arc::new(indexer) as Arc<dyn MultimodalCacheIndex>;
+            indexers.insert(endpoint_id, Arc::clone(&indexer));
+            Some(indexer)
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,
