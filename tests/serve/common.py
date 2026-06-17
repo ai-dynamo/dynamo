@@ -301,7 +301,9 @@ def _prepare_deployment(
     )
 
 
-def _sigterm_prefill_worker(server_process: EngineProcess, logger: logging.Logger) -> bool:
+def _sigterm_prefill_worker(
+    server_process: EngineProcess, logger: logging.Logger
+) -> bool:
     """Send SIGTERM to the prefill worker's main launcher process (the one
     running the Rust backend-common Worker), found by its `--disaggregation-mode
     prefill` cmdline under the launch script's process tree. Returns False if no

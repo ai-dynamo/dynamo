@@ -1059,7 +1059,9 @@ impl Worker {
                 }
                 // Busy (Some(false)) or no introspection (None): keep polling.
                 Ok(Some(false)) | Ok(None) => {}
-                Err(e) => tracing::debug!(error = %e, "is_quiescent raised; treating as not quiescent"),
+                Err(e) => {
+                    tracing::debug!(error = %e, "is_quiescent raised; treating as not quiescent")
+                }
             }
             if !announced {
                 // Not quiescent on the first poll (busy, or the engine can't
@@ -2294,6 +2296,11 @@ mod tests {
         );
     }
 
+    // ENV_LOCK must span the `.await` below: it serializes the env set/restore
+    // window against other env-mutating drain tests, and the value must stay
+    // pinned while the awaited drain loop reads it. No code reachable from the
+    // await re-acquires ENV_LOCK, so there's no deadlock risk.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn shutdown_steps_drain_failure_does_not_block_cleanup() {
         // is_quiescent errors are treated as "not idle"; the drain loop keeps

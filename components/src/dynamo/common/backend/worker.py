@@ -11,7 +11,7 @@ in Rust (``dynamo_backend_common::Worker``). This module only:
     ``from_runtime_config`` helper, and
   * drives the Rust ``Worker`` for a given ``LLMEngine`` instance.
 
-Engine semantics (``start``/``generate``/``abort``/``drain``/``cleanup``)
+Engine semantics (``start``/``generate``/``abort``/``is_quiescent``/``cleanup``)
 remain the only thing engine authors implement.
 """
 
@@ -70,6 +70,7 @@ def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
         return orig_add_signal_handler(sig, callback, *args)
 
     loop.add_signal_handler = add_signal_handler  # type: ignore[assignment]
+
 
 # Map the user-facing `dynamo.common.constants.DisaggregationMode` (which
 # carries 4 modes including ENCODE) to the 3-mode Rust enum. ENCODE is not
