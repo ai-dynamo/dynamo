@@ -50,6 +50,67 @@ var (
 	h100MaxGPUBudget = getenvInt32("DGDR_H100_MAX_GPU_BUDGET", 32)
 )
 
+// disaggPlannerBase builds the DGDRLifecycleInput shared by the larger models
+// (Qwen3-235B-A22B-FP8, Meta-Llama-3.1-70B) that run disagg with the planner and
+// need 256Gi of shared memory on the prefill/decode workers. Only the resource
+// name prefix, model, and DGD override name vary between these models, so they
+// are parameterized here to keep the per-model specs DRY.
+func disaggPlannerBase(
+	namePrefix, model, dgdName string,
+	backend v1beta1.BackendType,
+	suffix string,
+) DGDRLifecycleInput {
+	return DGDRLifecycleInput{
+		Name:           uniqueName(namePrefix + "-" + suffix),
+		Model:          model,
+		Backend:        backend,
+		SearchStrategy: v1beta1.SearchStrategyRapid,
+		AutoApply:      ptr.To(true),
+		SLA: &v1beta1.SLASpec{
+			TTFT: ptr.To(h100TTFTMillis),
+			ITL:  ptr.To(h100ITLMillis),
+		},
+		Workload: &v1beta1.WorkloadSpec{
+			ISL: ptr.To(h100ISL),
+			OSL: ptr.To(h100OSL),
+		},
+		Hardware: &v1beta1.HardwareSpec{
+			GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
+			VRAMMB:         ptr.To(h100VRAMMB),
+			NumGPUsPerNode: ptr.To(h100NumGPUsPerNode),
+			TotalGPUs:      ptr.To(h100TotalGPUs),
+		},
+		Features: &v1beta1.FeaturesSpec{
+			Planner: plannerRawExtension(map[string]interface{}{
+				"mode":                      "disagg",
+				"enable_throughput_scaling": true,
+				"enable_load_scaling":       true,
+				"max_gpu_budget":            h100MaxGPUBudget,
+			}),
+		},
+		Overrides: &v1beta1.OverridesSpec{
+			DGD: dgdOverrideRawExtension(map[string]interface{}{
+				"apiVersion": "nvidia.com/v1alpha1",
+				"kind":       "DynamoGraphDeployment",
+				"metadata":   map[string]interface{}{"name": dgdName},
+				"spec": map[string]interface{}{
+					"services": map[string]interface{}{
+						"prefill": map[string]interface{}{
+							"sharedMemory": map[string]interface{}{"size": "256Gi"},
+						},
+						"decode": map[string]interface{}{
+							"sharedMemory": map[string]interface{}{"size": "256Gi"},
+						},
+					},
+				},
+			}),
+		},
+		ExpectDGDReady:  true,
+		VerifyConfigMap: true,
+		VerifyInference: true,
+	}
+}
+
 // DGDR Support Matrix on H100 SKU exercises the full DGDR lifecycle (create -> profile ->
 // DGD generation -> DGD readiness) across a curated
 var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "integration", "k8s"), func() {
@@ -115,55 +176,7 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 		// ---- Qwen3-235B-A22B-FP8 (all backends) ----
 		Context("should complete full lifecycle of Qwen3-235B-A22B-FP8", func() {
 			qwen235bBase := func(backend v1beta1.BackendType, suffix string) DGDRLifecycleInput {
-				return DGDRLifecycleInput{
-					Name:           uniqueName("qwen235b-" + suffix),
-					Model:          "Qwen/Qwen3-235B-A22B-FP8",
-					Backend:        backend,
-					SearchStrategy: v1beta1.SearchStrategyRapid,
-					AutoApply:      ptr.To(true),
-					SLA: &v1beta1.SLASpec{
-						TTFT: ptr.To(h100TTFTMillis),
-						ITL:  ptr.To(h100ITLMillis),
-					},
-					Workload: &v1beta1.WorkloadSpec{
-						ISL: ptr.To(h100ISL),
-						OSL: ptr.To(h100OSL),
-					},
-					Hardware: &v1beta1.HardwareSpec{
-						GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
-						VRAMMB:         ptr.To(h100VRAMMB),
-						NumGPUsPerNode: ptr.To(h100NumGPUsPerNode),
-						TotalGPUs:      ptr.To(h100TotalGPUs),
-					},
-					Features: &v1beta1.FeaturesSpec{
-						Planner: plannerRawExtension(map[string]interface{}{
-							"mode":                      "disagg",
-							"enable_throughput_scaling": true,
-							"enable_load_scaling":       true,
-							"max_gpu_budget":            h100MaxGPUBudget,
-						}),
-					},
-					Overrides: &v1beta1.OverridesSpec{
-						DGD: dgdOverrideRawExtension(map[string]interface{}{
-							"apiVersion": "nvidia.com/v1alpha1",
-							"kind":       "DynamoGraphDeployment",
-							"metadata":   map[string]interface{}{"name": "q235"},
-							"spec": map[string]interface{}{
-								"services": map[string]interface{}{
-									"prefill": map[string]interface{}{
-										"sharedMemory": map[string]interface{}{"size": "256Gi"},
-									},
-									"decode": map[string]interface{}{
-										"sharedMemory": map[string]interface{}{"size": "256Gi"},
-									},
-								},
-							},
-						}),
-					},
-					ExpectDGDReady:  true,
-					VerifyConfigMap: true,
-					VerifyInference: true,
-				}
+				return disaggPlannerBase("qwen235b", "Qwen/Qwen3-235B-A22B-FP8", "q235", backend, suffix)
 			}
 
 			DescribeTable("Qwen3-235B-A22B-FP8 on H100 with planner",
@@ -238,55 +251,7 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 		// ---- Meta-Llama-3.1-70B (all backends) ----
 		Context("should complete full lifecycle of Meta-Llama-3.1-70B", func() {
 			llama31Base := func(backend v1beta1.BackendType, suffix string) DGDRLifecycleInput {
-				return DGDRLifecycleInput{
-					Name:           uniqueName("llama31-70b-" + suffix),
-					Model:          "meta-llama/Meta-Llama-3.1-70B",
-					Backend:        backend,
-					SearchStrategy: v1beta1.SearchStrategyRapid,
-					AutoApply:      ptr.To(true),
-					SLA: &v1beta1.SLASpec{
-						TTFT: ptr.To(h100TTFTMillis),
-						ITL:  ptr.To(h100ITLMillis),
-					},
-					Workload: &v1beta1.WorkloadSpec{
-						ISL: ptr.To(h100ISL),
-						OSL: ptr.To(h100OSL),
-					},
-					Hardware: &v1beta1.HardwareSpec{
-						GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
-						VRAMMB:         ptr.To(h100VRAMMB),
-						NumGPUsPerNode: ptr.To(h100NumGPUsPerNode),
-						TotalGPUs:      ptr.To(h100TotalGPUs),
-					},
-					Features: &v1beta1.FeaturesSpec{
-						Planner: plannerRawExtension(map[string]interface{}{
-							"mode":                      "disagg",
-							"enable_throughput_scaling": true,
-							"enable_load_scaling":       true,
-							"max_gpu_budget":            h100MaxGPUBudget,
-						}),
-					},
-					Overrides: &v1beta1.OverridesSpec{
-						DGD: dgdOverrideRawExtension(map[string]interface{}{
-							"apiVersion": "nvidia.com/v1alpha1",
-							"kind":       "DynamoGraphDeployment",
-							"metadata":   map[string]interface{}{"name": "llama31-70b"},
-							"spec": map[string]interface{}{
-								"services": map[string]interface{}{
-									"prefill": map[string]interface{}{
-										"sharedMemory": map[string]interface{}{"size": "256Gi"},
-									},
-									"decode": map[string]interface{}{
-										"sharedMemory": map[string]interface{}{"size": "256Gi"},
-									},
-								},
-							},
-						}),
-					},
-					ExpectDGDReady:  true,
-					VerifyConfigMap: true,
-					VerifyInference: true,
-				}
+				return disaggPlannerBase("llama31-70b", "meta-llama/Meta-Llama-3.1-70B", "llama31-70b", backend, suffix)
 			}
 
 			DescribeTable("Meta-Llama-3.1-70B on H100 with planner",

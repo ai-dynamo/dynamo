@@ -50,7 +50,8 @@ type DGDRLifecycleInput struct {
 	ExpectDGDReady  bool                          // verify DGD reaches state=successful (skipped in mocker mode)
 	VerifyServices  map[string]ServiceExpectation // per-service expectations on the DGD (optional)
 	VerifyConfigMap bool                          // check dgdr-output-<name> ConfigMap exists and contains a DGD
-	VerifyInference bool                          // send v1/models and v1/chat/completions requests (skipped in mocker mode)
+	// send v1/models and v1/chat/completions requests (skipped in mocker mode)
+	VerifyInference bool
 }
 
 // DGDRLifecycleSpec implements a test that exercises the full DGDR lifecycle:

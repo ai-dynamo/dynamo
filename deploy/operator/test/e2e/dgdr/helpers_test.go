@@ -543,7 +543,9 @@ func verifyInference(dgdName, model string) {
 
 	// v1/chat/completions — verify the model can generate a response
 	By("Sending a chat completion request")
-	chatBody := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":16}`, model)
+	chatBody := fmt.Sprintf(
+		`{"model":"%s","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":16}`,
+		model)
 	chatOut, chatErr, err := kubectl("run", "inference-chat-"+suffix,
 		"--rm", "-i", "--restart=Never",
 		"-n", flagNamespace,
