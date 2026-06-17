@@ -156,6 +156,15 @@ impl SelectionCore {
         self.cancel_token.cancel();
     }
 
+    fn ensure_running(&self) -> Result<(), SelectionError> {
+        if self.cancel_token.is_cancelled() {
+            return Err(SelectionError::NotReady(
+                "selection service is shutting down".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn recover_indexer_from_peers(
         &self,
         peers: &[String],
@@ -216,6 +225,7 @@ impl SelectionCore {
         &self,
         req: WorkerRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        self.ensure_running()?;
         let (previous, record) = self.catalog.upsert(req);
         self.reconcile_worker(record.worker_id, previous).await
     }
@@ -225,6 +235,7 @@ impl SelectionCore {
         worker_id: WorkerId,
         patch: WorkerPatchRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        self.ensure_running()?;
         let (previous, record) = self.catalog.patch(worker_id, patch)?;
         self.reconcile_worker(record.worker_id, Some(previous))
             .await
@@ -264,7 +275,7 @@ impl SelectionCore {
         let schedulable_workers = self.catalog.schedulable_count();
         let workers = self.catalog.list(None, None);
         ReadyResponse {
-            ready: schedulable_workers > 0,
+            ready: !self.cancel_token.is_cancelled() && schedulable_workers > 0,
             schedulable_workers,
             workers,
         }
@@ -603,11 +614,7 @@ impl SelectionCore {
             allowed_worker_ids,
             routing_constraints,
         } = operation;
-        if self.cancel_token.is_cancelled() {
-            return Err(SelectionError::NotReady(
-                "selection service is shutting down".to_string(),
-            ));
-        }
+        self.ensure_running()?;
 
         let entry = self.ready_entry(&key)?;
         let PreparedSelectionInputs {
@@ -691,6 +698,7 @@ impl SelectionCore {
         &self,
         req: ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
+        self.ensure_running()?;
         let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
         let entry = self.ready_entry(&key)?;
         let normalized = req
@@ -1044,6 +1052,14 @@ mod tests {
         .expect("selection did not queue");
     }
 
+    fn assert_shutdown_error(error: SelectionError) {
+        assert!(matches!(
+            error,
+            SelectionError::NotReady(message)
+                if message == "selection service is shutting down"
+        ));
+    }
+
     #[test]
     fn parent_cancel_cancels_core() {
         let parent = CancellationToken::new();
@@ -1079,14 +1095,65 @@ mod tests {
 
         core.shutdown();
         assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+    }
 
-        let record = core
-            .upsert_worker(worker_with_kv_events(2))
+    #[tokio::test]
+    async fn shutdown_reports_not_ready_and_rejects_new_work() {
+        let core = SelectionCore::new(test_config(false), 1, CancellationToken::new());
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        assert!(core.ready().ready);
+
+        core.shutdown();
+
+        let ready = core.ready();
+        assert!(!ready.ready);
+        assert_eq!(ready.schedulable_workers, 1);
+
+        let upsert_error = core
+            .upsert_worker(worker(2))
             .await
-            .expect("worker upsert");
+            .expect_err("upsert should fail after shutdown");
+        assert_shutdown_error(upsert_error);
 
-        assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
-        assert_eq!(core.indexer_registry.listener_cancelled(2, 0), Some(true));
+        let patch = serde_json::from_value(serde_json::json!({
+            "endpoint": "http://worker-1:9000"
+        }))
+        .expect("worker patch");
+        let patch_error = core
+            .patch_worker(1, patch)
+            .await
+            .expect_err("patch should fail after shutdown");
+        assert_shutdown_error(patch_error);
+
+        let select_error = core
+            .select(select_request())
+            .await
+            .expect_err("selection should fail after shutdown");
+        assert_shutdown_error(select_error);
+
+        let reservation_error = core
+            .create_reservation(ReservationRequest {
+                model_name: "model".to_string(),
+                tenant_id: "default".to_string(),
+                reservation_id: "res-after-shutdown".to_string(),
+                worker_id: 1,
+                dp_rank: None,
+                prompt: prompt(),
+                router_config_override: None,
+                expected_output_tokens: None,
+                effective_prefill_tokens: None,
+            })
+            .await
+            .expect_err("reservation should fail after shutdown");
+        assert_shutdown_error(reservation_error);
+
+        assert_eq!(core.list_workers(None, None).len(), 1);
+        assert_eq!(core.loads(None, None).len(), 1);
+        let deleted = core
+            .delete_worker(1)
+            .await
+            .expect("delete should remain available after shutdown");
+        assert_eq!(deleted.lifecycle, WorkerLifecycle::Unschedulable);
     }
 
     #[tokio::test]
