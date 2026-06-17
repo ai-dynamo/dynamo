@@ -404,19 +404,57 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        min_routing_total_blocks: int = 0,
         router_nvext_expectation: RouterNvextExpectation | None = None,
+        require_rust_processor_init: bool = False,
+        require_vllm_mm_processor_init: bool = False,
+        min_avg_kv_hit_rate: float = 0.0,
     ):
+        # MM-aware routing checks: piggyback on engine_process.validate_expected_logs.
+        log_patterns: List[str] = list(expected_log or [])
+        if require_rust_processor_init:
+            log_patterns.append(r"MM-aware KV routing enabled")
+        if require_vllm_mm_processor_init:
+            log_patterns.append(r"\[mm-routing\] Transfer mode:")
+        if min_routing_total_blocks > 0:
+            # The regex below gates by digit-count, so the threshold must
+            # be a power of 10 (1, 10, 100, ...). Reject any non-conforming
+            # value at construction time — otherwise the assertion would
+            # under-enforce (e.g. min_routing_total_blocks=25 would still
+            # only require 2-digit counts ≥10, not ≥25).
+            n_str = str(min_routing_total_blocks)
+            if n_str[0] != "1" or any(c != "0" for c in n_str[1:]):
+                raise ValueError(
+                    f"min_routing_total_blocks must be a power of 10 "
+                    f"(1, 10, 100, ...); got {min_routing_total_blocks}"
+                )
+            min_digits = len(n_str)
+            log_patterns.append(
+                rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
+            )
         super().__init__(
             body=body,
             repeat_count=repeat_count,
             expected_response=expected_response or [],
-            expected_log=expected_log or [],
+            expected_log=log_patterns,
             timeout=timeout,
         )
         self.min_cached_tokens = min_cached_tokens
         self._request_count = 0
         self._cached_tokens_found = False
         self.router_nvext_expectation = router_nvext_expectation
+        # Asserts the post-R1 mean of router_kv_hit_rate >= threshold. Catches
+        # router/worker hash divergence (overlap=0) that cached_tokens alone
+        # can miss via load-balance luck on vLLM's per-worker prefix cache.
+        #
+        # TODO(mm-routing): this field + _metrics_baseline + the kv_hit_rate
+        # delta assertion in final_validation() are router-metric-specific
+        # logic accreting onto a general-purpose Cached*Payload base. If
+        # more strong-gate metrics get added (decode-imbalance, routing-
+        # block-count, etc.), move into a RouterMetricsAssertion
+        # mixin/subclass.
+        self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -433,18 +471,27 @@ class CachedTokensChatPayload(ChatPayload):
 
         # Check usage field for cached tokens
         # Expected structure: usage.prompt_tokens_details.cached_tokens
-        usage = result.get("usage", {})
-        prompt_tokens_details = usage.get("prompt_tokens_details") or {}
+        usage = result.get("usage")
+        prompt_tokens_details = (usage or {}).get("prompt_tokens_details") or {}
         cached_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
+        prompt_tokens = (usage or {}).get("prompt_tokens")
 
         logger.info(
-            f"Request {self._request_count}: prompt_tokens={usage.get('prompt_tokens')}, "
+            f"Request {self._request_count}: prompt_tokens={prompt_tokens}, "
             f"cached_tokens={cached_tokens}, prompt_tokens_details={prompt_tokens_details}"
         )
 
-        # For requests after the first one, we expect cached tokens > 0
-        # (since identical prompts should hit the prefix cache)
-        if self._request_count > 1:
+        # On repeats we expect a cache hit. Require usage with prompt_tokens > 0
+        # so a backend that reports no usage fails instead of passing by default.
+        # An absent cached_tokens field is a legit miss (vLLM/SGLang omit it when
+        # cached==0), so treat it as a soft miss below, not a hard error.
+        if self._request_count > 1 and self.min_cached_tokens > 0:
+            if usage is None or prompt_tokens is None or prompt_tokens <= 0:
+                raise AssertionError(
+                    f"Request {self._request_count}: response carried no usage "
+                    f"evidence (usage={usage!r}); cannot validate cached tokens. "
+                    f"Expected a usage block with prompt_tokens > 0."
+                )
             if cached_tokens >= self.min_cached_tokens:
                 self._cached_tokens_found = True
                 logger.info(
@@ -457,20 +504,96 @@ class CachedTokensChatPayload(ChatPayload):
                     f"(expected >= {self.min_cached_tokens})"
                 )
 
-    def final_validation(self) -> None:
-        """Called after all requests are processed to ensure we saw cached tokens.
+        # Snapshot after R1 so the delta in final_validation isolates R2+.
+        if (
+            self._metrics_baseline is None
+            and self._request_count == 1
+            and self.min_avg_kv_hit_rate > 0
+        ):
+            self._metrics_baseline = self._scrape_router_kv_hit_rate()
 
-        Raises AssertionError if cached tokens were not found on any repeated request.
+    def _scrape_router_kv_hit_rate(self) -> Optional[tuple[float, float]]:
+        """Return ``(sum, count)`` for ``router_kv_hit_rate`` from the
+        frontend /metrics endpoint, or ``None`` if the endpoint is
+        unreachable. The component MetricsHierarchy auto-prepends
+        ``dynamo_component_`` to the exported name.
         """
-        if self.repeat_count > 1 and not self._cached_tokens_found:
+        url = f"http://localhost:{self.port}/metrics"
+        try:
+            text = requests.get(url, timeout=5).text
+        except requests.RequestException as e:
+            # Narrow to HTTP/network errors per .ai/python-guidelines.md:
+            # we expect transient endpoint flakes here (timeout, connection
+            # refused while the frontend is still binding /metrics) and
+            # the strong gate has its own `is None` guard. Programming
+            # errors propagate so they surface at test-time instead of
+            # being swallowed.
+            logger.warning("Failed to scrape %s: %s", url, e)
+            return None
+        # Compose from canonical constants so a metric rename in
+        # prometheus_names cascades here instead of silently breaking
+        # the kv_hit_rate strong gate.
+        full = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.router.KV_HIT_RATE}"
+        )
+        return (
+            sum_metric_samples(text, f"{full}_sum"),
+            sum_metric_samples(text, f"{full}_count"),
+        )
+
+    def final_validation(self) -> None:
+        """Assert cached_tokens >= min_cached_tokens on at least one repeat
+        (only when min_cached_tokens > 0), and (if set) router_kv_hit_rate
+        post-R1 mean >= min_avg_kv_hit_rate.
+        """
+        # Only assert cached tokens when a positive threshold is set; a caller
+        # validating purely via the router metric passes min_cached_tokens=0.
+        if self.min_cached_tokens > 0:
+            if self.repeat_count > 1 and not self._cached_tokens_found:
+                raise AssertionError(
+                    f"Expected cached_tokens >= {self.min_cached_tokens} in "
+                    f"prompt_tokens_details for at least one repeated request, "
+                    f"but none found after {self._request_count} requests. "
+                    f"Verify that prefix caching is enabled and working correctly."
+                )
+            logger.info(
+                "✓ Final validation PASSED: cached_tokens found in repeated requests"
+            )
+
+        if self.min_avg_kv_hit_rate <= 0:
+            return
+        if self._metrics_baseline is None:
             raise AssertionError(
-                f"Expected cached_tokens >= {self.min_cached_tokens} in "
-                f"prompt_tokens_details for at least one repeated request, "
-                f"but none found after {self._request_count} requests. "
-                f"Verify that prefix caching is enabled and working correctly."
+                "min_avg_kv_hit_rate set but no metrics baseline captured "
+                "(R1 validate() didn't run or /metrics was unreachable)."
+            )
+        after = self._scrape_router_kv_hit_rate()
+        if after is None:
+            raise AssertionError(
+                "router_kv_hit_rate scrape failed at final_validation; "
+                "/metrics endpoint unreachable from test."
+            )
+        bsum, bcount = self._metrics_baseline
+        asum, acount = after
+        d_sum, d_count = asum - bsum, acount - bcount
+        if d_count <= 0:
+            raise AssertionError(
+                f"router_kv_hit_rate: no new observations between R1 and final "
+                f"(baseline_count={bcount}, after_count={acount}); "
+                f"MM-routing likely not engaging on repeat requests."
+            )
+        avg = d_sum / d_count
+        if avg < self.min_avg_kv_hit_rate:
+            raise AssertionError(
+                f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "
+                f"min ({self.min_avg_kv_hit_rate}). delta_n={d_count}, "
+                f"delta_sum={d_sum:.3f}. Router-side block hashes did not "
+                f"match the worker — MM-aware routing degraded silently."
             )
         logger.info(
-            "✓ Final validation PASSED: cached_tokens found in repeated requests"
+            f"✓ router_kv_hit_rate: mean over R2+ = {avg:.3f} "
+            f"(>= {self.min_avg_kv_hit_rate})"
         )
 
 
@@ -581,6 +704,32 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class ImagesPayload(BasePayload):
+    """Payload for the image-generation endpoint (raw-media / DiffusionEngine).
+
+    Targets ``/v1/images/generations`` and validates the OpenAI-shaped
+    response: a non-empty ``data`` list whose first item carries either a
+    ``b64_json`` or a ``url``.
+    """
+
+    endpoint: str = "/v1/images/generations"
+
+    @staticmethod
+    def extract_image(response):
+        response.raise_for_status()
+        result = response.json()
+        assert "data" in result, "Missing 'data' in image response"
+        assert len(result["data"]) > 0, "Empty 'data' in image response"
+        item = result["data"][0]
+        # Return whichever representation the engine produced — either is a
+        # valid image result.
+        return item.get("b64_json") or item.get("url") or ""
+
+    def response_handler(self, response: Any) -> str:
+        return ImagesPayload.extract_image(response)
 
 
 @dataclass

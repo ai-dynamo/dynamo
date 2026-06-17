@@ -10,8 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use dynamo_data_gen::{AgenticMooncakeRow, MooncakeRow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
+    ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
 };
 use dynamo_tokens::compute_hash_v2;
 use rand::rngs::StdRng;
@@ -89,6 +88,8 @@ impl TurnTrace {
             uuid: Some(request_uuid),
             dp_rank: 0,
             arrival_timestamp_ms,
+            priority: self.priority,
+            strict_priority: self.strict_priority,
         })
     }
 
@@ -104,14 +105,7 @@ impl TurnTrace {
         let tokens = self.synthesize_tokens(trace_block_size)?;
         let engine_block_size =
             u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
-        let local_block_hashes =
-            compute_block_hash_for_seq(&tokens, engine_block_size, BlockHashOptions::default());
-        let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
-
-        Ok(ReplayRequestHashes {
-            local_block_hashes,
-            sequence_hashes,
-        })
+        Ok(ReplayRequestHashes::from_tokens(&tokens, engine_block_size))
     }
 }
 
@@ -166,14 +160,7 @@ impl AgenticTurnTrace {
         let tokens = self.synthesize_tokens(trace_block_size)?;
         let engine_block_size =
             u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
-        let local_block_hashes =
-            compute_block_hash_for_seq(&tokens, engine_block_size, BlockHashOptions::default());
-        let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
-
-        Ok(ReplayRequestHashes {
-            local_block_hashes,
-            sequence_hashes,
-        })
+        Ok(ReplayRequestHashes::from_tokens(&tokens, engine_block_size))
     }
 }
 
@@ -235,6 +222,8 @@ impl Trace {
                 .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
             let timestamp_ms = raw.timestamp;
             let explicit_delay_ms = raw.delay;
+            let priority = raw.priority.unwrap_or(0);
+            let strict_priority = raw.strict_priority.unwrap_or(0);
 
             let session_index = *session_indices
                 .entry(session_id.clone())
@@ -300,6 +289,8 @@ impl Trace {
                 max_output_tokens: output_length,
                 hash_ids,
                 delay_after_previous_ms,
+                priority,
+                strict_priority,
             });
             if let Some(timestamp_ms) = timestamp_ms {
                 last_timestamps[session_index] = Some(timestamp_ms);
@@ -421,6 +412,7 @@ impl Trace {
                     max_output_tokens: raw.assistant_response_length[turn_idx],
                     hash_ids: hash_ids.clone(),
                     delay_after_previous_ms: next_turn_delay_ms,
+                    ..Default::default()
                 });
 
                 current_input_length = current_input_length
@@ -448,6 +440,7 @@ impl Trace {
                 max_output_tokens: raw.final_assistant_response_length,
                 hash_ids,
                 delay_after_previous_ms: next_turn_delay_ms,
+                ..Default::default()
             });
 
             sessions.push(SessionTrace {
@@ -539,6 +532,7 @@ impl Trace {
                     } else {
                         sample_delay_ms(&spec.inter_turn_delays, &mut rng)?
                     },
+                    ..Default::default()
                 });
             }
 
@@ -829,10 +823,10 @@ impl Trace {
         WorkloadDriver::new_trace(self, engine_block_size)
     }
 
-    pub fn into_concurrency_driver(self) -> Result<WorkloadDriver> {
+    pub fn into_concurrency_driver(self, max_in_flight: usize) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
         let engine_block_size = self.block_size;
-        WorkloadDriver::new_concurrency(self, engine_block_size)
+        WorkloadDriver::new_concurrency(self, engine_block_size, max_in_flight)
     }
 
     pub fn into_trace_driver_with_block_size(
@@ -854,17 +848,19 @@ impl Trace {
     pub fn into_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
+        max_in_flight: usize,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
-        WorkloadDriver::new_concurrency(self, engine_block_size)
+        WorkloadDriver::new_concurrency(self, engine_block_size, max_in_flight)
     }
 
     pub fn into_delta_accumulating_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
+        max_in_flight: usize,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
-        WorkloadDriver::new_concurrency_accumulating_deltas(self, engine_block_size)
+        WorkloadDriver::new_concurrency_accumulating_deltas(self, engine_block_size, max_in_flight)
     }
 
     fn validate(&self, allow_missing_first_timestamp: bool) -> Result<()> {
@@ -1048,6 +1044,8 @@ impl AgenticTrace {
                 hash_ids,
                 first_ready_timestamp_ms: raw.timestamp,
                 delay_after_dependencies_ms,
+                priority: raw.priority.unwrap_or(0),
+                strict_priority: raw.strict_priority.unwrap_or(0),
                 wait_for: raw.wait_for,
                 prefix_reset: raw.prefix_reset.unwrap_or(false),
             });

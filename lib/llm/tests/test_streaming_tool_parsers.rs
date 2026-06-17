@@ -1607,4 +1607,105 @@ mod tests {
             "finish_reason should pass through as Stop when no tool calls are emitted"
         );
     }
+
+    // TOOLCALLING.stream.4.c — recover complete bare inner calls without
+    // leaking protocol markup, matching DeepSeek V3.2/V4 behavior.
+
+    #[tokio::test]
+    async fn test_deepseek_v3_streaming_orphan_call_recovered() {
+        let chunks = vec![
+            make_chunk(
+                "<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"location\": \"NYC\"}\n```\n<｜tool▁call▁end｜>\n<｜tool▁call▁end｜>\n<｜tool▁call▁end｜>",
+                None,
+            ),
+            make_chunk("", Some(FinishReason::Length)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            false,
+            Some("deepseek_v3".to_string()),
+            None,
+        )
+        .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Bare DeepSeek V3 inner call (no outer wrapper) should be recovered"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+        let args: serde_json::Value = serde_json::from_str(
+            aggregated.tool_calls[0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args["location"], "NYC");
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Orphan tool-call markup must not leak into normal_content. Got: {:?}",
+            aggregated.normal_content
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Length),
+            "finish_reason validation failed for recovered orphan DeepSeek V3 call"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_streaming_orphan_call_recovered() {
+        let chunks = vec![
+            make_chunk(
+                "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"location\":\"NYC\"}<｜tool▁call▁end｜><｜tool▁call▁end｜><｜tool▁call▁end｜>",
+                None,
+            ),
+            make_chunk("", Some(FinishReason::Length)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            false,
+            Some("deepseek_v3_1".to_string()),
+            None,
+        )
+        .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Bare DeepSeek V3.1 inner call (no outer wrapper) should be recovered"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+        let args: serde_json::Value = serde_json::from_str(
+            aggregated.tool_calls[0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args["location"], "NYC");
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Orphan tool-call markup must not leak into normal_content. Got: {:?}",
+            aggregated.normal_content
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Length),
+            "finish_reason validation failed for recovered orphan DeepSeek V3.1 call"
+        );
+    }
 }

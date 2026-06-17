@@ -14,7 +14,7 @@ pub(super) struct SglangRequest {
     pub(super) uuid: Uuid,
     pub(super) prompt_tokens: Vec<u64>,
     pub(super) max_output_tokens: usize,
-    pub(super) output_ids: Vec<u64>,
+    pub(super) output_ids: Vec<u32>,
     pub(super) last_node: Option<NodeId>,
     pub(super) kv_indices: Vec<usize>,
     pub(super) materialized_tokens: usize,
@@ -60,7 +60,7 @@ impl SglangRequest {
 
     pub(super) fn sequence_tokens(&self) -> Vec<u64> {
         let mut sequence = self.prompt_tokens.clone();
-        sequence.extend_from_slice(&self.output_ids);
+        sequence.extend(self.output_ids.iter().map(|&token| token as u64));
         sequence
     }
 
@@ -71,18 +71,22 @@ impl SglangRequest {
         }
 
         let mut prefix = self.prompt_tokens.clone();
-        prefix.extend_from_slice(&self.output_ids[..len - prompt_len]);
+        prefix.extend(
+            self.output_ids[..len - prompt_len]
+                .iter()
+                .map(|&token| token as u64),
+        );
         prefix
     }
 
-    pub(super) fn next_output_token(&self) -> u64 {
+    pub(super) fn next_output_token(&self) -> u32 {
         let mut hasher = DefaultHasher::new();
         self.uuid.hash(&mut hasher);
         self.output_len().hash(&mut hasher);
-        hasher.finish()
+        hasher.finish() as u32
     }
 
-    pub(super) fn append_output_token(&mut self, token: u64) {
+    pub(super) fn append_output_token(&mut self, token: u32) {
         self.output_ids.push(token);
         self.materialized_tokens += 1;
     }
@@ -159,16 +163,18 @@ impl SglangRequest {
     }
 }
 
-pub(super) fn direct_to_sglang(req: DirectRequest) -> SglangRequest {
-    SglangRequest {
-        uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
-        prompt_tokens: req.tokens.iter().map(|&t| t as u64).collect(),
-        max_output_tokens: req.max_output_tokens,
-        output_ids: Vec::new(),
-        last_node: None,
-        kv_indices: Vec::new(),
-        materialized_tokens: 0,
-        cached_tokens: 0,
-        allocated_tokens: 0,
+impl From<DirectRequest> for SglangRequest {
+    fn from(req: DirectRequest) -> Self {
+        Self {
+            uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
+            prompt_tokens: req.tokens.iter().map(|&t| t as u64).collect(),
+            max_output_tokens: req.max_output_tokens,
+            output_ids: Vec::new(),
+            last_node: None,
+            kv_indices: Vec::new(),
+            materialized_tokens: 0,
+            cached_tokens: 0,
+            allocated_tokens: 0,
+        }
     }
 }

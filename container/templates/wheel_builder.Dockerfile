@@ -488,9 +488,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
@@ -526,10 +526,12 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
 ##################################
 ##### wheel_builder ##############
 ##################################
-{% if "nixl_ref" in context[framework] %}
+{% if "nixl_ref" in context[framework] or device == "xpu" %}
 # Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
 # consolidates all wheels.
 # Runtime templates COPY from this stage.
+# Note: XPU triggers this path even when the framework section lacks nixl_ref,
+# because no upstream XPU runtime image ships pre-built NIXL.
 
 FROM wheel_builder_base AS wheel_builder
 
@@ -599,6 +601,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
+{% if not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev")) %}
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -612,6 +615,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 # Copy source code (order matters for layer caching)
@@ -661,9 +665,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
 
 {% else %}
-# SGLang uses NIXL from the upstream lmsysorg/sglang runtime image and does not
-# build Dynamo KVBM. Keep this alias so downstream stages can still COPY Dynamo
-# wheels and build tools from a common wheel_builder stage name.
+# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and
+# does not build Dynamo KVBM. Keep this alias so downstream stages can still
+# COPY Dynamo wheels and build tools from a common wheel_builder stage name.
 # SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
 # absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
 FROM runtime_wheel_builder AS wheel_builder

@@ -28,11 +28,28 @@ use std::sync::Arc;
 
 use dynamo_runtime::{Runtime, logging};
 
-use crate::engine::LLMEngine;
+use crate::engine::{LLMEngine, RawEngine};
 use crate::worker::{Worker, WorkerConfig};
 
-/// Drive the full lifecycle for an already-constructed engine.
+/// Drive the full lifecycle for an already-constructed token-pipeline engine.
 pub fn run(engine: Arc<dyn LLMEngine>, config: WorkerConfig) -> anyhow::Result<()> {
+    run_worker(config, |cfg| Worker::new(engine, cfg))
+}
+
+/// Drive the full lifecycle for an already-constructed raw media-pipeline
+/// engine (image/video/audio generation). Identical orchestration to [`run`];
+/// only the request adapter differs.
+pub fn run_raw(engine: Arc<dyn RawEngine>, config: WorkerConfig) -> anyhow::Result<()> {
+    run_worker(config, |cfg| Worker::new_raw(engine, cfg))
+}
+
+/// Shared runtime setup + shutdown for both engine modalities. `build`
+/// constructs the [`Worker`] from the (env-applied) config once the runtime
+/// is up.
+fn run_worker(
+    config: WorkerConfig,
+    build: impl FnOnce(WorkerConfig) -> Worker,
+) -> anyhow::Result<()> {
     logging::init();
 
     // Apply RuntimeConfig overrides to the env before the runtime reads
@@ -44,7 +61,7 @@ pub fn run(engine: Arc<dyn LLMEngine>, config: WorkerConfig) -> anyhow::Result<(
     let secondary = runtime.secondary();
 
     secondary.block_on(async move {
-        let result = Worker::new(engine, config)
+        let result = build(config)
             .run(runtime.clone())
             .await
             .map_err(anyhow::Error::from);

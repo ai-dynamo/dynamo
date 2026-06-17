@@ -15,7 +15,7 @@
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.26.3
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
@@ -31,7 +31,7 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
 # =============================================================================
-FROM ${DOCKER_PROXY}golang:${GO_VERSION} AS go-base
+FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64

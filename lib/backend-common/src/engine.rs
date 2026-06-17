@@ -22,7 +22,9 @@ use tokio::sync::watch;
 use crate::error::DynamoError;
 
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
-pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
+pub use dynamo_llm::protocols::common::llm_backend::{
+    LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
+};
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, PrefillResult, PreprocessedRequest,
 };
@@ -102,19 +104,12 @@ impl Deref for GenerateContext {
     }
 }
 
-/// Registration metadata returned by [`LLMEngine::start`].
-///
-/// `Worker` consumes this to build a `ModelDeploymentCard` and register the
-/// model with discovery. `None` on an optional field means "don't advertise":
-/// the router sees no value and falls back to round-robin (for scheduling
-/// hints) or its configured defaults. Engines without a traditional KV cache
-/// can leave `kv_cache_block_size` and `total_kv_blocks` unset.
+/// Token-pipeline registration metadata (KV cache, data-parallel layout,
+/// disaggregation bootstrap). Set by [`LLMEngine`]s; [`RawEngine`]s leave
+/// [`EngineConfig::llm`] `None`. A `None` field isn't advertised — the router
+/// falls back to round-robin / its configured defaults.
 #[derive(Clone, Debug, Default)]
-pub struct EngineConfig {
-    /// Canonical model identifier (e.g. HF repo name).
-    pub model: String,
-    /// Public-facing model name advertised to clients. Defaults to `model`.
-    pub served_model_name: Option<String>,
+pub struct LlmRegistration {
     /// Maximum context length the engine supports, in tokens.
     pub context_length: Option<u32>,
     /// KV cache block size, in tokens. Used by KV-aware routing. `None`
@@ -129,36 +124,40 @@ pub struct EngineConfig {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
-    /// Number of data-parallel ranks this worker hosts. Defaults to 1.
-    /// The router uses this to enumerate per-rank load when scoring.
+    /// DP ranks this worker hosts (default 1); the router enumerates per-rank
+    /// load from it.
     pub data_parallel_size: Option<u32>,
-    /// Global index of the first DP rank this worker hosts. Defaults to 0.
-    /// Non-zero only under multi-worker DP layouts where each worker owns a
-    /// sub-range (e.g. vLLM hybrid/external LB, SGLang DP-attention across
-    /// multiple nodes). The router enumerates ranks
-    /// `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    /// First DP rank this worker hosts (default 0). Non-zero only when a worker
+    /// owns a sub-range (vLLM hybrid/external LB, multi-node SGLang
+    /// DP-attention); the router enumerates `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
-    /// Bootstrap host this prefill worker advertises to decode peers.
-    ///
-    /// Only meaningful for backends with a Dynamo-level host/port
-    /// handshake (today: SGLang). Backends whose KV transport is
-    /// internal — TRT-LLM uses TRT-LLM's transceiver, vLLM uses vLLM's
-    /// `NixlConnector` — should leave this `None`.
-    ///
-    /// Engines that do use it set this in `start()` after the engine
-    /// has resolved its bootstrap address (SGLang reads
-    /// `tokenizer_manager.server_args.disaggregation_bootstrap_port`).
-    /// When both `bootstrap_host` and `bootstrap_port` are `Some`,
-    /// `Worker` publishes them via
-    /// `ModelRuntimeConfig::disaggregated_endpoint` so the frontend's
-    /// `PrefillRouter` can take its optimised "Bootstrap path" (route
-    /// decode concurrent with prefill instead of waiting for prefill
-    /// to drain).
+    /// Bootstrap host advertised to decode peers — only for Dynamo-handshake
+    /// backends (SGLang); internal-KV-transport backends (TRT-LLM, vLLM
+    /// `NixlConnector`) leave it `None`. When host+port are set, `Worker`
+    /// publishes them for the frontend's `PrefillRouter` Bootstrap path.
     pub bootstrap_host: Option<String>,
     /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
     pub bootstrap_port: Option<u16>,
+}
+
+/// Registration metadata returned by an engine's `start()`.
+///
+/// `Worker` consumes this to build a `ModelDeploymentCard` and register the
+/// model with discovery. The neutral fields (`model`, `served_model_name`,
+/// `runtime_data`) apply to every modality; the token-pipeline metadata lives
+/// in the optional [`llm`](Self::llm) sub-record, which raw media engines
+/// leave `None`.
+#[derive(Clone, Debug, Default)]
+pub struct EngineConfig {
+    /// Canonical model identifier (e.g. HF repo name).
+    pub model: String,
+    /// Public-facing model name advertised to clients. Defaults to `model`.
+    pub served_model_name: Option<String>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
+    /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
+    /// `Some` for [`LLMEngine`]s; `None` for [`RawEngine`]s.
+    pub llm: Option<LlmRegistration>,
 }
 
 /// Inference engine trait.
@@ -328,6 +327,130 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// relies on the activity-driven notifier. Operator overrides
     /// (`DYN_HEALTH_CHECK_PAYLOAD` env / `WorkerConfig`) take precedence
     /// and fully replace this value when set.
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(None)
+    }
+
+    /// Semantic engine controls this engine supports. Empty by default.
+    ///
+    /// Engines advertise control keys and implement them via
+    /// [`LLMEngine::engine_control`]. Mapping those keys onto runtime routes is
+    /// owned by the unified backend layer.
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Handle one semantic engine-control request.
+    async fn engine_control(
+        &self,
+        control: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine control: {control}"),
+        }))
+    }
+
+    /// Semantic engine updates this engine supports. Empty by default.
+    ///
+    /// Updates are a sibling surface to [`supported_controls`](LLMEngine::supported_controls)
+    /// for operations that mutate engine-managed assets (e.g. vLLM dynamic
+    /// LoRA load/unload/list) rather than the engine's serving lifecycle.
+    /// Keeping them separate avoids inflating the control surface. Engines
+    /// advertise update keys and implement them via [`LLMEngine::engine_update`];
+    /// the unified backend maps each key onto an `/engine/update/{key}` route.
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Handle one semantic engine-update request.
+    async fn engine_update(
+        &self,
+        update: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine update: {update}"),
+        }))
+    }
+
+    /// Hand the engine its runtime serving [`Endpoint`](dynamo_runtime::component::Endpoint),
+    /// exactly once, after it exists and before serving begins. Default no-op.
+    ///
+    /// Engines that publish their own discovery records (e.g. vLLM dynamic
+    /// LoRA via `register_model`) stash it here for later use from
+    /// [`engine_update`](LLMEngine::engine_update). Mirrors the
+    /// [`on_publisher_ready`](MetricsBindings::on_publisher_ready) handoff idiom.
+    /// Errors abort startup; `cleanup` runs on the partial state.
+    async fn on_endpoint_ready(
+        &self,
+        _endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
+}
+
+/// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].
+///
+/// Where [`LLMEngine`] sits behind the tokenizer/detokenizer pipeline
+/// (`PreprocessedRequest` → `LLMEngineOutput`), `RawEngine` serves modalities
+/// the frontend forwards verbatim (image/video/audio): request and response
+/// are plain [`serde_json::Value`]s. The contract is modality-neutral, so a
+/// new media modality is a new engine, not a new framework path.
+///
+/// Lifecycle is identical to [`LLMEngine`] (same `Worker` orchestrator); the
+/// only differences are `generate`'s request/response shape and the absence of
+/// `kv_event_sources` (no KV cache to route on).
+#[async_trait]
+pub trait RawEngine: Send + Sync + 'static {
+    /// Start the engine and return registration metadata. See
+    /// [`LLMEngine::start`] — same contract. Media engines typically leave
+    /// the KV-related `EngineConfig` fields unset.
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
+
+    /// Yield response object(s) for a single media-generation request.
+    ///
+    /// `request` is the raw OpenAI-shaped request body. Yield the response
+    /// body as JSON: exactly one (terminal) object for non-streaming
+    /// modalities, or intermediate progress objects ending with a terminal
+    /// one for streaming modalities (e.g. video progress).
+    ///
+    /// As with [`LLMEngine::generate`], poll `ctx.is_stopped()` between
+    /// yields and stop promptly on cancellation. A mid-stream `Err` is
+    /// terminal and forwarded as `Annotated::error`.
+    async fn generate(
+        &self,
+        request: serde_json::Value,
+        ctx: GenerateContext,
+    ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError>;
+
+    /// Abort an in-flight request (optional, default no-op). See
+    /// [`LLMEngine::abort`].
+    async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
+
+    /// Prefill-drain early-exit signal (optional, default `Ok(None)`). See
+    /// [`LLMEngine::is_quiescent`]. Raw media engines are aggregated, so the
+    /// `Worker` never polls this in practice; the method exists only to keep
+    /// the engine interface uniform across the two traits.
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
+    }
+
+    /// Release all engine resources. Called exactly once; must be null-safe
+    /// against partial state and idempotent. See [`LLMEngine::cleanup`].
+    async fn cleanup(&self) -> Result<(), DynamoError>;
+
+    /// Wire up Prometheus surfaces (optional, default empty). See
+    /// [`LLMEngine::setup_metrics`]. Media engines that expose per-rank
+    /// gauges use the same `MetricsBindings` handoff.
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings::default())
+    }
+
+    /// Canary payload for the runtime's `HealthCheckManager` (optional,
+    /// default `None`). See [`LLMEngine::health_check_payload`].
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         Ok(None)
     }

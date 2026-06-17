@@ -1,7 +1,12 @@
 # Backend Module
 
-Two-class abstraction: `Worker` (runtime integration) and
-`LLMEngine` (ABC for engine-specific logic). See `README.md` for full docs.
+`Worker` (runtime integration) drives a `BaseEngine` (ABC for
+engine-specific logic). `BaseEngine` owns the modality-agnostic lifecycle
+(`from_args`/`start`/`abort`/`drain`/`cleanup` + metrics/health hooks);
+the two modality subclasses add only their `generate` contract:
+`LLMEngine` (token pipeline: `token_ids` in/out, plus `kv_event_sources`)
+and `RawEngine` (raw media pipeline: OpenAI request dict in, response dict
+out; `DiffusionEngine` is a domain subclass). See `README.md` for full docs.
 
 ## Engine Lifecycle
 
@@ -77,8 +82,13 @@ Python engine authors keep the split API.)
   When adding new features, always ask: "is this engine-specific or common?"
   If two or more engines would need the same code, it is common.
 
-- **Exactly two classes.** `Worker` owns runtime lifecycle.
-  `LLMEngine` owns inference. Do not add intermediate base classes or mixins.
+- **One `Worker`, one lifecycle base, one subclass per modality.** `Worker`
+  owns runtime lifecycle. `BaseEngine` owns the modality-agnostic lifecycle;
+  `LLMEngine` and `RawEngine` subclass it and differ *only* in the `generate`
+  contract (token vs. raw media). Do not add per-engine mixins or intermediate
+  bases between a modality ABC and its concrete backend (e.g. `VllmLLMEngine`).
+  A new media modality is a new `RawEngine` implementation, not a new
+  engine trait or lifecycle.
 
 - **`from_args()` returns `(engine, WorkerConfig)`.**  The tuple return
   makes the contract statically checkable -- a subclass that forgets to
@@ -92,9 +102,9 @@ Python engine authors keep the split API.)
   exception → `BackendError` mapping are handled by the bridge.
 
 - **`start()` returns `EngineConfig`.** The model class needs registration
-  metadata (`context_length`, `block_size`, `total_kv_blocks`) but must not
-  reach into engine internals. `start()` returns this metadata so the boundary
-  stays clean.
+  metadata (token-pipeline KV/DP fields live in the `llm=LlmRegistration(...)`
+  sub-record; `RawEngine`s leave `llm=None`) but must not reach into engine
+  internals. `start()` returns this metadata so the boundary stays clean.
 
 - **No hooks.** If behavior needs to be shared across engines, put it in
   `Worker` or a shared utility, not in a hook system.
@@ -110,10 +120,11 @@ type the `generate()` signature.  `GenerateRequest` has `token_ids`
 (required) plus optional `sampling_options`, `stop_conditions`, and
 `output_options`.  `GenerateChunk` has `token_ids` and `index` (both
 required; use `index=0` for single-choice chunks), plus optional
-`finish_reason` and `completion_usage` (both required on the final chunk).
-Engines may read
-backend-specific request keys, but response chunk keys should be added to
-the shared contract before use.
+`finish_reason` and `completion_usage` (both required on the final chunk),
+`log_probs` (one float per emitted token), and `top_logprobs` (per-position
+list of ranked alternative dicts — see `logprobs.py` for the entry shape).
+Engines may read backend-specific request keys, but response chunk keys
+should be added to the shared contract before use.
 
 Build the `completion_usage` dict inline. Finish reason normalization
 (e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.
@@ -135,8 +146,10 @@ callers unchanged.
 
 What the **runtime** does with the mode (Rust `Worker` in `lib/backend-common`):
 
-- `Prefill` → register with `ModelType::Prefill` so the frontend's
-  `PrefillRouter` targets this worker, regardless of `endpoint_types`.
+- `Prefill` → register with `ModelType.Prefill` (legacy marker bit, no
+  OpenAI surface — dual-emitted for cross-version compat) and
+  `WorkerType.Prefill` regardless of `endpoint_types`, so the frontend's
+  `PrefillRouter` targets this worker via `worker_type`.
 - `Decode` → keep `endpoint_types`, but force-disable
   `enable_local_indexer` (decode workers don't host the indexer endpoint).
 - `Aggregated` → register with the parsed `endpoint_types`.
@@ -269,11 +282,12 @@ spans should be.
 
 | File | What it does |
 |------|-------------|
-| `engine.py` | `LLMEngine` ABC -- the only interface engines must implement (includes `component_metrics_dp_ranks` + `attach_snapshot_publisher`). |
+| `engine.py` | `BaseEngine` lifecycle ABC + `LLMEngine` / `RawEngine` modality subclasses (`DiffusionEngine` is a `RawEngine` subclass) -- the interface engines implement. |
 | `publisher.py` | `ComponentSnapshot` dataclass (the push payload). The `SnapshotPublisher` itself is a Rust-owned object exposed as `dynamo._core.backend.SnapshotPublisher`. |
 | `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
+| `logprobs.py` | Shared logprob helpers: `parse_logprob_options`, `extract_from_completion_output` (vLLM/TRT-LLM shape), `extract_from_sglang_meta` + `build_sglang_logprob_kwargs` (SGLang cumulative-array shape). Both unified engines and the legacy handlers delegate here. |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
 
 The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:

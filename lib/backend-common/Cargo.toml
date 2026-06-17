@@ -17,6 +17,9 @@ autoexamples = false
 # Enables the conformance test kit (testing.rs). Intended for `[dev-dependencies]`
 # in backend crates — adds no weight to production binaries.
 testing = []
+# Enables NATS-backed integration tests (e.g. the on_endpoint_ready handoff).
+# Forwards to dynamo-runtime's integration feature for `create_test_drt_async`.
+integration = ["dynamo-runtime/integration"]
 
 [dependencies]
 dynamo-runtime = { workspace = true }

@@ -106,6 +106,10 @@ vllm_configs = {
         # max_thinking_tokens payload below: vLLM only enables the thinking-
         # budget logits processor when reasoning_config is populated.
         script_args=["--reasoning-parser", "qwen3"],
+        # vLLM #43808 (0.23.0) moved the MRv2 thinking_token_budget check from
+        # startup to request time, removing the auto-fallback to V1. Force V1
+        # runner here until native MRv2 support is added.
+        env={"VLLM_USE_V2_MODEL_RUNNER": "0"},
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
@@ -542,19 +546,29 @@ vllm_configs = {
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
+            # Verifies dynamo+backend can serve a model that ships NO chat
+            # template, via the completions endpoint. The model is NOT
+            # incidental: it must be a base model without a chat template.
+            # TinyLlama-1.1B (intermediate base checkpoint) is a small Llama-
+            # family base without a chat template (replaces deepseek-llm-7b-base,
+            # 7B) -- keeps the coverage, cuts VRAM. TinyLlama-1.1B-Chat is
+            # already used in the router e2e suite.
+            # VRAM + KV cap profiled locally on an RTX 6000 Ada.
+            pytest.mark.profiled_vram_gib(3.9),  # actual nvidia-smi peak
             pytest.mark.requested_vllm_kv_cache_bytes(
-                4_074_898_000
-            ),  # KV cache cap (2x safety over min=2_037_448_704)
+                530_432_000
+            ),  # KV cache cap (2x safety over profiled min=265_216_000)
             pytest.mark.timeout(
-                420
-            ),  # 7B model loads ~48s on CI (A10G/L4) vs ~15s locally
+                300
+            ),  # 1.1B loads quickly; margin covers CI model download
             pytest.mark.post_merge,
         ],
-        model="deepseek-ai/deepseek-llm-7b-base",
+        model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+        # TinyLlama-1.1B caps at 2048 positions; agg.sh defaults to 4096.
+        env={"MAX_MODEL_LEN": "2048"},
         script_args=[
             "--model",
-            "deepseek-ai/deepseek-llm-7b-base",
+            "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
             "--dyn-endpoint-types",
             "completions",
         ],
