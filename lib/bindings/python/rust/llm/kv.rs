@@ -138,6 +138,8 @@ where
                 anyhow::anyhow!("invalid --trace-id-header '{}': {e}", cli.trace_id_header)
             })?;
 
+        init_standalone_logging();
+
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(indexer::run_server(IndexerConfig {
             block_size: cli.block_size,
@@ -265,7 +267,7 @@ where
     }
 }
 
-#[cfg(any(feature = "slot-tracker", feature = "select-service"))]
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker", feature = "select-service"))]
 fn init_standalone_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
