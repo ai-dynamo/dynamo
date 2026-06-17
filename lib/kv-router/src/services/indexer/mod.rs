@@ -128,8 +128,8 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
         "Starting standalone KV cache indexer (HTTP-only mode)"
     );
 
-    let registry = Arc::new(WorkerRegistry::new(config.threads));
-    run_common(&config, &registry, cancel_token).await
+    let state = Arc::new(AppState::new(config.threads)?);
+    run_common(&config, state, cancel_token).await
 }
 
 async fn wait_for_min_initial_workers(
@@ -161,9 +161,11 @@ async fn wait_for_min_initial_workers(
 
 async fn run_common(
     config: &IndexerConfig,
-    registry: &Arc<WorkerRegistry>,
+    state: Arc<AppState>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let registry = &state.registry;
+
     if let Some(ref workers_str) = config.workers {
         let block_size = config.block_size.ok_or_else(|| {
             anyhow::anyhow!("--block-size is required when --workers is specified")
@@ -208,19 +210,6 @@ async fn run_common(
 
     wait_for_min_initial_workers(registry, &cancel_token).await?;
     registry.signal_ready();
-
-    #[cfg(feature = "metrics")]
-    let prom_registry = {
-        let r = prometheus::Registry::new();
-        metrics::register(&r).expect("failed to register indexer metrics");
-        r
-    };
-
-    let state = Arc::new(AppState {
-        registry: registry.clone(),
-        #[cfg(feature = "metrics")]
-        prom_registry,
-    });
 
     let app = create_router(state);
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
