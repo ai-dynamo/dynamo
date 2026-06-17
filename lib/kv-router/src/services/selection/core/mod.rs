@@ -146,6 +146,12 @@ impl SelectionCore {
         }
     }
 
+    /// Cancel core-scoped tasks (KV-event listeners, scheduling, replica sync,
+    /// periodic expiry) without cancelling the parent token. In-flight and
+    /// queued selections then fail fast.
+    ///
+    /// The KV indexer thread pool is owned by the registry and released when
+    /// this `SelectionCore` is dropped. Idempotent.
     pub fn shutdown(&self) {
         self.cancel_token.cancel();
     }

@@ -21,14 +21,11 @@ import pytest
 
 from dynamo.llm import RadixTree
 
-# `SelectionService` requires the `select-service` Cargo feature; it is absent on
-# the default wheel. Guard it so the rest of this module still collects.
 try:
     from dynamo.llm import SelectionService
 except ImportError:
     SelectionService = None
 
-# `SelectionServiceError` is always registered (feature-independent).
 from dynamo.llm.exceptions import SelectionServiceError
 
 pytestmark = [

@@ -701,10 +701,11 @@ class SelectionService:
 
     def shutdown(self) -> None:
         """
-        Cancel all background tasks and stop the service.
+        Stop the service: cancel KV-event listeners and scheduling so that
+        in-flight and queued selections fail fast.
 
-        Idempotent. The service is also shut down automatically once the Python
-        handle is dropped.
+        The KV indexer thread pool is released when the handle is dropped.
+        Idempotent, and also runs automatically on drop.
         """
         ...
 
