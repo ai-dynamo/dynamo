@@ -472,11 +472,13 @@ func main() {
 	}
 
 	setupLog.Info("Detecting Istio availability...")
-	istioDetected := commonController.DetectIstioAvailability(mainCtx, mgr)
 	switch {
 	case operatorCfg.ServiceMesh.Enabled == nil:
-		runtimeConfig.IstioAvailable = istioDetected
+		setupLog.Info("Auto-detecting Istio availability")
+		runtimeConfig.IstioAvailable = commonController.DetectIstioAvailability(mainCtx, mgr)
 	case *operatorCfg.ServiceMesh.Enabled:
+		setupLog.Info("Istio service mesh is explicitly enabled; verifying availability")
+		istioDetected := commonController.DetectIstioAvailability(mainCtx, mgr)
 		if !istioDetected {
 			setupLog.Error(nil,
 				"Service mesh is explicitly enabled but the networking.istio.io"+
