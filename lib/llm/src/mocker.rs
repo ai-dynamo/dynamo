@@ -545,6 +545,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             uuid: Some(request_uuid),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
+            ..Default::default()
         };
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
