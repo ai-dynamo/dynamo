@@ -118,8 +118,10 @@ data:
       hostSuffix: {{ $ingressHostSuffix | quote }}
       {{- end }}
     {{- end }}
-    {{- if and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled }}
+    {{- if and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh (hasKey .Values.dynamo.serviceMesh "enabled") }}
     serviceMesh:
+      enabled: {{ .Values.dynamo.serviceMesh.enabled }}
+      {{- if .Values.dynamo.serviceMesh.enabled }}
       provider: {{ .Values.dynamo.serviceMesh.provider | default "istio" | quote }}
       {{- if eq (.Values.dynamo.serviceMesh.provider | default "istio") "istio" }}
       istio:
@@ -139,6 +141,7 @@ data:
         {{- if $istio.caCertificates }}
         caCertificates: {{ $istio.caCertificates | quote }}
         {{- end }}
+      {{- end }}
       {{- end }}
     {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}

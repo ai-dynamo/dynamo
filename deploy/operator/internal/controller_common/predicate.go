@@ -71,10 +71,11 @@ func DetectDRAAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 }
 
 // DetectIstioAvailability checks if Istio is available by checking if the
-// networking.istio.io API group is registered. Used to guard DestinationRule
-// reconciliation so the operator doesn't error on clusters without Istio CRDs.
+// DestinationRule API is registered. Used to guard DestinationRule
+// reconciliation so the operator doesn't error on clusters without Istio CRDs
+// or with only a partially installed networking.istio.io API group.
 func DetectIstioAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "networking.istio.io", nil)
+	return detectAPIResourceAvailability(ctx, mgr, "networking.istio.io/v1beta1", "destinationrules")
 }
 
 // detectAPIGroupAvailability checks if a specific API group, and optionally a
@@ -120,6 +121,39 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 	} else {
 		logger.Info("API group version not available", logValues...)
 	}
+	return false
+}
+
+func detectAPIResourceAvailability(ctx context.Context, mgr ctrl.Manager, groupVersion, resourceName string) bool {
+	logger := log.FromContext(ctx)
+	logValues := []any{"groupVersion", groupVersion, "resource", resourceName}
+
+	cfg := mgr.GetConfig()
+	if cfg == nil {
+		logger.Info("detection failed, no discovery client available", logValues...)
+		return false
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		logger.Error(err, "detection failed, could not create discovery client", logValues...)
+		return false
+	}
+
+	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
+	if err != nil {
+		logger.Info("API resource not available", append(logValues, "error", err.Error())...)
+		return false
+	}
+
+	for _, resource := range apiResourceList.APIResources {
+		if resource.Name == resourceName {
+			logger.Info("API resource is available", logValues...)
+			return true
+		}
+	}
+
+	logger.Info("API resource not available", logValues...)
 	return false
 }
 

@@ -472,7 +472,22 @@ func main() {
 	}
 
 	setupLog.Info("Detecting Istio availability...")
-	runtimeConfig.IstioAvailable = commonController.DetectIstioAvailability(mainCtx, mgr)
+	istioDetected := commonController.DetectIstioAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.ServiceMesh.Enabled == nil:
+		runtimeConfig.IstioAvailable = istioDetected
+	case *operatorCfg.ServiceMesh.Enabled:
+		if !istioDetected {
+			setupLog.Error(nil,
+				"service mesh is explicitly enabled in config but the networking.istio.io API group was not detected in the cluster",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.IstioAvailable = true
+	default:
+		setupLog.Info("Istio service mesh is explicitly disabled via config override")
+		runtimeConfig.IstioAvailable = false
+	}
 
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,

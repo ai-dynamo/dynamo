@@ -261,6 +261,10 @@ const (
 // DestinationRules) for EPP components so that sidecar proxies connect
 // correctly without double-TLS issues.
 type ServiceMeshConfiguration struct {
+	// Enabled overrides service mesh auto-detection. nil = auto-detect.
+	// Setting false disables service mesh resource watches and reconciliation
+	// even if service mesh CRDs are present.
+	Enabled *bool `json:"enabled,omitempty"`
 	// Provider selects the service mesh implementation. Supported: "istio", "".
 	// Empty string disables service mesh resource generation.
 	Provider string `json:"provider"`
@@ -270,6 +274,9 @@ type ServiceMeshConfiguration struct {
 
 // IsEnabled returns true if a supported service mesh provider is configured.
 func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	if s.Enabled != nil && !*s.Enabled {
+		return false
+	}
 	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
 }
 
