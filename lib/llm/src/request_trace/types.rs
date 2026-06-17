@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::openai::nvext::AgentContext;
+use crate::protocols::common::extensions::AgentContext;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestTraceRecord {
