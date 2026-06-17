@@ -50,10 +50,9 @@ struct SinkInner {
 impl AccessLogSink {
     pub fn new(path: &Path, trace_id_header: HeaderName, use_local_time: bool) -> io::Result<Self> {
         let file = File::options().create(true).append(true).open(path)?;
-        let (writer, guard) =
-            tracing_appender::non_blocking::NonBlockingBuilder::default()
-                .lossy(false)
-                .finish(file);
+        let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .lossy(false)
+            .finish(file);
         Ok(Self {
             path: path.to_path_buf(),
             inner: parking_lot::Mutex::new(SinkInner {
@@ -79,10 +78,9 @@ impl AccessLogSink {
 
     pub fn reopen(&self) -> io::Result<()> {
         let new_file = File::options().create(true).append(true).open(&self.path)?;
-        let (new_writer, new_guard) =
-            tracing_appender::non_blocking::NonBlockingBuilder::default()
-                .lossy(false)
-                .finish(new_file);
+        let (new_writer, new_guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .lossy(false)
+            .finish(new_file);
         let old = {
             let mut inner = self.inner.lock();
             std::mem::replace(
