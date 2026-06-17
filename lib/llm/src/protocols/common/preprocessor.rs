@@ -14,9 +14,9 @@ use utoipa::ToSchema;
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::agents::context::AgentContext;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
+use crate::protocols::openai::nvext::AgentContext;
 
 /// Router-specific parameters carried via `nvext.router`.
 ///
@@ -74,6 +74,10 @@ pub struct RoutingHints {
     /// ahead in the scheduler queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_jump: Option<f64>,
+
+    /// Strict router pending-queue priority tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
 
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]

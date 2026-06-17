@@ -23,6 +23,7 @@ from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_background_prefill_sticky_routing,
     _test_disagg_direct_mode,
+    _test_disagg_router_overload_503,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
@@ -107,6 +108,53 @@ ROUTER_OVERLOAD_503_CASES = (
         id="prefill-tokens",
     ),
 )
+# Speed isolation: only the *gated* stage is slow (speedup_ratio 0.01); the
+# non-gated stage is orders of magnitude faster (100.0) so its latency never
+# determines probe cleanup and each case exercises only the intended overload
+# signal.
+_SLOW_SPEEDUP = 0.01
+_FAST_SPEEDUP = 100.0
+ROUTER_DISAGG_OVERLOAD_503_CASES = (
+    pytest.param(
+        {
+            # A single prefill worker is sufficient to verify
+            # overloaded -> no free prefill worker -> 503, and --enforce-disagg
+            # means the model only lists once the prefill router has activated,
+            # so frontend readiness already gates on prefill registration.
+            "num_prefill": 1,
+            "num_decode": 1,
+            "max_tokens": 1,
+            # Gate the PREFILL pool only: slow prefill (accumulates tokens), fast
+            # decode. Decode/queue thresholds disabled.
+            "prefill_speedup": _SLOW_SPEEDUP,
+            "decode_speedup": _FAST_SPEEDUP,
+            "thresholds": {
+                "blocks_threshold": "None",
+                "tokens_threshold": 1,
+                "tokens_threshold_frac": "None",
+                "router_queue_threshold": "None",
+            },
+        },
+        id="prefill-tokens",
+    ),
+    pytest.param(
+        {
+            "num_prefill": 1,
+            "num_decode": 1,
+            "max_tokens": 50,
+            # Gate the DECODE pool only: fast prefill, slow decode (fills its
+            # limited blocks). Prefill threshold disabled.
+            "prefill_speedup": _FAST_SPEEDUP,
+            "decode_speedup": _SLOW_SPEEDUP,
+            "thresholds": {
+                "blocks_threshold": 0.2,
+                "tokens_threshold": "None",
+                "tokens_threshold_frac": "None",
+            },
+        },
+        id="decode-blocks",
+    ),
+)
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
     "Flaky on CI: tcp nondurable round-robin mocker router path timed out"
 )
@@ -121,6 +169,13 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 def _require_router_aic() -> dict[str, Any]:
     pytest.importorskip(
         "aiconfigurator", reason="router AIC test requires aiconfigurator"
+    )
+    # Rust AIC callback imports aiconfigurator.sdk.engine.compile_engine
+    # (Phase 1.5 API from ai-dynamo/aiconfigurator#1200). PyPI releases
+    # predating it don't ship engine.py.
+    pytest.importorskip(
+        "aiconfigurator.sdk.engine",
+        reason="router AIC test requires aiconfigurator.sdk.engine (Phase 1.5)",
     )
     return ROUTER_AIC_CONFIG.copy()
 
@@ -801,6 +856,7 @@ def test_router_decisions(
         request_plane=request_plane,
         zmq_kv_events=zmq_kv_events,
         standalone_indexer=zmq_kv_events,
+        standalone_selector=zmq_kv_events,
         model_name=MODEL_NAME,
     ) as mockers:
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
@@ -829,6 +885,7 @@ def test_router_decisions(
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             standalone_indexer_url=mockers.standalone_indexer_url,
+            standalone_selector_url=mockers.standalone_selector_url,
             router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
 
@@ -934,6 +991,66 @@ def test_router_decisions_disagg(
             test_payload=TEST_PAYLOAD,
             request_plane="nats",
             enable_bootstrap=enable_disagg_bootstrap,
+        )
+
+
+@pytest.mark.parametrize(
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
+)  # Use NATS Core (local indexer)
+@pytest.mark.parametrize("overload_case", ROUTER_DISAGG_OVERLOAD_503_CASES)
+@pytest.mark.timeout(120)
+def test_mocker_disagg_router_overload_503(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    durable_kv_events,
+    monkeypatch,
+    overload_case,
+):
+    """Disaggregated load shedding: clients get 503 when the gated pool is busy.
+
+    - prefill-tokens: a low ``--active-prefill-tokens-threshold`` must gate the
+      PREFILL pool. This was previously a silent no-op in disagg (the
+      overloaded set landed on the decode pool and the prefill router never saw
+      it), so this case is the regression guard for that fix.
+    - decode-blocks: a low ``--active-decode-blocks-threshold`` must gate the
+      DECODE pool (the path that already worked).
+    """
+    monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
+    logger.info("Starting disagg mocker router overload 503 test")
+
+    namespace_suffix = generate_random_suffix()
+    shared_namespace = f"test-namespace-{namespace_suffix}"
+
+    # Per-stage args: limited blocks, with only the gated stage slow (speed
+    # isolation — see _SLOW_SPEEDUP/_FAST_SPEEDUP).
+    def _stage_args(speedup: float) -> Dict[str, Any]:
+        return {
+            "speedup_ratio": speedup,
+            "block_size": 4,
+            "num_gpu_blocks": 64,
+            "durable_kv_events": durable_kv_events,
+        }
+
+    with _launch_disagg_workers(
+        request,
+        shared_namespace,
+        registration_order="prefill_first",
+        prefill_mocker_args=_stage_args(overload_case["prefill_speedup"]),
+        decode_mocker_args=_stage_args(overload_case["decode_speedup"]),
+        num_prefill_mockers=overload_case["num_prefill"],
+        num_decode_mockers=overload_case["num_decode"],
+        enable_disagg_bootstrap=False,
+    ) as (_prefill_workers, decode_workers):
+        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        _test_disagg_router_overload_503(
+            decode_workers=decode_workers,
+            block_size=4,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
+            max_tokens=overload_case["max_tokens"],
+            **overload_case["thresholds"],
         )
 
 
