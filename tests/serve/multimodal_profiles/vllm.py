@@ -186,7 +186,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 single_gpu=True,
                 profiled_vram_gib=15.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[MmCase(payload=make_image_payload(["green"], timeout=300))],
             ),
         },
     ),

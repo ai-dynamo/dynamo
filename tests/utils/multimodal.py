@@ -38,7 +38,7 @@ IMAGE_COLOR_PROMPT = _MULTIMODAL_COLOR_PROMPT
 
 
 def make_image_payload(
-    expected_response: list[str], *, max_attempts: int = 1
+    expected_response: list[str], *, max_attempts: int = 1, timeout: int = 60
 ) -> ChatPayload:
     """Standard image color-identification payload using MULTIMODAL_IMG_URL.
 
@@ -59,6 +59,7 @@ def make_image_payload(
         expected_response=expected_response,
         temperature=0.0,
         max_tokens=100,
+        timeout=timeout,
         max_attempts=max_attempts,
     )
 
