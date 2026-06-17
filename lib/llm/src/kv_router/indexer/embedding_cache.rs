@@ -33,9 +33,7 @@ pub struct EmbeddingCacheIndexer {
 static SHARED_INDEXERS: OnceLock<Mutex<HashMap<String, Arc<dyn MultimodalCacheIndex>>>> =
     OnceLock::new();
 
-pub async fn try_build_cache_indexer(
-    endpoint: &Endpoint,
-) -> Option<Arc<dyn MultimodalCacheIndex>> {
+pub async fn try_build_cache_indexer(endpoint: &Endpoint) -> Option<Arc<dyn MultimodalCacheIndex>> {
     let endpoint_id = endpoint.id().to_string();
     let mut indexers = SHARED_INDEXERS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -135,48 +133,76 @@ impl EmbeddingCacheIndexer {
         }
 
         let cancellation_token = component.drt().child_token();
-        let subscriber = match EventSubscriber::for_namespace(
-            component.namespace(),
-            MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
-        )
-        .await
-        {
-            Ok(subscriber) => subscriber.typed::<MultimodalEmbeddingCacheEvent>(),
-            Err(error) => {
-                self.started.store(false, Ordering::Release);
-                return Err(error);
-            }
-        };
+        let namespace = component.namespace().clone();
+        let subscriber =
+            match EventSubscriber::for_namespace(&namespace, MULTIMODAL_EMBEDDING_CACHE_SUBJECT)
+                .await
+            {
+                Ok(subscriber) => subscriber.typed::<MultimodalEmbeddingCacheEvent>(),
+                Err(error) => {
+                    self.started.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            };
 
         let indexer = self.clone();
         tokio::spawn(async move {
             let mut subscriber = subscriber;
+            const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
-            loop {
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => {
-                        tracing::debug!("Embedding cache indexer subscriber cancelled");
-                        break;
-                    }
-                    maybe_event = subscriber.next() => {
-                        let Some(result) = maybe_event else {
-                            tracing::warn!(
-                                "Embedding cache indexer stream closed; cache-state sync is stopped until routing is rebuilt"
-                            );
-                            break;
-                        };
-
-                        match result {
-                            Ok((_envelope, event)) => indexer.apply_event(&event),
-                            Err(error) => {
+            'reconnect: loop {
+                loop {
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => {
+                            tracing::debug!("Embedding cache indexer subscriber cancelled");
+                            break 'reconnect;
+                        }
+                        maybe_event = subscriber.next() => {
+                            let Some(result) = maybe_event else {
                                 tracing::warn!(
-                                    "Error receiving multimodal embedding cache event: {error:?}; cache-state sync is stopped until routing is rebuilt"
+                                    "Embedding cache indexer stream ended; reconnecting"
                                 );
                                 break;
+                            };
+
+                            match result {
+                                Ok((_envelope, event)) => indexer.apply_event(&event),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "Error receiving multimodal embedding cache event: {error:?}; reconnecting"
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
                 }
+
+                subscriber = loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => {}
+                        _ = cancellation_token.cancelled() => {
+                            tracing::debug!("Embedding cache indexer subscriber cancelled");
+                            break 'reconnect;
+                        }
+                    }
+
+                    match EventSubscriber::for_namespace(
+                        &namespace,
+                        MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
+                    )
+                    .await
+                    {
+                        Ok(subscriber) => {
+                            break subscriber.typed::<MultimodalEmbeddingCacheEvent>();
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "Failed to reconnect embedding cache indexer subscriber (will retry): {error}"
+                            );
+                        }
+                    }
+                };
             }
 
             indexer.started.store(false, Ordering::Release);
