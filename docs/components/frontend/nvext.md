@@ -39,6 +39,8 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
+| `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
+| `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
 | `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for request traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
