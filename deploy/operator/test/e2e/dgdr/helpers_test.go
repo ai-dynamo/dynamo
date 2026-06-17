@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +40,41 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// getenvFloat64 returns the float64 value of the named environment variable,
+// or def when the variable is unset, empty, or not a valid float. A parse
+// failure logs a warning to GinkgoWriter and falls back to def so a typo in an
+// env override never silently passes a zero value into a test.
+func getenvFloat64(name string, def float64) float64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	parsed, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter,
+			"WARNING: %s=%q is not a valid float64, using default %v\n", name, v, def)
+		return def
+	}
+	return parsed
+}
+
+// getenvInt32 returns the int32 value of the named environment variable, or def
+// when the variable is unset, empty, or not a valid int32. See getenvFloat64
+// for the parse-failure behaviour.
+func getenvInt32(name string, def int32) int32 {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	parsed, err := strconv.ParseInt(v, 10, 32)
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter,
+			"WARNING: %s=%q is not a valid int32, using default %d\n", name, v, def)
+		return def
+	}
+	return int32(parsed)
+}
 
 // Default hardware for mocker mode (AIC simulation needs hardware metadata).
 // Use H100_SXM because AIC has complete perf data for all backends (vllm, sglang, trtllm)
@@ -521,6 +558,7 @@ func verifyInference(dgdName, model string) {
 	Expect(chatOut).To(ContainSubstring("choices"),
 		"chat response should contain 'choices', got: %s", chatOut)
 }
+
 // are Running with all containers ready. This catches cases where the DGD status
 // reports Ready/Successful but the underlying pods are not actually healthy.
 func verifyDGDPodsReady(dgdName string) {

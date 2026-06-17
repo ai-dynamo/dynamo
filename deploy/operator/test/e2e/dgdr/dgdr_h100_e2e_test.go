@@ -23,6 +23,33 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+// h100VRAMMB is the per-GPU VRAM (MiB) for the H100 SXM test cluster (80 GiB).
+// Kept as a const because the test cluster's GPU SKU is fixed; unlike the
+// SLA/workload/budget knobs below it is not expected to vary between runs.
+const h100VRAMMB float64 = 81920
+
+// H100 support-matrix tunables. These default to the values the suite was
+// originally written against and can be overridden via environment variables so
+// the same specs can target a differently-sized cluster or different SLAs
+// without code changes. Defaults are applied when the env var is unset or
+// unparseable (see getenvFloat64 / getenvInt32).
+var (
+	// SLA targets.
+	h100TTFTMillis = getenvFloat64("DGDR_H100_TTFT_MS", 500.0) // time-to-first-token (ms)
+	h100ITLMillis  = getenvFloat64("DGDR_H100_ITL_MS", 30.0)   // inter-token latency (ms)
+
+	// Workload shape.
+	h100ISL = getenvInt32("DGDR_H100_ISL", 3000) // input sequence length
+	h100OSL = getenvInt32("DGDR_H100_OSL", 300)  // output sequence length
+
+	// Cluster hardware.
+	h100TotalGPUs      = getenvInt32("DGDR_H100_TOTAL_GPUS", 32)       // total GPUs in the cluster
+	h100NumGPUsPerNode = getenvInt32("DGDR_H100_NUM_GPUS_PER_NODE", 8) // GPUs per node
+
+	// Planner budget (max GPUs the planner may allocate).
+	h100MaxGPUBudget = getenvInt32("DGDR_H100_MAX_GPU_BUDGET", 32)
+)
+
 // DGDR Support Matrix on H100 SKU exercises the full DGDR lifecycle (create -> profile ->
 // DGD generation -> DGD readiness) across a curated
 var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "integration", "k8s"), func() {
@@ -43,26 +70,26 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 					SearchStrategy: v1beta1.SearchStrategyRapid,
 					AutoApply:      ptr.To(true),
 					SLA: &v1beta1.SLASpec{
-						TTFT: ptr.To(500.0),
-						ITL:  ptr.To(30.0),
+						TTFT: ptr.To(h100TTFTMillis),
+						ITL:  ptr.To(h100ITLMillis),
 					},
 					Workload: &v1beta1.WorkloadSpec{
-						ISL: ptr.To(int32(3000)),
-						OSL: ptr.To(int32(300)),
+						ISL: ptr.To(h100ISL),
+						OSL: ptr.To(h100OSL),
 					},
 					Features: &v1beta1.FeaturesSpec{
 						Planner: plannerRawExtension(map[string]interface{}{
 							"mode":                      "disagg",
 							"enable_throughput_scaling": true,
 							"enable_load_scaling":       true,
-							"max_gpu_budget":            32,
+							"max_gpu_budget":            h100MaxGPUBudget,
 						}),
 					},
 					Hardware: &v1beta1.HardwareSpec{
 						GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
-						VRAMMB:         ptr.To(float64(81920)),
-						NumGPUsPerNode: ptr.To(int32(8)),
-						TotalGPUs:      ptr.To(int32(32)),
+						VRAMMB:         ptr.To(h100VRAMMB),
+						NumGPUsPerNode: ptr.To(h100NumGPUsPerNode),
+						TotalGPUs:      ptr.To(h100TotalGPUs),
 					},
 					ExpectDGDReady:  true,
 					VerifyConfigMap: true,
@@ -95,25 +122,25 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 					SearchStrategy: v1beta1.SearchStrategyRapid,
 					AutoApply:      ptr.To(true),
 					SLA: &v1beta1.SLASpec{
-						TTFT: ptr.To(500.0),
-						ITL:  ptr.To(30.0),
+						TTFT: ptr.To(h100TTFTMillis),
+						ITL:  ptr.To(h100ITLMillis),
 					},
 					Workload: &v1beta1.WorkloadSpec{
-						ISL: ptr.To(int32(3000)),
-						OSL: ptr.To(int32(300)),
+						ISL: ptr.To(h100ISL),
+						OSL: ptr.To(h100OSL),
 					},
 					Hardware: &v1beta1.HardwareSpec{
 						GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
-						VRAMMB:         ptr.To(float64(81920)),
-						NumGPUsPerNode: ptr.To(int32(8)),
-						TotalGPUs:      ptr.To(int32(32)),
+						VRAMMB:         ptr.To(h100VRAMMB),
+						NumGPUsPerNode: ptr.To(h100NumGPUsPerNode),
+						TotalGPUs:      ptr.To(h100TotalGPUs),
 					},
 					Features: &v1beta1.FeaturesSpec{
 						Planner: plannerRawExtension(map[string]interface{}{
 							"mode":                      "disagg",
 							"enable_throughput_scaling": true,
 							"enable_load_scaling":       true,
-							"max_gpu_budget":            32,
+							"max_gpu_budget":            h100MaxGPUBudget,
 						}),
 					},
 					Overrides: &v1beta1.OverridesSpec{
@@ -165,25 +192,25 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 						SearchStrategy: v1beta1.SearchStrategyRapid,
 						AutoApply:      ptr.To(true),
 						SLA: &v1beta1.SLASpec{
-							TTFT: ptr.To(500.0),
-							ITL:  ptr.To(30.0),
+							TTFT: ptr.To(h100TTFTMillis),
+							ITL:  ptr.To(h100ITLMillis),
 						},
 						Workload: &v1beta1.WorkloadSpec{
-							ISL: ptr.To(int32(3000)),
-							OSL: ptr.To(int32(300)),
+							ISL: ptr.To(h100ISL),
+							OSL: ptr.To(h100OSL),
 						},
 						Hardware: &v1beta1.HardwareSpec{
 							GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
-							VRAMMB:         ptr.To(float64(81920)),
-							NumGPUsPerNode: ptr.To(int32(8)),
-							TotalGPUs:      ptr.To(int32(32)),
+							VRAMMB:         ptr.To(h100VRAMMB),
+							NumGPUsPerNode: ptr.To(h100NumGPUsPerNode),
+							TotalGPUs:      ptr.To(h100TotalGPUs),
 						},
 						Features: &v1beta1.FeaturesSpec{
 							Planner: plannerRawExtension(map[string]interface{}{
 								"mode":                      "disagg",
 								"enable_throughput_scaling": true,
 								"enable_load_scaling":       true,
-								"max_gpu_budget":            32,
+								"max_gpu_budget":            h100MaxGPUBudget,
 							}),
 						},
 						Overrides: &v1beta1.OverridesSpec{
@@ -218,25 +245,25 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 					SearchStrategy: v1beta1.SearchStrategyRapid,
 					AutoApply:      ptr.To(true),
 					SLA: &v1beta1.SLASpec{
-						TTFT: ptr.To(500.0),
-						ITL:  ptr.To(30.0),
+						TTFT: ptr.To(h100TTFTMillis),
+						ITL:  ptr.To(h100ITLMillis),
 					},
 					Workload: &v1beta1.WorkloadSpec{
-						ISL: ptr.To(int32(3000)),
-						OSL: ptr.To(int32(300)),
+						ISL: ptr.To(h100ISL),
+						OSL: ptr.To(h100OSL),
 					},
 					Hardware: &v1beta1.HardwareSpec{
 						GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
-						VRAMMB:         ptr.To(float64(81920)),
-						NumGPUsPerNode: ptr.To(int32(8)),
-						TotalGPUs:      ptr.To(int32(32)),
+						VRAMMB:         ptr.To(h100VRAMMB),
+						NumGPUsPerNode: ptr.To(h100NumGPUsPerNode),
+						TotalGPUs:      ptr.To(h100TotalGPUs),
 					},
 					Features: &v1beta1.FeaturesSpec{
 						Planner: plannerRawExtension(map[string]interface{}{
 							"mode":                      "disagg",
 							"enable_throughput_scaling": true,
 							"enable_load_scaling":       true,
-							"max_gpu_budget":            32,
+							"max_gpu_budget":            h100MaxGPUBudget,
 						}),
 					},
 					Overrides: &v1beta1.OverridesSpec{
