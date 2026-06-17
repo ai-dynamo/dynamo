@@ -19,7 +19,17 @@ import threading
 
 import pytest
 
-from dynamo.llm import RadixTree, SelectionService
+from dynamo.llm import RadixTree
+
+# `SelectionService` requires the `select-service` Cargo feature; it is absent on
+# the default wheel. Guard it so the rest of this module still collects.
+try:
+    from dynamo.llm import SelectionService
+except ImportError:
+    SelectionService = None
+
+# `SelectionServiceError` is always registered (feature-independent).
+from dynamo.llm.exceptions import SelectionServiceError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -194,11 +204,15 @@ def test_radix_tree_thread_safety(
     ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
 
 
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
 async def test_selection_service_selects_registered_worker(monkeypatch):
     monkeypatch.setenv("DYN_USE_KV_EVENTS", "false")
-    service = SelectionService(1)
+    service = SelectionService(indexer_threads=1)
 
     try:
         record = await service.upsert_worker(
@@ -227,5 +241,45 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
         assert selected["worker_id"] == 1
         assert selected["dp_rank"] == 0
         assert selected["endpoint"] == "http://worker-1:8000"
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_malformed_payload_raises_value_error(monkeypatch):
+    monkeypatch.setenv("DYN_USE_KV_EVENTS", "false")
+    service = SelectionService(indexer_threads=1)
+
+    try:
+        # Malformed input surfaces as a plain ValueError, not a SelectionServiceError.
+        with pytest.raises(ValueError):
+            await service.upsert_worker({"model_name": "model"})
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_not_ready_carries_status(monkeypatch):
+    monkeypatch.setenv("DYN_USE_KV_EVENTS", "false")
+    service = SelectionService(indexer_threads=1)
+
+    try:
+        # Selecting before any worker is schedulable is a typed selector failure.
+        with pytest.raises(SelectionServiceError) as exc_info:
+            await service.select(
+                {"model_name": "model", "token_ids": [1, 2, 3, 4]}
+            )
+        assert exc_info.value.kind == "not_ready"
+        assert exc_info.value.status_code == 503
     finally:
         service.shutdown()

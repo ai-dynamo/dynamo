@@ -28,7 +28,7 @@ use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionCore, SelectionServiceConfig, WorkerRequest,
+    SelectRequest, SelectionCore, SelectionError, SelectionServiceConfig, WorkerRequest,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -339,6 +339,26 @@ where
     }
 }
 
+/// Map a [`SelectionError`] to a Python exception: invalid input becomes a
+/// `ValueError`, anything else a `SelectionServiceError` carrying `kind` and
+/// `status_code`.
+#[cfg(feature = "select-service")]
+fn selection_to_pyerr(err: SelectionError) -> PyErr {
+    if let SelectionError::BadRequest(message) = &err {
+        return PyValueError::new_err(message.clone());
+    }
+    let message = err.to_string();
+    let kind = err.kind();
+    let status_code = err.status_code();
+    Python::with_gil(|py| {
+        let pyerr = crate::errors::SelectionServiceError::new_err(message);
+        let value = pyerr.value(py);
+        let _ = value.setattr("kind", kind);
+        let _ = value.setattr("status_code", status_code);
+        pyerr
+    })
+}
+
 /// In-process handle to a runtime-free Dynamo `SelectionCore`.
 #[cfg(feature = "select-service")]
 #[pyclass]
@@ -352,7 +372,7 @@ pub(crate) struct SelectionService {
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (indexer_threads = 4))]
+    #[pyo3(signature = (*, indexer_threads = 4))]
     fn new(indexer_threads: usize) -> Self {
         let cancel = tokio_util::sync::CancellationToken::new();
         let inner = Arc::new(SelectionCore::new(
@@ -373,10 +393,11 @@ impl SelectionService {
 
     /// Upsert a worker and subscribe to its live KV events via each `kv_events_endpoints`.
     fn upsert_worker<'p>(&self, py: Python<'p>, worker: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: WorkerRequest = depythonize(worker.bind(py)).map_err(to_pyerr)?;
+        let req: WorkerRequest =
+            depythonize(worker.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let record = core.upsert_worker(req).await.map_err(to_pyerr)?;
+            let record = core.upsert_worker(req).await.map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
@@ -385,13 +406,16 @@ impl SelectionService {
     fn delete_worker<'p>(&self, py: Python<'p>, worker_id: u64) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let record = core.delete_worker(worker_id).await.map_err(to_pyerr)?;
+            let record = core
+                .delete_worker(worker_id)
+                .await
+                .map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
     /// List catalog records, optionally filtered by model and tenant.
-    #[pyo3(signature = (model_name = None, tenant_id = None))]
+    #[pyo3(signature = (*, model_name = None, tenant_id = None))]
     fn list_workers(
         &self,
         py: Python<'_>,
@@ -415,20 +439,22 @@ impl SelectionService {
 
     /// Per-worker KV-overlap scores for a prompt (dict, see `OverlapScoresRequest`).
     fn overlap_scores<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: OverlapScoresRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let req: OverlapScoresRequest =
+            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let resp = core.overlap_scores(req).await.map_err(to_pyerr)?;
+            let resp = core.overlap_scores(req).await.map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 
     /// Select the best worker by KV-overlap + load, no booking (dict, see `SelectRequest`).
     fn select<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let req: SelectRequest =
+            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let resp = core.select(req).await.map_err(to_pyerr)?;
+            let resp = core.select(req).await.map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
@@ -439,10 +465,14 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectAndReserveRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let req: SelectAndReserveRequest =
+            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let resp = core.select_and_reserve(req).await.map_err(to_pyerr)?;
+            let resp = core
+                .select_and_reserve(req)
+                .await
+                .map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
@@ -453,10 +483,14 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: ReservationRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let req: ReservationRequest =
+            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let resp = core.create_reservation(req).await.map_err(to_pyerr)?;
+            let resp = core
+                .create_reservation(req)
+                .await
+                .map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
@@ -471,13 +505,13 @@ impl SelectionService {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core.prefill_complete(&reservation_id)
                 .await
-                .map_err(to_pyerr)?;
+                .map_err(selection_to_pyerr)?;
             Ok(())
         })
     }
 
     /// Record one decode output block for a reservation, advancing its decode load.
-    #[pyo3(signature = (reservation_id, decay_fraction = None))]
+    #[pyo3(signature = (reservation_id, *, decay_fraction = None))]
     fn add_output_block(
         &self,
         reservation_id: String,
@@ -485,7 +519,7 @@ impl SelectionService {
     ) -> PyResult<()> {
         self.inner
             .add_output_block(&reservation_id, decay_fraction)
-            .map_err(to_pyerr)
+            .map_err(selection_to_pyerr)
     }
 
     /// Free a finished reservation, releasing its tracked load.
@@ -498,13 +532,13 @@ impl SelectionService {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core.free_reservation(&reservation_id)
                 .await
-                .map_err(to_pyerr)?;
+                .map_err(selection_to_pyerr)?;
             Ok(())
         })
     }
 
     /// Current per-model active load (pending counts + per-worker potential loads).
-    #[pyo3(signature = (model_name = None, tenant_id = None))]
+    #[pyo3(signature = (*, model_name = None, tenant_id = None))]
     fn loads(
         &self,
         py: Python<'_>,
@@ -519,10 +553,14 @@ impl SelectionService {
 
     /// Per-worker potential loads for a prompt, without booking (dict, see `PotentialLoadsRequest`).
     fn potential_loads<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: PotentialLoadsRequest = depythonize(request.bind(py)).map_err(to_pyerr)?;
+        let req: PotentialLoadsRequest =
+            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let resp = core.potential_loads(req).await.map_err(to_pyerr)?;
+            let resp = core
+                .potential_loads(req)
+                .await
+                .map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }

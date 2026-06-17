@@ -38,6 +38,25 @@ impl SelectionError {
             Self::Sequence(error) => sequence_error_status(error),
         }
     }
+
+    /// HTTP-style status code for this error, for callers that consume the
+    /// service in-process without an HTTP layer.
+    pub fn status_code(&self) -> u16 {
+        self.status().as_u16()
+    }
+
+    /// Stable, machine-readable category for this error.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "bad_request",
+            Self::NotReady(_) => "not_ready",
+            Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "conflict",
+            Self::Internal(_) => "internal",
+            Self::Scheduler(_) => "scheduler",
+            Self::Sequence(_) => "sequence",
+        }
+    }
 }
 
 fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {

@@ -695,7 +695,7 @@ class SelectionService:
     In-process handle to a runtime-free Dynamo selection core.
     """
 
-    def __init__(self, indexer_threads: int = 4) -> None:
+    def __init__(self, *, indexer_threads: int = 4) -> None:
         """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
         ...
 
@@ -717,7 +717,7 @@ class SelectionService:
         ...
 
     def list_workers(
-        self, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
     ) -> JsonLike:
         """List catalog records, optionally filtered by model and tenant."""
         ...
@@ -747,7 +747,7 @@ class SelectionService:
         ...
 
     def add_output_block(
-        self, reservation_id: str, decay_fraction: Optional[float] = None
+        self, reservation_id: str, *, decay_fraction: Optional[float] = None
     ) -> None:
         """Record one decode output block for a reservation, advancing its decode load."""
         ...
@@ -757,7 +757,7 @@ class SelectionService:
         ...
 
     def loads(
-        self, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
     ) -> JsonLike:
         """Current per-model active load (pending counts + per-worker potential loads)."""
         ...
@@ -3020,6 +3020,17 @@ class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
     ...
+
+class SelectionServiceError(DynamoException):
+    """
+    Raised by `SelectionService` for selector failures that are not malformed
+    input.
+    """
+
+    # Stable, machine-readable error category, e.g. "not_ready".
+    kind: str
+    # HTTP-style status code for the failure, e.g. 503.
+    status_code: int
 
 # ---------------------------------------------------------------------------
 # `dynamo._core.backend` submodule.
