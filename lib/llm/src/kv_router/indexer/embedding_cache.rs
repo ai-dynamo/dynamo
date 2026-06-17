@@ -53,6 +53,16 @@ impl EmbeddingCacheIndexer {
     where
         I: IntoIterator<Item = &'a str>,
     {
+        self.worker_cache_key_hits(cache_keys)
+            .into_iter()
+            .map(|(worker_id, _hits)| worker_id)
+            .collect()
+    }
+
+    pub fn worker_cache_key_hits<'a, I>(&self, cache_keys: I) -> Vec<(WorkerId, usize)>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
         let requested = cache_keys.into_iter().collect::<HashSet<_>>();
         if requested.is_empty() {
             return Vec::new();
@@ -71,16 +81,13 @@ impl EmbeddingCacheIndexer {
             }
         }
 
-        let mut worker_ids = worker_hits.into_iter().collect::<Vec<_>>();
-        worker_ids.sort_by(|(left_id, left_hits), (right_id, right_hits)| {
+        let mut worker_hits = worker_hits.into_iter().collect::<Vec<_>>();
+        worker_hits.sort_by(|(left_id, left_hits), (right_id, right_hits)| {
             right_hits
                 .cmp(left_hits)
                 .then_with(|| left_id.cmp(right_id))
         });
-        worker_ids
-            .into_iter()
-            .map(|(worker_id, _hits)| worker_id)
-            .collect()
+        worker_hits
     }
 
     pub fn apply_event(&self, event: &MultimodalEmbeddingCacheEvent) {
@@ -203,8 +210,8 @@ impl EmbeddingCacheIndexer {
 }
 
 impl MultimodalCacheIndex for EmbeddingCacheIndexer {
-    fn workers_with_any_cache_key(&self, cache_keys: &[String]) -> Vec<WorkerId> {
-        self.workers_with_cached_keys(cache_keys.iter().map(|key| key.as_str()))
+    fn workers_with_cache_key_hits(&self, cache_keys: &[String]) -> Vec<(WorkerId, usize)> {
+        self.worker_cache_key_hits(cache_keys.iter().map(|key| key.as_str()))
     }
 
     fn remove_worker(&self, worker_id: WorkerId) {
@@ -263,6 +270,10 @@ mod tests {
         });
 
         assert_eq!(indexer.workers_with_cached_keys(["a", "b"]), vec![1, 2]);
+        assert_eq!(
+            indexer.worker_cache_key_hits(["a", "b"]),
+            vec![(1, 2), (2, 1)]
+        );
     }
 
     #[test]

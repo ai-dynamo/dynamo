@@ -113,7 +113,7 @@ pub trait WorkerLoadMonitor: Send + Sync {
 
 /// Query interface for routing against multimodal embedding cache state.
 pub trait MultimodalCacheIndex: Send + Sync {
-    fn workers_with_any_cache_key(&self, cache_keys: &[String]) -> Vec<u64>;
+    fn workers_with_cache_key_hits(&self, cache_keys: &[String]) -> Vec<(u64, usize)>;
     fn remove_worker(&self, worker_id: u64);
 }
 
@@ -833,8 +833,8 @@ where
                 let matched = if request_cache_keys.is_empty() {
                     Vec::new()
                 } else {
-                    let mut matched = indexer.workers_with_any_cache_key(&request_cache_keys);
-                    matched.retain(|id| instance_ids.contains(id));
+                    let mut matched = indexer.workers_with_cache_key_hits(&request_cache_keys);
+                    matched.retain(|(id, _)| instance_ids.contains(id));
                     matched
                 };
                 (request_cache_keys, matched)
@@ -842,28 +842,40 @@ where
                 (Vec::new(), Vec::new())
             };
 
-        let skip_weighted_accounting = !cache_matched_candidates.is_empty();
+        let embedding_cache_hit = !cache_matched_candidates.is_empty();
+        let request_cache_key_count = request_cache_keys
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
 
-        let candidates = if cache_matched_candidates.is_empty() {
+        let full_cache_candidates = cache_matched_candidates
+            .iter()
+            .filter_map(|(worker_id, hits)| {
+                (*hits >= request_cache_key_count).then_some(*worker_id)
+            })
+            .collect::<Vec<_>>();
+        let full_embedding_cache_hit = !full_cache_candidates.is_empty();
+
+        let candidates = if full_embedding_cache_hit {
+            full_cache_candidates
+        } else {
             device_aware_candidate_group(
                 state.as_ref(),
                 &instance_ids,
                 &device_type_map,
                 cuda_to_cpu_ratio,
             )
-        } else {
-            cache_matched_candidates
         };
 
-        // Select least-loaded within the chosen group.
-        // Cache-hit requests should not consume ratio budget occupancy.
-        let instance_id = if skip_weighted_accounting {
+        // Only full cache hits bypass weighted accounting; partial hits still follow the
+        // device-aware ratio because some image encoding remains for this request.
+        let instance_id = if full_embedding_cache_hit {
             state.select_exact_min(&candidates).await
         } else {
             state.select_exact_min_and_increment(&candidates).await
         }
         .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = if skip_weighted_accounting {
+        let permit = if full_embedding_cache_hit {
             None
         } else {
             Some(OccupancyPermit::new(state.clone(), instance_id))
@@ -879,7 +891,7 @@ where
             load = state.load(instance_id),
             endpoint = %endpoint_id,
             is_cpu,
-            embedding_cache_hit = skip_weighted_accounting,
+            embedding_cache_hit,
             request_cache_keys = request_cache_keys.len(),
             "Selected worker"
         );
