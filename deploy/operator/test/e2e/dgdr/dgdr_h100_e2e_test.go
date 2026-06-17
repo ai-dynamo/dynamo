@@ -303,11 +303,6 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 				Entry("trtllm", v1beta1.BackendTypeTrtllm),
 			)
 		})
-
-		// Other models:
-		// ---- GPT-OSS-120B (trtllm only, works on AIC 1.2.0rc5 but not current AIC version 1.3.0rc10) ----
-		// Note: moonshotai/Kimi-K2.5 works with sglang and vllm, but it might not fit on H100s.
-
 	})
 
 	// -----------------------------------------------------------------------
@@ -316,8 +311,5 @@ var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "i
 	// All targeting the H100 test cluster.
 	// -----------------------------------------------------------------------
 
-	Context("Models that require thorough profiling", func() {
-		// TODO: add Qwen3-VL-30B-FP8, Llama-3.3-70B-FP8, and Nemotron-3-Super-120B-FP8
-	})
-
+	// Models we can test include Qwen3-VL-30B-FP8, Llama-3.3-70B-FP8, and Nemotron-3-Super-120B-FP8.
 })
