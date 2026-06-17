@@ -262,6 +262,17 @@ impl Context {
         }
     }
 
+    #[pyo3(signature = (id))]
+    fn detached(&self, id: String) -> Self {
+        Self {
+            inner: Arc::new(Controller::new(id)),
+            trace_context: self.trace_context.clone(),
+            first_token: None,
+            metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
+            span: self.span.clone(),
+        }
+    }
+
     fn is_stopped(&self) -> bool {
         self.inner.is_stopped()
     }
