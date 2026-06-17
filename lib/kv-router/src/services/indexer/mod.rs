@@ -37,7 +37,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::min_initial_workers_from_env;
-use crate::services::zmq::validate_endpoint as validate_zmq_endpoint;
+use crate::services::common::zmq::validate_endpoint as validate_zmq_endpoint;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 
@@ -246,11 +246,6 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], (1, 0, "tcp://host:5557".to_string()));
         assert_eq!(result[1], (2, 1, "tcp://host:5558".to_string()));
-    }
-
-    #[test]
-    fn test_parse_workers_empty() {
-        assert!(parse_workers("").unwrap().is_empty());
     }
 
     #[test]

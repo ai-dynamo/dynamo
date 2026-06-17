@@ -41,6 +41,7 @@ from dynamo._core import make_engine
 from dynamo._core import register_model as register_model
 from dynamo._core import run_input
 from dynamo._core import run_kv_indexer as run_kv_indexer
+from dynamo._core import run_select_service as run_select_service
 from dynamo._core import run_slot_tracker as run_slot_tracker
 from dynamo._core import unregister_model as unregister_model
 
