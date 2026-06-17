@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::indexer::{
-    KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails,
-    MatchDetails, ThreadPoolIndexer, WireTieredMatchDetails,
+    KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
+    ThreadPoolIndexer, WireTieredMatchDetails,
 };
 use crate::protocols::{LocalBlockHash, StorageTier};
 

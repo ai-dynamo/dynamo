@@ -563,8 +563,15 @@ fn cpu_event_with_placeholder_payload_is_dropped_safely() {
         parent_block_hash: None,
     });
     let warning_count = Arc::new(AtomicU32::new(0));
-    let placement =
-        convert_event(raw, 42, 16, WorkerWithDpRank::new(7, 0), &warning_count).unwrap();
+    let placement = convert_event(
+        raw,
+        42,
+        16,
+        WorkerWithDpRank::new(7, 0),
+        &warning_count,
+        None,
+    )
+    .unwrap();
 
     assert_eq!(placement.placement.tier, StorageTier::HostPinned);
     match placement.event.data {
@@ -586,19 +593,29 @@ fn cpu_event_with_full_payload_is_indexable() {
         parent_block_hash: Some(200),
     });
     let warning_count = Arc::new(AtomicU32::new(0));
-    let placement =
-        convert_event(raw, 43, 4, WorkerWithDpRank::new(7, 0), &warning_count).unwrap();
+    let placement = convert_event(
+        raw,
+        43,
+        4,
+        WorkerWithDpRank::new(7, 0),
+        &warning_count,
+        None,
+    )
+    .unwrap();
 
     assert_eq!(placement.placement.tier, StorageTier::HostPinned);
     match placement.event.data {
         KvCacheEventData::Stored(store_data) => {
-            assert_eq!(
-                store_data.parent_hash,
-                Some(ExternalSequenceBlockHash(200))
-            );
+            assert_eq!(store_data.parent_hash, Some(ExternalSequenceBlockHash(200)));
             assert_eq!(store_data.blocks.len(), 2);
-            assert_eq!(store_data.blocks[0].block_hash, ExternalSequenceBlockHash(201));
-            assert_eq!(store_data.blocks[1].block_hash, ExternalSequenceBlockHash(202));
+            assert_eq!(
+                store_data.blocks[0].block_hash,
+                ExternalSequenceBlockHash(201)
+            );
+            assert_eq!(
+                store_data.blocks[1].block_hash,
+                ExternalSequenceBlockHash(202)
+            );
         }
         other => panic!("expected Stored event, got {other:?}"),
     }
