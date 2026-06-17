@@ -116,12 +116,13 @@ impl Indexer {
                         ConcurrentRadixTreeCompressed::new(),
                         kv_router_config.router_event_threads as usize,
                         block_size,
-                        Some(kv_indexer_metrics),
+                        Some(kv_indexer_metrics.clone()),
                         prune_config,
                     )),
-                    lower_tier: LowerTierIndexers::new(
+                    lower_tier: LowerTierIndexers::new_with_metrics(
                         kv_router_config.router_event_threads as usize,
                         block_size,
+                        Some(kv_indexer_metrics),
                     ),
                     approx: None,
                     primary_records_routing_decisions: true,
@@ -133,10 +134,14 @@ impl Indexer {
                 primary: KvIndexer::new_with_pruning(
                     cancellation_token,
                     block_size,
-                    kv_indexer_metrics,
+                    kv_indexer_metrics.clone(),
                     prune_config,
                 ),
-                lower_tier: LowerTierIndexers::new(1, block_size),
+                lower_tier: LowerTierIndexers::new_with_metrics(
+                    1,
+                    block_size,
+                    Some(kv_indexer_metrics),
+                ),
                 approx: None,
                 primary_records_routing_decisions: true,
             });
@@ -151,11 +156,12 @@ impl Indexer {
                     ConcurrentRadixTreeCompressed::new(),
                     kv_router_config.router_event_threads as usize,
                     block_size,
-                    Some(kv_indexer_metrics),
+                    Some(kv_indexer_metrics.clone()),
                 )),
-                lower_tier: LowerTierIndexers::new(
+                lower_tier: LowerTierIndexers::new_with_metrics(
                     kv_router_config.router_event_threads as usize,
                     block_size,
+                    Some(kv_indexer_metrics),
                 ),
                 approx,
                 primary_records_routing_decisions: false,
@@ -169,10 +175,14 @@ impl Indexer {
             primary: KvIndexer::new_with_pruning(
                 cancellation_token,
                 block_size,
-                kv_indexer_metrics,
+                kv_indexer_metrics.clone(),
                 None,
             ),
-            lower_tier: LowerTierIndexers::new(1, block_size),
+            lower_tier: LowerTierIndexers::new_with_metrics(
+                1,
+                block_size,
+                Some(kv_indexer_metrics),
+            ),
             approx,
             primary_records_routing_decisions: false,
         })
