@@ -273,9 +273,7 @@ async def test_selection_service_not_ready_carries_status(monkeypatch):
     try:
         # Selecting before any worker is schedulable is a typed selector failure.
         with pytest.raises(SelectionServiceError) as exc_info:
-            await service.select(
-                {"model_name": "model", "token_ids": [1, 2, 3, 4]}
-            )
+            await service.select({"model_name": "model", "token_ids": [1, 2, 3, 4]})
         assert exc_info.value.kind == "not_ready"
         assert exc_info.value.status_code == 503
     finally:
