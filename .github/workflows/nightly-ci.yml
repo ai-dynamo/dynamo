@@ -6,11 +6,6 @@ name: Nightly CI Pipeline
 on:
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
-  # TODO: REVERT — testing only. Triggers full nightly on push to this dev
-  # branch. MUST be removed before merging to main.
-  push:
-    branches:
-      - pvijayakrish/nightly-notifications
   workflow_dispatch:  # Allow manual triggering for testing
     inputs:
       release:
@@ -129,13 +124,6 @@ jobs:
           case "${GITHUB_EVENT_NAME}" in
             schedule)
               # cron must keep tests on so a failing nightly blocks the release.
-              echo "release=true" >> "$GITHUB_OUTPUT"
-              echo "run_tests=true" >> "$GITHUB_OUTPUT"
-              ;;
-            push)
-              # TODO: REVERT — testing only. Treats push to the dev branch like
-              # schedule so the full nightly (incl. release.yml + GitLab) runs.
-              # MUST be removed before merging to main.
               echo "release=true" >> "$GITHUB_OUTPUT"
               echo "run_tests=true" >> "$GITHUB_OUTPUT"
               ;;
@@ -261,7 +249,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
@@ -276,7 +264,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
@@ -309,11 +297,13 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
@@ -334,11 +324,13 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
@@ -354,11 +346,13 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
@@ -380,11 +374,13 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
@@ -400,6 +396,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -426,6 +424,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -439,6 +439,20 @@ jobs:
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
+
+  # ============================================================================
+  # XPU TEST JOBS
+  # ============================================================================
+
+  vllm-test-xpu:
+    name: vllm-xpu
+    needs: [resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/xpu-ci.yaml
+    with:
+      framework: vllm
+      pytest_markers: 'vllm and xpu_1'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
@@ -812,9 +826,15 @@ jobs:
       contents: read
     steps:
       - name: Get Failed jobs
+        id: failed-jobs
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Jobs whose names contain any of these substrings are excluded from Slack failure reporting
+          # (see ops-support). Add one substring per line to silence additional jobs.
+          IGNORED_JOBS: |
+            build-xpu
+            test-xpu
         run: |
           JOBS_JSON=$(mktemp)
           curl -sSL \
@@ -823,14 +843,26 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
+          # Turn the newline-separated IGNORED_JOBS list into a trimmed, non-empty JSON array for jq.
+          IGNORED_JSON=$(printf '%s\n' "$IGNORED_JOBS" | jq -R 'gsub("^\\s+|\\s+$";"")' | jq -s 'map(select(length > 0))')
+
+          # Drop any failed job whose name contains one of the ignored substrings.
+          FAILED_JOBS=$(jq -r --argjson ignored "$IGNORED_JSON" '.jobs[] | select(.conclusion == "failure") | select(.name as $n | ($ignored | any(. as $i | $n | contains($i))) | not) | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"
             echo "$FAILED_JOBS"
             echo "EOF"
           } >> "$GITHUB_ENV"
+
+          # Skip the Slack alert when there are no reportable failures (e.g. only IGNORED_JOBS failed).
+          if [ -n "$(echo "$FAILED_JOBS" | tr -d '[:space:]')" ]; then
+            echo "has_failures=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_failures=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Notify Slack
+        if: steps.failed-jobs.outputs.has_failures == 'true'
         uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
         with:
           webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}

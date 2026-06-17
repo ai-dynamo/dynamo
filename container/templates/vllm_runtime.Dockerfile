@@ -23,6 +23,7 @@ ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
+ARG MODELEXPRESS_VERSION
 
 WORKDIR /workspace
 
@@ -71,9 +72,12 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
-# Create dynamo user with group 0 for OpenShift compatibility
+# Create dynamo user with group 0 for OpenShift compatibility.
+# Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
+# UID 2000, so after freeing 1000 (ubuntu) useradd would otherwise auto-assign the
+# next-highest UID (2001) and fail the `id -u dynamo` == 1000 assertion below.
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
+    && useradd -u 1000 -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
     && ln -sf /usr/bin/python3 /usr/local/bin/python \
@@ -130,10 +134,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         "nixl-cu12==${NIXL_VERSION}"
 {% endif %}
 
-# Copy attribution files and wheels
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-
 # Install device-specific NIXL wheels for non-CUDA devices.
 # These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
 {% if device != "cuda" %}
@@ -189,6 +189,17 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
 {% endif %}
+
+{% if context.vllm.enable_modelexpress == "true" %}
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# vLLM runtime dependency stack.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    uv pip install {{ pip_target }} --no-deps \
+        "modelexpress==${MODELEXPRESS_VERSION}"
+{% endif %}
+
 {% endif %}
 
 {% if context.vllm.enable_media_ffmpeg == "true" %}
@@ -200,6 +211,18 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
+
+# Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships
+# a GPL-encumbered prebuilt ffmpeg binary) with a source install that leaves
+# no binary on disk. vLLM-Omni uses diffusers.export_to_video and doesn't
+# invoke imageio-ffmpeg, so no IMAGEIO_FFMPEG_EXE is needed — this is
+# purely to clear the GPL binary. The --no-binary directive lives in the
+# requirements file itself.
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
+        --requirement /tmp/requirements.vllm.txt
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale

@@ -5,8 +5,13 @@ import json
 
 import pytest
 
-from dynamo.llm import MockEngineArgs
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay
+
+# run_synthetic_trace_replay constructs the Rust AIC callback, which imports
+# aiconfigurator.sdk.engine (Phase 1.5 compile_engine API). Skip if absent —
+# PyPI aiconfigurator releases predating PR #1200 don't ship it.
+pytest.importorskip("aiconfigurator.sdk.engine")
 
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"

@@ -4,8 +4,6 @@
 title: Amazon EFS Setup for EKS
 ---
 
-# Create an Amazon EFS File System for Amazon EKS
-
 This guide walks through creating an Amazon EFS file system and connecting it to your EKS cluster. The EFS CSI Driver was already installed as an addon via `eksctl.yaml` during cluster creation. Now we need to create the actual file system and make it available to Kubernetes workloads.
 
 This filesystem will be used by Dynamo to store shared model weights and compilation cache across nodes.

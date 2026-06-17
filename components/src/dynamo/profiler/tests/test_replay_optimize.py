@@ -13,9 +13,10 @@ import pandas as pd
 import pytest
 
 try:
-    from dynamo.llm import KvRouterConfig, MockEngineArgs
+    from dynamo.llm import KvRouterConfig
+    from dynamo.mocker import MockEngineArgs
 except ImportError:
-    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
+    pytest.skip("dynamo mocker bindings not available", allow_module_level=True)
 from dynamo.profiler.utils import replay_optimize
 from dynamo.profiler.utils.replay_optimize import (
     DenseAggReplayState,
@@ -1162,6 +1163,8 @@ def test_kv_router_config_with_overrides_deprecated_zero_wins() -> None:
 @pytest.mark.timeout(30)
 def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
     pytest.importorskip("aiconfigurator")
+    # Rust AIC callback also requires the Phase 1.5 Python engine API.
+    pytest.importorskip("aiconfigurator.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1189,6 +1192,8 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
 @pytest.mark.timeout(30)
 def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
     pytest.importorskip("aiconfigurator")
+    # Rust AIC callback also requires the Phase 1.5 Python engine API.
+    pytest.importorskip("aiconfigurator.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1216,6 +1221,8 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
 @pytest.mark.timeout(30)
 def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
     pytest.importorskip("aiconfigurator")
+    # Rust AIC callback also requires the Phase 1.5 Python engine API.
+    pytest.importorskip("aiconfigurator.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1242,6 +1249,8 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
 @pytest.mark.timeout(30)
 def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
     pytest.importorskip("aiconfigurator")
+    # Rust AIC callback also requires the Phase 1.5 Python engine API.
+    pytest.importorskip("aiconfigurator.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",

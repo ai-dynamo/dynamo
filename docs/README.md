@@ -1,21 +1,15 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: How to Build and Publish Dynamo Docs
 sidebar-title: Dynamo Docs Guide
 ---
-
-# How to Build and Publish Dynamo Docs
 
 This document describes the architecture, workflows, and maintenance procedures for the
 NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com).
 
 <Note>
-The documentation website is hosted entirely on
-[Fern](https://buildwithfern.com). CI publishes to
-`dynamo.docs.buildwithfern.com`; the production domain
-`docs.dynamo.nvidia.com` is a custom domain alias that points to the
-Fern-hosted site. There is no separate server — Fern handles hosting,
-CDN, and versioned URL routing.
+The documentation website is published at [https://docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo). CI handles publishing, including hosting, CDN, and versioned URL routing.
 </Note>
 
 <Error>
@@ -54,7 +48,7 @@ the navigation in `docs/index.yml`, and running `fern check` to validate.
 
 | Skill | Description |
 |-------|-------------|
-| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.agents/contributor-skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
+| [dynamo-docs](../.agents/skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
 
 ---
 
@@ -416,9 +410,9 @@ The Fern site supports a version dropdown in the UI. Each version is defined by:
 
 ### URL structure
 
-- **Latest (default):** `docs.dynamo.nvidia.com/dynamo/`
-- **Specific version:** `docs.dynamo.nvidia.com/dynamo/v0.8.1/`
-- **Dev:** `docs.dynamo.nvidia.com/dynamo/dev/`
+- **Latest (default):** `docs.nvidia.com/dynamo/`
+- **Specific version:** `docs.nvidia.com/dynamo/v0.8.1/`
+- **Dev:** `docs.nvidia.com/dynamo/dev/`
 
 ### Creating a new version
 
@@ -449,7 +443,7 @@ automatically.
 │       │                                                             │
 │       ▼                                                             │
 │  sync-dev job:                                                      │
-│    1. Copy docs/ content → fern/pages/ on docs-website branch │
+│    1. Copy docs/ content → fern/pages/ on docs-website branch       │
 │    2. Copy fern/ configs → fern/ on docs-website branch             │
 │    3. Convert GitHub callouts → Fern admonitions                    │
 │    4. Preserve version list from docs-website's docs.yml            │
@@ -457,7 +451,7 @@ automatically.
 │    6. fern generate --docs (publishes to Fern)                      │
 │       │                                                             │
 │       ▼                                                             │
-│  Live on docs.dynamo.nvidia.com/dynamo/dev/ within minutes          │
+│  Live on docs.nvidia.com/dynamo/dev/ within minutes                 │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -470,15 +464,15 @@ automatically.
 │    1. Validate tag format (vX.Y.Z only)                             │
 │    2. Check version doesn't already exist                           │
 │    3. Snapshot fern/pages/ → fern/pages-vX.Y.Z/                     │
-│    4. Rewrite GitHub links (tree/main → tree/vX.Y.Z)               │
+│    4. Rewrite GitHub links (tree/main → tree/vX.Y.Z)                │
 │    5. Convert callouts in snapshot                                  │
-│    6. Create fern/versions/vX.Y.Z.yml (paths → pages-vX.Y.Z/)     │
+│    6. Create fern/versions/vX.Y.Z.yml (paths → pages-vX.Y.Z/)       │
 │    7. Update fern/docs.yml (insert version, set as default)         │
 │    8. Commit + push to docs-website                                 │
 │    9. fern generate --docs (publishes to Fern)                      │
 │       │                                                             │
 │       ▼                                                             │
-│  New version visible in dropdown at docs.dynamo.nvidia.com/dynamo/  │
+│  New version visible in dropdown at docs.nvidia.com/dynamo/         │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 

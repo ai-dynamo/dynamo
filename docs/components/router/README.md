@@ -27,7 +27,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. For event-driv
 | `--router-kv-overlap-score-credit` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Consume worker KV events, or fall back to approximate routing without events |
-| `--router-queue-threshold` | `16.0` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.priority` |
+| `--router-queue-threshold` | `16.0` | Backpressure queue threshold; priority hints only reorder requests while this queue is non-empty |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
 
@@ -57,10 +57,13 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 
 - **[Router Guide](router-guide.md)**: Deployment modes, quick start, and page map
 - **[Routing Concepts](router-concepts.md)**: Cost model and worker-selection behavior
+- **[Router Filtering](router-filtering.md)**: Candidate eligibility, DP-rank filtering, and busy-threshold overload handling
 - **[Configuration and Tuning](router-configuration.md)**: Router flags, transport modes, and metrics
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
 - **[Router Operations](router-operations.md)**: Replicas, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Testing](router-testing.md)**: Test layers from Rust unit tests to fixture-backed replay and full process E2E
 - **[Standalone Indexer](standalone-indexer.md)**: Run the KV indexer as a separate service for independent scaling
+- **[Standalone Selection Service](standalone-selection.md)**: Expose KV-aware selection and reservation accounting over HTTP
+- **[Standalone Slot Tracker](standalone-slot-tracker.md)**: Run active-request load accounting as a separate HTTP service
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details, algorithms, and event transport modes

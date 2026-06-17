@@ -1,13 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: "Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo"
+sidebar-title: Multi-Turn Agentic Harnesses
 subtitle: "Matej Kosec, Ishan Dhanani, Benjamin Klieger, Dan Gil and Alec Flowers — April 2026"
 description: "Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo"
 keywords: agentic inference, responses api, messages api, tool calling, interleaved reasoning, prefix caching, agent hints, Dynamo
 last-updated: Apr 30, 2026
 ---
-
-# Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo
 
 An agentic exchange must preserve a structured interaction: assistant turns interleave reasoning with one or more tool calls, and subsequent user turns return the corresponding tool results to the model context. Reasoning replay is model- and turn-dependent: some reasoning should be retained, while some should be dropped. The inference engine is responsible for this more expressive interaction and for producing correctly segmented API results. Tool-call parsing and reasoning parsing need to happen before the attached harness consumes the response. High-value agentic workflows such as coding also depend on a responsive harness experience: reasoning segments, tool-call events, and request metadata need to stream back as the turn unfolds instead of arriving after a final text response. This post covers lessons from running real agentic clients against Dynamo: how we hardened parser and API coverage and how those parser layers became standalone reusable crates.
 
@@ -173,7 +173,11 @@ Claude Code and OpenClaw both exercise the Anthropic Messages API rather than on
 - model metadata at both `GET /v1/models` and `GET /v1/models/{model_id}`
 - correct handling of slashed model IDs
 - useful `input_tokens` in `message_start`
-- acceptance of `cache_control`
+- tolerant parsing of Anthropic `cache_control` annotations
+
+That last item is API compatibility: Dynamo should not reject Anthropic-format
+requests that contain `cache_control`, but it does not currently treat those
+annotations as Dynamo cache-pinning or TTL-retention directives.
 
 Once the frontend is reachable and compliant, both harnesses can point at Dynamo's Anthropic-compatible endpoint:
 
@@ -262,7 +266,7 @@ For Dynamo, the implication is that Codex compatibility needs to be evaluated at
 
 ## What's Next
 
-Dynamo now has `nvext.agent_hints`: `latency_sensitivity`, `priority`, `osl`, and `speculative_prefill`. Those fields give the harness a way to say more about the turn than the prompt alone. A session waiting on a user reply is not the same as one working through a long background tool sequence, and the API can now carry some of that difference.
+Dynamo now has `nvext.agent_hints`: `priority`, `osl`, and `speculative_prefill`. Those fields give the harness a way to say more about the turn than the prompt alone. A session waiting on a user reply is not the same as one working through a long background tool sequence, and the API can now carry some of that difference.
 
 In the v1.1.0 line, Dynamo is also making more of the agent stack available as reusable pieces. The protocol, parser, and tokenizer layers are versioned as standalone crates, including `dynamo-protocols`, `dynamo-parsers`, and `dynamo-tokenizers`. That gives teams a way to build or customize a harness-facing serving path without copying Dynamo internals into a separate project.
 

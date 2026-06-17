@@ -25,8 +25,9 @@ from tests.utils.engine_process import (
 from tests.utils.payload_builder import (
     make_chat_health_check,
     make_completions_health_check,
+    make_images_health_check,
 )
-from tests.utils.payloads import ChatPayload, CompletionPayload
+from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
@@ -46,6 +47,7 @@ def _tail_logs(content: str, *, lines: int = 80) -> str:
 _ENDPOINT_HEALTH_CHECK_FACTORIES = (
     (CompletionPayload, make_completions_health_check),
     (ChatPayload, make_chat_health_check),
+    (ImagesPayload, make_images_health_check),
 )
 
 
@@ -210,6 +212,10 @@ def run_serve_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
+
+        # Per-worker NIXL side-channel ports, indexed to match DYN_SYSTEM_PORT{idx}.
+        for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
+            merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)
