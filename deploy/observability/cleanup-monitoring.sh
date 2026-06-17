@@ -44,6 +44,11 @@ kubectl rollout status daemonset nvidia-dcgm-exporter -n gpu-operator --timeout=
 echo ""
 echo "Step 3: Removing Prometheus endpoint from Dynamo operator..."
 DYNAMO_VERSION=$(helm list -n "${DYNAMO_NAMESPACE}" -o json | jq -r '.[] | select(.name=="dynamo-platform") | .chart' | sed 's/dynamo-platform-//')
+if [ -z "${DYNAMO_VERSION}" ]; then
+  echo "ERROR: Could not detect a 'dynamo-platform' Helm release in namespace '${DYNAMO_NAMESPACE}'." >&2
+  echo "       Set DYNAMO_NAMESPACE to the namespace where Dynamo is installed and retry." >&2
+  exit 1
+fi
 echo "Detected Dynamo Platform version: ${DYNAMO_VERSION} (namespace: ${DYNAMO_NAMESPACE})"
 
 # Delete the conflicting secret (grove-operator will recreate it)
