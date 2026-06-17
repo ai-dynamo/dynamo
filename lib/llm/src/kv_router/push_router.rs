@@ -23,7 +23,7 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
-        timing::{RequestPhase, RoutingData},
+        timing::{RequestPhase, RequestTracker, RoutingData},
     },
 };
 
@@ -403,8 +403,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        mut request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        // Requests that arrive over the request plane are deserialized with
+        // `PreprocessedRequest::tracker` empty because the field is `serde(skip)`.
+        // Create the tracker here so standalone routers still publish routing
+        // metrics such as kv_hit_rate.
+        if request.tracker.is_none() {
+            request.tracker = Some(Arc::new(RequestTracker::new()));
+        }
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let phase = request
             .tracker
