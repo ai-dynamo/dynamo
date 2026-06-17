@@ -20,7 +20,7 @@ use crate::scheduling::overlap::{
 use crate::scheduling::policy::RouterSchedulingPolicy;
 use crate::scheduling::selector::DefaultWorkerSelector;
 use crate::scheduling::{
-    LocalScheduler, PotentialLoad, effective_prefill_tokens,
+    KvSchedulerError, LocalScheduler, PotentialLoad, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -597,6 +597,12 @@ impl SelectionCore {
             allowed_worker_ids,
             routing_constraints,
         } = operation;
+        if self.cancel_token.is_cancelled() {
+            return Err(SelectionError::NotReady(
+                "selection service is shutting down".to_string(),
+            ));
+        }
+
         let entry = self.ready_entry(&key)?;
         let PreparedSelectionInputs {
             sequence_hashes,
@@ -618,9 +624,12 @@ impl SelectionCore {
         } else {
             None
         };
-        let response = entry
-            .scheduler
-            .schedule_with_block_hashes(
+        let response = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
+            }
+            result = entry.scheduler.schedule_with_block_hashes(
                 scheduler_request_id,
                 isl_tokens,
                 Some(sequence_hashes),
@@ -638,8 +647,8 @@ impl SelectionCore {
                 allowed_worker_ids,
                 routing_constraints,
                 None,
-            )
-            .await?;
+            ) => result?,
+        };
         let endpoint = self
             .catalog
             .schedulable_endpoint(response.best_worker.worker_id, &key)
@@ -929,6 +938,7 @@ impl Drop for SelectionCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
         crate::config::KvRouterConfig {
@@ -938,13 +948,13 @@ mod tests {
         }
     }
 
-    fn worker_with_kv_events(worker_id: WorkerId) -> WorkerRequest {
+    fn worker(worker_id: WorkerId) -> WorkerRequest {
         WorkerRequest {
             worker_id,
             model_name: "model".to_string(),
             tenant_id: "default".to_string(),
             endpoint: Some(format!("http://worker-{worker_id}:8000")),
-            kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+            kv_events_endpoint: None,
             kv_events_endpoints: HashMap::new(),
             replay_endpoint: None,
             block_size: Some(4),
@@ -960,6 +970,72 @@ mod tests {
             kv_transfer_enforcement: None,
             kv_transfer_preferred_weight: None,
         }
+    }
+
+    fn worker_with_kv_events(worker_id: WorkerId) -> WorkerRequest {
+        WorkerRequest {
+            kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+            ..worker(worker_id)
+        }
+    }
+
+    fn prompt() -> PromptRequest {
+        PromptRequest {
+            token_ids: Some(vec![1, 2, 3, 4]),
+            mm_routing_info: None,
+            block_mm_infos: None,
+            block_hashes: None,
+            sequence_hashes: None,
+            isl_tokens: None,
+            lora_name: None,
+            is_eagle: None,
+        }
+    }
+
+    fn select_request() -> SelectRequest {
+        SelectRequest {
+            model_name: "model".to_string(),
+            tenant_id: "default".to_string(),
+            selection_id: None,
+            prompt: prompt(),
+            router_config_override: None,
+            expected_output_tokens: None,
+            priority_jump: None,
+            strict_priority: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+        }
+    }
+
+    fn reserve_request(reservation_id: &str) -> SelectAndReserveRequest {
+        SelectAndReserveRequest {
+            model_name: "model".to_string(),
+            tenant_id: "default".to_string(),
+            selection_id: None,
+            reservation_id: Some(reservation_id.to_string()),
+            prompt: prompt(),
+            router_config_override: None,
+            expected_output_tokens: None,
+            priority_jump: None,
+            strict_priority: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+        }
+    }
+
+    async fn wait_for_pending_selection(core: &SelectionCore) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if core.loads(Some("model"), Some("default"))[0].pending_count == 1 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("selection did not queue");
     }
 
     #[test]
@@ -1005,5 +1081,34 @@ mod tests {
 
         assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
         assert_eq!(core.indexer_registry.listener_cancelled(2, 0), Some(true));
+    }
+
+    #[tokio::test]
+    async fn queued_selection_errors_on_shutdown() {
+        let mut config = test_config(false);
+        config.router_queue_threshold = Some(0.0);
+        let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
+
+        let record = core.upsert_worker(worker(1)).await.expect("worker upsert");
+        assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
+        core.select_and_reserve(reserve_request("res-a"))
+            .await
+            .expect("initial reservation");
+
+        let queued_core = core.clone();
+        let queued = tokio::spawn(async move { queued_core.select(select_request()).await });
+        wait_for_pending_selection(&core).await;
+
+        core.shutdown();
+        let err = tokio::time::timeout(Duration::from_secs(1), queued)
+            .await
+            .expect("queued selection timed out")
+            .expect("queued selection task panicked")
+            .expect_err("queued selection should fail");
+
+        assert!(matches!(
+            err,
+            SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)
+        ));
     }
 }
