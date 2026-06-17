@@ -3,15 +3,13 @@
 
 //! Standalone services built from brokerless transport primitives.
 
-#[cfg(any(
-    feature = "standalone-indexer",
-    feature = "standalone-slot-tracker",
-    feature = "standalone-selection"
-))]
-pub(crate) mod zmq;
+pub(crate) mod common;
 
 #[cfg(feature = "standalone-indexer")]
 pub mod indexer;
+
+#[cfg(feature = "standalone-indexer")]
+pub mod overlap;
 
 #[cfg(feature = "standalone-indexer")]
 pub mod shared_cache;

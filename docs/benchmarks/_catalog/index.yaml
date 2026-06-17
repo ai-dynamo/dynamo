@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ordering + inclusion index for the Dynamo Feature Benchmarks catalog.
+# Each id must have a matching docs/benchmarks/_catalog/benchmarks/<id>.yaml
+# file. `benchmarks:` lists the benchmarks in nav order — this order matches
+# the Feature Benchmarks section in docs/index.yml.
+schema_version: 1
+benchmarks:
+- qwen3-32b-kv-routing
+- kimi-k2-5-feature-stack
+- qwen3-6-35b-feature-stack
+- qwen3-vl-embedding-cache
+- deepseek-v3-2-wideep-routing
+- llama-3-70b-topology

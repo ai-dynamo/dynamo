@@ -109,7 +109,7 @@ impl AgenticMooncakeRow {
 }
 
 /// Harness tool span attributed to the LLM request that consumed it. Mirrors
-/// `tool_end` / `tool_error` fields from `dynamo.agent.trace.v1`.
+/// `tool_end` / `tool_error` fields from `dynamo.request.trace.v1`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgenticToolEvent {
     pub tool_call_id: String,
