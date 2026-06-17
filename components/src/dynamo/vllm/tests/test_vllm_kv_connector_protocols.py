@@ -47,6 +47,23 @@ def _config(connector: Optional[str], **kv_extra) -> SimpleNamespace:
     )
 
 
+# A representative offload leaf for the PdConnector index-0 slot. It never
+# participates in P→D coordination, so its exact identity is irrelevant to
+# protocol resolution.
+_OFFLOAD = {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"}
+
+
+def _pd_config(*connectors: dict, **kv_extra) -> SimpleNamespace:
+    """PdConnector ``vllm_config`` wrapping the given inner connector dicts in
+    nested ``kv_connector_extra_config["connectors"]``, in order (index 0 =
+    offload leaf, index 1 = P→D transport)."""
+    return _config(
+        "PdConnector",
+        kv_connector_extra_config={"connectors": list(connectors)},
+        **kv_extra,
+    )
+
+
 def _install_fake_mooncake(monkeypatch, host: str, port: int) -> None:
     """Install a fake leaf module exposing ``get_mooncake_bootstrap_addr``.
 
@@ -233,6 +250,69 @@ def test_make_kv_connector_protocol_falls_back_to_nixl_for_missing_config():
 def test_make_kv_connector_protocol_falls_back_to_nixl_when_config_is_none():
     proto = make_kv_connector_protocol(_config(None))
     assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_pd_connector_delegates_to_index_1():
+    """PdConnector fixes the offload leaf at index 0 and the P→D transport at
+    index 1. The resolver delegates to index 1 — here NixlConnector — yielding
+    the NIXL pull-based wire shape, regardless of the index-0 offload leaf."""
+    cfg = _pd_config(
+        _OFFLOAD,
+        {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
+    )
+    proto = make_kv_connector_protocol(cfg)
+    assert isinstance(proto, NixlConnectorProtocol)
+    assert proto.prefill_request_kv_transfer_params()["do_remote_decode"] is True
+
+
+def test_make_kv_connector_protocol_pd_connector_real_nested_config():
+    """Real deployment shape: PdConnector wrapping MooncakeStore (kv_both
+    offload) at index 0 and Nixl (kv_producer transport) at index 1."""
+    cfg = _pd_config(
+        {
+            "kv_connector": "MooncakeStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"load_async": True},
+        },
+        {
+            "kv_connector": "NixlConnector",
+            "kv_role": "kv_producer",
+            "kv_buffer_device": "cuda",
+        },
+    )
+    assert isinstance(make_kv_connector_protocol(cfg), NixlConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_pd_connector_delegates_not_hardcoded(
+    fake_mooncake,
+):
+    """The transport slot is resolved dynamically, not hard-coded to NIXL: a
+    PdConnector whose index-1 transport is MooncakeConnector resolves to the
+    Mooncake protocol."""
+    cfg = _pd_config(
+        _OFFLOAD,
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_producer"},
+    )
+    assert isinstance(make_kv_connector_protocol(cfg), MooncakeConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_pd_connector_missing_transport_raises():
+    """A PdConnector with no connector at the transport index (1) is a
+    misconfiguration and must raise rather than silently mis-resolve."""
+    cfg = _pd_config(_OFFLOAD)  # only index 0 present
+    with pytest.raises(ValueError, match="index 1"):
+        make_kv_connector_protocol(cfg)
+
+
+def test_make_kv_connector_protocol_pd_connector_unknown_transport_raises():
+    """An index-1 transport with no registered protocol must raise, naming the
+    offending connector."""
+    cfg = _pd_config(
+        _OFFLOAD,
+        {"kv_connector": "SomeFutureTransport", "kv_role": "kv_producer"},
+    )
+    with pytest.raises(ValueError, match="SomeFutureTransport"):
+        make_kv_connector_protocol(cfg)
 
 
 def test_make_kv_connector_protocol_raises_on_unknown_connector():

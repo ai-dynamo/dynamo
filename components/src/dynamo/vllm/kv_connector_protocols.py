@@ -105,10 +105,26 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         }
 
 
-# Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
+# Keyed by ``KVTransferConfig.kv_connector``. One entry per leaf connector
+# that drives the P→D wire shape directly.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
+}
+
+
+# Wrapper connectors compose a local KV-offload leaf with a separate
+# cross-worker P→D transport, and delegate all P→D coordination to the
+# transport leaf. dynamo's ``PdConnector`` (a vLLM ``MultiConnector`` from
+# ``kvbm.vllm_integration.connector``) fixes the offload connector at index 0
+# (KVBM/LMCache/FlexKV/MooncakeStore — local only, no P→D role) and the P→D
+# transport at index 1, in the same order as the nested
+# ``kv_connector_extra_config["connectors"]`` list that vLLM's MultiConnector
+# instantiates. Map each wrapper name to the index of its transport
+# sub-connector; the resolver dispatches on whatever connector occupies that
+# slot via KV_CONNECTOR_PROTOCOLS, rather than assuming it is NIXL.
+PD_WRAPPER_TRANSPORT_INDEX: Dict[str, int] = {
+    "PdConnector": 1,
 }
 
 
@@ -126,11 +142,55 @@ def make_kv_connector_protocol(vllm_config: Any) -> KvConnectorProtocol:
     if name is None:
         return NixlConnectorProtocol(vllm_config)
     cls = KV_CONNECTOR_PROTOCOLS.get(name)
+    if cls is not None:
+        return cls(vllm_config)
+    # Wrapper connectors (e.g. PdConnector) have no wire shape of their own;
+    # they delegate P→D coordination to the transport sub-connector at a known
+    # index, so resolve that leaf's protocol.
+    transport_idx = PD_WRAPPER_TRANSPORT_INDEX.get(name)
+    if transport_idx is not None:
+        return _resolve_wrapped_transport(vllm_config, kv_cfg, name, transport_idx)
+    supported = sorted({*KV_CONNECTOR_PROTOCOLS, *PD_WRAPPER_TRANSPORT_INDEX})
+    raise ValueError(
+        f"Unsupported kv_connector={name!r} for PD. Supported names: "
+        f"{supported}. If this is a typo or a renamed vLLM connector, fix "
+        f"the kv_transfer_config; if this is a new connector, add it to "
+        f"KV_CONNECTOR_PROTOCOLS."
+    )
+
+
+def _resolve_wrapped_transport(
+    vllm_config: Any, kv_cfg: Any, wrapper_name: str, transport_idx: int
+) -> KvConnectorProtocol:
+    """Resolve the protocol for the transport sub-connector of a wrapper
+    connector.
+
+    The wrapper's nested ``kv_connector_extra_config["connectors"]`` list
+    mirrors vLLM ``MultiConnector`` ordering, so the entry at ``transport_idx``
+    is the connector that actually owns ``kv_transfer_params``. Its protocol is
+    looked up in :data:`KV_CONNECTOR_PROTOCOLS` exactly as a top-level
+    connector would be. A missing/short ``connectors`` list or an unregistered
+    transport is a misconfiguration and raises rather than mis-resolving.
+    """
+    extra = getattr(kv_cfg, "kv_connector_extra_config", None)
+    connectors = extra.get("connectors") if isinstance(extra, dict) else None
+    if not isinstance(connectors, (list, tuple)) or len(connectors) <= transport_idx:
+        raise ValueError(
+            f"{wrapper_name} expects kv_connector_extra_config['connectors'] to "
+            f"hold a transport connector at index {transport_idx}, but found "
+            f"{connectors!r}. Check the --kv-transfer-config nesting."
+        )
+    inner = connectors[transport_idx]
+    inner_name = (
+        inner.get("kv_connector")
+        if isinstance(inner, dict)
+        else getattr(inner, "kv_connector", None)
+    )
+    cls = KV_CONNECTOR_PROTOCOLS.get(inner_name)
     if cls is None:
         raise ValueError(
-            f"Unsupported kv_connector={name!r} for PD. Supported names: "
-            f"{sorted(KV_CONNECTOR_PROTOCOLS)}. If this is a typo or a "
-            f"renamed vLLM connector, fix the kv_transfer_config; if this "
-            f"is a new connector, add it to KV_CONNECTOR_PROTOCOLS."
+            f"{wrapper_name} transport connector at index {transport_idx} has "
+            f"kv_connector={inner_name!r}, which has no PD protocol. Supported "
+            f"transports: {sorted(KV_CONNECTOR_PROTOCOLS)}."
         )
     return cls(vllm_config)
