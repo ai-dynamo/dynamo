@@ -53,8 +53,6 @@ ignore:
   - '.coderabbit.yaml'
   - '.clang-format'
   - 'dynamo.code-workspace'
-  # Top-level dev-convenience Makefile for local image builds / e2e; not used by CI.
-  - 'Makefile'
   - 'deploy/*'
   - 'dev/*'
   - '.github/scripts/**'
