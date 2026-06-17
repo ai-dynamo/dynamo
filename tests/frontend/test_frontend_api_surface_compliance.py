@@ -14,14 +14,18 @@ sequentially against one server:
    `/v1/responses`.
 3. `claude -p` smoke — forces the Bash tool-call path through
    `/v1/messages` (Anthropic Messages API).
+4. `opencode run` smoke — sends a real OpenCode request through
+   `/v1/chat/completions`.
 
-All external tooling (bun, node, the OpenResponses suite, and the codex /
-claude CLIs) is installed lazily at test time by session-scoped fixtures
-into a session-shared cache directory. Versions and the OpenResponses
-SHA are pinned as module-level constants. FileLock coordination makes
-concurrent xdist workers share a single install.
+All external tooling (bun, node, the OpenResponses suite, and the coding-agent
+CLIs) is installed lazily at test time by session-scoped fixtures into a
+session-shared cache directory. Versions and the OpenResponses SHA are pinned
+as module-level constants. FileLock coordination makes concurrent xdist
+workers share a single install.
+
 """
 
+import json
 import logging
 import os
 import platform
@@ -50,9 +54,9 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
 COMPLIANCE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 
 # Pinned external-tool versions. Bun and node are pinned for reproducibility.
-# The agent CLIs (@openai/codex, @anthropic-ai/claude-code) float to @latest
-# so we automatically pick up protocol fixes — they're client-side harnesses,
-# not Dynamo surface.
+# The agent CLIs (@openai/codex, @anthropic-ai/claude-code, opencode-ai) float
+# to @latest so we automatically pick up protocol fixes — they're client-side
+# harnesses, not Dynamo surface.
 BUN_VERSION = "1.3.12"
 NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
@@ -101,11 +105,10 @@ _SUBPROCESS_ENV_ALLOWLIST: frozenset[str] = frozenset(
 def _agent_subprocess_env(
     extra_env: dict[str, str], path_prepend: list[Path] | None = None
 ) -> dict[str, str]:
-    """Build a minimal env for codex/claude subprocesses: allowlist from
-    `os.environ` merged with explicit test-scoped vars. Optional
-    `path_prepend` prepends directories to PATH so the fixture-installed
-    node/codex/claude binaries resolve without contaminating the
-    inherited PATH."""
+    """Build a minimal env for agent subprocesses: allowlist from `os.environ`
+    merged with explicit test-scoped vars. Optional `path_prepend` prepends
+    directories to PATH so fixture-installed CLIs resolve without
+    contaminating the inherited PATH."""
     base = {
         k: v for k in _SUBPROCESS_ENV_ALLOWLIST if (v := os.environ.get(k)) is not None
     }
@@ -359,7 +362,7 @@ def _install_npm_cli(
     slot: str,
 ) -> Path:
     """Install `package` into `{tools_cache}/{slot}` via npm and return
-    the path to the CLI entry point. Shared helper for codex + claude."""
+    the path to the CLI entry point. Shared helper for agent CLIs."""
     install_dir = tools_cache / slot
     cli_bin = install_dir / "node_modules" / ".bin" / binary_name
     with FileLock(str(tools_cache / f"{slot}.lock")):
@@ -411,8 +414,19 @@ def _claude_cli(_tools_cache, _node_bin) -> Path:
     )
 
 
+@pytest.fixture(scope="session")
+def _opencode_cli(_tools_cache, _node_bin) -> Path:
+    return _install_npm_cli(
+        _tools_cache,
+        _node_bin,
+        package="opencode-ai",
+        binary_name="opencode",
+        slot="opencode",
+    )
+
+
 # ---------------------------------------------------------------------------
-# Test
+# Live Dynamo frontend compliance test
 # ---------------------------------------------------------------------------
 
 
@@ -425,10 +439,10 @@ def _claude_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
-# codex exec (up to 180s) + claude exec (up to 180s) + two inter-suite
-# health checks + teardown. 750s leaves headroom for CI variance without
-# masking real hangs.
-@pytest.mark.timeout(750)
+# codex exec (up to 180s) + claude exec (up to 180s) + opencode run (up to
+# 180s) + inter-suite health checks + teardown. 930s leaves headroom for CI
+# variance without masking real hangs.
+@pytest.mark.timeout(930)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
 @pytest.mark.flaky(reruns=2, only_rerun=["did not report the marker file"])
@@ -443,6 +457,7 @@ def test_frontend_api_surface_compliance(
     _openresponses_suite,
     _codex_cli,
     _claude_cli,
+    _opencode_cli,
 ):
     """Assert the frontend passes the upstream OpenResponses compliance suite."""
 
@@ -481,12 +496,19 @@ def test_frontend_api_surface_compliance(
         frontend_port=frontend_port,
     )
 
+    request_trace_path = tmp_path / "request_trace.jsonl"
+    request_trace_path.unlink(missing_ok=True)
     merged_env = {
         "DYN_HTTP_PORT": str(frontend_port),
         "DYN_SYSTEM_PORT": str(system_port),
         # agg.sh doesn't forward frontend args, but the frontend reads this
         # env var directly. Enables /v1/messages for the claude smoke step.
         "DYN_ENABLE_ANTHROPIC_API": "1",
+        "DYN_ENABLE_FRONTEND_NVEXT": "1",
+        "DYN_REQUEST_TRACE": "1",
+        "DYN_REQUEST_TRACE_SINKS": "jsonl",
+        "DYN_REQUEST_TRACE_OUTPUT_PATH": str(request_trace_path),
+        "DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS": "10",
     }
 
     codex_home = tmp_path / "codex_home"
@@ -508,6 +530,11 @@ def test_frontend_api_surface_compliance(
     # ~/.claude during CI / local invocation.
     claude_home = tmp_path / "claude_home"
     claude_home.mkdir()
+    opencode_home = tmp_path / "opencode_home"
+    opencode_home.mkdir()
+    opencode_cwd = tmp_path / "opencode_cwd"
+    opencode_cwd.mkdir()
+    _write_opencode_config(opencode_cwd, frontend_port)
 
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
@@ -515,6 +542,7 @@ def test_frontend_api_surface_compliance(
         _run_codex_exec_smoke(
             _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
         )
+        _assert_agent_context_in_trace(request_trace_path, "codex")
         _wait_for_frontend_healthy(frontend_port)
         _run_claude_exec_smoke(
             _claude_cli,
@@ -524,6 +552,10 @@ def test_frontend_api_surface_compliance(
             marker_filename,
             frontend_port,
         )
+        _assert_agent_context_in_trace(request_trace_path, "claude_code")
+        _wait_for_frontend_healthy(frontend_port)
+        _run_opencode_smoke(_opencode_cli, _node_bin, opencode_home, opencode_cwd)
+        _assert_agent_context_in_trace(request_trace_path, "opencode")
 
 
 def _attach_subprocess_log(
@@ -605,6 +637,49 @@ def _wait_for_frontend_healthy(
     )
 
 
+def _read_request_trace_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            logger.debug("Skipping partial request-trace line: %r", line)
+    return records
+
+
+def _assert_agent_context_in_trace(
+    trace_path: Path, session_type_id: str, timeout_s: float = 30.0
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    last_records: list[dict] = []
+    while time.monotonic() < deadline:
+        last_records = _read_request_trace_records(trace_path)
+        for record in last_records:
+            agent_context = record.get("agent_context")
+            if not agent_context:
+                continue
+            if agent_context.get("session_type_id") != session_type_id:
+                continue
+            assert agent_context.get("session_id"), agent_context
+            assert agent_context.get("session_id") == agent_context.get("trajectory_id")
+            return
+        time.sleep(0.2)
+
+    seen = [
+        record.get("agent_context")
+        for record in last_records
+        if record.get("agent_context")
+    ]
+    pytest.fail(
+        f"request trace did not contain agent_context for {session_type_id!r} "
+        f"within {timeout_s}s; saw {seen}"
+    )
+
+
 def _run_bun_compliance(
     bun_binary: Path, openresponses_dir: Path, frontend_port: int
 ) -> None:
@@ -674,6 +749,31 @@ wire_api = "responses"
 env_key = "LOCAL_API_KEY"
 """.lstrip()
     )
+
+
+def _write_opencode_config(cwd: Path, frontend_port: int) -> None:
+    config = {
+        "provider": {
+            "dynamo": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Dynamo",
+                "env": ["DYNAMO_API_KEY"],
+                "models": {
+                    COMPLIANCE_MODEL: {
+                        "id": COMPLIANCE_MODEL,
+                        "name": COMPLIANCE_MODEL,
+                        "limit": {"context": 8192, "output": 4096},
+                        "cost": {"input": 0, "output": 0},
+                    }
+                },
+                "options": {"baseURL": f"http://localhost:{frontend_port}/v1"},
+            }
+        }
+    }
+
+    project_config = cwd / ".opencode"
+    project_config.mkdir(parents=True, exist_ok=True)
+    (project_config / "opencode.jsonc").write_text(json.dumps(config, indent=2))
 
 
 def _run_codex_exec_smoke(
@@ -826,4 +926,58 @@ def _run_claude_exec_smoke(
             "claude -p did not report the marker file — expected stdout to "
             f"contain {marker_filename!r} (implies the Bash tool was invoked "
             f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}"
+        )
+
+
+def _run_opencode_smoke(
+    opencode_cli: Path,
+    node_bin: Path,
+    opencode_home: Path,
+    cwd: Path,
+) -> None:
+    """Run `opencode run` against the live Dynamo chat/completions endpoint."""
+    logger.info("Running opencode smoke test against cwd=%s", cwd)
+
+    extra_env = {
+        "HOME": str(opencode_home),
+        "DYNAMO_API_KEY": "sk-none",
+        "NO_PROXY": "127.0.0.1,localhost",
+    }
+    env = _agent_subprocess_env(extra_env, path_prepend=[node_bin])
+
+    cmd = [
+        str(opencode_cli),
+        "run",
+        "--dangerously-skip-permissions",
+        "-m",
+        f"dynamo/{COMPLIANCE_MODEL}",
+        "--dir",
+        str(cwd),
+        "Reply with exactly OK. Do not use tools.",
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    _attach_subprocess_log(
+        name="opencode_smoke.log",
+        cmd=cmd,
+        result=result,
+        extra_env=extra_env,
+        cwd=str(cwd),
+    )
+    if result.stdout:
+        logger.info("opencode stdout:\n%s", result.stdout)
+    if result.stderr:
+        logger.info("opencode stderr:\n%s", result.stderr)
+
+    if result.returncode != 0:
+        pytest.fail(
+            f"opencode run failed (exit={result.returncode}).\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
