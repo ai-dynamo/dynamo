@@ -25,7 +25,8 @@ use super::state::{DisaggPhase, DisaggRequestState};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector,
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds,
+    TraceCollector,
 };
 use crate::scheduler::AdmissionEvent;
 
@@ -186,6 +187,14 @@ impl DisaggRuntime {
         );
         decode_engine.set_scaling_args(config.decode_args.clone(), false);
 
+        // Record each pool's GPUs/worker from its engine parallelism so the
+        // report can express GPU-hours from the mocker's own config.
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(
+            config.prefill_args.aic_gpus_per_worker(),
+            config.decode_args.aic_gpus_per_worker(),
+        );
+
         Ok(Self {
             now_ms: 0.0,
             next_prefill_worker_idx: 0,
@@ -197,7 +206,7 @@ impl DisaggRuntime {
             prefill_router,
             decode_router,
             requests: HashMap::new(),
-            collector: TraceCollector::default(),
+            collector,
             events: BinaryHeap::new(),
             progress,
             #[cfg(test)]
@@ -235,6 +244,12 @@ impl DisaggRuntime {
     /// it for the calibration use case this exists to serve.
     pub(in crate::replay) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
         self.max_sim_time_ms = ms;
+        self
+    }
+
+    /// Set the SLA thresholds used to classify goodput in the final report.
+    pub(in crate::replay) fn with_sla_thresholds(mut self, sla: SlaThresholds) -> Self {
+        self.collector.set_sla_thresholds(sla);
         self
     }
 
@@ -917,12 +932,12 @@ impl DisaggRuntime {
 
             if next_timestamp_ms > until_ms {
                 if until_ms > self.now_ms {
-                    self.now_ms = until_ms;
+                    self.advance_now_ms(until_ms);
                 }
                 break;
             }
 
-            self.now_ms = next_timestamp_ms;
+            self.advance_now_ms(next_timestamp_ms);
             self.drain_current_timestamp()?;
         }
 
@@ -932,6 +947,21 @@ impl DisaggRuntime {
     /// Current simulated time in milliseconds.
     pub(in crate::replay) fn now_ms(&self) -> f64 {
         self.now_ms
+    }
+
+    /// Advance the sim clock to `new_now_ms`, integrating provisioned
+    /// worker-seconds for both pools over the interval just elapsed.
+    /// `worker_count()` counts active + starting-up + draining workers, so this
+    /// captures the startup ramp and the scale-down drain tail.
+    fn advance_now_ms(&mut self, new_now_ms: f64) {
+        let dt_ms = (new_now_ms - self.now_ms).max(0.0);
+        if dt_ms > 0.0 {
+            let prefill_worker_seconds = self.prefill_engine.worker_count() as f64 * dt_ms / 1000.0;
+            let decode_worker_seconds = self.decode_engine.worker_count() as f64 * dt_ms / 1000.0;
+            self.collector
+                .add_worker_seconds(prefill_worker_seconds, decode_worker_seconds);
+        }
+        self.now_ms = new_now_ms;
     }
 
     pub(in crate::replay) fn active_prefill_count(&self) -> usize {
@@ -1074,7 +1104,7 @@ impl DisaggRuntime {
             {
                 break;
             }
-            self.now_ms = next_timestamp_ms;
+            self.advance_now_ms(next_timestamp_ms);
             self.drain_current_timestamp()?;
         }
 

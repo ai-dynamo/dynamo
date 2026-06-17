@@ -2384,6 +2384,9 @@ class PlannerReplayBridge:
         router_config: Optional[KvRouterConfig] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
     ) -> None: ...
 
     @staticmethod
@@ -2397,6 +2400,9 @@ class PlannerReplayBridge:
         router_config: Optional[KvRouterConfig] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
     ) -> "PlannerReplayBridge": ...
 
     def advance_to(self, until_ms: float) -> Dict[str, Any]: ...

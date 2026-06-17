@@ -12,7 +12,10 @@ use axum::{Json, Router};
 #[cfg(feature = "metrics")]
 use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "metrics")]
+use crate::indexer::KvIndexerMetrics;
 use crate::indexer::TieredMatchDetails;
 #[cfg(test)]
 use crate::protocols::StorageTier;
@@ -44,6 +47,40 @@ pub struct AppState {
     pub registry: Arc<WorkerRegistry>,
     #[cfg(feature = "metrics")]
     pub prom_registry: prometheus::Registry,
+}
+
+impl AppState {
+    pub fn new(indexer_threads: usize) -> anyhow::Result<Self> {
+        Self::new_with_cancel_token(indexer_threads, CancellationToken::new())
+    }
+
+    pub(super) fn new_with_cancel_token(
+        indexer_threads: usize,
+        root_cancel_token: CancellationToken,
+    ) -> anyhow::Result<Self> {
+        #[cfg(feature = "metrics")]
+        {
+            let prom_registry = prometheus::Registry::new();
+            super::metrics::register(&prom_registry)?;
+            let indexer_metrics = KvIndexerMetrics::new_registered(&prom_registry)?;
+            return Ok(Self {
+                registry: Arc::new(WorkerRegistry::new_with_indexer_metrics_and_cancel_token(
+                    indexer_threads,
+                    indexer_metrics,
+                    root_cancel_token,
+                )),
+                prom_registry,
+            });
+        }
+
+        #[cfg(not(feature = "metrics"))]
+        Ok(Self {
+            registry: Arc::new(WorkerRegistry::new_with_cancel_token(
+                indexer_threads,
+                root_cancel_token,
+            )),
+        })
+    }
 }
 
 fn default_tenant() -> String {
