@@ -15,11 +15,11 @@ use parking_lot::Mutex;
 
 use crate::local_model::LocalModel;
 use crate::protocols::common::FinishReason as BackendFinishReason;
+use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
-    chat_completions::NvCreateChatCompletionStreamResponse,
-    completions::NvCreateCompletionResponse, nvext::AgentContext,
+    chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
 use crate::request_trace::{
     DEFAULT_TOOL_EVENTS_TOPIC, FinishReasonMetadata, RequestReplayMetrics, RequestTraceMetrics,
@@ -523,13 +523,14 @@ fn tool_events_namespace(local_model: &LocalModel) -> String {
 mod tests {
     use std::{thread, time::Duration};
 
+    use crate::protocols::common::extensions::AgentContext;
     use crate::protocols::common::{
         self,
         timing::{RequestTracker, WORKER_TYPE_DECODE},
     };
     use crate::protocols::openai::{
         chat_completions::NvCreateChatCompletionStreamResponse,
-        completions::NvCreateCompletionResponse, nvext::AgentContext,
+        completions::NvCreateCompletionResponse,
     };
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,

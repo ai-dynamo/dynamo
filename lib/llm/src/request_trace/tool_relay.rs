@@ -145,7 +145,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::protocols::openai::nvext::AgentContext;
+    use crate::protocols::common::extensions::AgentContext;
     use crate::request_trace::{
         RequestTraceEventSource, RequestTraceToolEvent, RequestTraceToolStatus,
     };

@@ -3,8 +3,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::openai::nvext::AgentContext;
 use crate::request_trace::{RequestReplayMetrics, RequestTraceEventSource};
 
 use super::{
