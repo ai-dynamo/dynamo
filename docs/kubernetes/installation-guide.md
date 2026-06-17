@@ -276,6 +276,7 @@ Run the pre-deployment check script to validate your cluster is ready for deploy
 
 ```bash
 ./deploy/pre-deployment/pre-deployment-check.sh
+./deploy/pre-deployment/pre-deployment-check.sh --device cpu
 ```
 
 This checks kubectl connectivity, default StorageClass configuration, GPU node availability, and GPU Operator status. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.

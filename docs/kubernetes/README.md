@@ -241,6 +241,43 @@ Option B: apply the DGD directly.
 kubectl apply -f qwen3-dgd.yaml -n $NAMESPACE
 ```
 
+For CPU clusters, use Option B with a vLLM CPU runtime image. Build the image
+from this repository and load or push it to your cluster:
+
+```bash
+python3 container/render.py \
+  --framework=vllm \
+  --device=cpu \
+  --target=runtime \
+  --output-short-filename
+
+docker build -t dynamo:latest-vllm-cpu-runtime -f container/rendered.Dockerfile .
+```
+
+Then set both container images in `qwen3-dgd.yaml` to
+`dynamo:latest-vllm-cpu-runtime` and replace the worker GPU resource block with
+CPU and memory resources. For vLLM CPU, also lower the CPU memory reservation
+with `--gpu-memory-utilization` (despite the flag name) and reduce the context
+length for a quickstart-sized deployment:
+
+```yaml
+              args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --gpu-memory-utilization
+                - "0.1"
+                - --max-model-len
+                - "4096"
+              resources:
+                limits:
+                  cpu: "4"
+                  memory: 16Gi
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                  ephemeral-storage: 2Gi
+```
+
 If you use DGDR, watch it progress from `Pending` to `Profiling` to `Deploying`
 to `Deployed`:
 

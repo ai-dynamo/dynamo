@@ -6,13 +6,41 @@
 # This script verifies that the Kubernetes cluster has the necessary prerequisites
 # before deploying Dynamo platform.
 #
+# Usage: ./pre-deployment-check.sh [--device gpu|cpu]
+#   --device gpu  (default) Check for NVIDIA GPU nodes and GPU Operator
+#   --device cpu            Check for CPU-only nodes; no accelerator operator required
+#
 # Checks performed:
 # 1. kubectl connectivity - Verifies kubectl is installed and can connect to cluster
 # 2. Default StorageClass - Ensures a default StorageClass is configured
-# 3. Cluster GPU Resources - Validates GPU nodes are available
-# 4. GPU Operator - Confirms GPU operator is installed and running
+# 3. Cluster Resources - Validates GPU or CPU nodes are available
+# 4. Accelerator Runtime - Confirms GPU Operator when using GPU; skipped for CPU
 
 set -e
+
+# Parse arguments
+DEVICE_TYPE="gpu"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --device requires a value: gpu or cpu" >&2
+                exit 1
+            fi
+            DEVICE_TYPE="$2"
+            if [[ "$DEVICE_TYPE" != "gpu" && "$DEVICE_TYPE" != "cpu" ]]; then
+                echo "Error: --device must be 'gpu' or 'cpu'" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--device gpu|cpu]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Colors for output
 RED='\033[0;31m'
@@ -120,19 +148,34 @@ check_default_storage_class() {
 }
 
 check_cluster_resources() {
-    print_section "Checking cluster GPU resources"
+    print_section "Checking cluster ${DEVICE_TYPE^^} resources"
 
-    local node_count
-    node_count=$(kubectl get nodes -l nvidia.com/gpu.present=true -o name 2>/dev/null | wc -l || echo "0")
+    if [[ "$DEVICE_TYPE" == "cpu" ]]; then
+        local ready_node_count
+        ready_node_count=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2 == "Ready" { count++ } END { print count + 0 }')
 
-    if [[ $node_count -eq 0 ]]; then
-        print_status $RED "❌ No GPU nodes found in the cluster"
-        print_status $YELLOW "Dynamo requires nodes with nvidia.com/gpu.present=true label."
-        print_status $BLUE "Please ensure your cluster has GPU-enabled nodes properly labeled."
-        return 1
+        if [[ $ready_node_count -eq 0 ]]; then
+            print_status $RED "❌ No ready CPU nodes found in the cluster"
+            print_status $YELLOW "Dynamo CPU deployments require at least one Ready Kubernetes node."
+            print_status $BLUE "Please ensure your cluster has schedulable nodes before proceeding."
+            return 1
+        else
+            print_status $GREEN "✅ Found ${ready_node_count} ready CPU node(s) in the cluster"
+            return 0
+        fi
     else
-        print_status $GREEN "✅ Found ${node_count} GPU node(s) in the cluster"
-        return 0
+        local node_count
+        node_count=$(kubectl get nodes -l nvidia.com/gpu.present=true -o name 2>/dev/null | wc -l || echo "0")
+
+        if [[ $node_count -eq 0 ]]; then
+            print_status $RED "❌ No GPU nodes found in the cluster"
+            print_status $YELLOW "Dynamo requires nodes with nvidia.com/gpu.present=true label."
+            print_status $BLUE "Please ensure your cluster has GPU-enabled nodes properly labeled."
+            return 1
+        else
+            print_status $GREEN "✅ Found ${node_count} GPU node(s) in the cluster"
+            return 0
+        fi
     fi
 
     # Show basic node information (commented out for cleaner output)
@@ -141,6 +184,12 @@ check_cluster_resources() {
 }
 
 check_gpu_operator() {
+    if [[ "$DEVICE_TYPE" == "cpu" ]]; then
+        print_section "Checking CPU runtime"
+        print_status $GREEN "✅ CPU-only deployments do not require an accelerator operator"
+        return 0
+    fi
+
     print_section "Checking GPU operator"
 
     # Check if GPU operator pods exist and are running
@@ -257,16 +306,24 @@ main() {
     fi
 
     if check_cluster_resources; then
-        record_check_result "Cluster GPU Resources" "PASS"
+        record_check_result "Cluster ${DEVICE_TYPE^^} Resources" "PASS"
     else
-        record_check_result "Cluster GPU Resources" "FAIL"
+        record_check_result "Cluster ${DEVICE_TYPE^^} Resources" "FAIL"
         overall_exit_code=1
     fi
 
     if check_gpu_operator; then
-        record_check_result "GPU Operator" "PASS"
+        if [[ "$DEVICE_TYPE" == "cpu" ]]; then
+            record_check_result "CPU Runtime" "PASS"
+        else
+            record_check_result "GPU Operator" "PASS"
+        fi
     else
-        record_check_result "GPU Operator" "FAIL"
+        if [[ "$DEVICE_TYPE" == "cpu" ]]; then
+            record_check_result "CPU Runtime" "FAIL"
+        else
+            record_check_result "GPU Operator" "FAIL"
+        fi
         overall_exit_code=1
     fi
 
