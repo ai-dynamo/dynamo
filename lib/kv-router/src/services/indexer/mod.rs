@@ -135,7 +135,7 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
         "Starting standalone KV cache indexer (HTTP-only mode)"
     );
 
-    let mut state = AppState::new(config.threads)?;
+    let mut state = AppState::new_with_cancel_token(config.threads, cancel_token.clone())?;
     state.access_log_sink = match config.access_log {
         Some(ref path) => {
             let s = AccessLogSink::new(
