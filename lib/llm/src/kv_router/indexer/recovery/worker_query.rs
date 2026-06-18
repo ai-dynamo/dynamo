@@ -373,30 +373,43 @@ impl WorkerQueryClient {
         end_event_id: Option<u64>,
     ) {
         let client = self.clone();
-        let cancel = self.recovery_cancels.entry(key).or_default().clone();
 
         tokio::spawn(async move {
-            // The caller decided to spawn outside the worker-state lock, so the
-            // rank may have been torn down in between — and a token registered
-            // after `remove_worker_dp_state` drained the map would never be
-            // cancelled.  Re-checking under the lock closes that race: if the
-            // rank is still present here, `remove_rank` has not run yet, so the
-            // removal path is guaranteed to see (and cancel) our token.
-            let alive = match client.worker_states.get(&key.0).map(|e| e.clone()) {
-                Some(worker_state) => {
-                    let worker_state = worker_state.lock().await;
-                    worker_state.epoch == epoch && worker_state.ranks.contains_key(&key.1)
-                }
-                None => false,
+            // Re-check liveness under the worker-state lock, then register the
+            // cancellation token only if the rank is still present. Removal holds
+            // this same lock to drop the rank before it drains `recovery_cancels`,
+            // so a token registered here is guaranteed to be observed — and
+            // cancelled — by that drain. A rank that is already gone registers
+            // nothing, so a spawn that loses the removal race cannot leak an entry
+            // that no later teardown would reclaim.
+            let cancel = {
+                let live = match client.worker_states.get(&key.0).map(|e| e.clone()) {
+                    Some(worker_state) => {
+                        let worker_state = worker_state.lock().await;
+                        // TODO(#10580 follow-up): pre-existing ABA case — if removing
+                        // the final rank deletes `WorkerState` and rediscovery
+                        // recreates it at epoch 0, a stale follow-up still carrying
+                        // epoch 0 can pass this check against the freshly discovered
+                        // endpoint. Out of scope for the #10580 fix (the base branch
+                        // already has a resettable epoch + dynamic target resolution);
+                        // a follow-up should fold the endpoint/rank incarnation into
+                        // the recovery identity, or use a generation that survives
+                        // removal.
+                        (worker_state.epoch == epoch && worker_state.ranks.contains_key(&key.1))
+                            .then(|| client.recovery_cancels.entry(key).or_default().clone())
+                    }
+                    None => None,
+                };
+                let Some(cancel) = live else {
+                    tracing::debug!(
+                        "Skipping recovery for worker {} dp_rank {}: rank removed or epoch changed",
+                        key.0,
+                        key.1
+                    );
+                    return;
+                };
+                cancel
             };
-            if !alive {
-                tracing::debug!(
-                    "Skipping recovery for worker {} dp_rank {}: rank removed or epoch changed",
-                    key.0,
-                    key.1
-                );
-                return;
-            }
 
             let recovery = async {
                 // Add jitter only for full-restore (start_event_id is None)
@@ -1160,11 +1173,17 @@ mod tests {
 
         // A follow-up spawn can race rank removal (the spawn decision happens
         // outside the worker-state lock). With no rank state, the task's
-        // liveness check must drop it before it ever queries the transport.
+        // liveness check must drop it before it ever queries the transport — and
+        // without registering a cancellation token that no later teardown would
+        // ever reclaim.
         client.spawn_recovery_task((1, 0), 0, Some(5), None);
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(transport.call_count(), 0);
+        assert!(
+            client.recovery_cancels.is_empty(),
+            "a spawn that lost the removal race must not leak a recovery_cancels entry"
+        );
         kv_indexer.flush().await;
     }
 
