@@ -19,7 +19,8 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
         "extra_fields": ["worker_id", "timing"],
         "agent_hints": {
             "osl": 1024,
-            "priority": 5
+            "priority": 5,
+            "strict_priority": 1
         }
     }
 }
@@ -38,7 +39,9 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
-| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for agent traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
+| `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
+| `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
+| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for request traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
@@ -61,12 +64,14 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 |--------|-----------|
 | `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
 | `x-prefill-instance-id` | `prefill_worker_id` |
+| `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
+| `x-prefill-dp-rank` | `prefill_dp_rank` |
 
 ## Agent Context
 
 The `agent_context` sub-object carries passive session and trajectory identity for
-agentic requests. Dynamo uses this metadata to emit request traces when the
-agent trace sink is enabled. It does not change routing, scheduling, or cache
+agentic requests. Dynamo uses this metadata to emit enriched request traces when
+request tracing is enabled. It does not change routing, scheduling, or cache
 behavior.
 
 | Field | Type | Required | Description |
@@ -75,6 +80,7 @@ behavior.
 | `session_id` | `string` | Yes | Top-level agent run/session identifier. |
 | `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
 | `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
+| `trajectory_final` | `bool` | No | Terminal marker for lifecycle-aware consumers; ignored by consumers that do not track trajectory lifecycle. |
 
 ```json
 {
@@ -98,13 +104,15 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `priority` | `i32` | `None` | Unified request priority. Higher values mean higher priority at the Dynamo API level. Used for router queue ordering and backend scheduling/eviction. |
+| `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values. Unset is equivalent to `0`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
 ### `priority`
 
-`priority` is the single user-facing scheduling hint. Higher values mean "more important" across Dynamo.
+`priority` is the cross-layer scheduling hint. Higher values mean "more
+important" across Dynamo.
 
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
@@ -116,6 +124,27 @@ For layer-by-layer behavior and backend requirements, see
     "nvext": {
         "agent_hints": {
             "priority": 5
+        }
+    }
+}
+```
+
+### `strict_priority`
+
+`strict_priority` is an unsigned router-only tier for requests waiting in a
+router scheduler queue. The queue orders requests by
+`(strict_priority, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
+requests within the same tier.
+
+This field does not change backend engine priority, preempt running work, or
+provide ordering across router replicas. It also does not prevent an eligible
+new arrival from being admitted directly while other requests are parked.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "strict_priority": 2
         }
     }
 }

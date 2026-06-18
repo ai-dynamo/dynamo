@@ -93,12 +93,13 @@ non-agentic traffic sharing the same workers.
 
 ## Tracing
 
-Enable agent tracing on the frontend with the master switch
-`DYN_AGENT_TRACE=1`. That turns on sane defaults: the `jsonl_gz` sink at
-`/tmp/dynamo-agent-trace`, the tool-events ZMQ socket bound at
-`tcp://127.0.0.1:20390`, and replay hashes. Override any of them with
-`DYN_AGENT_TRACE_SINKS` (e.g. `jsonl`, `stderr`),
-`DYN_AGENT_TRACE_OUTPUT_PATH`, and `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT`.
+Enable request tracing on the frontend with the master switch
+`DYN_REQUEST_TRACE=1`. That turns on sane defaults: the `jsonl_gz` sink at
+`/tmp/dynamo-request-trace` and replay hashes. Bind the optional tool-events ZMQ
+socket with `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` when the harness
+publishes explicit tool spans. Override sink behavior with
+`DYN_REQUEST_TRACE_SINKS` (e.g. `jsonl`, `stderr`) and
+`DYN_REQUEST_TRACE_OUTPUT_PATH`.
 See [Agent Tracing](/docs/agents/agent-tracing.md) for the record schema.
 
 Every LLM call then lands a `request_end` record carrying `trajectory_id`,

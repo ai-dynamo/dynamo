@@ -163,13 +163,17 @@ async fn spawn_indexer_http(
 fn make_app_state(registry: Arc<WorkerRegistry>) -> Arc<AppState> {
     Arc::new(AppState {
         registry,
+        access_log_sink: None,
         prom_registry: prometheus::Registry::new(),
     })
 }
 
 #[cfg(not(feature = "metrics"))]
 fn make_app_state(registry: Arc<WorkerRegistry>) -> Arc<AppState> {
-    Arc::new(AppState { registry })
+    Arc::new(AppState {
+        registry,
+        access_log_sink: None,
+    })
 }
 
 /// `/query_by_hash` against a populated registry must surface both the legacy
@@ -304,6 +308,58 @@ async fn health_returns_ok() {
         .await
         .expect("GET /health");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    cancel.cancel();
+    task.await.expect("server task join");
+}
+
+#[cfg(feature = "metrics")]
+#[tokio::test]
+async fn duplicate_store_warning_is_exported() {
+    const BLOCK_SIZE: u32 = 4;
+    const MODEL: &str = "test-model";
+    const TENANT: &str = "default";
+
+    let state = Arc::new(AppState::new(4).expect("create app state"));
+    state.registry.signal_ready();
+
+    let key = IndexerKey {
+        model_name: MODEL.to_string(),
+        tenant_id: TENANT.to_string(),
+    };
+    let indexer = state
+        .registry
+        .get_or_create_indexer(key.clone(), BLOCK_SIZE);
+    indexer
+        .apply_event_routed(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+        .await;
+    indexer
+        .apply_event_routed(store_event(7, 0, 2, &[], &[11, 12], StorageTier::Device))
+        .await;
+
+    let entry = state
+        .registry
+        .get_indexer(&key)
+        .expect("indexer should exist");
+    drop(entry.indexer.dump_events().await.expect("dump events"));
+    drop(entry);
+
+    let (base_url, cancel, task) = spawn_indexer_http(state).await;
+    let body = reqwest::Client::new()
+        .get(format!("{base_url}/metrics"))
+        .send()
+        .await
+        .expect("GET /metrics")
+        .text()
+        .await
+        .expect("read metrics body");
+
+    assert!(
+        body.lines().any(|line| {
+            line == "dynamo_kvrouter_kv_cache_event_warnings{warning_kind=\"duplicate_store\"} 1"
+        }),
+        "duplicate-store warning metric missing from /metrics:\n{body}"
+    );
 
     cancel.cancel();
     task.await.expect("server task join");

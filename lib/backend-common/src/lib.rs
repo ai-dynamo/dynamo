@@ -30,13 +30,14 @@ pub mod worker;
 
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
+pub use dynamo_llm::model_type::ModelInput;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
-    FinishReason, GenerateContext, HEALTH_CHECK_KEY, KvEventPublisher, KvEventSource, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs, Metrics, MetricsBindings,
-    MetricsCtx, OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult,
-    PreprocessedRequest, RawEngine, SamplingOptions, StopConditions, TopLogprob, TopLogprobs,
-    chunk, usage,
+    FinishReason, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY, KvEventPublisher,
+    KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs,
+    Metrics, MetricsBindings, MetricsCtx, OnPublisherReady, OnSnapshotPublisherReady,
+    OutputOptions, PrefillResult, PreprocessedRequest, RawEngine, SamplingOptions, StopConditions,
+    StopReason, TopLogprob, TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};

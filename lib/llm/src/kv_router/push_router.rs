@@ -61,6 +61,321 @@ impl KvPushRouter {
             sticky,
         }
     }
+
+    async fn select_request(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        is_query_only: bool,
+    ) -> Result<WorkerSelection, Error> {
+        let context_id = request.context().id().to_string();
+        let routing_parts = RoutingRequestParts::new(request);
+        let sticky_worker = match self.sticky.worker_for_phase(request, phase) {
+            Some(worker)
+                if self.unbind_ineligible_sticky_worker_for_phase(
+                    &context_id,
+                    request,
+                    phase,
+                    worker,
+                ) =>
+            {
+                None
+            }
+            worker => worker,
+        };
+        let request_context = request.context().clone();
+        let mut selection_future = Box::pin(async {
+            match self
+                .select_worker(
+                    &context_id,
+                    request,
+                    routing_parts,
+                    phase,
+                    is_query_only,
+                    sticky_worker,
+                )
+                .instrument(tracing::info_span!("kv_router.select_worker"))
+                .await
+            {
+                Ok(selection) => {
+                    if sticky_worker.is_some() && !is_query_only {
+                        self.sticky.refresh_worker_for_phase(request, phase);
+                    }
+                    Ok(selection)
+                }
+                Err(error) if sticky_worker.is_some() => {
+                    if let Some(worker) = sticky_worker {
+                        let unbound = self.unbind_ineligible_sticky_worker_for_phase(
+                            &context_id,
+                            request,
+                            phase,
+                            worker,
+                        );
+                        tracing::warn!(
+                            request_id = %context_id,
+                            worker_id = worker.worker_id,
+                            dp_rank = worker.dp_rank,
+                            error = %error,
+                            unbound_due_to_ineligibility = unbound,
+                            "Sticky worker routing failed; falling back to normal routing"
+                        );
+                    }
+                    self.select_worker(
+                        &context_id,
+                        request,
+                        routing_parts,
+                        phase,
+                        is_query_only,
+                        None,
+                    )
+                    .instrument(tracing::info_span!("kv_router.select_worker_fallback"))
+                    .await
+                }
+                Err(error) => Err(error),
+            }
+        });
+        let selection_result = tokio::select! {
+            biased;
+
+            _ = request_context.stopped() => None,
+            result = &mut selection_future => Some(result),
+        };
+        drop(selection_future);
+
+        match selection_result {
+            Some(result) => result,
+            None => {
+                if !is_query_only && let Err(error) = self.chooser.free(&context_id).await {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        %error,
+                        "Failed to free scheduler state after cancellation during worker selection"
+                    );
+                }
+                Err(cancelled_error(&context_id))
+            }
+        }
+    }
+
+    async fn track_selection(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selection: &mut WorkerSelection,
+    ) -> Result<RequestGuard, Error> {
+        let context_id = request.context().id().to_string();
+        let request_context = request.context().clone();
+        let routing_parts = RoutingRequestParts::new(request);
+        let block_size = self.chooser.block_size() as usize;
+        let mut guard = RequestGuard::new(
+            self.chooser.clone(),
+            context_id.clone(),
+            request,
+            selection.scheduler_tracked,
+        );
+
+        let record_result: Result<(), Error> = async {
+            if self.chooser.indexer().records_routing_decisions() {
+                let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
+                let record_result = if let Some(hashes) = selection.routing_hashes.take() {
+                    cancel_on_stop(
+                        request_context.as_ref(),
+                        &context_id,
+                        self.chooser.record_routing_decision_hashes(hashes, worker),
+                    )
+                    .await?
+                } else {
+                    let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+                    let mut tokens_with_hashes = TokensWithHashes::new(
+                        routing_parts.token_ids.to_vec(),
+                        self.chooser.block_size(),
+                    )
+                    .with_is_eagle(self.chooser.is_eagle());
+                    if let Some(infos) = routing_parts.block_mm_infos {
+                        tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
+                    }
+                    if let Some(lora_name) = lora_name {
+                        tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+                    }
+                    cancel_on_stop(
+                        request_context.as_ref(),
+                        &context_id,
+                        self.chooser
+                            .record_routing_decision(tokens_with_hashes, worker),
+                    )
+                    .await?
+                };
+                if let Err(error) = record_result {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        worker_id = selection.instance_id,
+                        dp_rank = selection.dp_rank,
+                        error = %error,
+                        "Failed to record routing decision"
+                    );
+                }
+            }
+
+            if let Some(ref tracker) = request.tracker {
+                let isl_blocks = routing_parts.token_ids.len().div_ceil(block_size);
+                tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
+                tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
+                tracker.record_worker(
+                    selection.instance_id,
+                    Some(selection.dp_rank),
+                    self.chooser.worker_type(),
+                );
+                tracker.record_router_queue_depth(self.chooser.pending_count());
+                if let Some(hit_rate) = tracker.kv_hit_rate() {
+                    guard.request_metrics().kv_hit_rate.observe(hit_rate);
+                }
+            }
+            guard
+                .request_metrics()
+                .input_sequence_tokens
+                .observe(request.token_ids.len() as f64);
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = record_result {
+            guard.abort().await;
+            return Err(error);
+        }
+        Ok(guard)
+    }
+
+    async fn dispatch_selection(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        selection: WorkerSelection,
+        mut guard: RequestGuard,
+        exact: bool,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let context_id = request.context().id().to_string();
+        let request_context = request.context().clone();
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or(RequestPhase::Aggregated);
+        let phase_label = phase.to_string();
+        guard.start_dispatch(&phase_label);
+
+        let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
+        let route_outcome = cancel_on_stop(
+            request_context.as_ref(),
+            &context_id,
+            self.sticky.on_routed(&request, worker, &context_id),
+        )
+        .await
+        .and_then(|result| result);
+        let route_outcome = match route_outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                guard.abort().await;
+                return Err(error);
+            }
+        };
+        guard.set_deferred_close(route_outcome.deferred_close);
+        let mut rollback = route_outcome.rollback;
+
+        let (mut backend_input, context) = request.into_parts();
+        backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
+        let updated_request = context.map(|_| backend_input);
+        guard.record_prefill_start();
+
+        let dispatch = async {
+            if exact {
+                self.inner
+                    .dispatch_exact(updated_request, selection.instance_id)
+                    .await
+            } else {
+                self.inner
+                    .direct(updated_request, selection.instance_id)
+                    .await
+            }
+        };
+        let dispatch_result = cancel_on_stop(
+            request_context.as_ref(),
+            &context_id,
+            dispatch.instrument(tracing::info_span!(
+                "kv_router.route_request",
+                request_id = %context_id,
+                worker_id = selection.instance_id,
+                dp_rank = selection.dp_rank,
+                overlap_blocks = selection.overlap_amount,
+                phase = ?phase,
+            )),
+        )
+        .await
+        .and_then(|result| result);
+        let mut response_stream = match dispatch_result {
+            Ok(stream) => stream,
+            Err(error) => {
+                if let Some(rollback) = rollback.take() {
+                    self.sticky.rollback_routed(rollback, &context_id);
+                }
+                guard.abort().await;
+                return Err(error);
+            }
+        };
+
+        guard.mark_dispatched();
+        let stream_context = response_stream.context();
+        let context_for_monitoring = stream_context.clone();
+        let wrapped_stream = Box::pin(async_stream::stream! {
+            let mut guard = guard;
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = context_for_monitoring.stopped() => {
+                        tracing::debug!("Request {context_id} cancelled, ending stream");
+                        break;
+                    }
+
+                    item = response_stream.next() => {
+                        let Some(item) = item else {
+                            break;
+                        };
+                        guard.on_item(&item).await;
+                        yield item;
+                    }
+                }
+            }
+
+            guard.finish().await;
+        });
+        Ok(ResponseStream::new(wrapped_stream, stream_context))
+    }
+
+    pub(crate) async fn select_and_dispatch_prefill<M, F>(
+        &self,
+        mut request: SingleIn<PreprocessedRequest>,
+        prepare: F,
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    where
+        F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M, Error>,
+    {
+        let phase = RequestPhase::Prefill;
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let mut selection = self.select_request(&request, phase, false).await?;
+        let mut guard = self.track_selection(&request, &mut selection).await?;
+        let metadata = match prepare(&mut request, selection.instance_id, Some(selection.dp_rank)) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                guard.abort().await;
+                return Err(error);
+            }
+        };
+        drop(route_guard);
+        let stream = self
+            .dispatch_selection(request, selection, guard, true)
+            .await?;
+        Ok((metadata, stream))
+    }
 }
 
 #[async_trait]
@@ -90,198 +405,47 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        // Extract context ID for request tracking
-        let context_id = request.context().id().to_string();
-
-        // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-
-        // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
             .tracker
             .as_ref()
-            .map(|t| t.phase())
+            .map(|tracker| tracker.phase())
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-
-        let should_record = !is_query_only && self.chooser.indexer().records_routing_decisions();
-        let block_size = self.chooser.block_size() as usize;
-        let routing_parts = RoutingRequestParts::new(&request);
-        let sticky_worker = match self.sticky.worker_for_phase(&request, phase) {
-            Some(worker)
-                if self.unbind_ineligible_sticky_worker_for_phase(
-                    &context_id,
-                    &request,
-                    phase,
-                    worker,
-                ) =>
-            {
-                None
-            }
-            worker => worker,
-        };
-        let request_context = request.context().clone();
-        let mut selection_future = Box::pin(async {
-            match self
-                .select_worker(
-                    &context_id,
-                    &request,
-                    routing_parts,
-                    phase,
-                    is_query_only,
-                    sticky_worker,
-                )
-                .instrument(tracing::info_span!("kv_router.select_worker"))
-                .await
-            {
-                Ok(selection) => {
-                    if sticky_worker.is_some() && !is_query_only {
-                        self.sticky.refresh_worker_for_phase(&request, phase);
-                    }
-                    Ok(selection)
-                }
-                Err(error) if sticky_worker.is_some() => {
-                    if let Some(worker) = sticky_worker {
-                        let unbound = self.unbind_ineligible_sticky_worker_for_phase(
-                            &context_id,
-                            &request,
-                            phase,
-                            worker,
-                        );
-                        tracing::warn!(
-                            request_id = %context_id,
-                            worker_id = worker.worker_id,
-                            dp_rank = worker.dp_rank,
-                            error = %error,
-                            unbound_due_to_ineligibility = unbound,
-                            "Sticky worker routing failed; falling back to normal routing"
-                        );
-                    }
-                    self.select_worker(
-                        &context_id,
-                        &request,
-                        routing_parts,
-                        phase,
-                        is_query_only,
-                        None,
-                    )
-                    .instrument(tracing::info_span!("kv_router.select_worker_fallback"))
-                    .await
-                }
-                Err(error) => Err(error),
-            }
-        });
-        let selection_result = tokio::select! {
-            biased;
-
-            _ = request_context.stopped() => None,
-            result = &mut selection_future => Some(result),
-        };
-        drop(selection_future);
-
-        let selection = match selection_result {
-            Some(result) => result?,
-            None => {
-                if !is_query_only && let Err(error) = self.chooser.free(&context_id).await {
-                    tracing::warn!(
-                        request_id = %context_id,
-                        %error,
-                        "Failed to free scheduler state after cancellation during worker selection"
-                    );
-                }
-                return Err(cancelled_error(&context_id));
-            }
-        };
-        let WorkerSelection {
-            instance_id,
-            dp_rank,
-            overlap_amount,
-            effective_overlap_blocks,
-            cached_tokens,
-            routing_hashes,
-            scheduler_tracked,
-        } = selection;
-
-        // Tracked selection books scheduler state, so own its cleanup before any later await.
-        let mut guard = RequestGuard::new(
-            self.chooser.clone(),
-            context_id.clone(),
-            &request,
-            scheduler_tracked,
-        );
-
-        if should_record {
-            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-            let record_result = if let Some(hashes) = routing_hashes {
-                cancel_on_stop(
-                    request_context.as_ref(),
-                    &context_id,
-                    self.chooser.record_routing_decision_hashes(hashes, worker),
-                )
-                .await?
-            } else {
-                let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
-                let mut tokens_with_hashes = TokensWithHashes::new(
-                    routing_parts.token_ids.to_vec(),
-                    self.chooser.block_size(),
-                )
-                .with_is_eagle(self.chooser.is_eagle());
-                if let Some(infos) = routing_parts.block_mm_infos {
-                    tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
-                }
-                if let Some(lora_name) = lora_name {
-                    tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
-                }
-                cancel_on_stop(
-                    request_context.as_ref(),
-                    &context_id,
-                    self.chooser
-                        .record_routing_decision(tokens_with_hashes, worker),
-                )
-                .await?
-            };
-            if let Err(e) = record_result {
-                tracing::warn!(
-                    request_id = %context_id,
-                    worker_id = instance_id,
-                    dp_rank = dp_rank,
-                    error = %e,
-                    "Failed to record routing decision"
-                );
-            }
-        }
-
-        // Record routing metrics on tracker and observe ISL + prefill start.
-        if let Some(ref tracker) = request.tracker {
-            let isl_blocks = routing_parts.token_ids.len().div_ceil(block_size);
-            tracker.record_kv_hit(effective_overlap_blocks, isl_blocks);
-            tracker.record_isl(routing_parts.token_ids.len(), Some(cached_tokens));
-            tracker.record_worker(instance_id, Some(dp_rank), self.chooser.worker_type());
-            tracker.record_router_queue_depth(self.chooser.pending_count());
-            if let Some(hit_rate) = tracker.kv_hit_rate() {
-                guard.request_metrics().kv_hit_rate.observe(hit_rate);
-            }
-        }
-        guard
-            .request_metrics()
-            .input_sequence_tokens
-            .observe(request.token_ids.len() as f64);
-
-        // Handle query-only requests: early return with worker info
+        let mut selection = self.select_request(&request, phase, is_query_only).await?;
         if is_query_only {
+            let routing_parts = RoutingRequestParts::new(&request);
+            if let Some(ref tracker) = request.tracker {
+                let isl_blocks = routing_parts
+                    .token_ids
+                    .len()
+                    .div_ceil(self.chooser.block_size() as usize);
+                tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
+                tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
+                tracker.record_worker(
+                    selection.instance_id,
+                    Some(selection.dp_rank),
+                    self.chooser.worker_type(),
+                );
+                tracker.record_router_queue_depth(self.chooser.pending_count());
+            }
+            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component())
+                .input_sequence_tokens
+                .observe(request.token_ids.len() as f64);
             let stream_context = request.context().clone();
-            let worker_id_info = request.tracker.as_ref().and_then(|t| t.get_worker_info());
+            let worker_id_info = request
+                .tracker
+                .as_ref()
+                .and_then(|tracker| tracker.get_worker_info());
 
             tracing::trace!(
                 ?phase,
-                worker_id = instance_id,
+                worker_id = selection.instance_id,
                 ?worker_id_info,
                 "Returning worker selection (query-only mode)"
             );
 
-            // Return worker attribution + the tokenized prompt on `routing_data`, the same
-            // typed channel as router timing; the frontend drains it onto the request tracker.
             let output = LLMEngineOutput {
                 routing_data: Some(RoutingData {
                     worker_id: worker_id_info,
@@ -295,79 +459,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        // End route stage — worker has been selected and routing metrics recorded.
-        // Dispatch stage starts immediately so there is no gap between stages.
+        let guard = self.track_selection(&request, &mut selection).await?;
         drop(route_guard);
-        guard.start_dispatch(&phase_label);
-
-        // Session lifecycle RPCs.
-        // Fails fast if session_control.open is requested but the client can't be created.
-        let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-        let route_outcome = cancel_on_stop(
-            request_context.as_ref(),
-            &context_id,
-            self.sticky.on_routed(&request, worker, &context_id),
-        )
-        .await??;
-        guard.set_deferred_close(route_outcome.deferred_close);
-
-        let (mut backend_input, context) = request.into_parts();
-        backend_input.routing_mut().dp_rank = Some(dp_rank);
-        let updated_request = context.map(|_| backend_input);
-
-        // Record prefill start right before pushing to backend (OnceLock: first call wins).
-        guard.record_prefill_start();
-
-        let mut response_stream = cancel_on_stop(
-            request_context.as_ref(),
-            &context_id,
-            self.inner
-                .direct(updated_request, instance_id)
-                .instrument(tracing::info_span!(
-                    "kv_router.route_request",
-                    request_id = %context_id,
-                    worker_id = instance_id,
-                    dp_rank = dp_rank,
-                    overlap_blocks = overlap_amount,
-                    phase = ?phase,
-                )),
-        )
-        .await??;
-        // direct() succeeded — mark dispatched so record_metrics() fires.
-        // If direct() returned Err above, guard drops here with dispatched=false
-        // and suppresses metrics; its nested RequestCleanup then frees scheduler
-        // state and executes the deferred close action.
-        guard.mark_dispatched();
-        let stream_context = response_stream.context();
-        let context_for_monitoring = stream_context.clone();
-
-        let wrapped_stream = Box::pin(async_stream::stream! {
-            // Move guard into the stream closure. Drop fires here if the stream
-            // is polled to completion, or via the outer Drop if never polled.
-            let mut guard = guard;
-
-            loop {
-                tokio::select! {
-                    biased;
-
-                    _ = context_for_monitoring.stopped() => {
-                        tracing::debug!("Request {context_id} cancelled, ending stream");
-                        break;
-                    }
-
-                    item = response_stream.next() => {
-                        let Some(item) = item else {
-                            break;
-                        };
-                        guard.on_item(&item).await;
-                        yield item;
-                    }
-                }
-            }
-
-            guard.finish().await;
-        });
-        Ok(ResponseStream::new(wrapped_stream, stream_context))
+        self.dispatch_selection(request, selection, guard, false)
+            .await
     }
 }
 
