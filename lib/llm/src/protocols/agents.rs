@@ -10,6 +10,8 @@ pub(crate) const HEADER_CLAUDE_CODE_AGENT_ID: &str = "x-claude-code-agent-id";
 pub(crate) const HEADER_CODEX_SESSION_ID: &str = "session-id";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
+pub(crate) const HEADER_DYNAMO_TRAJECTORY_ID: &str = "x-dynamo-trajectory-id";
+pub(crate) const DEFAULT_DYNAMO_SESSION_TYPE_ID: &str = "dynamo";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentHeaderMapping {
@@ -81,17 +83,25 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             parent_trajectory_id,
         });
     }
-    None
+    header_value(headers, HEADER_DYNAMO_TRAJECTORY_ID).map(|trajectory_id| {
+        AgentContextHeaderValues {
+            session_type_id: DEFAULT_DYNAMO_SESSION_TYPE_ID,
+            session_id: trajectory_id.clone(),
+            trajectory_id,
+            parent_trajectory_id: None,
+        }
+    })
 }
 
 pub(crate) fn has_agent_headers(headers: &HeaderMap) -> bool {
-    AGENT_HEADER_MAPPINGS.iter().any(|mapping| {
-        headers.contains_key(mapping.session_header)
-            || mapping
-                .trajectory_header
-                .is_some_and(|trajectory_header| headers.contains_key(trajectory_header))
-            || mapping
-                .parent_session_header
-                .is_some_and(|parent_header| headers.contains_key(parent_header))
-    })
+    headers.contains_key(HEADER_DYNAMO_TRAJECTORY_ID)
+        || AGENT_HEADER_MAPPINGS.iter().any(|mapping| {
+            headers.contains_key(mapping.session_header)
+                || mapping
+                    .trajectory_header
+                    .is_some_and(|trajectory_header| headers.contains_key(trajectory_header))
+                || mapping
+                    .parent_session_header
+                    .is_some_and(|parent_header| headers.contains_key(parent_header))
+        })
 }
