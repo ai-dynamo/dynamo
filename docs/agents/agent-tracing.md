@@ -195,8 +195,8 @@ background publisher, bounded queue, monotonic sequence, and PUSH with HWM.
 **Terminal** `tool_end` / `tool_error`
 rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`)
 even if `tool_start` was dropped. Same `agent_context` as the surrounding LLM
-calls; `tool_call_id` unique per trajectory. Join offline on `session_id`,
-`trajectory_id`, `tool_call_id`.
+calls; `tool_call_id` unique per trajectory. Join offline on `trajectory_id`,
+`tool_call_id`; include `session_id` when present to group a wider agent run.
 
 Example `tool_end`:
 
@@ -335,11 +335,11 @@ flags and engine settings, see [DynoSim Runs](../dynosim/runs.md).
 <details>
 <summary>ATIF alignment</summary>
 
-Dynamo emits `dynamo.request.trace.v1`, not full ATIF logs—but identifiers match [ATIF][atif-rfc] / [Harbor](https://github.com/harbor-framework/harbor) so you can join harness trajectories to Dynamo rows on `session_id` + `trajectory_id`. Dynamo omits conversational payload by design.
+Dynamo emits `dynamo.request.trace.v1`, not full ATIF logs—but identifiers match [ATIF][atif-rfc] / [Harbor](https://github.com/harbor-framework/harbor) so you can join harness trajectories to Dynamo rows on `trajectory_id`. If a harness supplies `session_id`, use it to group trajectories from the same run. Dynamo omits conversational payload by design.
 
 | Dynamo                 | Role                    |
 | ---------------------- | ----------------------- |
-| `session_id`           | Shared run id           |
+| `session_id`           | Optional shared run id  |
 | `trajectory_id`        | Branch within run       |
 | `parent_trajectory_id` | Subagent link           |
 | `session_type_id`      | Profile / workload type |
