@@ -16,6 +16,8 @@ sequentially against one server:
    `/v1/messages` (Anthropic Messages API).
 4. `opencode run --command ...` smoke — forces an OpenCode subtask request
    through `/v1/chat/completions`.
+5. Optional `claude -p` subagent smoke — collects CI signal for Claude Code
+   child-agent headers without gating the suite while invocation is calibrated.
 
 All external tooling (bun, node, the OpenResponses suite, and the coding-agent
 CLIs) is installed lazily at test time by session-scoped fixtures into a
@@ -63,6 +65,8 @@ NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
 OPENRESPONSES_SHA = "fa29df5"
 OPENRESPONSES_MAX_OUTPUT_TOKENS = 512
+CLAUDE_SUBAGENT_NAME = "dynamo-subagent-smoke"
+CLAUDE_SUBAGENT_TIMEOUT_S = 45
 OPENCODE_SUBTASK_COMMAND = "dynamo-subagent-smoke"
 
 # Retry budget for network-touching installs. Exponential backoff starting
@@ -450,10 +454,11 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
-# codex exec (up to 180s) + claude exec (up to 180s) + opencode run (up to
-# 180s) + inter-suite health checks + teardown. 930s leaves headroom for CI
-# variance without masking real hangs.
-@pytest.mark.timeout(930)
+# codex exec (up to 180s) + claude exec (up to 180s) + optional claude
+# subagent probe (up to 45s) + opencode run (up to 180s) + inter-suite
+# health checks + teardown. 975s leaves headroom for CI variance without
+# masking real hangs.
+@pytest.mark.timeout(975)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
 @pytest.mark.flaky(reruns=2, only_rerun=["did not report the marker file"])
@@ -577,6 +582,15 @@ def test_frontend_api_surface_compliance(
         )
         _assert_agent_context_in_trace(request_trace_path, "opencode")
         _assert_agent_parent_context_in_trace(request_trace_path, "opencode")
+        _try_run_claude_subagent_smoke(
+            _claude_cli,
+            _node_bin,
+            claude_home,
+            agent_cwd,
+            marker_filename,
+            frontend_port,
+            request_trace_path,
+        )
 
 
 def _attach_subprocess_log(
@@ -752,6 +766,27 @@ def _trace_contains_agent_parent_context(
     return False
 
 
+def _trace_contains_claude_subagent_context(records: list[dict]) -> bool:
+    for record in records:
+        agent_context = record.get("agent_context")
+        if not agent_context:
+            continue
+        if agent_context.get("session_type_id") != "claude_code":
+            continue
+
+        session_id = agent_context.get("session_id")
+        trajectory_id = agent_context.get("trajectory_id")
+        parent_trajectory_id = agent_context.get("parent_trajectory_id")
+        if not session_id or not trajectory_id:
+            continue
+        if trajectory_id == session_id:
+            continue
+        if parent_trajectory_id != session_id:
+            continue
+        return True
+    return False
+
+
 def _run_bun_compliance(
     bun_binary: Path, openresponses_dir: Path, frontend_port: int
 ) -> None:
@@ -819,6 +854,24 @@ name = "local-dynamo"
 base_url = "http://localhost:{frontend_port}/v1"
 wire_api = "responses"
 env_key = "LOCAL_API_KEY"
+	""".lstrip()
+    )
+
+
+def _write_claude_subagent_config(cwd: Path) -> None:
+    """Register a project-local Claude Code subagent for best-effort CI signal."""
+    agents_dir = cwd / ".claude" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / f"{CLAUDE_SUBAGENT_NAME}.md").write_text(
+        f"""
+---
+name: {CLAUDE_SUBAGENT_NAME}
+description: Dynamo CI smoke subagent that lists the current directory.
+tools: Bash
+---
+
+Use Bash to run `ls -1` in the current working directory. Return only the exact
+filenames from the command output, one per line. Do not explain anything.
 """.lstrip()
     )
 
@@ -1006,6 +1059,139 @@ def _run_claude_exec_smoke(
             f"contain {marker_filename!r} (implies the Bash tool was invoked "
             f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}"
         )
+
+
+def _try_run_claude_subagent_smoke(
+    claude_cli: Path,
+    node_bin: Path,
+    claude_home: Path,
+    cwd: Path,
+    marker_filename: str,
+    frontend_port: int,
+    request_trace_path: Path,
+) -> None:
+    """Best-effort Claude subagent probe.
+
+    This intentionally does not fail the suite yet. OpenCode gives us a hard
+    `subtask: true` trigger, but Claude subagent invocation is model-mediated,
+    so keep this as CI telemetry until it is stable enough to gate on.
+    """
+    try:
+        _write_claude_subagent_config(cwd)
+        _run_claude_subagent_smoke(
+            claude_cli,
+            node_bin,
+            claude_home,
+            cwd,
+            marker_filename,
+            frontend_port,
+            request_trace_path,
+        )
+    except Exception:
+        logger.warning("Optional Claude subagent smoke failed", exc_info=True)
+
+
+def _run_claude_subagent_smoke(
+    claude_cli: Path,
+    node_bin: Path,
+    claude_home: Path,
+    cwd: Path,
+    marker_filename: str,
+    frontend_port: int,
+    request_trace_path: Path,
+) -> None:
+    base_url = f"http://localhost:{frontend_port}"
+    logger.info("Running optional Claude subagent smoke test against %s", base_url)
+
+    extra_env = {
+        "HOME": str(claude_home),
+        "ANTHROPIC_BASE_URL": base_url,
+        "ANTHROPIC_AUTH_TOKEN": "sk-none",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "512",
+    }
+    env = _agent_subprocess_env(extra_env, path_prepend=[node_bin])
+
+    prompt = (
+        f"@agent-{CLAUDE_SUBAGENT_NAME}\n"
+        f"Invoke the {CLAUDE_SUBAGENT_NAME} subagent exactly once. Do not use "
+        f"Bash yourself. The subagent must use Bash to run `ls -1` in the "
+        f"current working directory and return the exact filenames. The output "
+        f"must include {marker_filename}."
+    )
+    cmd = [
+        str(claude_cli),
+        "--model",
+        COMPLIANCE_MODEL,
+        "--dangerously-skip-permissions",
+        "-p",
+        prompt,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=CLAUDE_SUBAGENT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.warning(
+            "Optional Claude subagent smoke timed out after %.0fs; stdout=%r stderr=%r",
+            exc.timeout,
+            exc.stdout,
+            exc.stderr,
+        )
+        return
+
+    _attach_subprocess_log(
+        name="claude_subagent_smoke_optional.log",
+        cmd=cmd,
+        result=result,
+        extra_env=extra_env,
+        cwd=str(cwd),
+    )
+    if result.stdout:
+        logger.info("claude subagent stdout:\n%s", result.stdout)
+    if result.stderr:
+        logger.info("claude subagent stderr:\n%s", result.stderr)
+
+    if result.returncode != 0:
+        logger.warning(
+            "Optional Claude subagent smoke exited with %s; stdout=%r stderr=%r",
+            result.returncode,
+            result.stdout,
+            result.stderr,
+        )
+        return
+
+    if marker_filename not in result.stdout:
+        logger.warning(
+            "Optional Claude subagent smoke did not report marker file %r; stdout=%r",
+            marker_filename,
+            result.stdout,
+        )
+        return
+
+    deadline = time.monotonic() + 30.0
+    last_records: list[dict] = []
+    while time.monotonic() < deadline:
+        last_records = _read_request_trace_records(request_trace_path)
+        if _trace_contains_claude_subagent_context(last_records):
+            logger.info("Optional Claude subagent smoke traced child agent_context")
+            return
+        time.sleep(0.2)
+
+    seen = [
+        record.get("agent_context")
+        for record in last_records
+        if record.get("agent_context")
+    ]
+    logger.warning(
+        "Optional Claude subagent smoke did not trace child agent_context; saw %s",
+        seen,
+    )
 
 
 def _run_opencode_smoke(
