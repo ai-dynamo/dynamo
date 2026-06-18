@@ -882,8 +882,8 @@ mod tests {
         assert_eq!(
             nvext.and_then(|ext| ext.agent_context),
             Some(AgentContext {
-                session_type_id: "deep_research:v1".to_string(),
-                session_id: "run-123".to_string(),
+                session_type_id: Some("deep_research:v1".to_string()),
+                session_id: Some("run-123".to_string()),
                 trajectory_id: "run-123:researcher-0".to_string(),
                 parent_trajectory_id: None,
                 trajectory_final: None,
