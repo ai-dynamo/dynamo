@@ -278,7 +278,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
         Self {
             session_type_id: values.session_type_id.to_string(),
             session_id: values.session_id.clone(),
-            trajectory_id: values.session_id,
+            trajectory_id: values.trajectory_id,
             parent_trajectory_id: values.parent_trajectory_id,
             trajectory_final: None,
         }
@@ -294,6 +294,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
 /// - coding-agent session headers -> `agent_context.session_id` and
 ///   `agent_context.trajectory_id`
+/// - coding-agent child trajectory headers -> `agent_context.trajectory_id`
 /// - coding-agent source -> `agent_context.session_type_id`
 /// - configured coding-agent parent session headers ->
 ///   `agent_context.parent_trajectory_id`
@@ -649,8 +650,8 @@ pub(crate) fn validate_completion_token_ids_single_choice(
 mod tests {
     use super::*;
     use crate::protocols::agents::{
-        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
-        HEADER_OPENCODE_SESSION_ID,
+        HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[test]
@@ -906,6 +907,29 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn apply_header_routing_overrides_uses_claude_agent_id_as_child_trajectory() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
+
+        let agent_context = apply_header_routing_overrides(None, &headers)
+            .unwrap()
+            .agent_context
+            .unwrap();
+
+        assert_eq!(agent_context.session_type_id, "claude_code");
+        assert_eq!(agent_context.session_id, "claude-session");
+        assert_eq!(agent_context.trajectory_id, "claude-agent");
+        assert_eq!(
+            agent_context.parent_trajectory_id.as_deref(),
+            Some("claude-session")
+        );
     }
 
     #[test]
