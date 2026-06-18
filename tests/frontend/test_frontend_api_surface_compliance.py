@@ -45,6 +45,13 @@ import pytest
 import requests
 from filelock import FileLock
 
+from tests.frontend.agent_smoke_inputs import (
+    LIST_DIRECTORY_PROMPT,
+    claude_subagent_prompt,
+    write_claude_subagent_config,
+    write_codex_config,
+    write_opencode_config,
+)
 from tests.serve.common import WORKSPACE_DIR
 from tests.utils.engine_process import EngineConfig, EngineProcess
 
@@ -531,7 +538,7 @@ def test_frontend_api_surface_compliance(
     }
 
     codex_home = tmp_path / "codex_home"
-    _write_codex_config(codex_home, frontend_port)
+    write_codex_config(codex_home, frontend_port)
 
     # Marker file that the agents can only "see" by invoking their shell/Bash
     # tool; if a model answers from its prior without actually running `ls`,
@@ -553,7 +560,9 @@ def test_frontend_api_surface_compliance(
     opencode_home.mkdir()
     opencode_cwd = tmp_path / "opencode_cwd"
     opencode_cwd.mkdir()
-    _write_opencode_config(opencode_cwd, frontend_port)
+    write_opencode_config(
+        opencode_cwd, frontend_port, COMPLIANCE_MODEL, OPENCODE_SUBTASK_COMMAND
+    )
 
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
@@ -843,82 +852,6 @@ def _run_bun_compliance(
         )
 
 
-def _write_codex_config(codex_home, frontend_port: int) -> None:
-    """Emit a minimal ~/.codex/config.toml pointing Codex at Dynamo.
-
-    Using a per-test CODEX_HOME keeps the runner's global Codex state
-    (if any) untouched.
-    """
-    codex_home.mkdir(parents=True, exist_ok=True)
-    config_path = codex_home / "config.toml"
-    # Bound the per-request output budget so the smoke test stays well within
-    # the 180s subprocess timeout. Codex omits `max_output_tokens` by default,
-    # and the Dynamo Responses handler forwards `None` to the engine — sglang
-    # then generates up to `max_model_len`, which is far more than this test
-    # needs and easily exceeds the timeout for reasoning models.
-    config_path.write_text(
-        f"""
-model_max_output_tokens = 4096
-
-[model_providers.local]
-name = "local-dynamo"
-base_url = "http://localhost:{frontend_port}/v1"
-wire_api = "responses"
-env_key = "LOCAL_API_KEY"
-	""".lstrip()
-    )
-
-
-def _write_claude_subagent_config(cwd: Path) -> None:
-    """Register a project-local Claude Code subagent for best-effort CI signal."""
-    agents_dir = cwd / ".claude" / "agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    (agents_dir / f"{CLAUDE_SUBAGENT_NAME}.md").write_text(
-        f"""
----
-name: {CLAUDE_SUBAGENT_NAME}
-description: Dynamo CI smoke subagent that lists the current directory.
-tools: Bash
----
-
-Use Bash to run `ls -1` in the current working directory. Return only the exact
-filenames from the command output, one per line. Do not explain anything.
-""".lstrip()
-    )
-
-
-def _write_opencode_config(cwd: Path, frontend_port: int) -> None:
-    config = {
-        "provider": {
-            "dynamo": {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "Dynamo",
-                "env": ["DYNAMO_API_KEY"],
-                "models": {
-                    COMPLIANCE_MODEL: {
-                        "id": COMPLIANCE_MODEL,
-                        "name": COMPLIANCE_MODEL,
-                        "limit": {"context": 8192, "output": 512},
-                        "cost": {"input": 0, "output": 0},
-                    }
-                },
-                "options": {"baseURL": f"http://localhost:{frontend_port}/v1"},
-            }
-        },
-        "permission": {"task": "allow"},
-        "command": {
-            OPENCODE_SUBTASK_COMMAND: {
-                "template": "Reply with exactly OK.",
-                "subtask": True,
-            }
-        },
-    }
-
-    project_config = cwd / ".opencode"
-    project_config.mkdir(parents=True, exist_ok=True)
-    (project_config / "opencode.jsonc").write_text(json.dumps(config, indent=2))
-
-
 def _run_codex_exec_smoke(
     codex_cli: Path, node_bin: Path, codex_home, cwd, marker_filename: str
 ) -> None:
@@ -955,7 +888,7 @@ def _run_codex_exec_smoke(
         "-c",
         "model_provider=local",
         "exec",
-        "What files exist in the current working directory? Use your shell tool to run ls and report each filename verbatim from the output.",
+        LIST_DIRECTORY_PROMPT,
         "--dangerously-bypass-approvals-and-sandbox",
     ]
     result = subprocess.run(
@@ -1022,7 +955,7 @@ def _run_claude_exec_smoke(
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
         # Cap output so reasoning models don't blow the 180s subprocess
-        # timeout. Mirrors the codex cap in `_write_codex_config`.
+        # timeout. Mirrors the codex cap in `write_codex_config`.
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096",
     }
     # claude shells out to `node` internally; make sure the fixture-installed
@@ -1035,7 +968,7 @@ def _run_claude_exec_smoke(
         COMPLIANCE_MODEL,
         "--dangerously-skip-permissions",
         "-p",
-        "What files exist in the current working directory? Use your shell tool to run ls and report each filename verbatim from the output.",
+        LIST_DIRECTORY_PROMPT,
     ]
     result = subprocess.run(
         cmd,
@@ -1088,7 +1021,7 @@ def _try_run_claude_subagent_smoke(
     so keep this as CI telemetry until it is stable enough to gate on.
     """
     try:
-        _write_claude_subagent_config(cwd)
+        write_claude_subagent_config(cwd, CLAUDE_SUBAGENT_NAME)
         _run_claude_subagent_smoke(
             claude_cli,
             node_bin,
@@ -1122,20 +1055,13 @@ def _run_claude_subagent_smoke(
     }
     env = _agent_subprocess_env(extra_env, path_prepend=[node_bin])
 
-    prompt = (
-        f"@agent-{CLAUDE_SUBAGENT_NAME}\n"
-        f"Invoke the {CLAUDE_SUBAGENT_NAME} subagent exactly once. Do not use "
-        f"Bash yourself. The subagent must use Bash to run `ls -1` in the "
-        f"current working directory and return the exact filenames. The output "
-        f"must include {marker_filename}."
-    )
     cmd = [
         str(claude_cli),
         "--model",
         COMPLIANCE_MODEL,
         "--dangerously-skip-permissions",
         "-p",
-        prompt,
+        claude_subagent_prompt(CLAUDE_SUBAGENT_NAME, marker_filename),
     ]
 
     try:
