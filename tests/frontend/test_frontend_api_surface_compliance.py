@@ -371,9 +371,12 @@ def _install_npm_cli(
     the path to the CLI entry point. Shared helper for agent CLIs."""
     install_dir = tools_cache / slot
     cli_bin = install_dir / "node_modules" / ".bin" / binary_name
+    sentinel = install_dir / ".installed"
     with FileLock(str(tools_cache / f"{slot}.lock")):
-        if cli_bin.exists():
+        if sentinel.exists() and cli_bin.exists():
             return cli_bin
+        if install_dir.exists():
+            shutil.rmtree(install_dir)
         install_dir.mkdir(parents=True, exist_ok=True)
         env = {
             **os.environ,
@@ -395,6 +398,7 @@ def _install_npm_cli(
             ),
             description=f"npm install {package}",
         )
+        sentinel.touch()
     return cli_bin
 
 
