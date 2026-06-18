@@ -32,11 +32,17 @@ Inject `agent_context` into each LLM request
 
 | Field                  | Required | Meaning                                  |
 | ---------------------- | :------: | ---------------------------------------- |
-| `session_type_id`      |    No    | Workload class; defaults to `dynamo`.    |
-| `session_id`           |    No    | Whole agent run; defaults to `trajectory_id`. |
 | `trajectory_id`        |   Yes    | One reasoning/tool chain inside the run. |
+| `session_type_id`      |    No    | Workload class.                          |
+| `session_id`           |    No    | Whole agent run.                         |
 | `parent_trajectory_id` |    No    | Parent trajectory when using subagents.  |
 | `trajectory_final`     |    No    | `true` marks the trajectory's last request — a cleanup hint. |
+
+For generic HTTP clients, `x-dynamo-trajectory-id` is enough to synthesize
+`agent_context`. Dynamo sets `trajectory_id` from the header, sets
+`session_type_id` to `dynamo`, and leaves `session_id`,
+`parent_trajectory_id`, and `trajectory_final` unset. Explicit
+`nvext.agent_context` takes precedence over all identity headers.
 
 `trajectory_final` is an optional terminal marker: set it to `true` to signal that a
 trajectory is finished. Lifecycle-aware backends use it to release whatever

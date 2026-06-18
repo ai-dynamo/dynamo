@@ -74,17 +74,16 @@ agentic requests. Dynamo uses this metadata to emit enriched request traces when
 request tracing is enabled. It does not change routing, scheduling, or cache
 behavior.
 
-For generic HTTP clients, `x-dynamo-trajectory-id` is enough to synthesize
-`agent_context`: Dynamo uses that value for both `trajectory_id` and
-`session_id`, sets `session_type_id` to `"dynamo"`, and leaves
-`parent_trajectory_id` and `trajectory_final` unset. Explicit
-`nvext.agent_context` remains the richer/manual path and takes precedence.
+Generic HTTP clients can send `x-dynamo-trajectory-id` instead of a body
+`agent_context`; Dynamo synthesizes the passive identity at the HTTP boundary.
+For the full header precedence and tracing contract, see
+[Agent Tracing](../../agents/agent-tracing.md).
 
 | Field | Type | Required | Description |
 |-------|------|:--------:|-------------|
-| `session_type_id` | `string` | No | Reusable profile or agent class label. Defaults to `"dynamo"` when omitted. |
-| `session_id` | `string` | No | Top-level agent run/session identifier. Defaults to `trajectory_id` when omitted. |
 | `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
+| `session_type_id` | `string` | No | Reusable profile or agent class label. |
+| `session_id` | `string` | No | Top-level agent run/session identifier. |
 | `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
 | `trajectory_final` | `bool` | No | Terminal marker for lifecycle-aware consumers; ignored by consumers that do not track trajectory lifecycle. |
 
