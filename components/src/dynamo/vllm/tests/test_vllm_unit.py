@@ -15,6 +15,10 @@ from unittest.mock import patch
 
 import pytest
 
+# dynamo.vllm imports uvloop transitively; skip collection in environments where
+# it is not installed (e.g. the pre-commit pytest-marker-report hook).
+pytest.importorskip("uvloop")
+
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
     _is_routable,
