@@ -32,8 +32,8 @@ Inject `agent_context` into each LLM request
 
 | Field                  | Required | Meaning                                  |
 | ---------------------- | :------: | ---------------------------------------- |
-| `session_type_id`      |   Yes    | Workload class (e.g. `deep_research`).   |
-| `session_id`           |   Yes    | Whole agent run.                         |
+| `session_type_id`      |    No    | Workload class; defaults to `dynamo`.    |
+| `session_id`           |    No    | Whole agent run; defaults to `trajectory_id`. |
 | `trajectory_id`        |   Yes    | One reasoning/tool chain inside the run. |
 | `parent_trajectory_id` |    No    | Parent trajectory when using subagents.  |
 | `trajectory_final`     |    No    | `true` marks the trajectory's last request — a cleanup hint. |
