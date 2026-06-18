@@ -49,7 +49,7 @@ const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentContextHeaderValues {
     pub(crate) session_type_id: &'static str,
-    pub(crate) session_id: String,
+    pub(crate) session_id: Option<String>,
     pub(crate) trajectory_id: String,
     pub(crate) parent_trajectory_id: Option<String>,
 }
@@ -78,7 +78,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
 
         return Some(AgentContextHeaderValues {
             session_type_id: mapping.session_type_id,
-            session_id,
+            session_id: Some(session_id),
             trajectory_id,
             parent_trajectory_id,
         });
@@ -86,7 +86,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
     header_value(headers, HEADER_DYNAMO_TRAJECTORY_ID).map(|trajectory_id| {
         AgentContextHeaderValues {
             session_type_id: DEFAULT_DYNAMO_SESSION_TYPE_ID,
-            session_id: trajectory_id.clone(),
+            session_id: None,
             trajectory_id,
             parent_trajectory_id: None,
         }
