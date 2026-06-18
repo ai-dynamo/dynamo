@@ -54,7 +54,7 @@ Note the phase shift of `-π/2` is to make the request rate start from the minim
 ### Input/Output Sequence Length Parameters
 
 The script will generate load with requests sampled from two preset ISL/OSL combinations.
-The ISL/OSL ratio defines how much of requests follow the first preset ISL/OSL pattern. ISl/OSL 0 means all requests follow the first preset ISL/OSL pattern, while ISL/OSL 1 means all requests follow the second preset ISL/OSL pattern.
+The ISL/OSL ratio defines how much of requests follow the first preset ISL/OSL pattern. An ISL/OSL ratio of 1 means all requests follow the first preset ISL/OSL pattern, while a ratio of 0 means all requests follow the second preset ISL/OSL pattern.
 
 The ISL/OSL ratio follows a sinusoidal pattern:
 ```
@@ -64,16 +64,16 @@ isl-osl-ratio(t) = (min + max) / 2 + (max - min) / 2 * sin(2 * π / period * t -
 Similarly, the phase shift of `-π/2` is to make the ISL/OSL ratio start from the minimum at `t = 0`.
 
 - `--isl1 INT` (default: 100)
-  - Minimum input sequence length
+  - Input sequence length of the first preset ISL/OSL pair
 
 - `--osl1 INT` (default: 2000)
-  - Minimum output sequence length
+  - Output sequence length of the first preset ISL/OSL pair
 
 - `--isl2 INT` (default: 5000)
-  - Maximum input sequence length
+  - Input sequence length of the second preset ISL/OSL pair
 
 - `--osl2 INT` (default: 100)
-  - Maximum output sequence length
+  - Output sequence length of the second preset ISL/OSL pair
 
 - `--isl-osl-ratio-min FLOAT` (default: 0.2)
   - Minimum ratio of input sequence length to output sequence length
