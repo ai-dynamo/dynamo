@@ -275,7 +275,7 @@ async def wait_for_frontend_ready(
                             logger.debug(
                                 f"No models registered yet (elapsed: {elapsed:.1f}s)"
                             )
-        except Exception as e:
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error checking models endpoint: {e}")
 
         # Wait before next poll
@@ -316,7 +316,7 @@ async def wait_for_frontend_ready(
                         logger.debug(
                             f"Chat completions not ready yet, status {response.status} (elapsed: {elapsed:.1f}s)"
                         )
-        except Exception as e:
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error testing chat completions: {e}")
 
         # Wait before next poll

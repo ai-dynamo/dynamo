@@ -651,15 +651,18 @@ def _wait_for_disagg_workers(
     request_plane: str,
     event_plane: Optional[str],
 ) -> None:
-    runtime = get_runtime(
-        store_backend=store_backend,
-        request_plane=request_plane,
-        event_plane=event_plane,
-    )
-    endpoint = runtime.endpoint(
-        f"{workers.namespace}.{workers.component_name}.generate"
-    )
-    asyncio.run(poll_for_worker_instances(endpoint, workers.num_workers))
+    async def wait_for_workers() -> None:
+        runtime = get_runtime(
+            store_backend=store_backend,
+            request_plane=request_plane,
+            event_plane=event_plane,
+        )
+        endpoint = runtime.endpoint(
+            f"{workers.namespace}.{workers.component_name}.generate"
+        )
+        await poll_for_worker_instances(endpoint, workers.num_workers)
+
+    asyncio.run(wait_for_workers())
 
 
 @contextmanager
