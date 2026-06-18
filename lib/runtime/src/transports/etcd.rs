@@ -19,7 +19,7 @@ use etcd_client::{
     WatchStream, Watcher,
 };
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Instant, interval};
 use tokio_util::sync::CancellationToken;
 
 mod connector;
@@ -32,6 +32,10 @@ pub use lock::*;
 
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
+
+const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(5);
+const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// ETCD Client
 #[derive(Clone)]
@@ -68,22 +72,44 @@ impl Client {
         let token = runtime.primary_token();
 
         let ((connector, lease_id), rt) = build_in_runtime(
-            async move {
-                let etcd_urls = config.etcd_url.clone();
-                let connect_options = config.etcd_connect_options.clone();
+            async move { Self::connect_with_startup_retry(&config, token).await },
+            1,
+        )
+        .await?;
 
-                // Create the connector
-                let connector = Connector::new(etcd_urls, connect_options)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Unable to connect to etcd server at {}. Check etcd server status",
-                            config.etcd_url.join(", ")
-                        )
-                    })?;
+        Ok(Client {
+            connector,
+            primary_lease: lease_id,
+            rt,
+            runtime,
+        })
+    }
+
+    async fn connect_with_startup_retry(
+        config: &ClientOptions,
+        token: CancellationToken,
+    ) -> Result<(Arc<Connector>, u64)> {
+        let deadline = Instant::now() + STARTUP_CONNECT_TIMEOUT;
+        let mut backoff = STARTUP_CONNECT_INITIAL_BACKOFF;
+
+        loop {
+            if token.is_cancelled() {
+                anyhow::bail!("etcd startup connection cancelled");
+            }
+
+            let attempt: Result<(Arc<Connector>, u64)> = async {
+                let connector =
+                    Connector::new(config.etcd_url.clone(), config.etcd_connect_options.clone())
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Unable to connect to etcd server at {}. Check etcd server status",
+                                config.etcd_url.join(", ")
+                            )
+                        })?;
 
                 let lease_id = if config.attach_lease {
-                    create_lease(connector.clone(), config.lease_ttl, token)
+                    create_lease(connector.clone(), config.lease_ttl, token.clone())
                         .await
                         .with_context(|| {
                             format!(
@@ -95,18 +121,44 @@ impl Client {
                     0
                 };
 
-                Ok((connector, lease_id))
-            },
-            1,
-        )
-        .await?;
+                if token.is_cancelled() {
+                    anyhow::bail!("etcd startup connection cancelled");
+                }
 
-        Ok(Client {
-            connector,
-            primary_lease: lease_id,
-            rt,
-            runtime,
-        })
+                Ok((connector, lease_id))
+            }
+            .await;
+
+            match attempt {
+                Ok(connection) => return Ok(connection),
+                Err(err) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(err);
+                    }
+
+                    let sleep_duration = backoff.min(deadline.saturating_duration_since(now));
+
+                    tracing::info!(
+                        error = %err,
+                        retry_in = ?sleep_duration,
+                        remaining = ?deadline.saturating_duration_since(now),
+                        "etcd not reachable yet; retrying startup connection"
+                    );
+
+                    tokio::select! {
+                        biased;
+
+                        _ = token.cancelled() => {
+                            anyhow::bail!("etcd startup connection cancelled");
+                        }
+
+                        _ = tokio::time::sleep(sleep_duration) => {}
+                    }
+                    backoff = backoff.saturating_mul(2).min(STARTUP_CONNECT_MAX_BACKOFF);
+                }
+            }
+        }
     }
 
     /// Get a clone of the underlying [`etcd_client::Client`] instance.
