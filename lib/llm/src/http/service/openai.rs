@@ -45,8 +45,10 @@ use super::{
 };
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
+use crate::protocols::common::extensions::{
+    NvExt, apply_header_routing_overrides, validate_nvext_semantics,
+};
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
@@ -537,7 +539,7 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 /// Warn (once per request) when nvext data is dropped because the extension is
 /// disabled. Only called from the disabled branch, so the default path is free.
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
-    use crate::protocols::openai::nvext::{
+    use crate::protocols::common::extensions::{
         HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
         HEADER_WORKER_INSTANCE_ID,
     };
@@ -1911,6 +1913,15 @@ pub fn validate_completion_fields_generic(
     })
 }
 
+fn validate_openai_nvext(nvext: Option<&NvExt>) -> Result<(), ErrorResponse> {
+    validate_nvext_semantics(nvext).map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -2076,6 +2087,10 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    if let Err(err_response) = validate_openai_nvext(chat_request.nvext.as_ref()) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3159,6 +3174,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    use crate::protocols::common::extensions::NvExt;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -3192,6 +3208,27 @@ mod tests {
             },
             nvext: None,
         }
+    }
+
+    #[test]
+    fn test_validate_openai_nvext_rejects_invalid_agent_context() {
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "agent_context": {
+                "session_type_id": "deep_research:v1",
+                "session_id": "run-123",
+                "trajectory_id": ""
+            }
+        }))
+        .unwrap();
+
+        let err = validate_openai_nvext(Some(&nvext)).unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1
+                .message
+                .contains("nvext.agent_context.trajectory_id must not be empty")
+        );
     }
 
     #[test]

@@ -63,7 +63,10 @@ use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
     TokenIdType,
-    common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
+    common::{
+        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        extensions::{AgentHints, NvExtProvider, routing_constraints_to_kv},
+    },
     openai::{
         DeltaGeneratorExt,
         chat_completions::{
@@ -71,7 +74,6 @@ use crate::protocols::{
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-        nvext::NvExtProvider,
     },
 };
 use crate::tokenizers::traits::Tokenizer;
@@ -84,9 +86,7 @@ pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
-fn routing_priorities(
-    hints: Option<&crate::protocols::openai::nvext::AgentHints>,
-) -> (Option<f64>, Option<u32>, Option<i32>) {
+fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
     let priority_jump = hints.and_then(|h| {
         h.priority
             .map(|priority| priority.max(0) as f64)
@@ -851,7 +851,10 @@ impl OpenAIPreprocessor {
                 lora_name,
                 allowed_worker_ids: None,
                 session_control: nvext.session_control.clone(),
-                routing_constraints: nvext.routing_constraints.clone(),
+                routing_constraints: nvext
+                    .routing_constraints
+                    .clone()
+                    .map(routing_constraints_to_kv),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
@@ -3222,7 +3225,7 @@ mod tests {
 
     #[test]
     fn routing_priorities_keep_strict_tier_independent() {
-        let hints = crate::protocols::openai::nvext::AgentHints {
+        let hints = crate::protocols::common::extensions::AgentHints {
             priority: Some(-3),
             strict_priority: Some(7),
             ..Default::default()

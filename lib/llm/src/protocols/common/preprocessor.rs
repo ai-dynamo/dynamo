@@ -10,28 +10,12 @@ use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
+use super::extensions::{AgentContext, RouterParams, SessionControl};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
-use crate::protocols::openai::nvext::AgentContext;
-
-/// Router-specific parameters carried via `nvext.router`.
-///
-/// Consumed by router implementations such as the global router for
-/// hierarchical pool selection. Unknown to engines/backends.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct RouterParams {
-    /// Target time-to-first-token in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttft_target: Option<f64>,
-
-    /// Target inter-token latency in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub itl_target: Option<f64>,
-}
 
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine
@@ -95,7 +79,7 @@ pub struct RoutingHints {
     /// Session control for subagent KV isolation and sticky routing.
     /// Contains session_id (for affinity) and optional action (open/close).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
+    pub session_control: Option<SessionControl>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

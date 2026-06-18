@@ -210,8 +210,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::protocols::common::extensions::AgentContext;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use crate::protocols::openai::nvext::AgentContext;
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
 

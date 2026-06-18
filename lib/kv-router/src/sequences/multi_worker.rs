@@ -74,6 +74,12 @@ pub trait SequencePublisher: Send + Sync {
         blocks: usize,
         tokens: usize,
     );
+
+    /// Observe that a worker/dp_rank is currently registered in the router.
+    fn observe_worker_registered(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+
+    /// Observe that a worker/dp_rank was removed from the router.
+    fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
 }
 
 /// Abstraction over event subscription for replica sync.
@@ -195,7 +201,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
         let workers = WorkerTable::new(block_size, &dp_range);
-        let prompt_registry = PromptRegistry::new(workers.workers());
+        let initial_workers: Vec<_> = workers.workers().collect();
+        let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
+        let publisher = Arc::new(publisher);
+        for worker in &initial_workers {
+            publisher.observe_worker_registered(worker, worker_type);
+        }
 
         Self {
             workers: RwLock::new(workers),
@@ -203,7 +214,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             prompt_registry,
             block_size,
             router_id,
-            publisher: Arc::new(publisher),
+            publisher,
             remote_state_updates,
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
@@ -421,6 +432,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     fn apply_worker_topology_change(&self, change: WorkerTopologyChange) {
         for removed in &change.removed {
             self.request_index.remove_worker_requests(removed.worker);
+            self.publisher
+                .observe_worker_removed(&removed.worker, self.worker_type);
+        }
+        for worker in &change.added {
+            self.publisher
+                .observe_worker_registered(worker, self.worker_type);
         }
         self.prompt_registry.apply_topology_change(change);
     }
@@ -1190,6 +1207,8 @@ mod tests {
         single_loads: Mutex<Vec<ActiveLoad>>,
         load_batches: Mutex<Vec<Vec<ActiveLoad>>>,
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
+        registered: Mutex<Vec<WorkerWithDpRank>>,
+        removed: Mutex<Vec<WorkerWithDpRank>>,
     }
 
     impl RecordingPublisherState {
@@ -1201,6 +1220,8 @@ mod tests {
             self.single_loads.lock().unwrap().clear();
             self.load_batches.lock().unwrap().clear();
             self.observations.lock().unwrap().clear();
+            self.registered.lock().unwrap().clear();
+            self.removed.lock().unwrap().clear();
         }
     }
 
@@ -1237,6 +1258,14 @@ mod tests {
                 .unwrap()
                 .push((*worker, blocks, tokens));
         }
+
+        fn observe_worker_registered(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
+            self.state.registered.lock().unwrap().push(*worker);
+        }
+
+        fn observe_worker_removed(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
+            self.state.removed.lock().unwrap().push(*worker);
+        }
     }
 
     fn make_recording_sequences(
@@ -1257,6 +1286,31 @@ mod tests {
             "test",
         );
         (sequences, state)
+    }
+
+    #[test]
+    fn worker_topology_observes_registered_and_removed_workers() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 2))]));
+        assert_eq!(
+            *state.registered.lock().unwrap(),
+            vec![WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(1, 1)]
+        );
+
+        state.clear();
+        sequences
+            .register_worker(WorkerDpRange::new(2, 0, 1))
+            .unwrap();
+        assert_eq!(
+            *state.registered.lock().unwrap(),
+            vec![WorkerWithDpRank::new(2, 0)]
+        );
+
+        state.clear();
+        sequences.unregister_worker(1).unwrap();
+        assert_eq!(
+            *state.removed.lock().unwrap(),
+            vec![WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(1, 1)]
+        );
     }
 
     fn replica_add(

@@ -29,7 +29,7 @@ use dynamo_runtime::transports::event_plane::EventSubscriber;
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 
-/// Clean up all Prometheus metrics for a worker across the specified dp_ranks.
+/// Clean up load and latency Prometheus metrics for a worker across the specified dp_ranks.
 ///
 /// This removes metrics with the given worker_id, dp_rank, and worker_type label combination.
 /// Called when workers are removed to prevent stale metrics from accumulating.

@@ -490,7 +490,7 @@ async fn test_multi_turn_with_continuation() {
 pub mod openai_preprocessor_tests {
     // re-export all the tests from the parent module
     pub use super::*;
-    use dynamo_llm::protocols::openai::nvext::{AgentContext, NvExt};
+    use dynamo_llm::protocols::common::extensions::{AgentContext, NvExt};
     use std::collections::HashSet;
 
     #[tokio::test]

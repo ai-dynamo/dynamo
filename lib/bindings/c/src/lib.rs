@@ -18,6 +18,7 @@ use dynamo_kv_router::{
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::extensions::routing_constraints_to_kv;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
@@ -1149,6 +1150,7 @@ unsafe fn preprocess_request(
         .nvext
         .as_ref()
         .and_then(|nvext| nvext.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
         .unwrap_or_default();
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
