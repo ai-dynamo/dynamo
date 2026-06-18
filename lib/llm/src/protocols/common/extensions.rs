@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::protocols::TokenIdType;
-use crate::protocols::agents::{AgentContextHeaderValues, agent_context_header_values};
+use crate::protocols::agents::{
+    AgentContextHeaderValues, DEFAULT_DYNAMO_SESSION_TYPE_ID, agent_context_header_values,
+};
 use crate::protocols::common::llm_backend::PromptLogprobs;
 use crate::protocols::common::timing::TimingInfo;
 
@@ -60,8 +62,7 @@ where
 }
 
 /// Identity metadata for agentic workloads.
-#[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Builder, Debug, Clone, PartialEq, Eq)]
 pub struct AgentContext {
     /// Reusable session/profile class.
     pub session_type_id: String,
@@ -74,19 +75,51 @@ pub struct AgentContext {
 
     /// Optional parent trajectory for subagents.
     #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_trajectory_id: Option<String>,
 
     /// Optional terminal marker: when true, this request signals that the
     /// trajectory is complete.
     #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub trajectory_final: Option<bool>,
 }
 
 impl AgentContext {
     pub fn builder() -> AgentContextBuilder {
         AgentContextBuilder::default()
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AgentContextWire {
+            session_type_id: Option<String>,
+            session_id: Option<String>,
+            trajectory_id: String,
+            #[serde(default)]
+            parent_trajectory_id: Option<String>,
+            #[serde(default)]
+            trajectory_final: Option<bool>,
+        }
+
+        let wire = AgentContextWire::deserialize(deserializer)?;
+        Ok(Self {
+            session_type_id: wire
+                .session_type_id
+                .unwrap_or_else(|| DEFAULT_DYNAMO_SESSION_TYPE_ID.to_string()),
+            session_id: wire
+                .session_id
+                .unwrap_or_else(|| wire.trajectory_id.clone()),
+            trajectory_id: wire.trajectory_id,
+            parent_trajectory_id: wire.parent_trajectory_id,
+            trajectory_final: wire.trajectory_final,
+        })
     }
 }
 
@@ -298,6 +331,8 @@ impl From<AgentContextHeaderValues> for AgentContext {
 /// - coding-agent source -> `agent_context.session_type_id`
 /// - configured coding-agent parent session headers ->
 ///   `agent_context.parent_trajectory_id`
+/// - `x-dynamo-trajectory-id` -> generic `agent_context` with
+///   `session_id=trajectory_id` and `session_type_id=dynamo`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// Explicit `nvext.agent_context` takes priority over coding-agent headers.
@@ -651,7 +686,7 @@ mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID,
-        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_TRAJECTORY_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[test]
@@ -751,11 +786,26 @@ mod tests {
     }
 
     #[test]
-    fn agent_context_serde_missing_required_field_fails() {
+    fn agent_context_serde_defaults_missing_session_fields() {
+        let json = r#"{
+            "agent_context": {
+                "trajectory_id": "run-123:researcher-0"
+            }
+        }"#;
+
+        let nvext = serde_json::from_str::<NvExt>(json).unwrap();
+        let agent_context = nvext.agent_context.unwrap();
+        assert_eq!(agent_context.session_type_id, "dynamo");
+        assert_eq!(agent_context.session_id, "run-123:researcher-0");
+        assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
+    }
+
+    #[test]
+    fn agent_context_serde_missing_trajectory_id_fails() {
         let json = r#"{
             "agent_context": {
                 "session_type_id": "deep_research:v1",
-                "trajectory_id": "run-123:researcher-0"
+                "session_id": "run-123"
             }
         }"#;
 
@@ -869,6 +919,13 @@ mod tests {
                 "opencode",
                 Some("parent-run-1"),
             ),
+            (
+                HEADER_DYNAMO_TRAJECTORY_ID,
+                "generic-run-1",
+                None,
+                "dynamo",
+                None,
+            ),
         ];
 
         for (
@@ -933,6 +990,22 @@ mod tests {
     }
 
     #[test]
+    fn apply_header_routing_overrides_prefers_first_class_agent_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_SESSION_ID, "codex-run".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_TRAJECTORY_ID, "generic-run".parse().unwrap());
+
+        let agent_context = apply_header_routing_overrides(None, &headers)
+            .unwrap()
+            .agent_context
+            .unwrap();
+
+        assert_eq!(agent_context.session_type_id, "codex");
+        assert_eq!(agent_context.session_id, "codex-run");
+        assert_eq!(agent_context.trajectory_id, "codex-run");
+    }
+
+    #[test]
     fn apply_header_routing_overrides_ignores_non_identity_session_headers() {
         use axum::http::{HeaderMap, HeaderName};
 
@@ -955,6 +1028,7 @@ mod tests {
             HEADER_OPENCODE_PARENT_SESSION_ID,
             "header-parent".parse().unwrap(),
         );
+        headers.insert(HEADER_DYNAMO_TRAJECTORY_ID, "generic-run".parse().unwrap());
         let explicit = AgentContext::builder()
             .session_type_id("native".to_string())
             .session_id("native-session".to_string())
