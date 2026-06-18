@@ -2258,6 +2258,8 @@ func GenerateGrovePodCliqueSet(
 	}
 	gangSet.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
+	// Volcano queue selection is consumed by Grove from the PodCliqueSet annotation.
+	// KAI-Scheduler is injected later on each clique via schedulerName and queue label.
 	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations, runtimeConfig)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
