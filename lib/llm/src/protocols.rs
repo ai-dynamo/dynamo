@@ -10,7 +10,7 @@
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
-pub(crate) mod agents;
+pub mod agents;
 pub mod anthropic;
 pub mod codec;
 pub mod common;
