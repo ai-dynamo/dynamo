@@ -14,8 +14,8 @@ sequentially against one server:
    `/v1/responses`.
 3. `claude -p` smoke — forces the Bash tool-call path through
    `/v1/messages` (Anthropic Messages API).
-4. `opencode run` smoke — sends a real OpenCode request through
-   `/v1/chat/completions`.
+4. `opencode run --command ...` smoke — forces an OpenCode subtask request
+   through `/v1/chat/completions`.
 
 All external tooling (bun, node, the OpenResponses suite, and the coding-agent
 CLIs) is installed lazily at test time by session-scoped fixtures into a
@@ -63,6 +63,7 @@ NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
 OPENRESPONSES_SHA = "fa29df5"
 OPENRESPONSES_MAX_OUTPUT_TOKENS = 512
+OPENCODE_SUBTASK_COMMAND = "dynamo-subagent-smoke"
 
 # Retry budget for network-touching installs. Exponential backoff starting
 # at 2s; 3 attempts caps the worst-case wait at ~6s before we surface a
@@ -575,6 +576,7 @@ def test_frontend_api_surface_compliance(
             request_trace_path,
         )
         _assert_agent_context_in_trace(request_trace_path, "opencode")
+        _assert_agent_parent_context_in_trace(request_trace_path, "opencode")
 
 
 def _attach_subprocess_log(
@@ -696,6 +698,28 @@ def _assert_agent_context_in_trace(
     )
 
 
+def _assert_agent_parent_context_in_trace(
+    trace_path: Path, session_type_id: str, timeout_s: float = 30.0
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    last_records: list[dict] = []
+    while time.monotonic() < deadline:
+        last_records = _read_request_trace_records(trace_path)
+        if _trace_contains_agent_parent_context(last_records, session_type_id):
+            return
+        time.sleep(0.2)
+
+    seen = [
+        record.get("agent_context")
+        for record in last_records
+        if record.get("agent_context")
+    ]
+    pytest.fail(
+        f"request trace did not contain parent agent_context for {session_type_id!r} "
+        f"within {timeout_s}s; saw {seen}"
+    )
+
+
 def _trace_contains_agent_context(records: list[dict], session_type_id: str) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
@@ -705,6 +729,25 @@ def _trace_contains_agent_context(records: list[dict], session_type_id: str) -> 
             continue
         assert agent_context.get("session_id"), agent_context
         assert agent_context.get("session_id") == agent_context.get("trajectory_id")
+        return True
+    return False
+
+
+def _trace_contains_agent_parent_context(
+    records: list[dict], session_type_id: str
+) -> bool:
+    for record in records:
+        agent_context = record.get("agent_context")
+        if not agent_context:
+            continue
+        if agent_context.get("session_type_id") != session_type_id:
+            continue
+        parent_trajectory_id = agent_context.get("parent_trajectory_id")
+        if not parent_trajectory_id:
+            continue
+        assert agent_context.get("session_id"), agent_context
+        assert agent_context.get("session_id") == agent_context.get("trajectory_id")
+        assert parent_trajectory_id != agent_context.get("trajectory_id"), agent_context
         return True
     return False
 
@@ -796,6 +839,13 @@ def _write_opencode_config(cwd: Path, frontend_port: int) -> None:
                     }
                 },
                 "options": {"baseURL": f"http://localhost:{frontend_port}/v1"},
+            }
+        },
+        "permission": {"task": "allow"},
+        "command": {
+            OPENCODE_SUBTASK_COMMAND: {
+                "template": "Reply with exactly OK.",
+                "subtask": True,
             }
         },
     }
@@ -965,7 +1015,7 @@ def _run_opencode_smoke(
     cwd: Path,
     request_trace_path: Path,
 ) -> None:
-    """Run `opencode run` until Dynamo traces its live chat/completions request."""
+    """Run `opencode run` until Dynamo traces its live subagent request."""
     logger.info("Running opencode smoke test against cwd=%s", cwd)
 
     extra_env = {
@@ -983,7 +1033,8 @@ def _run_opencode_smoke(
         f"dynamo/{COMPLIANCE_MODEL}",
         "--dir",
         str(cwd),
-        "Reply with exactly OK. Do not use tools.",
+        "--command",
+        OPENCODE_SUBTASK_COMMAND,
     ]
     process = subprocess.Popen(
         cmd,
@@ -997,7 +1048,7 @@ def _run_opencode_smoke(
     trace_seen = False
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        if _trace_contains_agent_context(
+        if _trace_contains_agent_parent_context(
             _read_request_trace_records(request_trace_path), "opencode"
         ):
             trace_seen = True
@@ -1016,7 +1067,7 @@ def _run_opencode_smoke(
     else:
         stdout, stderr = process.communicate()
 
-    trace_seen = trace_seen or _trace_contains_agent_context(
+    trace_seen = trace_seen or _trace_contains_agent_parent_context(
         _read_request_trace_records(request_trace_path), "opencode"
     )
     result = subprocess.CompletedProcess(
@@ -1047,4 +1098,7 @@ def _run_opencode_smoke(
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
 
-    pytest.fail("opencode run exited before Dynamo traced an opencode agent_context")
+    pytest.fail(
+        "opencode run exited before Dynamo traced an opencode child agent_context "
+        "with parent_trajectory_id"
+    )
