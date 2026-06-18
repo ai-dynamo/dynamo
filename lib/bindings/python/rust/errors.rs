@@ -35,6 +35,12 @@ pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRe
     error
 }
 
+// Raised by the in-process `SelectionService` bindings for selector failures
+// that are not malformed input. Instances carry `kind` (a stable,
+// machine-readable category) and `status_code` (an HTTP-style status) so
+// callers can branch without matching on the message string.
+pyo3::create_exception!(dynamo._core, SelectionServiceError, DynamoException);
+
 /// Defines Python exception classes for each Dynamo error type.
 ///
 /// For each `(RustExceptionName, BackendError)` pair, the macro:
@@ -93,6 +99,10 @@ macro_rules! define_dynamo_exceptions {
             m.add(
                 "RouterQueueLimitExceeded",
                 m.py().get_type::<RouterQueueLimitExceeded>(),
+            )?;
+            m.add(
+                "SelectionServiceError",
+                m.py().get_type::<SelectionServiceError>(),
             )?;
             $(
                 m.add(stringify!($name), m.py().get_type::<$name>())?;

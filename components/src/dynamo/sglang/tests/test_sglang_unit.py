@@ -510,6 +510,20 @@ def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
     assert should_fetch_model(args, "Qwen/Qwen3-0.6B") is False
 
 
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "s3://bucket/model/",
+        "gs://bucket/model/",
+        "az://container/model/",
+    ],
+)
+def test_should_fetch_model_skips_object_storage_paths(model_path):
+    args = SimpleNamespace(load_format="runai_streamer")
+
+    assert should_fetch_model(args, model_path) is False
+
+
 def test_should_fetch_model_keeps_default_non_local_fetch():
     args = SimpleNamespace(load_format="auto")
 
@@ -556,6 +570,63 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
 
     assert result is True
     assert captured["kwargs"]["ignore_weights"] is True
+
+
+@pytest.mark.asyncio
+async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
+    monkeypatch,
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    captured: dict = {}
+
+    async def fake_get_runtime_config(engine, server_args, dynamo_args):
+        return None
+
+    async def fake_register_model(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        if args[3].startswith("s3://"):
+            raise AssertionError("object-storage path used as a normal model_path")
+
+    monkeypatch.setattr(sglang_register, "_get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+
+    server_args = SimpleNamespace(
+        model_path="s3://bucket/model",
+        served_model_name="bucket-model",
+        context_length=4096,
+        page_size=1,
+        load_format="runai_streamer",
+        remote_instance_weight_loader_backend=None,
+    )
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False,
+        frontend_decoding=False,
+        custom_jinja_template=None,
+    )
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(
+                model_weights="s3://bucket/model",
+                model_path="/tmp/runai-model-metadata",
+            )
+        )
+    )
+
+    result = await sglang_register._register_model_with_runtime_config(
+        engine=engine,
+        endpoint=SimpleNamespace(),
+        server_args=server_args,
+        dynamo_args=dynamo_args,
+        worker_type=sglang_register.WorkerType.Aggregated,
+    )
+
+    assert result is True
+    assert captured["args"][3] == "/tmp/runai-model-metadata"
+    assert "skip_model_path_fetch" not in captured["kwargs"]
+    assert captured["kwargs"]["ignore_weights"] is False
 
 
 # ---------------------------------------------------------------------------
