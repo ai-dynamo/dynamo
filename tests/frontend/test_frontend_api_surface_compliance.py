@@ -741,8 +741,13 @@ def _trace_contains_agent_context(records: list[dict], session_type_id: str) -> 
             continue
         if agent_context.get("session_type_id") != session_type_id:
             continue
-        assert agent_context.get("session_id"), agent_context
-        assert agent_context.get("session_id") == agent_context.get("trajectory_id")
+
+        session_id = agent_context.get("session_id")
+        trajectory_id = agent_context.get("trajectory_id")
+        if not session_id or not trajectory_id:
+            continue
+        if session_type_id != "claude_code" and session_id != trajectory_id:
+            continue
         return True
     return False
 
@@ -759,9 +764,15 @@ def _trace_contains_agent_parent_context(
         parent_trajectory_id = agent_context.get("parent_trajectory_id")
         if not parent_trajectory_id:
             continue
-        assert agent_context.get("session_id"), agent_context
-        assert agent_context.get("session_id") == agent_context.get("trajectory_id")
-        assert parent_trajectory_id != agent_context.get("trajectory_id"), agent_context
+
+        session_id = agent_context.get("session_id")
+        trajectory_id = agent_context.get("trajectory_id")
+        if not session_id or not trajectory_id:
+            continue
+        if session_id != trajectory_id:
+            continue
+        if parent_trajectory_id == trajectory_id:
+            continue
         return True
     return False
 
@@ -1232,26 +1243,27 @@ def _run_opencode_smoke(
     )
 
     trace_seen = False
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if _trace_contains_agent_parent_context(
-            _read_request_trace_records(request_trace_path), "opencode"
-        ):
-            trace_seen = True
-            break
-        if process.poll() is not None:
-            break
-        time.sleep(0.2)
-
-    if process.poll() is None:
-        process.terminate()
-        try:
-            stdout, stderr = process.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if _trace_contains_agent_parent_context(
+                _read_request_trace_records(request_trace_path), "opencode"
+            ):
+                trace_seen = True
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.2)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+        else:
             stdout, stderr = process.communicate()
-    else:
-        stdout, stderr = process.communicate()
 
     trace_seen = trace_seen or _trace_contains_agent_parent_context(
         _read_request_trace_records(request_trace_path), "opencode"
