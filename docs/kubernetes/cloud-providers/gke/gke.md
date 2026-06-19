@@ -49,17 +49,18 @@ gcloud container node-pools create gpu-pool \
     --max-nodes=3
 ```
 
-### Set environment variables for GKE
+### Create a namespace for your inference graph deployments
 
 ```bash
-export NAMESPACE=dynamo-system
+export NAMESPACE=my-inference
 kubectl create namespace $NAMESPACE
-kubectl config set-context --current --namespace=$NAMESPACE
+```
 
+### Create a secret to store your Hugging Face token (needed to download model weights from Hugging Face)
+
+```bash
 export HF_TOKEN=<HF_TOKEN>
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN=${HF_TOKEN} \
-  -n ${NAMESPACE}
+kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN} -n ${NAMESPACE}
 ```
 
 ## Install Dynamo Kubernetes Platform
