@@ -1526,6 +1526,43 @@ Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API g
 
 
 
+#### AuditAwsS3Spec
+
+
+
+AuditAwsS3Spec holds the IAM role ARN for EKS IRSA. The operator
+translates this into an `eks.amazonaws.com/role-arn` annotation on the
+per-DGD ServiceAccount.
+
+
+
+_Appears in:_
+- [AuditSpec](#auditspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `irsaRoleArn` _string_ | irsaRoleArn is the ARN of the IAM role the frontend pod should<br />assume via IRSA to write audit segments to S3. |  | Pattern: `^arn:aws:iam::\d\{12\}:role/.+$` <br /> |
+
+
+#### AuditSpec
+
+
+
+AuditSpec carries cloud-identity metadata the operator attaches to the
+frontend pod's ServiceAccount. Currently supports AWS IRSA only; other
+clouds (GCP Workload Identity, Azure Workload Identity) can be added as
+peer sub-fields in future PRs without changing the overall shape.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `aws_s3` _[AuditAwsS3Spec](#auditawss3spec)_ | aws_s3 configures AWS IRSA for the S3 audit sink. |  | Optional: \{\} <br /> |
+
+
 #### BackendType
 
 _Underlying type:_ _string_
@@ -2158,6 +2195,7 @@ _Appears in:_
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | topologyConstraint is the deployment-level topology constraint. When<br />set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology<br />CR to use. `spec.topologyConstraint.packDomain` is optional at this<br />level and can be omitted when only components carry constraints.<br />Components without their own `topologyConstraint` inherit from this value. |  | Optional: \{\} <br /> |
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
+| `audit` _[AuditSpec](#auditspec)_ | audit configures cloud-identity metadata for the audit subsystem.<br />When set, the operator attaches the corresponding cloud-identity<br />annotations to the existing per-DGD ServiceAccount so the audit<br />sink running inside the frontend pod can authenticate to cloud<br />storage (e.g., S3 via IRSA). Whether audit is enabled at runtime<br />is controlled by the DYN_AUDIT_SINKS env var, not by this field. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus

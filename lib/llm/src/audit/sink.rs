@@ -13,7 +13,10 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
-use crate::telemetry::jsonl_gz::{JsonlGzipSinkOptions, JsonlGzipWriter};
+use crate::telemetry::jsonl_gz::{JsonlGzipSinkOptions, JsonlGzipWriter, SegmentSink};
+use crate::telemetry::s3_segment_sink::{
+    S3SegmentIdentity, S3SegmentSink, S3SegmentSinkConfig, S3SinkEncryption,
+};
 
 use super::{
     bus,
@@ -148,6 +151,8 @@ impl JsonlGzipAuditSink {
                 flush_interval: Duration::from_millis(policy.jsonl_flush_interval_ms.max(1)),
                 roll_uncompressed_bytes: policy.jsonl_gz_roll_bytes,
                 roll_lines: policy.jsonl_gz_roll_lines,
+                roll_interval: None,
+                channel_capacity: 2048,
             },
         )
         .await
@@ -163,6 +168,73 @@ impl AuditSink for JsonlGzipAuditSink {
     async fn emit(&self, rec: &AuditRecord) {
         if self.writer.send(rec.clone()).await.is_err() {
             tracing::warn!("audit jsonl_gz sink closed; dropping record");
+        }
+    }
+}
+
+/// S3-backed audit sink. Buffers records into rotated, gzip-compressed
+/// segments in memory and uploads each completed segment as one S3
+/// object. Backed by the shared `JsonlGzipWriter` rotation engine — the
+/// only thing different from `JsonlGzipAuditSink` is the destination.
+pub struct S3AuditSink {
+    writer: JsonlGzipWriter<AuditRecord>,
+}
+
+impl S3AuditSink {
+    async fn from_policy(policy: &AuditPolicy) -> anyhow::Result<Self> {
+        let bucket = policy.s3_bucket.clone().ok_or_else(|| {
+            anyhow!(
+                "{} must be set when {} includes s3",
+                env_audit::DYN_AUDIT_S3_BUCKET,
+                env_audit::DYN_AUDIT_SINKS
+            )
+        })?;
+
+        let identity =
+            S3SegmentIdentity::resolve(policy.s3_instance_id.clone(), policy.deployment.clone());
+        let encryption = S3SinkEncryption {
+            sse: policy.s3_sse.clone(),
+            kms_key_id: policy.s3_kms_key_id.clone(),
+        };
+        let client =
+            S3SegmentSink::build_client(policy.s3_region.clone(), policy.s3_endpoint_url.clone())
+                .await
+                .context("audit s3: building AWS SDK client")?;
+        let segment_sink: Arc<dyn SegmentSink> = Arc::new(S3SegmentSink::new(
+            client,
+            S3SegmentSinkConfig {
+                bucket,
+                prefix: policy.s3_prefix.clone(),
+                identity,
+                encryption,
+            },
+        ));
+
+        let writer = JsonlGzipWriter::with_segment_sink(
+            segment_sink,
+            JsonlGzipSinkOptions {
+                buffer_bytes: policy.s3_batch_bytes,
+                flush_interval: Duration::from_millis(policy.jsonl_flush_interval_ms.max(1)),
+                roll_uncompressed_bytes: policy.s3_roll_bytes,
+                roll_lines: policy.s3_roll_lines,
+                roll_interval: Some(Duration::from_millis(policy.s3_roll_interval_ms.max(1))),
+                channel_capacity: policy.s3_channel_capacity,
+            },
+        )
+        .context("audit s3: starting rotation engine")?;
+        Ok(Self { writer })
+    }
+}
+
+#[async_trait]
+impl AuditSink for S3AuditSink {
+    fn name(&self) -> &'static str {
+        "s3"
+    }
+
+    async fn emit(&self, rec: &AuditRecord) {
+        if self.writer.send(rec.clone()).await.is_err() {
+            tracing::warn!("audit s3 sink closed; dropping record");
         }
     }
 }
@@ -194,6 +266,10 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
                     Arc::new(JsonlGzipAuditSink::from_policy(policy).await?);
                 out.push(sink);
             }
+            "s3" => {
+                let sink: Arc<dyn AuditSink> = Arc::new(S3AuditSink::from_policy(policy).await?);
+                out.push(sink);
+            }
             other => tracing::warn!(%other, "audit: unknown sink ignored"),
         }
     }
@@ -217,11 +293,16 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
                         loop {
                             match rx.try_recv() {
                                 Ok(rec) => sink.emit(&rec).await,
-                                Err(broadcast::error::TryRecvError::Lagged(n)) => tracing::warn!(
-                                    sink = name,
-                                    dropped = n,
-                                    "audit bus lagged during shutdown; dropped records"
-                                ),
+                                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                    super::metrics::AUDIT_RECORDS_DROPPED_TOTAL
+                                        .with_label_values(&["bus_lag"])
+                                        .inc_by(n);
+                                    tracing::warn!(
+                                        sink = name,
+                                        dropped = n,
+                                        "audit bus lagged during shutdown; dropped records"
+                                    );
+                                }
                                 Err(
                                     broadcast::error::TryRecvError::Empty
                                     | broadcast::error::TryRecvError::Closed,
@@ -233,11 +314,16 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
                     msg = rx.recv() => {
                         match msg {
                             Ok(rec) => sink.emit(&rec).await,
-                            Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!(
-                                sink = name,
-                                dropped = n,
-                                "audit bus lagged; dropped records"
-                            ),
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                super::metrics::AUDIT_RECORDS_DROPPED_TOTAL
+                                    .with_label_values(&["bus_lag"])
+                                    .inc_by(n);
+                                tracing::warn!(
+                                    sink = name,
+                                    dropped = n,
+                                    "audit bus lagged; dropped records"
+                                );
+                            }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
@@ -266,6 +352,8 @@ mod tests {
             request_id: "req-abc".to_string(),
             requested_streaming: false,
             model: "test-model".to_string(),
+            deployment: None,
+            emitted_at_unix_ms: 0,
             request: None,
             response: None,
         }
@@ -292,6 +380,8 @@ mod tests {
                 flush_interval: Duration::from_secs(60),
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
+                roll_interval: None,
+                channel_capacity: 2048,
             },
         )
         .await

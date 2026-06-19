@@ -378,6 +378,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
 	}
 
+	// Attach cloud-identity annotations to the discovery SA for the audit
+	// subsystem. This runs after reconcileK8sDiscoveryResources so the SA
+	// is guaranteed to exist.
+	if err := r.reconcileAuditIdentity(ctx, dynamoDeployment); err != nil {
+		logger.Error(err, "Failed to reconcile audit identity annotations")
+		// Non-fatal: audit is optional. Log and continue.
+	}
+
 	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
 		return ReconcileResult{}, err
 	}
@@ -1755,6 +1763,71 @@ func (r *DynamoGraphDeploymentReconciler) reconcileK8sDiscoveryResources(ctx con
 
 	return nil
 
+}
+
+// reconcileAuditIdentity attaches (or removes) cloud-identity annotations on
+// the existing per-DGD ServiceAccount based on spec.audit. This lets the
+// frontend pod's audit sink authenticate to cloud storage (S3 via IRSA,
+// GCS via GKE Workload Identity, etc.) without creating a separate SA.
+func (r *DynamoGraphDeploymentReconciler) reconcileAuditIdentity(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+	saName := discovery.GetK8sDiscoveryServiceAccountName(dynamoDeployment.Name)
+
+	// Build the desired annotation set from spec.audit
+	desired := map[string]string{}
+	if audit := dynamoDeployment.Spec.Audit; audit != nil {
+		if audit.AwsS3 != nil && audit.AwsS3.IrsaRoleArn != "" {
+			desired["eks.amazonaws.com/role-arn"] = audit.AwsS3.IrsaRoleArn
+		}
+	}
+
+	// Managed annotation keys — the operator owns these and will add/remove
+	// them. Other annotations on the SA (like nvidia.com/last-applied-hash)
+	// are left untouched. Future clouds add their annotation key here.
+	managedKeys := []string{
+		"eks.amazonaws.com/role-arn",
+	}
+
+	// Fetch the SA
+	sa := &corev1.ServiceAccount{}
+	if err := r.Get(ctx, types.NamespacedName{Name: saName, Namespace: dynamoDeployment.Namespace}, sa); err != nil {
+		if errors.IsNotFound(err) {
+			// SA hasn't been created yet (e.g., discovery is disabled).
+			// Nothing to annotate — skip silently.
+			return nil
+		}
+		return fmt.Errorf("audit identity: failed to get SA %s: %w", saName, err)
+	}
+
+	// Compute patch: add/update desired, remove managed keys that are no
+	// longer desired.
+	changed := false
+	if sa.Annotations == nil {
+		sa.Annotations = map[string]string{}
+	}
+	for _, key := range managedKeys {
+		if val, want := desired[key]; want {
+			if sa.Annotations[key] != val {
+				sa.Annotations[key] = val
+				changed = true
+			}
+		} else {
+			if _, has := sa.Annotations[key]; has {
+				delete(sa.Annotations, key)
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+
+	logger.Info("Updating audit identity annotations on SA", "sa", saName, "annotations", desired)
+	if err := r.Update(ctx, sa); err != nil {
+		return fmt.Errorf("audit identity: failed to update SA %s: %w", saName, err)
+	}
+	return nil
 }
 
 // reconcilePVC reconciles a single top-level PVC preserved from a converted v1alpha1 DGD.

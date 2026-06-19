@@ -410,6 +410,66 @@ pub mod llm {
 
         /// Rotating gzip JSONL audit sink roll threshold in record lines.
         pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
+
+        /// Global head-based sample rate in [0.0, 1.0]. Applied at audit
+        /// handle creation against a deterministic hash of the request id.
+        /// Bypassed when the request `store` flag is true or when
+        /// `DYN_AUDIT_FORCE_LOGGING` is set. Default 1.0 (capture all).
+        pub const DYN_AUDIT_SAMPLE_RATE: &str = "DYN_AUDIT_SAMPLE_RATE";
+
+        /// Logical deployment name attached to every audit record. Used for
+        /// partitioning the S3 sink's object keys and for in-record
+        /// filtering. On Kubernetes this is auto-detected from
+        /// `DYN_PARENT_DGD_K8S_NAME` (which the Dynamo operator injects into
+        /// every worker pod with the parent DynamoGraphDeployment CR name);
+        /// set this env var only to override that default.
+        pub const DYN_AUDIT_DEPLOYMENT: &str = "DYN_AUDIT_DEPLOYMENT";
+
+        /// S3 bucket the S3 audit sink uploads to. Required when the
+        /// `s3` sink is selected via DYN_AUDIT_SINKS.
+        pub const DYN_AUDIT_S3_BUCKET: &str = "DYN_AUDIT_S3_BUCKET";
+
+        /// Key prefix under the bucket. Default `dynamo-audit`.
+        pub const DYN_AUDIT_S3_PREFIX: &str = "DYN_AUDIT_S3_PREFIX";
+
+        /// AWS region for the S3 client. If unset, the SDK uses the
+        /// standard region resolution chain (env, profile, IMDS).
+        pub const DYN_AUDIT_S3_REGION: &str = "DYN_AUDIT_S3_REGION";
+
+        /// Override the S3 endpoint URL. Use for LocalStack, MinIO, or
+        /// other S3-compatible test environments.
+        pub const DYN_AUDIT_S3_ENDPOINT_URL: &str = "DYN_AUDIT_S3_ENDPOINT_URL";
+
+        /// In-memory batch size before the S3 sink compresses and emits a
+        /// gzip member into the current segment.
+        pub const DYN_AUDIT_S3_BATCH_BYTES: &str = "DYN_AUDIT_S3_BATCH_BYTES";
+
+        /// Compressed-segment size threshold that triggers a roll
+        /// (PutObject + new segment).
+        pub const DYN_AUDIT_S3_ROLL_BYTES: &str = "DYN_AUDIT_S3_ROLL_BYTES";
+
+        /// Wall-clock interval (ms) after which the current segment is
+        /// rolled regardless of size, so quiet periods do not leave
+        /// in-memory data uncommitted to S3.
+        pub const DYN_AUDIT_S3_ROLL_INTERVAL_MS: &str = "DYN_AUDIT_S3_ROLL_INTERVAL_MS";
+
+        /// Optional record-line threshold per segment.
+        pub const DYN_AUDIT_S3_ROLL_LINES: &str = "DYN_AUDIT_S3_ROLL_LINES";
+
+        /// Server-side encryption mode for S3 PutObject: `AES256` or `aws:kms`.
+        pub const DYN_AUDIT_S3_SSE: &str = "DYN_AUDIT_S3_SSE";
+
+        /// KMS key ARN used when `DYN_AUDIT_S3_SSE=aws:kms`.
+        pub const DYN_AUDIT_S3_KMS_KEY_ID: &str = "DYN_AUDIT_S3_KMS_KEY_ID";
+
+        /// Override the per-instance identifier used in S3 object keys.
+        /// If unset, resolves from the `POD_NAME` env var (Kubernetes
+        /// downward API), then from `hostname()`, then `unknown`.
+        pub const DYN_AUDIT_S3_INSTANCE_ID: &str = "DYN_AUDIT_S3_INSTANCE_ID";
+
+        /// Capacity of the mpsc channel between the bus worker and the
+        /// S3 uploader task.
+        pub const DYN_AUDIT_S3_CHANNEL_CAPACITY: &str = "DYN_AUDIT_S3_CHANNEL_CAPACITY";
     }
 
     /// Per-request replay trace configuration
@@ -709,6 +769,20 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
+            llm::audit::DYN_AUDIT_SAMPLE_RATE,
+            llm::audit::DYN_AUDIT_DEPLOYMENT,
+            llm::audit::DYN_AUDIT_S3_BUCKET,
+            llm::audit::DYN_AUDIT_S3_PREFIX,
+            llm::audit::DYN_AUDIT_S3_REGION,
+            llm::audit::DYN_AUDIT_S3_ENDPOINT_URL,
+            llm::audit::DYN_AUDIT_S3_BATCH_BYTES,
+            llm::audit::DYN_AUDIT_S3_ROLL_BYTES,
+            llm::audit::DYN_AUDIT_S3_ROLL_INTERVAL_MS,
+            llm::audit::DYN_AUDIT_S3_ROLL_LINES,
+            llm::audit::DYN_AUDIT_S3_SSE,
+            llm::audit::DYN_AUDIT_S3_KMS_KEY_ID,
+            llm::audit::DYN_AUDIT_S3_INSTANCE_ID,
+            llm::audit::DYN_AUDIT_S3_CHANNEL_CAPACITY,
             llm::request_trace::DYN_REQUEST_TRACE,
             llm::request_trace::DYN_REQUEST_TRACE_SINKS,
             llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,

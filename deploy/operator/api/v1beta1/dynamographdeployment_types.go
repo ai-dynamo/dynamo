@@ -78,6 +78,35 @@ type DynamoGraphDeploymentSpec struct {
 	// behavior may change in breaking ways between v1beta1 releases.
 	// +optional
 	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+
+	// audit configures cloud-identity metadata for the audit subsystem.
+	// When set, the operator attaches the corresponding cloud-identity
+	// annotations to the existing per-DGD ServiceAccount so the audit
+	// sink running inside the frontend pod can authenticate to cloud
+	// storage (e.g., S3 via IRSA). Whether audit is enabled at runtime
+	// is controlled by the DYN_AUDIT_SINKS env var, not by this field.
+	// +optional
+	Audit *AuditSpec `json:"audit,omitempty"`
+}
+
+// AuditSpec carries cloud-identity metadata the operator attaches to the
+// frontend pod's ServiceAccount. Currently supports AWS IRSA only; other
+// clouds (GCP Workload Identity, Azure Workload Identity) can be added as
+// peer sub-fields in future PRs without changing the overall shape.
+type AuditSpec struct {
+	// aws_s3 configures AWS IRSA for the S3 audit sink.
+	// +optional
+	AwsS3 *AuditAwsS3Spec `json:"aws_s3,omitempty"`
+}
+
+// AuditAwsS3Spec holds the IAM role ARN for EKS IRSA. The operator
+// translates this into an `eks.amazonaws.com/role-arn` annotation on the
+// per-DGD ServiceAccount.
+type AuditAwsS3Spec struct {
+	// irsaRoleArn is the ARN of the IAM role the frontend pod should
+	// assume via IRSA to write audit segments to S3.
+	// +kubebuilder:validation:Pattern=`^arn:aws:iam::\d{12}:role/.+$`
+	IrsaRoleArn string `json:"irsaRoleArn"`
 }
 
 // DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview

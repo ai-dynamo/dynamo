@@ -4,6 +4,7 @@
 pub mod bus;
 pub mod config;
 pub mod handle;
+pub mod metrics;
 pub mod sink;
 pub mod stream;
 
@@ -21,6 +22,7 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
         return Ok(());
     }
 
+    metrics::register_audit_metrics();
     bus::init(policy.capacity);
     sink::spawn_workers_from_env(shutdown).await?;
 

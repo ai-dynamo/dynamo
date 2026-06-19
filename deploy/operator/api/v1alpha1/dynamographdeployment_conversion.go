@@ -121,6 +121,11 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 		save.PVCs = slices.Clone(src.PVCs)
 	}
 
+	// Restore Audit from the hub-saved payload (v1beta1-only field).
+	if restored != nil && restored.Audit != nil {
+		dst.Audit = restored.Audit
+	}
+
 	// Restore target-only component leaves from the preserved hub payload.
 	restoredHubComponents := restoredDGDHubComponentsByName(restored)
 
@@ -422,6 +427,10 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 	if src.Experimental != nil {
 		dst.Experimental = &DynamoGraphDeploymentExperimentalSpec{}
 		ConvertToDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
+	}
+	// Save Audit into hub payload (v1beta1-only field, no v1alpha1 equivalent).
+	if save != nil && src.Audit != nil {
+		save.Audit = src.Audit
 	}
 	dst.Envs = src.Env
 

@@ -12050,6 +12050,28 @@ spec:
                     and pod templates). Component-level (`podTemplate`) values take precedence
                     on conflict.
                   type: object
+                audit:
+                  description: |-
+                    audit configures cloud-identity metadata for the audit subsystem.
+                    When set, the operator attaches the corresponding cloud-identity
+                    annotations to the existing per-DGD ServiceAccount so the audit
+                    sink running inside the frontend pod can authenticate to cloud
+                    storage (e.g., S3 via IRSA). Whether audit is enabled at runtime
+                    is controlled by the DYN_AUDIT_SINKS env var, not by this field.
+                  properties:
+                    aws_s3:
+                      description: aws_s3 configures AWS IRSA for the S3 audit sink.
+                      properties:
+                        irsaRoleArn:
+                          description: |-
+                            irsaRoleArn is the ARN of the IAM role the frontend pod should
+                            assume via IRSA to write audit segments to S3.
+                          pattern: ^arn:aws:iam::\d{12}:role/.+$
+                          type: string
+                      required:
+                        - irsaRoleArn
+                      type: object
+                  type: object
                 backendFramework:
                   description: backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
                   enum:

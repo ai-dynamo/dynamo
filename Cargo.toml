@@ -159,6 +159,8 @@ opentelemetry-otlp = { version = "0.31.0", features = [
     "reqwest-rustls",
 ] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
+aws-config = { version = "1.8.11" }
+aws-sdk-s3 = { version = "1.120.0" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
