@@ -4,7 +4,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any, AsyncIterator, Callable, Literal, Optional, Protocol
 
 import sglang as sgl
 import torch
@@ -42,6 +42,29 @@ class MultimodalConfig:
 
     EMBEDDINGS_DTYPE = torch.float16
     EMBEDDINGS_DEVICE = "cpu"
+
+
+class EmbeddingsProcessorLike(Protocol):
+    async def process_embeddings(
+        self, request: SglangMultimodalRequest
+    ) -> tuple[torch.Tensor, int]:
+        ...
+
+    def create_multimodal_image_item(
+        self,
+        embeddings: torch.Tensor,
+        image_grid_thw: list[Any],
+    ) -> dict[str, Any]:
+        ...
+
+    def create_multimodal_video_item(
+        self,
+        embeddings: torch.Tensor,
+        video_grid_thw: list[Any],
+        second_per_grid_ts: list[float] | None = None,
+        video_timestamps: list[list[float]] | None = None,
+    ) -> dict[str, Any]:
+        ...
 
 
 class SglangUtils:
@@ -116,42 +139,59 @@ class EmbeddingsProcessor:
         self.embedding_receiver.release_tensor(tensor_id)
 
     @staticmethod
-    def create_multimodal_item(
+    def _create_processor_output_item(
         embeddings: torch.Tensor,
+        grid_key: Literal["image_grid_thw", "video_grid_thw"],
         grid_values: list[Any],
-        modality: str = "IMAGE",
-        second_per_grid_ts: list[float] | None = None,
-        video_timestamps: list[list[float]] | None = None,
-    ) -> dict:
-        """Create processor_output mm_item for SGLang async_generate."""
+        modality: Literal["IMAGE", "VIDEO"],
+    ) -> dict[str, Any]:
+        """Create shared processor_output fields for SGLang async_generate."""
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
-
-        GRID_KEYS = {"IMAGE": "image_grid_thw", "VIDEO": "video_grid_thw"}
-        if modality not in GRID_KEYS:
-            raise ValueError(
-                f"Unsupported modality for precomputed mm_item: {modality}"
-            )
-        grid_key = GRID_KEYS[modality]
         grid_payload = torch.tensor(grid_values)
 
-        mm_item: dict[str, Any] = {grid_key: grid_payload}
-        if modality == "VIDEO":
-            if second_per_grid_ts is not None:
-                mm_item["second_per_grid_ts"] = torch.tensor(
-                    second_per_grid_ts, dtype=torch.float32
-                )
-            if video_timestamps is not None:
-                # Keep per-video timestamp lists nested; Qwen VL indexes by video.
-                mm_item["video_timestamps"] = video_timestamps
+        mm_item: dict[str, Any] = {
+            grid_key: grid_payload,
+            "format": "processor_output",
+            "precomputed_embeddings": precomputed,
+            "modality": modality,
+        }
 
-        mm_item.update(
-            {
-                "format": "processor_output",
-                "precomputed_embeddings": precomputed,
-                "modality": modality,
-            }
+        return mm_item
+
+    @staticmethod
+    def create_multimodal_image_item(
+        embeddings: torch.Tensor,
+        image_grid_thw: list[Any],
+    ) -> dict[str, Any]:
+        """Create an image processor_output mm_item for SGLang async_generate."""
+        return EmbeddingsProcessor._create_processor_output_item(
+            embeddings,
+            "image_grid_thw",
+            image_grid_thw,
+            "IMAGE",
         )
 
+    @staticmethod
+    def create_multimodal_video_item(
+        embeddings: torch.Tensor,
+        video_grid_thw: list[Any],
+        second_per_grid_ts: list[float] | None = None,
+        video_timestamps: list[list[float]] | None = None,
+    ) -> dict[str, Any]:
+        """Create a video processor_output mm_item for SGLang async_generate."""
+        mm_item = EmbeddingsProcessor._create_processor_output_item(
+            embeddings,
+            "video_grid_thw",
+            video_grid_thw,
+            "VIDEO",
+        )
+        if second_per_grid_ts is not None:
+            mm_item["second_per_grid_ts"] = torch.tensor(
+                second_per_grid_ts, dtype=torch.float32
+            )
+        if video_timestamps is not None:
+            # Keep per-video timestamp lists nested; Qwen VL indexes by video.
+            mm_item["video_timestamps"] = video_timestamps
         return mm_item
 
 
@@ -263,7 +303,7 @@ class ErrorResponseBuilder:
 
 
 async def _build_mm_items(
-    request: SglangMultimodalRequest, embeddings_processor: EmbeddingsProcessor
+    request: SglangMultimodalRequest, embeddings_processor: EmbeddingsProcessorLike
 ) -> tuple[list[dict], list[dict], Optional[torch.Tensor], Optional[int]]:
     """Process embeddings and build multimodal items for SGLang.
 
@@ -337,10 +377,9 @@ async def _build_mm_items(
 
         if grouped_embeds["IMAGE"]:
             image_mm_items.append(
-                embeddings_processor.create_multimodal_item(
+                embeddings_processor.create_multimodal_image_item(
                     torch.cat(grouped_embeds["IMAGE"], dim=0),
                     grouped_grids["IMAGE"],
-                    modality="IMAGE",
                 )
             )
         if grouped_embeds["VIDEO"]:
@@ -357,10 +396,9 @@ async def _build_mm_items(
                     "video_timestamps must be present for every video group"
                 )
             video_data_items.append(
-                embeddings_processor.create_multimodal_item(
+                embeddings_processor.create_multimodal_video_item(
                     torch.cat(grouped_embeds["VIDEO"], dim=0),
                     grouped_grids["VIDEO"],
-                    modality="VIDEO",
                     second_per_grid_ts=video_second_per_grid_ts or None,
                     video_timestamps=video_timestamps or None,
                 )

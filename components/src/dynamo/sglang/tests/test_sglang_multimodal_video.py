@@ -74,17 +74,25 @@ async def test_build_mm_items_routes_video_to_video_data():
             return embeddings, 17
 
         @staticmethod
-        def create_multimodal_item(
+        def create_multimodal_image_item(
             embeddings,
-            grid_values,
-            modality="IMAGE",
+            image_grid_thw,
+        ):
+            return EmbeddingsProcessor.create_multimodal_image_item(
+                embeddings,
+                image_grid_thw,
+            )
+
+        @staticmethod
+        def create_multimodal_video_item(
+            embeddings,
+            video_grid_thw,
             second_per_grid_ts=None,
             video_timestamps=None,
         ):
-            return EmbeddingsProcessor.create_multimodal_item(
+            return EmbeddingsProcessor.create_multimodal_video_item(
                 embeddings,
-                grid_values,
-                modality=modality,
+                video_grid_thw,
                 second_per_grid_ts=second_per_grid_ts,
                 video_timestamps=video_timestamps,
             )
