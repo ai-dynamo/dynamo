@@ -67,17 +67,6 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN
 
 [See installation steps](../../installation-guide.md#overview)
 
-After installation, verify the installation:
-
-**Expected output**
-
-```bash
-kubectl get pods
-NAME                                                              READY   STATUS             RESTARTS   AGE
-dynamo-platform-dynamo-operator-controller-manager-69b9794fpgv9   2/2     Running            0          4m27s
-dynamo-platform-etcd-0                                            1/1     Running            0          4m27s
-dynamo-platform-nats-0                                            2/2     Running            0          4m27s
-```
 
 ## Deploy Inference Graph
 
