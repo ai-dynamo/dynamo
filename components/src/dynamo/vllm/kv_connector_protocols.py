@@ -154,8 +154,9 @@ def make_kv_connector_protocol(vllm_config: Any) -> KvConnectorProtocol:
     raise ValueError(
         f"Unsupported kv_connector={name!r} for PD. Supported names: "
         f"{supported}. If this is a typo or a renamed vLLM connector, fix "
-        f"the kv_transfer_config; if this is a new connector, add it to "
-        f"KV_CONNECTOR_PROTOCOLS."
+        f"the kv_transfer_config; if this is a new transport connector, add it "
+        f"to KV_CONNECTOR_PROTOCOLS; if this is a new wrapper connector, add "
+        f"it to PD_WRAPPER_TRANSPORT_INDEX."
     )
 
 
