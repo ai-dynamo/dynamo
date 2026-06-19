@@ -49,7 +49,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter::Directive, fmt};
 
 use crate::config::{
-    disable_ansi_logging, env_is_truthy, jsonl_logging_enabled, span_events_enabled,
+    disable_ansi_logging, env_is_falsey, env_is_truthy, jsonl_logging_enabled, span_events_enabled,
 };
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
@@ -142,6 +142,15 @@ impl Default for LoggingConfig {
 /// Check if OTLP trace exporting is enabled (accepts: "1", "true", "on", "yes" - case insensitive)
 fn otlp_exporter_enabled() -> bool {
     env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED)
+}
+
+/// Check if OTLP log exporting is enabled. Logs are exported by default when
+/// OTLP export is on; set `OTEL_EXPORT_LOGS_ENABLED` to a falsy value ("0",
+/// "false", "off", "no") to export traces only. This avoids flooding stderr
+/// with endpoint-unavailable errors when the collector accepts traces but not
+/// logs.
+fn otlp_logs_enabled() -> bool {
+    !env_is_falsey(env_logging::otlp::OTEL_EXPORT_LOGS_ENABLED)
 }
 
 /// Get the service name from environment or use default
@@ -303,7 +312,8 @@ fn log_otel_init_status(service_name: &str, endpoint_opt: Option<(OtlpProtocol, 
             endpoint = %endpoint,
             protocol = %protocol.as_str(),
             service = %service_name,
-            "OpenTelemetry OTLP export enabled (traces and logs)"
+            logs_enabled = otlp_logs_enabled(),
+            "OpenTelemetry OTLP export enabled"
         );
     } else {
         tracing::info!(
@@ -1334,16 +1344,25 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             }
             let tracer_provider = tracer_provider_builder.build();
 
-            let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
+            // Build the OTLP log exporter, unless log export is disabled
+            // (traces-only mode for collectors that accept traces but not
+            // logs).
+            let logger_provider_opt = if otlp_logs_enabled() {
+                let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
 
-            let logger_provider = SdkLoggerProvider::builder()
-                .with_batch_exporter(log_exporter)
-                .with_resource(resource)
-                .build();
+                Some(
+                    SdkLoggerProvider::builder()
+                        .with_batch_exporter(log_exporter)
+                        .with_resource(resource)
+                        .build(),
+                )
+            } else {
+                None
+            };
 
             (
                 tracer_provider,
-                Some(logger_provider),
+                logger_provider_opt,
                 Some((traces_protocol, traces_endpoint)),
             )
         } else {
@@ -2808,6 +2827,33 @@ pub mod tests {
     #[tracing::instrument(level = "info", target = "other_module", skip_all)]
     async fn other_target_info_span() {
         tracing::info!(target: "other_module", "inside other target span");
+    }
+
+    /// Verify `otlp_logs_enabled()` defaults to enabled when `OTEL_EXPORT_LOGS_ENABLED`
+    /// is unset, disables logs for falsy values, and keeps logs enabled for truthy
+    /// or unrecognized values.
+    #[test]
+    fn test_otlp_logs_enabled() {
+        use env_logging::otlp::OTEL_EXPORT_LOGS_ENABLED;
+
+        // Default (unset): logs are exported alongside traces.
+        temp_env::with_vars(vec![(OTEL_EXPORT_LOGS_ENABLED, None::<&str>)], || {
+            assert!(otlp_logs_enabled());
+        });
+
+        // Falsy values export traces only.
+        for val in ["0", "false", "off", "no", "OFF", "No"] {
+            temp_env::with_vars(vec![(OTEL_EXPORT_LOGS_ENABLED, Some(val))], || {
+                assert!(!otlp_logs_enabled(), "expected logs disabled for {val:?}");
+            });
+        }
+
+        // Truthy or unrecognized values keep logs enabled.
+        for val in ["1", "true", "on", "yes", "anything"] {
+            temp_env::with_vars(vec![(OTEL_EXPORT_LOGS_ENABLED, Some(val))], || {
+                assert!(otlp_logs_enabled(), "expected logs enabled for {val:?}");
+            });
+        }
     }
 
     /// Comprehensive test for span events covering:
