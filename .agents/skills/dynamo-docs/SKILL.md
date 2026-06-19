@@ -231,7 +231,7 @@ validates against `docs/benchmarks/_catalog/schema.json`, whose required set is 
 #### Target picker
 
 The picker is pure CSS under the `dynamo-*` namespace — **MDX uses `className`, not `class`**, and the
-exact class names matter (a wrong or `class=`-spelled wrapper renders but filters nothing). A
+exact class names matter (a wrong class name, or a `class=`-spelled wrapper, renders but filters nothing). A
 **multi-target** page renders `<div className="dynamo-target-picker">` containing a
 `dynamo-target-picker-title`, one `dynamo-target-picker-row` per dimension (a `dynamo-target-picker-dim`
 label plus radio `<input>` + `<label>` pairs), and one `dynamo-target-picker-summary` per combination
