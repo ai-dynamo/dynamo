@@ -21,10 +21,11 @@ start of every tick. Published unconditionally, they were written ``0`` on the
 ~35 of every 36 load-only ticks (default load=5s / throughput=180s), so Grafana
 reads ~0 essentially always while the planner logs real predictions every 180s.
 
-These tests pin that those five gauges are only written on throughput ticks,
-and that the load-stage ``estimated_*`` gauges remain written every tick.
-
-Drop-in for ``components/src/dynamo/planner/tests/unit/``.
+These tests pin that those five gauges are written only when a prediction is
+actually present -- on a builtin throughput tick, or on any tick whose
+diagnostics still carry a prediction -- and never on an empty load-only tick,
+while the load-stage ``estimated_*`` gauges remain written every tick. The
+throughput-decision *Enum* stays gated on ``tick.run_throughput_scaling``.
 """
 
 import os
@@ -130,8 +131,10 @@ _PREDICTED_GAUGES = (
 
 
 class TestReportDiagnosticsThroughputGauges:
-    """Throughput-cadence numeric gauges must only be written on throughput
-    ticks, so the 35/36 load-only ticks don't zero the last real value."""
+    """Throughput-cadence numeric gauges must be written only when a prediction
+    is actually present (the throughput loop is due, or a PREDICT plugin
+    produced one), so the ~35/36 empty load-only ticks don't zero the last real
+    value while a genuine off-cadence prediction is still published."""
 
     def test_load_only_tick_does_not_touch_throughput_gauges(self):
         """REGRESSION: a load-only tick must not write the predicted/engine
@@ -174,6 +177,27 @@ class TestReportDiagnosticsThroughputGauges:
 
         pm.estimated_ttft_ms.set.assert_called_once_with(171.0)
         pm.estimated_itl_ms.set.assert_called_once_with(12.0)
+
+    def test_prediction_present_without_throughput_flag_publishes_gauges(self):
+        """A tick that did not set ``run_throughput_scaling`` but still carries a
+        prediction (e.g. an independently-scheduled PREDICT plugin produced one)
+        must publish the five numeric gauges -- gating on the flag alone would
+        drop a real value. The throughput-decision enum stays gated on the flag,
+        so it must NOT be written on such a tick."""
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(
+            _tick(run_load=True, run_throughput=False), _diag_with_prediction()
+        )
+
+        pm.predicted_requests_per_second.set.assert_called_once_with(1330.0 / 180)
+        pm.predicted_input_sequence_tokens.set.assert_called_once_with(8008.0)
+        pm.predicted_output_sequence_tokens.set.assert_called_once_with(946.0)
+        pm.engine_prefill_capacity_requests_per_second.set.assert_called_once_with(2.5)
+        pm.engine_decode_capacity_requests_per_second.set.assert_called_once_with(4.0)
+        # enum is throughput-cadence only, not prediction-presence driven
+        pm.throughput_scaling_decision.state.assert_not_called()
 
     def test_skipped_when_prometheus_disabled(self):
         """No gauge writes at all when prometheus_port=0."""
