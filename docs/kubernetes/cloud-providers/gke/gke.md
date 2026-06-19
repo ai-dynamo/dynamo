@@ -49,18 +49,6 @@ gcloud container node-pools create gpu-pool \
     --max-nodes=3
 ```
 
-### Clone Dynamo GitHub repository
-
-**Note:** Please make sure GitHub branch/commit version matches with Dynamo platform and VLLM container.
-
-```bash
-git clone https://github.com/ai-dynamo/dynamo.git
-cd dynamo
-
-# Checkout the release branch matching your Dynamo platform version
-git checkout release/1.2.1
-```
-
 ### Set environment variables for GKE
 
 ```bash
