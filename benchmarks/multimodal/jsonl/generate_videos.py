@@ -1,99 +1,128 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Utilities for loading and sampling video URL pools."""
+"""Utilities for generating and sampling video pools."""
 
-import json
+import hashlib
 import random
 from pathlib import Path
-from typing import Any
+
+import numpy as np
 
 
-def _extract_video_ref(value: Any) -> str | None:
-    """Extract one video reference from a manifest value.
-
-    Accepted shapes are intentionally small and common:
-      - "https://.../clip.mp4"
-      - {"url": "..."}
-      - {"video": "..."}
-      - {"video_url": "..."} or {"video_url": {"url": "..."}}
-    """
-    if isinstance(value, str):
-        return value.strip() or None
-    if not isinstance(value, dict):
-        return None
-
-    for key in ("url", "video"):
-        ref = value.get(key)
-        if isinstance(ref, str) and ref.strip():
-            return ref.strip()
-
-    video_url = value.get("video_url")
-    if isinstance(video_url, str) and video_url.strip():
-        return video_url.strip()
-    if isinstance(video_url, dict):
-        ref = video_url.get("url")
-        if isinstance(ref, str) and ref.strip():
-            return ref.strip()
-
-    return None
+def _synthetic_video_key(
+    seed: int,
+    video_idx: int,
+    width: int,
+    height: int,
+    fps: int,
+    seconds: int,
+) -> str:
+    return f"seed{seed}_idx{video_idx:04d}_{width}x{height}_{fps}fps_{seconds}s"
 
 
-def _iter_manifest_records(path: Path) -> list[Any]:
-    text = path.read_text().strip()
-    if not text:
-        return []
-
-    if path.suffix.lower() == ".json":
-        data = json.loads(text)
-        if isinstance(data, dict):
-            for key in ("videos", "data", "items"):
-                if isinstance(data.get(key), list):
-                    return data[key]
-            return [data]
-        if isinstance(data, list):
-            return data
-        raise ValueError(f"Unsupported JSON manifest root type: {type(data).__name__}")
-
-    records: list[Any] = []
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            records.append(line)
-        if records[-1] is None:
-            raise ValueError(f"Invalid empty record at {path}:{line_no}")
-    return records
+def _derive_synthetic_seed(key: str) -> int:
+    digest = hashlib.sha256(key.encode()).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
 
-def load_video_pool(
-    py_rng: random.Random,
-    manifest_path: Path,
-    pool_size: int,
-) -> list[str]:
-    """Load up to pool_size unique video references from a text/json/jsonl manifest."""
-    records = _iter_manifest_records(manifest_path)
-    refs: list[str] = []
-    seen: set[str] = set()
-    for record in records:
-        ref = _extract_video_ref(record)
-        if ref and ref not in seen:
-            refs.append(ref)
-            seen.add(ref)
-
-    if pool_size > len(refs):
+def _write_synthetic_video(
+    path: Path,
+    seed: int,
+    width: int,
+    height: int,
+    fps: int,
+    seconds: int,
+) -> None:
+    try:
+        import imageio.v2 as imageio
+    except ImportError as exc:
         raise RuntimeError(
-            f"--videos-pool ({pool_size}) exceeds available videos in "
-            f"{manifest_path} ({len(refs)}). Reduce --videos-pool or add videos."
-        )
+            "Synthetic video generation requires imageio. Install imageio and "
+            "imageio-ffmpeg."
+        ) from exc
 
-    py_rng.shuffle(refs)
-    pool = refs[:pool_size]
+    frame_count = fps * seconds
+    rng = np.random.default_rng(seed)
+    base = rng.integers(0, 256, size=3, dtype=np.uint8)
+    accent = rng.integers(0, 256, size=3, dtype=np.uint8)
+    rect_w = max(4, width // 4)
+    rect_h = max(4, height // 4)
+    span_x = max(1, width - rect_w + 1)
+    span_y = max(1, height - rect_h + 1)
+    offset_x = int(rng.integers(0, span_x))
+    offset_y = int(rng.integers(0, span_y))
+    speed_x = int(rng.integers(1, max(2, width // 8)))
+    speed_y = int(rng.integers(1, max(2, height // 8)))
+    xx = np.arange(width, dtype=np.uint16)[None, :]
+    yy = np.arange(height, dtype=np.uint16)[:, None]
+
+    with imageio.get_writer(
+        str(path),
+        fps=fps,
+        codec="libx264",
+        macro_block_size=None,
+        ffmpeg_params=[
+            "-pix_fmt",
+            "yuv420p",
+            "-map_metadata",
+            "-1",
+            "-threads",
+            "1",
+        ],
+    ) as writer:
+        for frame_idx in range(frame_count):
+            frame = np.empty((height, width, 3), dtype=np.uint8)
+            frame[:, :, 0] = ((xx + int(base[0]) + frame_idx * speed_x) % 256).astype(
+                np.uint8
+            )
+            frame[:, :, 1] = ((yy + int(base[1]) + frame_idx * speed_y) % 256).astype(
+                np.uint8
+            )
+            frame[:, :, 2] = (
+                (xx // 2 + yy // 2 + int(base[2]) + frame_idx * 7) % 256
+            ).astype(np.uint8)
+
+            x = (offset_x + frame_idx * speed_x) % span_x
+            y = (offset_y + frame_idx * speed_y) % span_y
+            frame[y : y + rect_h, x : x + rect_w, :] = accent
+            writer.append_data(frame)
+
+
+def generate_synthetic_video_pool(
+    pool_size: int,
+    video_dir: Path,
+    video_size: tuple[int, int],
+    fps: int,
+    seconds: int,
+    seed: int,
+) -> list[str]:
+    """Generate pool_size deterministic local MP4 files and return their paths."""
+    width, height = video_size
+    if width <= 0 or height <= 0:
+        raise ValueError(f"synthetic video size must be positive, got {video_size}")
+    if width % 2 or height % 2:
+        raise ValueError(
+            f"synthetic video dimensions must be even for yuv420p, got {video_size}"
+        )
+    if fps <= 0:
+        raise ValueError(f"synthetic video fps must be positive, got {fps}")
+    if seconds <= 0:
+        raise ValueError(f"synthetic video seconds must be positive, got {seconds}")
+
+    video_dir.mkdir(parents=True, exist_ok=True)
+    pool: list[str] = []
+    for idx in range(pool_size):
+        key = _synthetic_video_key(seed, idx, width, height, fps, seconds)
+        path = video_dir / f"synthetic_{key}.mp4"
+        if not path.exists() or path.stat().st_size == 0:
+            video_seed = _derive_synthetic_seed(key)
+            _write_synthetic_video(path, video_seed, width, height, fps, seconds)
+        pool.append(str(path.resolve()))
+
     print(
-        f"  {pool_size} video URLs sampled from {manifest_path} ({len(refs)} available)"
+        f"  {pool_size} synthetic {width}x{height} videos "
+        f"({fps} fps, {seconds}s) saved to {video_dir}"
     )
     return pool
 

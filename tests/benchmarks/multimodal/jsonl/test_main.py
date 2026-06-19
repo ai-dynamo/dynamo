@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ pytest.importorskip("PIL", reason="Pillow required for image generation benchmar
 JSONL_DIR = Path(__file__).resolve().parents[4] / "benchmarks" / "multimodal" / "jsonl"
 sys.path.insert(0, str(JSONL_DIR))
 
+from generate_videos import generate_synthetic_video_pool  # noqa: E402
 from main import main  # noqa: E402
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -139,27 +141,15 @@ class TestSlidingWindow:
 class TestVideoSingleTurn:
     """video-single-turn mirrors image pool reuse across requests."""
 
-    @staticmethod
-    def _write_manifest(tmp_path: Path, count: int) -> Path:
-        manifest = tmp_path / "videos.txt"
-        manifest.write_text(
-            "\n".join(
-                f"https://example.com/video_{idx:04d}.mp4" for idx in range(count)
-            )
-            + "\n"
-        )
-        return manifest
-
     def test_video_pool_reuse_with_multiple_videos_per_request(
         self, tmp_path: Path
     ) -> None:
-        manifest = self._write_manifest(tmp_path, count=5)
+        pytest.importorskip("imageio")
+        pytest.importorskip("imageio_ffmpeg")
         lines = _run_main(
             tmp_path,
             [
                 "video-single-turn",
-                "--video-manifest",
-                str(manifest),
                 "-n",
                 "6",
                 "--videos-per-request",
@@ -168,6 +158,15 @@ class TestVideoSingleTurn:
                 "3",
                 "--seed",
                 "11",
+                "--synthetic-video-dir",
+                str(tmp_path / "clips"),
+                "--synthetic-video-size",
+                "32",
+                "32",
+                "--synthetic-video-fps",
+                "2",
+                "--synthetic-video-seconds",
+                "1",
                 "-o",
                 str(tmp_path / "videos.jsonl"),
             ],
@@ -186,43 +185,68 @@ class TestVideoSingleTurn:
         assert len(set(all_videos)) == 3
 
 
-class TestVideoSlidingWindow:
-    """video-sliding-window mirrors image overlap semantics."""
+class TestSyntheticVideo:
+    """Synthetic video mode generates reusable local MP4 inputs."""
 
-    @staticmethod
-    def _write_manifest(tmp_path: Path, count: int) -> Path:
-        manifest = tmp_path / "videos.txt"
-        manifest.write_text(
-            "\n".join(
-                f"https://example.com/video_{idx:04d}.mp4" for idx in range(count)
-            )
-            + "\n"
+    def test_synthetic_video_generation_is_reproducible_in_place(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("imageio")
+        pytest.importorskip("imageio_ffmpeg")
+        video_dir = tmp_path / "clips"
+        kwargs = dict(
+            pool_size=1,
+            video_dir=video_dir,
+            video_size=(32, 32),
+            fps=2,
+            seconds=1,
+            seed=123,
         )
-        return manifest
 
-    def test_video_overlap(self, tmp_path: Path) -> None:
-        manifest = self._write_manifest(tmp_path, count=5)
+        pool = generate_synthetic_video_pool(**kwargs)
+        first_digest = hashlib.sha256(Path(pool[0]).read_bytes()).hexdigest()
+        Path(pool[0]).unlink()
+
+        pool = generate_synthetic_video_pool(**kwargs)
+        second_digest = hashlib.sha256(Path(pool[0]).read_bytes()).hexdigest()
+
+        assert first_digest == second_digest
+
+    def test_video_single_turn_generates_local_synthetic_pool(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("imageio")
+        pytest.importorskip("imageio_ffmpeg")
+        video_dir = tmp_path / "clips"
         lines = _run_main(
             tmp_path,
             [
-                "video-sliding-window",
-                "--video-manifest",
-                str(manifest),
-                "--num-users",
-                "1",
-                "--turns-per-user",
+                "video-single-turn",
+                "-n",
                 "4",
-                "--window-size",
+                "--videos-per-request",
+                "1",
+                "--videos-pool",
                 "2",
+                "--synthetic-video-dir",
+                str(video_dir),
+                "--synthetic-video-size",
+                "32",
+                "32",
+                "--synthetic-video-fps",
+                "2",
+                "--synthetic-video-seconds",
+                "1",
                 "--seed",
-                "13",
+                "17",
                 "-o",
-                str(tmp_path / "video_overlap.jsonl"),
+                str(tmp_path / "synthetic.jsonl"),
             ],
         )
 
+        refs = [row["videos"][0] for row in lines]
         assert len(lines) == 4
-        for i in range(len(lines) - 1):
-            prev = lines[i]["videos"]
-            curr = lines[i + 1]["videos"]
-            assert prev[1:] == curr[:-1]
+        assert len(set(refs)) == 2
+        for ref in refs:
+            assert Path(ref).is_file()
+            assert Path(ref).suffix == ".mp4"

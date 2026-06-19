@@ -16,9 +16,9 @@ timeout: 1200
 output_dir: benchmarks/multimodal/sweep/results/sglang_e_pd
 
 input_files:
-  - benchmarks/multimodal/jsonl/100req_1vid_20pool_300word_http.jsonl
-  - benchmarks/multimodal/jsonl/100req_1vid_80pool_300word_http.jsonl
-  - benchmarks/multimodal/jsonl/100req_2vid_160pool_300word_http.jsonl
+  - benchmarks/multimodal/jsonl/100req_1vid_20pool_300word_local.jsonl
+  - benchmarks/multimodal/jsonl/100req_1vid_80pool_300word_local.jsonl
+  - benchmarks/multimodal/jsonl/100req_2vid_160pool_300word_local.jsonl
 
 configs:
   - label: cache-off
