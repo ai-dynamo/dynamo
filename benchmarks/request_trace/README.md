@@ -27,7 +27,8 @@ glob pattern. The converter emits Chrome Trace Event JSON:
 - inferred tool slices from request `finish_reason_metadata.tool_calls` when
   no matching tool event was traced; when the next same-trajectory request
   starts after the tool-call response, the slice spans that gap, otherwise the
-  converter emits a short `duration_unknown` synthetic slice at the response end
+  converter emits a short `duration_unknown` synthetic slice at the response
+  end, including when there is no following same-trajectory request
 - finish metadata on request slices, including final finish reason, backend
   finish reason, stop reason, per-choice finish summaries, and complete
   tool-call names

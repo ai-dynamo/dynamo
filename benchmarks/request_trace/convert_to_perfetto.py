@@ -16,7 +16,6 @@ import gzip
 import heapq
 import json
 import sys
-from itertools import pairwise
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -454,14 +453,17 @@ def _prepare_inferred_tool_items(
 
     for requests in by_trajectory.values():
         requests.sort(key=lambda item: item["ts_us"])
-        for request_item, next_request_item in pairwise(requests):
+        for index, request_item in enumerate(requests):
+            next_request_item = (
+                requests[index + 1] if index + 1 < len(requests) else None
+            )
             tool_calls = _inferred_tool_calls(request_item["request"])
             if not tool_calls:
                 continue
 
             start_us = request_item["ts_us"] + request_item["dur_us"]
-            end_us = next_request_item["ts_us"]
-            duration_unknown = end_us <= start_us
+            end_us = next_request_item["ts_us"] if next_request_item else start_us
+            duration_unknown = next_request_item is None or end_us <= start_us
 
             for tool_call in tool_calls:
                 tool_call_id = tool_call.get("id")
@@ -498,8 +500,10 @@ def _prepare_inferred_tool_items(
                             "duration_unknown": True,
                             "synthetic_duration": True,
                             "visual_duration_ms": _SYNTHETIC_TOOL_DURATION_US / 1000.0,
-                            "overlapping_request_id": next_request_item["request"].get(
-                                "request_id"
+                            "overlapping_request_id": (
+                                next_request_item["request"].get("request_id")
+                                if next_request_item
+                                else None
                             ),
                         }
                     )

@@ -76,7 +76,7 @@ def check_convert_records_emits_request_stages_and_metadata():
         include_markers=True,
     )
 
-    assert converted == 1
+    assert converted == 2
     events = trace["traceEvents"]
     assert [event for event in events if event["ph"] == "M"]
 
@@ -549,6 +549,35 @@ def check_convert_records_infers_tool_slices_between_requests():
     assert "next_request_id" not in tool_event["args"]
     assert "ended_at_unix_ms" not in tool_event["args"]
     assert "duration_ms" not in tool_event["args"]
+
+    trace, converted = convert_records(
+        [
+            request(
+                "req-terminal-tool-call",
+                1000,
+                100,
+                {
+                    "finish_reason": "tool_calls",
+                    "tool_calls": [{"id": "call-1", "name": "exec_command"}],
+                },
+            ),
+        ],
+        include_stages=False,
+        include_markers=False,
+    )
+
+    assert converted == 2
+    tool_event = next(
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool"
+    )
+    assert tool_event["ts"] == 1_100_000
+    assert tool_event["dur"] == 1_000
+    assert tool_event["args"]["duration_unknown"] is True
+    assert tool_event["args"]["synthetic_duration"] is True
+    assert "next_request_id" not in tool_event["args"]
+    assert "overlapping_request_id" not in tool_event["args"]
 
     trace, converted = convert_records(
         [
