@@ -283,6 +283,9 @@ STUB_MODULES = [
     "zmq",
     "zmq.asyncio",
     "blake3",
+    # dynamo.vllm.main and omni/main.py import uvloop at module top-level;
+    # stub it so collection doesn't fail in pre-commit environments without it.
+    "uvloop",
 ]
 
 # Project paths for local imports
