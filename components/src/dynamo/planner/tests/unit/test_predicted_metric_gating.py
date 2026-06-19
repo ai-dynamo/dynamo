@@ -84,6 +84,7 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
 
 
 def _tick(run_load: bool, run_throughput: bool) -> ScheduledTick:
+    """A ScheduledTick that runs the load and/or throughput scaling stages."""
     return ScheduledTick(
         at_s=0.0,
         run_load_scaling=run_load,
