@@ -49,26 +49,27 @@ gcloud container node-pools create gpu-pool \
     --max-nodes=3
 ```
 
+## Install Dynamo Kubernetes Platform
+
+[See installation steps](../../installation-guide.md#overview)
+
+## Deploy Inference Graph
+
 ### Create a namespace for your inference graph deployments
 
 ```bash
-export NAMESPACE=my-inference
-kubectl create namespace $NAMESPACE
+export INFERENCE_NAMESPACE=my-inference
+kubectl create namespace $INFERENCE_NAMESPACE
 ```
 
 ### Create a secret to store your Hugging Face token (needed to download model weights from Hugging Face)
 
 ```bash
 export HF_TOKEN=<HF_TOKEN>
-kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN} -n ${NAMESPACE}
+kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN} -n ${INFERENCE_NAMESPACE}
 ```
 
-## Install Dynamo Kubernetes Platform
-
-[See installation steps](../../installation-guide.md#overview)
-
-
-## Deploy Inference Graph
+### Perform the deployment
 
 We will deploy a LLM model to the Dynamo platform. Here we use `Qwen/Qwen3-0.6B` model with VLLM and disaggregated deployment as an example.
 
