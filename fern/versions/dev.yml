@@ -42,8 +42,6 @@ navigation:
             path: ../pages-dev/getting-started/kubernetes-deployment.md
           - page: Contribution Guide
             path: ../pages-dev/contribution-guide.md
-          - page: Documentation Style Guide
-            path: ../pages-dev/documentation-style-guide.md
       # ==================== Resources ====================
       - section: Resources
         contents:
@@ -488,7 +486,9 @@ navigation:
       # ==================== Documentation ====================
       - section: Documentation
         contents:
-          - page: Dynamo Docs Guide
+          - page: Style Guide
+            path: ../pages-dev/documentation-style-guide.md
+          - page: Building and Publishing
             path: ../pages-dev/README.md
       # ==================== Hidden Pages ====================
       # Pages accessible via direct URL but not shown in main navigation.
