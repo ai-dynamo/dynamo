@@ -88,7 +88,7 @@ class EmbeddingsProcessor:
         self, request: SglangMultimodalRequest
     ) -> tuple[torch.Tensor, int]:
         """Process one concatenated embedding tensor from serialized request."""
-        logger.debug("Processing embeddings with shape: " f"{request.embeddings_shape}")
+        logger.debug(f"Processing embeddings with shape: {request.embeddings_shape}")
 
         multimodal_groups = request.multimodal_inputs
         if not multimodal_groups:
@@ -118,10 +118,10 @@ class EmbeddingsProcessor:
     @staticmethod
     def create_multimodal_item(
         embeddings: torch.Tensor,
-        grid_values,
+        grid_values: list[Any],
         modality: str = "IMAGE",
-        second_per_grid_ts: Any | None = None,
-        video_timestamps: Any | None = None,
+        second_per_grid_ts: list[float] | None = None,
+        video_timestamps: list[list[float]] | None = None,
     ) -> dict:
         """Create processor_output mm_item for SGLang async_generate."""
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
@@ -141,6 +141,7 @@ class EmbeddingsProcessor:
                     second_per_grid_ts, dtype=torch.float32
                 )
             if video_timestamps is not None:
+                # Keep per-video timestamp lists nested; Qwen VL indexes by video.
                 mm_item["video_timestamps"] = video_timestamps
 
         mm_item.update(
@@ -272,7 +273,7 @@ async def _build_mm_items(
     image_mm_items: list[dict] = []
     video_data_items: list[dict] = []
 
-    encoded_groups: list[tuple[str, Any, int, Any, Any]] = []
+    encoded_groups: list[tuple[str, Any, int, float | None, list[float] | None]] = []
 
     for group in request.multimodal_inputs:
         if group.num_mm_tokens is not None and group.num_mm_tokens > 0:
@@ -307,8 +308,9 @@ async def _build_mm_items(
 
         grouped_grids: dict[str, list[Any]] = {"IMAGE": [], "VIDEO": []}
         grouped_embeds: dict[str, list[torch.Tensor]] = {"IMAGE": [], "VIDEO": []}
-        video_second_per_grid_ts: list[Any] = []
-        video_timestamps: list[Any] = []
+        video_second_per_grid_ts: list[float] = []
+        # SGLang expects one timestamp list per video in the grouped item.
+        video_timestamps: list[list[float]] = []
 
         offset = 0
         for (
@@ -580,7 +582,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                     "Shape mismatch error - this likely indicates a tokenization/embedding alignment issue"
                 )
                 logger.error(f"Request token IDs length: {len(input_ids)}")
-                logger.error("Embeddings shape: " f"{request.embeddings_shape}")
+                logger.error(f"Embeddings shape: {request.embeddings_shape}")
                 logger.error(f"Token sequence preview: {input_ids[:20]}...")
                 error_msg = (
                     f"Multimodal embedding alignment error: {str(e)}. "

@@ -48,6 +48,14 @@ def cache_handler() -> MultimodalEncodeWorkerHandler:
             return await self.encode_mock(mm_items, modality)
 
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+
+    def _set_token_ids_for_test(image_token_id: int, video_token_id: int) -> None:
+        handler.image_token_id = image_token_id
+        handler.video_token_id = video_token_id
+
+    handler.set_token_ids_for_test = _set_token_ids_for_test
+    handler.set_token_ids_for_test(151655, 151656)
+    handler._missing_video_cache_key_config_warned = False
     handler._embedding_cache = MultimodalEmbeddingCacheManager(
         capacity_bytes=32 * 1024 * 1024
     )
@@ -168,9 +176,7 @@ async def test_video_requests_reuse_cached_embeddings(
     """Second identical video request should reuse cached embeddings."""
 
     video_url = "https://example.com/clip.mp4"
-    video_token_id = 151656
-    cache_handler.image_token_id = 151655
-    cache_handler.video_token_id = video_token_id
+    video_token_id = cache_handler.video_token_id
 
     cache_handler.encoder.encode_mock.return_value = (
         torch.tensor([2, 3, 4]),
