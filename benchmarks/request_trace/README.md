@@ -25,8 +25,9 @@ glob pattern. The converter emits Chrome Trace Event JSON:
   `started_at_unix_ms`/`ended_at_unix_ms` are preferred, then `duration_ms`,
   then paired `tool_start` timing when both records are present
 - inferred tool slices from request `finish_reason_metadata.tool_calls` when
-  no matching tool event was traced; these span the gap from the tool-call LLM
-  response end to the next LLM request start in the same trajectory
+  no matching tool event was traced; when the next same-trajectory request
+  starts after the tool-call response, the slice spans that gap, otherwise the
+  converter emits a short `duration_unknown` synthetic slice at the response end
 - finish metadata on request slices, including final finish reason, backend
   finish reason, stop reason, per-choice finish summaries, and complete
   tool-call names

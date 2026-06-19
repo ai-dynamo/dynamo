@@ -521,6 +521,40 @@ def check_convert_records_infers_tool_slices_between_requests():
             request(
                 "req-tool-call",
                 1000,
+                100,
+                {
+                    "finish_reason": "tool_calls",
+                    "tool_calls": [{"id": "call-1", "name": "exec_command"}],
+                },
+            ),
+            request("req-overlap", 1050, 40),
+            request("req-later", 1200, 40),
+        ],
+        include_stages=False,
+        include_markers=False,
+    )
+
+    assert converted == 4
+    tool_event = next(
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool"
+    )
+    assert tool_event["ts"] == 1_100_000
+    assert tool_event["dur"] == 1_000
+    assert tool_event["args"]["duration_unknown"] is True
+    assert tool_event["args"]["synthetic_duration"] is True
+    assert tool_event["args"]["visual_duration_ms"] == 1.0
+    assert tool_event["args"]["overlapping_request_id"] == "req-overlap"
+    assert "next_request_id" not in tool_event["args"]
+    assert "ended_at_unix_ms" not in tool_event["args"]
+    assert "duration_ms" not in tool_event["args"]
+
+    trace, converted = convert_records(
+        [
+            request(
+                "req-tool-call",
+                1000,
                 50,
                 {
                     "finish_reason": "tool_calls",

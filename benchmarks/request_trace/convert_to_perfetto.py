@@ -461,8 +461,7 @@ def _prepare_inferred_tool_items(
 
             start_us = request_item["ts_us"] + request_item["dur_us"]
             end_us = next_request_item["ts_us"]
-            if end_us <= start_us:
-                continue
+            duration_unknown = end_us <= start_us
 
             for tool_call in tool_calls:
                 tool_call_id = tool_call.get("id")
@@ -487,15 +486,36 @@ def _prepare_inferred_tool_items(
                     "inferred": True,
                     "host_execution": False,
                     "source_request_id": request_item["request"].get("request_id"),
-                    "next_request_id": next_request_item["request"].get("request_id"),
                     "tool_call_id": tool_call_id,
                     "tool_call_index": tool_call.get("tool_call_index"),
                     "choice_index": tool_call.get("choice_index"),
                     "tool_class": tool_name,
                     "started_at_unix_ms": start_us / 1000.0,
-                    "ended_at_unix_ms": end_us / 1000.0,
-                    "duration_ms": (end_us - start_us) / 1000.0,
                 }
+                if duration_unknown:
+                    args.update(
+                        {
+                            "duration_unknown": True,
+                            "synthetic_duration": True,
+                            "visual_duration_ms": _SYNTHETIC_TOOL_DURATION_US / 1000.0,
+                            "overlapping_request_id": next_request_item["request"].get(
+                                "request_id"
+                            ),
+                        }
+                    )
+                    dur_us = _SYNTHETIC_TOOL_DURATION_US
+                else:
+                    args.update(
+                        {
+                            "next_request_id": next_request_item["request"].get(
+                                "request_id"
+                            ),
+                            "ended_at_unix_ms": end_us / 1000.0,
+                            "duration_ms": (end_us - start_us) / 1000.0,
+                        }
+                    )
+                    dur_us = end_us - start_us
+
                 items.append(
                     {
                         "kind": "inferred_tool",
@@ -506,7 +526,7 @@ def _prepare_inferred_tool_items(
                             if value is not None
                         },
                         "ts_us": start_us,
-                        "dur_us": end_us - start_us,
+                        "dur_us": dur_us,
                         "session_id": request_item["session_id"],
                         "trajectory_id": request_item["trajectory_id"],
                     }
