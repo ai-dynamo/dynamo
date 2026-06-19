@@ -70,6 +70,10 @@ pub mod runtime {
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
 
+    /// Maximum time to wait for graceful endpoint drain during runtime shutdown.
+    pub const DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
+        "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
+
     /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
     /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
     pub const DYN_ENABLE_POLL_HISTOGRAM: &str = "DYN_ENABLE_POLL_HISTOGRAM";
@@ -618,6 +622,7 @@ mod tests {
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
+            runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
             runtime::system::DYN_SYSTEM_PORT,
@@ -746,6 +751,7 @@ mod tests {
     fn test_naming_conventions() {
         // Dynamo-specific vars should start with DYN_
         assert!(runtime::DYN_RUNTIME_NUM_WORKER_THREADS.starts_with("DYN_"));
+        assert!(runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS.starts_with("DYN_"));
         assert!(runtime::system::DYN_SYSTEM_ENABLED.starts_with("DYN_"));
         assert!(kvbm::DYN_KVBM_METRICS.starts_with("DYN_"));
         assert!(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("DYN_"));

@@ -24,17 +24,12 @@ from tests.router.helper import (
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
-    send_request_with_retry,
     verify_response_timing,
     wait_for_frontend_ready,
     wait_for_indexer_workers_active,
     wait_for_workers_ready,
 )
-from tests.router.router_process import (
-    DirectRouterProcess,
-    FrontendRouterProcess,
-    KVRouterProcess,
-)
+from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -214,6 +209,9 @@ def _test_router_basic(
                 frontend_url=frontend_url,
                 expected_num_workers=engine_workers.num_workers,
                 timeout=frontend_timeout,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
         )
 
@@ -313,6 +311,9 @@ def _test_router_override_router_config(
                 frontend_url=frontend_url,
                 expected_num_workers=engine_workers.num_workers,
                 timeout=frontend_timeout,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
         )
 
@@ -402,6 +403,8 @@ def _test_router_two_routers(
                     frontend_url=frontend_url,
                     expected_num_workers=engine_workers.num_workers,
                     timeout=120,
+                    engine_workers=engine_workers,
+                    store_backend=store_backend,
                 )
             )
         logger.info("Both routers have discovered workers")
@@ -530,17 +533,6 @@ def _test_remote_indexer_decisions(
 ):
     """Validate remote-indexer-backed routing decisions using direct KvRouter instances."""
 
-    async def wait_for_worker_ids(endpoint, expected_num_workers: int) -> list[int]:
-        client = await endpoint.client()
-
-        for _ in range(120):
-            worker_ids = sorted(set(client.instance_ids()))
-            if len(worker_ids) >= expected_num_workers:
-                return worker_ids
-            await asyncio.sleep(1)
-
-        raise TimeoutError("Timed out waiting for backend worker IDs")
-
     async def wait_for_served_indexer(
         runtime,
         expected_query_instances: int,
@@ -650,8 +642,10 @@ def _test_remote_indexer_decisions(
             router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
 
-        worker_ids = await wait_for_worker_ids(
-            serving_endpoints[0], expected_num_instances
+        worker_ids = sorted(
+            await poll_for_worker_instances(
+                serving_endpoints[0], expected_num_instances, max_wait_time=120
+            )
         )
         if len(worker_ids) >= 2:
             worker_a_id = worker_ids[0]
@@ -762,7 +756,9 @@ def _test_remote_indexer_decisions(
                 f"(longest prefix match), got {req5['prefill_dp_rank']}"
             )
 
-        await wait_for_worker_ids(consumer_endpoint, expected_num_instances)
+        await poll_for_worker_instances(
+            consumer_endpoint, expected_num_instances, max_wait_time=120
+        )
 
     asyncio.run(test_sync())
 
@@ -930,9 +926,16 @@ def _test_router_query_instance_id(
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
-        # Send a warming request first to ensure system is ready
-        logger.info("Sending warming request without annotations...")
-        asyncio.run(send_request_with_retry(url, test_payload))
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=f"http://localhost:{frontend_port}",
+                expected_num_workers=engine_workers.num_workers,
+                timeout=120,
+                test_payload=test_payload,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+            )
+        )
 
         # Test payload with query_instance_id annotation
         # Format: "query_instance_id:" (colon with empty value) for GAIE aggregated mode
@@ -1298,8 +1301,9 @@ def _test_router_overload_503(
         asyncio.run(
             wait_for_frontend_ready(
                 frontend_url=frontend_url,
-                expected_num_workers=1,
+                expected_num_workers=engine_workers.num_workers,
                 timeout=60,
+                engine_workers=engine_workers,
             )
         )
 
@@ -1307,6 +1311,7 @@ def _test_router_overload_503(
 
 
 def _test_disagg_router_overload_503(
+    prefill_workers,
     decode_workers,
     block_size: int,
     request,
@@ -1369,8 +1374,13 @@ def _test_disagg_router_overload_503(
         asyncio.run(
             wait_for_frontend_ready(
                 frontend_url=frontend_url,
-                expected_num_workers=decode_workers.num_workers,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
                 timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
         )
 
@@ -1430,8 +1440,9 @@ def _test_router_threshold_none_disables_rejection(
         asyncio.run(
             wait_for_frontend_ready(
                 frontend_url=frontend_url,
-                expected_num_workers=1,
+                expected_num_workers=engine_workers.num_workers,
                 timeout=60,
+                engine_workers=engine_workers,
             )
         )
 
@@ -2186,8 +2197,13 @@ def _test_router_decisions_disagg(
         asyncio.run(
             wait_for_frontend_ready(
                 frontend_url=frontend_url,
-                expected_num_workers=decode_workers.num_workers,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
                 timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
         )
 
@@ -2429,8 +2445,13 @@ def _test_disagg_background_prefill_sticky_routing(
         async def test_sync():
             await wait_for_frontend_ready(
                 frontend_url=frontend_url,
-                expected_num_workers=decode_workers.num_workers,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
                 timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
 
             runtime = get_runtime(
@@ -2567,13 +2588,13 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 frontend_url=frontend_url,
                 expected_num_workers=decode_workers.num_workers,
                 timeout=120,
+                engine_workers=decode_workers,
+                request_plane=request_plane,
             )
 
             runtime = get_runtime(request_plane=request_plane)
-            decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
             prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
 
-            await poll_for_worker_instances(decode_endpoint, decode_workers.num_workers)
             await poll_for_worker_instances(
                 prefill_endpoint, decode_workers.num_workers
             )
@@ -2636,6 +2657,8 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 expected_num_workers=decode_workers.num_workers,
                 timeout=120,
                 test_payload=topology_ready_payload,
+                engine_workers=decode_workers,
+                request_plane=request_plane,
             )
 
             async with aiohttp.ClientSession() as session:
@@ -2698,8 +2721,13 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
             chat_url = f"{frontend_url}/v1/chat/completions"
             await wait_for_frontend_ready(
                 frontend_url=frontend_url,
-                expected_num_workers=decode_workers.num_workers,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
                 timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
 
             runtime = get_runtime(
@@ -2726,18 +2754,11 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                 engine_workers=prefill_workers,
             )
 
-            client = await prefill_endpoint.client()
-            worker_ids: list[int] = []
-            deadline = asyncio.get_running_loop().time() + 60
-            while asyncio.get_running_loop().time() < deadline:
-                worker_ids = sorted(set(client.instance_ids()))
-                if len(worker_ids) >= prefill_workers.num_workers:
-                    break
-                await asyncio.sleep(1.0)
-
-            assert len(worker_ids) == prefill_workers.num_workers, (
-                f"Timed out waiting for prefill workers. "
-                f"Found {worker_ids}, expected {prefill_workers.num_workers}"
+            worker_ids = sorted(
+                await poll_for_worker_instances(
+                    prefill_endpoint,
+                    prefill_workers.num_workers,
+                )
             )
             prefill_worker_id = worker_ids[0]
 
@@ -3242,6 +3263,9 @@ def _test_busy_threshold_endpoint(
                 frontend_url=frontend_url,
                 expected_num_workers=engine_workers.num_workers,
                 timeout=120,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
         )
 
@@ -3517,40 +3541,17 @@ def _test_disagg_direct_mode(
         test_payload: Base test payload for /v1/chat/completions.
         request_plane: Transport for request plane ("nats" or "tcp").
     """
-    with DirectRouterProcess(
+    with FrontendRouterProcess(
         request,
+        BLOCK_SIZE,
         frontend_port,
         decode_workers.namespace,
         enforce_disagg=True,
         request_plane=request_plane,
+        router_mode="direct",
     ):
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
-
-        logger.info("Waiting for models to appear in Direct-mode frontend...")
-
-        async def wait_for_models():
-            models_url = f"{frontend_url}/v1/models"
-            for _ in range(120):
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(models_url) as response:
-                            if response.status == 200:
-                                data = await response.json()
-                                models = data.get("data", [])
-                                if models:
-                                    logger.info(
-                                        f"Models registered: {[m.get('id') for m in models]}"
-                                    )
-                                    return
-                except Exception as e:
-                    logger.debug(f"Error checking models endpoint: {e}")
-                await asyncio.sleep(1)
-            raise TimeoutError("Timeout waiting for models in Direct-mode frontend")
-
-        asyncio.run(wait_for_models())
-
-        # Phase 2: Discover worker IDs via the runtime
         runtime = get_runtime(request_plane=request_plane)
         prefill_endpoint = runtime.endpoint(
             f"{decode_workers.namespace}.prefill.generate"
@@ -3559,21 +3560,30 @@ def _test_disagg_direct_mode(
             f"{decode_workers.namespace}.backend.generate"
         )
 
-        async def discover_workers():
-            prefill_client = await prefill_endpoint.client()
-            decode_client = await decode_endpoint.client()
-
-            for _ in range(60):
-                p_ids = prefill_client.instance_ids()
-                d_ids = decode_client.instance_ids()
-                if p_ids and d_ids:
-                    return p_ids, d_ids
-                await asyncio.sleep(0.5)
-            raise TimeoutError(
-                f"Timeout discovering workers: prefill={p_ids}, decode={d_ids}"
+        async def wait_for_direct_frontend():
+            prefill_ids = await poll_for_worker_instances(
+                prefill_endpoint,
+                prefill_workers.num_workers,
             )
+            decode_ids = await poll_for_worker_instances(
+                decode_endpoint,
+                decode_workers.num_workers,
+            )
+            headers = {
+                "x-worker-instance-id": str(decode_ids[0]),
+                "x-prefill-instance-id": str(prefill_ids[0]),
+                "x-dp-rank": "0",
+                "x-prefill-dp-rank": "0",
+            }
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                timeout=120,
+                test_payload={**test_payload, "stream": False},
+                request_headers=headers,
+            )
+            return prefill_ids, decode_ids
 
-        prefill_ids, decode_ids = asyncio.run(discover_workers())
+        prefill_ids, decode_ids = asyncio.run(wait_for_direct_frontend())
         logger.info(f"Discovered prefill workers: {prefill_ids}")
         logger.info(f"Discovered decode workers: {decode_ids}")
 
@@ -3599,34 +3609,18 @@ def _test_disagg_direct_mode(
             }
 
             async with aiohttp.ClientSession() as session:
-                # Retry a few times to allow the pipeline to warm up
-                for attempt in range(10):
-                    async with session.post(
-                        chat_url, json=payload, headers=headers
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            logger.info(
-                                f"Direct-mode response (attempt {attempt + 1}): "
-                                f"status=200, model={data.get('model')}"
-                            )
-                            assert (
-                                "choices" in data
-                            ), "Expected 'choices' in response data"
-                            assert (
-                                len(data["choices"]) > 0
-                            ), "Expected at least one choice in response"
-                            break
-                        else:
-                            logger.info(
-                                f"Direct-mode attempt {attempt + 1} returned "
-                                f"status {response.status}, retrying..."
-                            )
-                            await asyncio.sleep(2)
-                else:
-                    raise AssertionError(
-                        "Direct-mode request with headers never returned 200"
+                async with session.post(
+                    chat_url, json=payload, headers=headers
+                ) as response:
+                    assert response.status == 200, (
+                        "Direct-mode request with headers failed: "
+                        f"status={response.status}, body={await response.text()}"
                     )
+                    data = await response.json()
+                    assert "choices" in data, "Expected 'choices' in response data"
+                    assert (
+                        len(data["choices"]) > 0
+                    ), "Expected at least one choice in response"
 
                 # Test 2: Request WITHOUT headers should fail (Direct mode
                 # rejects requests that have no worker ID)

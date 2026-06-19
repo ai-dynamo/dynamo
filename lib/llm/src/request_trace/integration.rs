@@ -366,8 +366,8 @@ mod tests {
         let state = RequestEndTraceState {
             agent: Some(AgentContextTraceState {
                 agent_context: AgentContext {
-                    session_type_id: "agent_harness".to_string(),
-                    session_id: "run-1".to_string(),
+                    session_type_id: Some("agent_harness".to_string()),
+                    session_id: Some("run-1".to_string()),
                     trajectory_id: "root".to_string(),
                     parent_trajectory_id: None,
                     trajectory_final: None,
@@ -440,8 +440,8 @@ mod tests {
             ..Default::default()
         });
         request.agent_context = Some(AgentContext {
-            session_type_id: "agent_harness".to_string(),
-            session_id: "run-unsupported".to_string(),
+            session_type_id: Some("agent_harness".to_string()),
+            session_id: Some("run-unsupported".to_string()),
             trajectory_id: "root".to_string(),
             parent_trajectory_id: None,
             trajectory_final: None,
