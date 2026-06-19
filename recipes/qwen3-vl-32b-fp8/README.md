@@ -85,17 +85,12 @@ curl http://localhost:8000/v1/chat/completions \
 ## Run Performance Benchmarks
 
 ```bash
-# Benchmark (aggregated and disaggregated share the same template — use envsubst to set BENCH_NAME and BENCH_ENDPOINT)
+# Benchmark (aggregated and disaggregated share the same template)
 # Example for aggregated:
-BENCH_NAME=qwen3-vl-32b-fp8-agg-perf BENCH_ENDPOINT=qwen3-vl-32b-fp8-vllm-agg-frontend:8000 \
-  kubectl apply -f benchmark/perf.yaml -n ${NAMESPACE}
+./benchmark/run-benchmark.sh --config agg -n ${NAMESPACE}
 
 # Example for disaggregated:
-BENCH_NAME=qwen3-vl-32b-fp8-disagg-perf BENCH_ENDPOINT=qwen3-vl-32b-fp8-vllm-disagg-frontend:8000 \
-  kubectl apply -f benchmark/perf.yaml -n ${NAMESPACE}
-
-# Monitor benchmark progress
-kubectl logs -f job/qwen3-vl-32b-fp8-agg-perf -n ${NAMESPACE}
+./benchmark/run-benchmark.sh --config disagg -n ${NAMESPACE}
 ```
 
 ## Model Details
