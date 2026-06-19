@@ -16,6 +16,7 @@ import gzip
 import heapq
 import json
 import sys
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -453,7 +454,7 @@ def _prepare_inferred_tool_items(
 
     for requests in by_trajectory.values():
         requests.sort(key=lambda item: item["ts_us"])
-        for request_item, next_request_item in zip(requests, requests[1:]):
+        for request_item, next_request_item in pairwise(requests):
             tool_calls = _inferred_tool_calls(request_item["request"])
             if not tool_calls:
                 continue
