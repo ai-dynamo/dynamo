@@ -139,8 +139,11 @@ Short intro paragraph stating what the page covers.
 > [!IMPORTANT]
 > A page's URL is `<section-slug>/<page-name-slug>`, where the page-name slug comes from the nav
 > `page:` label. Moving a page to another section **or** renaming its label changes that URL. Add a
-> redirect to the `redirects:` list in `fern/docs.yml` (`source` → `destination`, dev-scoped:
-> `/dynamo/dev/<old>` → `/dynamo/dev/<new>`) so existing links keep working.
+> **dev-scoped** redirect to the `redirects:` list in `fern/docs.yml`: `/dynamo/dev/<old>` →
+> `/dynamo/dev/<new>`. Editing `docs/index.yml` regenerates only the `dev` nav, so do **not** redirect
+> the unversioned (`/dynamo/<old>`) or `/dynamo/latest/<old>` forms — those serve **Latest**, a frozen
+> release snapshot that `main` edits don't touch, and a redirect there would break a working URL. See
+> [Redirects and the version model](#redirects-and-the-version-model).
 
 ### Remove a Page
 
@@ -321,9 +324,25 @@ Design Docs, Documentation, Hidden Pages. To place a page, match the nearest exi
 - **Versioned navs.** Author only against `docs/` on `main` (the `pages-dev` set). When a release is
   cut, the publish step copies `pages-dev/ → pages-vX.Y.Z/` and rewrites nav paths — **never** edit a
   `pages-vX.Y.Z/` directory by hand. Write portable paths so the rewrite stays clean.
-- **Redirects.** A moved or renamed page (changed section or `page:` label) changes its URL. Add a
-  `fern/docs.yml` redirect — dev-scoped `/dynamo/dev/<old>` → `/dynamo/dev/<new>` for a main-only
-  change — so existing links survive.
+### Redirects and the version model
+
+The site serves the same nav under three prefixes: **`dev`** (slug `dev`, tracks `main`, regenerated on
+every push), **Latest** (slug `/` — the unversioned root `/dynamo/...` *and* `/dynamo/latest/...`, a
+frozen snapshot of the newest release), and pinned **`vX.Y.Z`** (immutable snapshots). A
+`docs/index.yml` edit on `main` regenerates **only the `dev` nav**.
+
+So a moved or renamed page (changed section or `page:` label) changes only its `/dynamo/dev/<old>` URL.
+Add one dev-scoped `fern/docs.yml` redirect:
+
+```yaml
+- source: "/dynamo/dev/<old>"
+  destination: "/dynamo/dev/<new>"
+```
+
+**Do not** add unversioned (`/dynamo/<old>`) or `/dynamo/latest/<old>` redirects for a main-only move:
+Latest is frozen, still serves the old path, and a redirect there would break a working URL and point at
+a `<new>` that won't exist in Latest until the next release re-snapshots it. Per-version redirects are a
+release-time concern, not an authoring one.
 
 ## Validate
 
@@ -363,7 +382,7 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | `fern check` YAML error | Check 2-space indent; `- page:` must sit under a section's `contents:` |
 | Missing/orphaned file | `path:` in `index.yml` must match the actual file location |
 | Broken links in CI | `grep -rn "<filename>" docs/` and fix stale references |
-| 404 after a move/rename | Add a `fern/docs.yml` redirect from the old URL to the new one |
+| 404 after a move/rename | Add a **dev-scoped** `fern/docs.yml` redirect (`/dynamo/dev/<old>` → `/dynamo/dev/<new>`); don't redirect `latest`/unversioned (those serve the frozen newest release) |
 | MDX parse error | Replace `<https://...>` with `[text](https://...)`; escape stray `<`/`>`; blank line after `<div ...>` and before `</div>`, code fences at column 0 |
 | Page missing from site | Ensure the nav entry exists in `index.yml`; allow a few minutes for sync |
 | Target picker renders but filters nothing | Use `className` (not `class`) and the exact `dynamo-target-picker` classes; and ensure the axis `value=` is in `fern/main.css` (add its hide rule) |

@@ -433,6 +433,35 @@ git push origin v0.9.0
 The `release-version` job in `fern-docs.yml` handles everything else
 automatically.
 
+### Redirects
+
+When a page's URL changes — moved to a different section, or its nav label
+renamed — add a redirect to the `redirects:` list in `fern/docs.yml` so existing
+links keep working. The key rule is **scope the redirect to the version whose
+nav actually changed**, and for everyday authoring that is always `dev`:
+
+- **A `main` edit to `docs/index.yml` only regenerates the `dev` nav.** So a page
+  you move or rename on `main` changes only its `/dynamo/dev/<old>` URL. Add a
+  single dev-scoped rule:
+
+  ```yaml
+  - source: "/dynamo/dev/<old-path>"
+    destination: "/dynamo/dev/<new-path>"
+  ```
+
+- **Do not** add unversioned (`/dynamo/<old>`) or `/dynamo/latest/<old>`
+  redirects for that same move. The unversioned root and `/latest/` both resolve
+  to **Latest** (slug `/`) — a frozen snapshot of the newest release that `main`
+  edits never touch — so the old path keeps serving there. A `latest`/unversioned
+  redirect would hijack a still-working URL and send it to a `<new-path>` that
+  does not exist in Latest until the next release re-snapshots it.
+- **Pinned versions (`/dynamo/vX.Y.Z/...`) are immutable** and never need new
+  redirects after the fact.
+
+A page reachable in Latest therefore keeps its old URL at the unversioned and
+`/latest/` prefixes after a `main`-only move — only the `dev` prefix moves, and
+only the `dev` redirect is needed.
+
 ---
 
 ## How Publishing Works
