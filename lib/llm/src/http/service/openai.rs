@@ -539,6 +539,7 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 /// Warn (once per request) when nvext data is dropped because the extension is
 /// disabled. Only called from the disabled branch, so the default path is free.
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
+    use crate::protocols::agents::has_agent_headers;
     use crate::protocols::common::extensions::{
         HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
         HEADER_WORKER_INSTANCE_ID,
@@ -551,7 +552,8 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
         HEADER_PREFILL_DP_RANK,
     ]
     .iter()
-    .any(|h| headers.contains_key(*h));
+    .any(|h| headers.contains_key(*h))
+        || has_agent_headers(headers);
 
     if nvext_present || header_present {
         tracing::warn!(

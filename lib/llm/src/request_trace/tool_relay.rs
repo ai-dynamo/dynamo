@@ -173,8 +173,8 @@ mod tests {
             event_time_unix_ms: 1,
             event_source: Some(RequestTraceEventSource::Harness),
             agent_context: Some(AgentContext {
-                session_type_id: "agent_harness".to_string(),
-                session_id: "run-1".to_string(),
+                session_type_id: Some("agent_harness".to_string()),
+                session_id: Some("run-1".to_string()),
                 trajectory_id: "run-1:agent".to_string(),
                 parent_trajectory_id: None,
                 trajectory_final: None,
@@ -247,7 +247,7 @@ mod tests {
                 assert_eq!(record.event_source, Some(RequestTraceEventSource::Harness));
                 assert_eq!(
                     record.agent_context.expect("agent context").session_id,
-                    "run-1"
+                    Some("run-1".to_string())
                 );
                 assert_eq!(record.tool.unwrap().tool_call_id, "tool-123");
 
