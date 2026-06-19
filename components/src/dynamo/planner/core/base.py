@@ -950,20 +950,27 @@ class NativePlannerBase:
         pm.estimated_ttft_ms.set(diag.estimated_ttft_ms or 0)
         pm.estimated_itl_ms.set(diag.estimated_itl_ms or 0)
 
-        pm.predicted_requests_per_second.set(
-            diag.predicted_num_req / interval
-            if diag.predicted_num_req is not None and interval > 0
-            else 0
-        )
-        pm.predicted_input_sequence_tokens.set(diag.predicted_isl or 0)
-        pm.predicted_output_sequence_tokens.set(diag.predicted_osl or 0)
-
-        pm.engine_prefill_capacity_requests_per_second.set(diag.engine_rps_prefill or 0)
-        pm.engine_decode_capacity_requests_per_second.set(diag.engine_rps_decode or 0)
-
         if tick.run_load_scaling:
             pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
         if tick.run_throughput_scaling:
+            # Predicted-load, engine-capacity, and throughput-decision gauges are
+            # all produced by the throughput stage (advance_throughput_from_prediction),
+            # which only runs on throughput ticks. Publishing them every tick wrote
+            # `or 0` on the ~35/36 load-only ticks, wiping the real value within
+            # seconds.
+            pm.predicted_requests_per_second.set(
+                diag.predicted_num_req / interval
+                if diag.predicted_num_req is not None and interval > 0
+                else 0
+            )
+            pm.predicted_input_sequence_tokens.set(diag.predicted_isl or 0)
+            pm.predicted_output_sequence_tokens.set(diag.predicted_osl or 0)
+            pm.engine_prefill_capacity_requests_per_second.set(
+                diag.engine_rps_prefill or 0
+            )
+            pm.engine_decode_capacity_requests_per_second.set(
+                diag.engine_rps_decode or 0
+            )
             pm.throughput_scaling_decision.state(
                 diag.throughput_decision_reason or "unset"
             )
