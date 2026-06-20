@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn backend_args_set_worker_model_name_for_mdc() {
         let (_engine, config) = SglangBackend::from_argv(vec![
-            "dynamo-sglang".to_string(),
+            "dynamo-sglang-rs-backend".to_string(),
             "--model-name".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
         ])
@@ -760,7 +760,7 @@ mod tests {
     #[test]
     fn backend_args_set_served_model_name_for_registration() {
         let (_engine, config) = SglangBackend::from_argv(vec![
-            "dynamo-sglang".to_string(),
+            "dynamo-sglang-rs-backend".to_string(),
             "--model-name".to_string(),
             "/models/qwen".to_string(),
             "--served-model-name".to_string(),
@@ -775,7 +775,7 @@ mod tests {
     #[test]
     fn backend_args_set_worker_disaggregation_mode() {
         let (_engine, config) = SglangBackend::from_argv(vec![
-            "dynamo-sglang".to_string(),
+            "dynamo-sglang-rs-backend".to_string(),
             "--disaggregation-mode".to_string(),
             "prefill".to_string(),
         ])
@@ -784,7 +784,7 @@ mod tests {
         assert_eq!(config.disaggregation_mode, DisaggregationMode::Prefill);
 
         let (_engine, config) = SglangBackend::from_argv(vec![
-            "dynamo-sglang".to_string(),
+            "dynamo-sglang-rs-backend".to_string(),
             "--disaggregation-mode".to_string(),
             "decode".to_string(),
         ])

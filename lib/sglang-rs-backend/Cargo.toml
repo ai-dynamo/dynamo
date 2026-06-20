@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-sglang"
+name = "dynamo-sglang-rs-backend"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

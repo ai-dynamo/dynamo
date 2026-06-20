@@ -2361,7 +2361,7 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-protocols",
  "dynamo-runtime",
- "dynamo-sglang",
+ "dynamo-sglang-rs-backend",
  "futures",
  "once_cell",
  "opentelemetry",
@@ -2480,7 +2480,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-sglang"
+name = "dynamo-sglang-rs-backend"
 version = "1.3.0"
 dependencies = [
  "async-stream",
@@ -2488,6 +2488,7 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "futures",
+ "local-ip-address",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rand 0.9.4",

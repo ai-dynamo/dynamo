@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 #[pyfunction]
 pub fn run_sglang_backend(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
     let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push("dynamo-sglang".to_string());
+    argv.push("dynamo-sglang-rs-backend".to_string());
     argv.extend(args);
 
     let (engine, config) = dynamo_sglang::SglangBackend::from_argv(argv)

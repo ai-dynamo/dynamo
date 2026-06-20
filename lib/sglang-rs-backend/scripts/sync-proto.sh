@@ -49,7 +49,7 @@ for name in common.proto sglang_scheduler.proto; do
         echo "//"
         echo "// Generated from $SMG_REPO"
         echo "// Commit:        $SHA"
-        echo "// Refresh with:  lib/backend/sglang/scripts/sync-proto.sh [ref]"
+        echo "// Refresh with:  lib/sglang-rs-backend/scripts/sync-proto.sh [ref]"
         echo
         awk 'NR <= 3 && /^(\/\/|$)/ { next } { print }' "$SRC"
     } > "$DST"

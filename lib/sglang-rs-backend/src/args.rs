@@ -5,7 +5,7 @@ use dynamo_backend_common::CommonArgs;
 
 #[derive(clap::Parser, Debug)]
 #[command(
-    name = "dynamo-sglang",
+    name = "dynamo-sglang-rs-backend",
     about = "Dynamo SGLang backend for SMG's scheduler gRPC service."
 )]
 pub struct Args {
