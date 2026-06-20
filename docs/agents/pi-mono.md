@@ -93,7 +93,6 @@ trajectory id.
 python benchmarks/request_trace/convert_to_perfetto.py \
   /tmp/dynamo-request-trace.jsonl \
   --include-markers \
-  --separate-stage-tracks \
   --output /tmp/dynamo-request-trace.perfetto.json
 ```
 

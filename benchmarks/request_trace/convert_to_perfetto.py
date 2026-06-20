@@ -530,7 +530,6 @@ def convert_records(
     *,
     include_stages: bool,
     include_markers: bool,
-    separate_stage_tracks: bool = False,
 ) -> tuple[dict[str, Any], int]:
     prepared: list[dict[str, Any]] = []
     request_items: list[dict[str, Any]] = []
@@ -688,11 +687,7 @@ def convert_records(
             lane,
             "request",
         )
-        stage_pid, stage_tid = (
-            tracks.track_for(item["trajectory_id"], lane, "stages")
-            if include_stages and separate_stage_tracks
-            else (request_pid, request_tid)
-        )
+        stage_pid, stage_tid = request_pid, request_tid
         trace_events.append(
             _make_complete_event(
                 name=(
@@ -829,14 +824,6 @@ def parse_args() -> argparse.Namespace:
         help="Emit only full LLM request slices.",
     )
     parser.add_argument(
-        "--separate-stage-tracks",
-        action="store_true",
-        help=(
-            "Place stage slices on adjacent stage tracks instead of stacking "
-            "them under the request slice."
-        ),
-    )
-    parser.add_argument(
         "--include-markers",
         action="store_true",
         help="Also emit first-token instant markers. Disabled by default to reduce clutter.",
@@ -864,7 +851,6 @@ def main() -> int:
         _iter_records(input_paths),
         include_stages=args.include_stages,
         include_markers=args.include_markers,
-        separate_stage_tracks=args.separate_stage_tracks,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -225,7 +225,7 @@ uv run --no-project python benchmarks/request_trace/convert_to_perfetto.py \
 ```
 
 Open the output in [Perfetto UI](https://ui.perfetto.dev/). Useful flags include
-`--include-markers`, `--no-stages`, and `--separate-stage-tracks`.
+`--include-markers` and `--no-stages`.
 
 Request slices include flattened finish metadata when present, such as
 `finish.finish_reason`, `finish.backend_finish_reason`, `finish.stop_reason`,

@@ -106,55 +106,6 @@ def check_convert_records_emits_request_stages_and_metadata():
     assert markers[0]["ts"] == 1_012_000
 
 
-def check_convert_records_can_emit_stages_on_separate_tracks():
-    trace, _ = convert_records(
-        [
-            {
-                "event": {
-                    "schema": "dynamo.request.trace.v1",
-                    "event_type": "request_end",
-                    "event_time_unix_ms": 1050,
-                    "agent_context": {
-                        "trajectory_id": "session-1:researcher",
-                    },
-                    "request": {
-                        "request_id": "req-1",
-                        "model": "test-model",
-                        "request_received_ms": 1000,
-                        "prefill_wait_time_ms": 5,
-                        "prefill_time_ms": 7,
-                        "ttft_ms": 12,
-                        "total_time_ms": 50,
-                    },
-                },
-            }
-        ],
-        include_stages=True,
-        include_markers=False,
-        separate_stage_tracks=True,
-    )
-
-    request = next(
-        event for event in trace["traceEvents"] if event.get("cat") == "dynamo.llm"
-    )
-    stage_tids = {
-        event["tid"]
-        for event in trace["traceEvents"]
-        if event.get("cat") == "dynamo.llm.stage"
-    }
-    assert stage_tids != {request["tid"]}
-
-    thread_names = [
-        event["args"]["name"]
-        for event in trace["traceEvents"]
-        if event.get("name") == "thread_name"
-    ]
-    assert thread_names == [
-        "session-1:researcher",
-        "session-1:researcher stages",
-    ]
-
-
 def check_convert_records_accepts_enriched_request_trace_schema():
     trace, converted = convert_records(
         [
@@ -729,7 +680,6 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
 
 CHECKS = [
     check_convert_records_emits_request_stages_and_metadata,
-    check_convert_records_can_emit_stages_on_separate_tracks,
     check_convert_records_accepts_enriched_request_trace_schema,
     check_convert_records_accepts_context_free_request_trace_schema,
     check_convert_records_clamps_stage_rounding_overlap,
