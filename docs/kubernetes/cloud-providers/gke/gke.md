@@ -109,56 +109,71 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
     vllm-agg-vllmdecodeworker-2e88533b-6446cd9cdb-2n4sv   1/1     Running   0          5m
     ```
 
-## Deploy the model
+### Test
 
-```bash
-cd examples/deployments/GKE/vllm/v1beta1
+1.  In a separate terminal, forward the port of the frontend of the inference graph to your local machine:
 
-kubectl apply -f disagg.yaml -n ${NAMESPACE}
-```
+    ```bash
+    kubectl port-forward deployment/vllm-agg-frontend 8000:8000 -n ${INFERENCE_NAMESPACE}
+    ```
 
-**Expected output after successful deployment**
+1.  Send a chat completion request:
 
-```bash
-kubectl get pods
-NAME                                                              READY   STATUS    RESTARTS   AGE
-dynamo-platform-dynamo-operator-controller-manager-c665684ssqkx   2/2     Running   0          65m
-dynamo-platform-etcd-0                                            1/1     Running   0          65m
-dynamo-platform-nats-0                                            2/2     Running   0          65m
-vllm-disagg-frontend-5954ddc4dd-4w2cb                             1/1     Running   0          11m
-vllm-disagg-vllmdecodeworker-77844cfcff-ddn4v                     1/1     Running   0          11m
-vllm-disagg-vllmprefillworker-55d5b74b4f-zrskh                    1/1     Running   0          11m
-```
+    ```bash
+    curl localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "Qwen/Qwen3-0.6B",
+        "messages": [
+        {
+            "role": "user",
+            "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+        }
+        ],
+        "stream":false,
+        "max_tokens": 30
+      }'
+    ```
 
-## Test the Deployment
+    Expected response:
+    ```json
+    {"id":"chatcmpl-bd0670d9-0342-4eea-97c1-99b69f1f931f","choices":[{"index":0,"message":{"content":"Okay, here's a detailed character background for your intrepid explorer, tailored to fit the premise of Aeloria, with a focus on a","refusal":null,"tool_calls":null,"role":"assistant","function_call":null,"audio":null},"finish_reason":"stop","logprobs":null}],"created":1756336263,"model":"Qwen/Qwen3-0.6B","service_tier":null,"system_fingerprint":null,"object":"chat.completion","usage":{"prompt_tokens":190,"completion_tokens":29,"total_tokens":219,"prompt_tokens_details":null,"completion_tokens_details":null}}
+    ```
 
-```bash
-export DEPLOYMENT_NAME=vllm-disagg
+### Cleanup
 
-# Find the frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+The following steps show how to undeploy the inference graph. You may want to perform steps 2-6 to undeploy
+Dynamo Kubernetes Platform, delete the GPU node pool and delete the Kubernetes cluster.
 
-# Forward the pod's port to localhost
-kubectl port-forward deployment/vllm-disagg-frontend  8000:8000 -n ${NAMESPACE}
+1.  Kill the port-forwarding command you ran in a separate terminal.
 
-# disagg
-curl localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [
-    {
-        "role": "user",
-        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-    }
-    ],
-    "stream":false,
-    "max_tokens": 30
-  }'
-```
+1.  Undeploy the inference graph.
 
-### Response
+    ```bash
+    kubectl delete -n ${INFERENCE_NAMESPACE} -f https://raw.githubusercontent.com/ai-dynamo/dynamo/refs/tags/v1.2.1/examples/deployments/GKE/vllm/agg.yaml
+    ```
 
-```json
-{"id":"chatcmpl-bd0670d9-0342-4eea-97c1-99b69f1f931f","choices":[{"index":0,"message":{"content":"Okay, here's a detailed character background for your intrepid explorer, tailored to fit the premise of Aeloria, with a focus on a","refusal":null,"tool_calls":null,"role":"assistant","function_call":null,"audio":null},"finish_reason":"stop","logprobs":null}],"created":1756336263,"model":"Qwen/Qwen3-0.6B","service_tier":null,"system_fingerprint":null,"object":"chat.completion","usage":{"prompt_tokens":190,"completion_tokens":29,"total_tokens":219,"prompt_tokens_details":null,"completion_tokens_details":null}}
-```
+1.  Undeploy Dynamo Kubernetes Platform:
+
+    ```
+    export NAMESPACE="dynamo-system"
+    helm delete dynamo-platform -n ${NAMESPACE}
+    ```
+
+1.  Delete the CRDs in the output of the following command:
+
+    ```bash
+    kubectl get crd -o name | grep 'dynamo.*\.nvidia\.com'
+    ```
+
+1.  Delete the node pool:
+
+    ```bash
+    gcloud container node-pools delete gpu-pool --project=${PROJECT_ID}  --location=${ZONE}  --cluster=${CLUSTER_NAME}
+    ```
+
+1.  Delete the cluster:
+
+    ```bash
+    gcloud container clusters delete ${CLUSTER_NAME} --project=${PROJECT_ID}  --location=${ZONE}
+    ```
