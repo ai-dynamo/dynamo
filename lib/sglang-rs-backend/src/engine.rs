@@ -5,6 +5,7 @@
 //! `PreprocessedRequest` to SMG's `Generate` RPC and streams tokens back.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -37,6 +38,11 @@ const HEALTH_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// Emit an info-level "still waiting" log once per this many HealthCheck
 /// failures so ops can see the backend is alive and waiting on SGLang.
 const HEALTH_LOG_EVERY_N_ATTEMPTS: u32 = 20;
+/// Spread concurrent Generate streams across multiple HTTP/2 connections.
+/// A single tonic Channel can trip local grpc/h2 stream pressure at high
+/// concurrency before SGLang itself is saturated.
+const DEFAULT_GRPC_CHANNELS: usize = 16;
+const GRPC_CHANNELS_ENV: &str = "DYN_SGLANG_GRPC_CHANNELS";
 /// Enable deterministic remapping of Dynamo's 63-bit bootstrap rooms into
 /// SMG v1.5's signed 32-bit `bootstrap_room` field.
 const SMG_BOOTSTRAP_ROOM_ENV: &str = "DYN_SMG_BOOTSTRAP_ROOM";
@@ -48,7 +54,9 @@ pub struct SglangBackend {
     /// `generate()` to dispatch prefill vs decode.
     disaggregation_mode: OnceCell<DisaggregationMode>,
     bootstrap: OnceCell<(String, u16)>,
-    client: OnceCell<SglangSchedulerClient<Channel>>,
+    clients: OnceCell<Vec<SglangSchedulerClient<Channel>>>,
+    next_client: AtomicUsize,
+    grpc_channel_count: usize,
     /// Unset → KV routing off; populated in `start()` from `GetServerInfo`.
     kv_events: OnceCell<KvEventsConfig>,
     /// SGLang's `dp_size`; 1 when DP attention is off (the common case).
@@ -68,7 +76,9 @@ impl SglangBackend {
             grpc_endpoint: args.sglang_grpc_endpoint,
             disaggregation_mode: OnceCell::new(),
             bootstrap: OnceCell::new(),
-            client: OnceCell::new(),
+            clients: OnceCell::new(),
+            next_client: AtomicUsize::new(0),
+            grpc_channel_count: grpc_channel_count_from_env(),
             kv_events: OnceCell::new(),
             dp_size: OnceCell::new(),
             smg_bootstrap_room_compat: truthy_env(SMG_BOOTSTRAP_ROOM_ENV),
@@ -318,10 +328,12 @@ impl SglangBackend {
     }
 
     fn client_or_err(&self) -> Result<SglangSchedulerClient<Channel>, DynamoError> {
-        self.client
+        let clients = self
+            .clients
             .get()
-            .ok_or_else(|| backend_error("generate called before start"))
-            .cloned()
+            .ok_or_else(|| backend_error("generate called before start"))?;
+        let idx = self.next_client.fetch_add(1, Ordering::Relaxed) % clients.len();
+        Ok(clients[idx].clone())
     }
 
     fn generate_bootstrap_room(&self) -> u64 {
@@ -341,13 +353,7 @@ impl SglangBackend {
 #[async_trait]
 impl LLMEngine for SglangBackend {
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-        let channel = Endpoint::from_shared(self.grpc_endpoint.clone())
-            .map_err(|e| invalid_arg(format!("invalid grpc endpoint: {e}")))?
-            .connect_timeout(CONNECT_TIMEOUT)
-            .connect()
-            .await
-            .map_err(|e| backend_error(format!("connect {}: {e}", self.grpc_endpoint)))?;
-        let mut client = SglangSchedulerClient::new(channel);
+        let mut client = connect_client(&self.grpc_endpoint).await?;
 
         // Wait for SGLang's scheduler to finish loading weights. We don't cap
         // this with a wall-clock — model load time is workload-dependent (small
@@ -435,9 +441,14 @@ impl LLMEngine for SglangBackend {
             let _ = self.bootstrap.set((host, port));
         }
 
-        self.client
-            .set(client)
-            .map_err(|_| backend_error("client already set"))?;
+        let mut clients = Vec::with_capacity(self.grpc_channel_count);
+        clients.push(client);
+        for _ in 1..self.grpc_channel_count {
+            clients.push(connect_client(&self.grpc_endpoint).await?);
+        }
+        self.clients
+            .set(clients)
+            .map_err(|_| backend_error("clients already set"))?;
 
         let total_kv_blocks = match (info.max_total_num_tokens, info.page_size) {
             (Some(t), Some(p)) if p > 0 => Some(t.div_ceil(p as u64)),
@@ -456,6 +467,7 @@ impl LLMEngine for SglangBackend {
             disagg_mode = %mode,
             kv_events_enabled = info.kv_events.is_some(),
             dp_size,
+            grpc_channels = self.grpc_channel_count,
             smg_bootstrap_room_compat = self.smg_bootstrap_room_compat,
             "sglang backend connected"
         );
@@ -501,14 +513,16 @@ impl LLMEngine for SglangBackend {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(client) = self.client.get() else {
+        let Some(clients) = self.clients.get() else {
             return;
         };
+        let idx = self.next_client.fetch_add(1, Ordering::Relaxed) % clients.len();
+        let mut client = clients[idx].clone();
         let req = AbortRequest {
             request_id: ctx.id().to_string(),
             reason: "client_cancelled".to_string(),
         };
-        if let Err(e) = client.clone().abort(req).await {
+        if let Err(e) = client.abort(req).await {
             tracing::warn!(request_id = ctx.id(), error = %e, "abort RPC failed");
         }
     }
@@ -574,6 +588,24 @@ fn build_health_check_payload() -> serde_json::Value {
 /// engine failure that retrying won't fix.
 fn is_transient_health_error(status: &tonic::Status) -> bool {
     matches!(status.code(), tonic::Code::Unavailable)
+}
+
+async fn connect_client(endpoint: &str) -> Result<SglangSchedulerClient<Channel>, DynamoError> {
+    let channel = Endpoint::from_shared(endpoint.to_string())
+        .map_err(|e| invalid_arg(format!("invalid grpc endpoint: {e}")))?
+        .connect_timeout(CONNECT_TIMEOUT)
+        .connect()
+        .await
+        .map_err(|e| backend_error(format!("connect {endpoint}: {e}")))?;
+    Ok(SglangSchedulerClient::new(channel))
+}
+
+fn grpc_channel_count_from_env() -> usize {
+    std::env::var(GRPC_CHANNELS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(DEFAULT_GRPC_CHANNELS)
 }
 
 fn request_dp_rank(request: &PreprocessedRequest, prefill: bool) -> i32 {
