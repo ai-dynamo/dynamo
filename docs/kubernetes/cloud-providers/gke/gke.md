@@ -9,7 +9,7 @@ title: Google Kubernetes Engine (GKE)
 ### Install gcloud CLI
 https://cloud.google.com/sdk/docs/install
 
-### Create GKE cluster
+### Create a GKE cluster
 
 ```bash
 export PROJECT_ID=<>
@@ -33,7 +33,7 @@ gcloud container clusters create ${CLUSTER_NAME} \
  	--num-nodes=${CPU_NODE}
 ```
 
-#### Create GPU pool
+#### Create a GPU pool
 
 ```bash
 gcloud container node-pools create gpu-pool \
