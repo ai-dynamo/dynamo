@@ -54,6 +54,8 @@ is not to install NVIDIA GPU operator. This is why you skip [step 1](../../insta
 
 ## Deploy Inference Graph
 
+In this section you deploy VLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B`.
+
 ### Create a namespace for your inference graph deployments
 
 ```bash
