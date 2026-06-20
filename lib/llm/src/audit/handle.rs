@@ -107,7 +107,6 @@ mod tests {
             "nvext": {
                 "agent_context": {
                     "session_type_id": "deep_research",
-                    "session_id": "run-123",
                     "trajectory_id": "run-123:researcher",
                     "parent_trajectory_id": "run-123:planner"
                 }
@@ -160,10 +159,6 @@ mod tests {
 
         let value = serde_json::to_value(record).unwrap();
 
-        assert_eq!(
-            value["request"]["nvext"]["agent_context"]["session_id"],
-            "run-123"
-        );
         assert_eq!(
             value["request"]["nvext"]["agent_context"]["trajectory_id"],
             "run-123:researcher"

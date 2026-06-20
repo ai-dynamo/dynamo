@@ -14,7 +14,7 @@ telemetry, routing hints, and backend-specific cache behavior.
 
 | Concept | Purpose |
 |---------|---------|
-| [Agent Tracing](agent-tracing.md) | Passive `session_id`/`trajectory_id` metadata plus Dynamo-owned request timing, token, cache, worker-placement, and harness tool-event traces. |
+| [Agent Tracing](agent-tracing.md) | Passive `trajectory_id` metadata plus Dynamo-owned request timing, token, cache, worker-placement, and harness tool-event traces. |
 | [Agent Hints](agent-hints.md) | Optional per-request hints such as priority, expected output length, and speculative prefill. |
 | [Priority Scheduling](priority-scheduling.md) | Request priority semantics across the router queue, backend engines, and cache policy. |
 | [Use Pi-Mono with Dynamo](pi-mono.md) | End-to-end quickstart that drives the Pi coding agent through Dynamo with agent context and tool tracing turned on. |
@@ -41,7 +41,6 @@ bodies:
     "nvext": {
         "agent_context": {
             "session_type_id": "deep_research",
-            "session_id": "research-run-42",
             "trajectory_id": "research-run-42:researcher"
         },
         "agent_hints": {

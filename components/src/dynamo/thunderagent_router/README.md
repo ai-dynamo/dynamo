@@ -66,8 +66,8 @@ forwarded.
 ### Sending requests
 
 The router expects `nvext.agent_context.trajectory_id` (and optionally
-`session_id`, `session_type_id`) on each chat-completions request so it
-can group turns under the same program. The
+`session_type_id`) on each chat-completions request so it can group turns under
+the same program. The
 [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
 fork of `mini-swe-agent` injects these directly via OpenAI client
 `extra_body`; any other harness can do the same.
@@ -80,7 +80,6 @@ fork of `mini-swe-agent` injects these directly via OpenAI client
   "nvext": {
     "agent_context": {
       "trajectory_id": "astropy__astropy-14365",
-      "session_id":    "mswea-...",
       "session_type_id": "swebench-lite"
     }
   }
@@ -103,7 +102,7 @@ publishes explicit tool spans. Override sink behavior with
 See [Agent Tracing](/docs/agents/agent-tracing.md) for the record schema.
 
 Every LLM call then lands a `request_end` record carrying `trajectory_id`,
-`session_id`, `input_tokens`, `output_tokens`, `cached_tokens`,
+`input_tokens`, `output_tokens`, `cached_tokens`,
 `request_received_ms`, `total_time_ms`, and the block-level
 `input_sequence_hashes` — enough for offline replay against this router.
 Dynamo owns the ZMQ bind side, so point your harness's tool-event publisher

@@ -22,7 +22,6 @@ Inject `agent_context` into each LLM request
   "nvext": {
     "agent_context": {
       "session_type_id": "deep_research",
-      "session_id": "research-run-42",
       "trajectory_id": "research-run-42:researcher",
       "parent_trajectory_id": "research-run-42:planner"
     }
@@ -34,15 +33,14 @@ Inject `agent_context` into each LLM request
 | ---------------------- | :------: | ---------------------------------------- |
 | `trajectory_id`        |   Yes    | One reasoning/tool chain inside the run. |
 | `session_type_id`      |    No    | Workload class.                          |
-| `session_id`           |    No    | Whole agent run.                         |
 | `parent_trajectory_id` |    No    | Parent trajectory when using subagents.  |
 | `trajectory_final`     |    No    | `true` marks the trajectory's last request — a cleanup hint. |
 
 For generic HTTP clients, `x-dynamo-trajectory-id` is enough to synthesize
 `agent_context`. Dynamo sets `trajectory_id` from the header, sets
-`session_type_id` to `dynamo`, and leaves `session_id`,
-`parent_trajectory_id`, and `trajectory_final` unset. Explicit
-`nvext.agent_context` takes precedence over all identity headers.
+`session_type_id` to `dynamo`, and leaves `parent_trajectory_id` and
+`trajectory_final` unset. Explicit `nvext.agent_context` takes precedence over
+all identity headers.
 
 `trajectory_final` is an optional terminal marker: set it to `true` to signal that a
 trajectory is finished. Lifecycle-aware backends use it to release whatever
@@ -107,7 +105,6 @@ metadata is ids and names only — arguments are intentionally not stored.
   "event_source": "dynamo",
   "agent_context": {
     "session_type_id": "deep_research",
-    "session_id": "research-run-42",
     "trajectory_id": "research-run-42:researcher",
     "parent_trajectory_id": "research-run-42:planner"
   },
@@ -196,7 +193,7 @@ background publisher, bounded queue, monotonic sequence, and PUSH with HWM.
 rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`)
 even if `tool_start` was dropped. Same `agent_context` as the surrounding LLM
 calls; `tool_call_id` unique per trajectory. Join offline on `trajectory_id`,
-`tool_call_id`; include `session_id` when present to group a wider agent run.
+`tool_call_id`.
 
 Example `tool_end`:
 
@@ -208,7 +205,6 @@ Example `tool_end`:
   "event_source": "harness",
   "agent_context": {
     "session_type_id": "deep_research",
-    "session_id": "research-run-42",
     "trajectory_id": "research-run-42:researcher"
   },
   "tool": {
@@ -316,7 +312,7 @@ uv run --no-sync python -m dynamo.replay /tmp/dynamo-request-trace.agentic-moonc
 Agentic Mooncake rows preserve:
 
 - `request_id`: the LLM request row identity.
-- `session_id`: the Dynamo `trajectory_id`.
+- Mooncake `session_id`: derived from the Dynamo `trajectory_id`.
 - `wait_for`: request ids that must complete before this row becomes eligible.
 - `branches`: child request ids spawned from this row.
 - `prefix_reset`: first request in a trajectory.
@@ -335,11 +331,10 @@ flags and engine settings, see [DynoSim Runs](../dynosim/runs.md).
 <details>
 <summary>ATIF alignment</summary>
 
-Dynamo emits `dynamo.request.trace.v1`, not full ATIF logs—but identifiers match [ATIF][atif-rfc] / [Harbor](https://github.com/harbor-framework/harbor) so you can join harness trajectories to Dynamo rows on `trajectory_id`. If a harness supplies `session_id`, use it to group trajectories from the same run. Dynamo omits conversational payload by design.
+Dynamo emits `dynamo.request.trace.v1`, not full ATIF logs—but identifiers match [ATIF][atif-rfc] / [Harbor](https://github.com/harbor-framework/harbor) so you can join harness trajectories to Dynamo rows on `trajectory_id`. Dynamo omits conversational payload by design.
 
 | Dynamo                 | Role                    |
 | ---------------------- | ----------------------- |
-| `session_id`           | Optional shared run id  |
 | `trajectory_id`        | Branch within run       |
 | `parent_trajectory_id` | Subagent link           |
 | `session_type_id`      | Profile / workload type |

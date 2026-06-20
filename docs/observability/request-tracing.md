@@ -88,7 +88,6 @@ Agent-enriched row:
   "event_source": "dynamo",
   "agent_context": {
     "session_type_id": "deep_research",
-    "session_id": "research-run-42",
     "trajectory_id": "research-run-42:researcher",
     "parent_trajectory_id": "research-run-42:planner"
   },
@@ -133,7 +132,6 @@ Optional harness tool events use the same request trace schema:
   "event_source": "harness",
   "agent_context": {
     "session_type_id": "deep_research",
-    "session_id": "research-run-42",
     "trajectory_id": "research-run-42:researcher"
   },
   "tool": {

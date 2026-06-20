@@ -751,11 +751,8 @@ def _trace_contains_agent_context(records: list[dict], session_type_id: str) -> 
         if agent_context.get("session_type_id") != session_type_id:
             continue
 
-        session_id = agent_context.get("session_id")
         trajectory_id = agent_context.get("trajectory_id")
-        if not session_id or not trajectory_id:
-            continue
-        if session_type_id != "claude_code" and session_id != trajectory_id:
+        if not trajectory_id:
             continue
         return True
     return False
@@ -774,11 +771,8 @@ def _trace_contains_agent_parent_context(
         if not parent_trajectory_id:
             continue
 
-        session_id = agent_context.get("session_id")
         trajectory_id = agent_context.get("trajectory_id")
-        if not session_id or not trajectory_id:
-            continue
-        if session_id != trajectory_id:
+        if not trajectory_id:
             continue
         if parent_trajectory_id == trajectory_id:
             continue
@@ -794,14 +788,11 @@ def _trace_contains_claude_subagent_context(records: list[dict]) -> bool:
         if agent_context.get("session_type_id") != "claude_code":
             continue
 
-        session_id = agent_context.get("session_id")
         trajectory_id = agent_context.get("trajectory_id")
         parent_trajectory_id = agent_context.get("parent_trajectory_id")
-        if not session_id or not trajectory_id:
+        if not trajectory_id or not parent_trajectory_id:
             continue
-        if trajectory_id == session_id:
-            continue
-        if parent_trajectory_id != session_id:
+        if trajectory_id == parent_trajectory_id:
             continue
         return True
     return False

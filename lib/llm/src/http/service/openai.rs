@@ -3217,7 +3217,6 @@ mod tests {
         let nvext: NvExt = serde_json::from_value(serde_json::json!({
             "agent_context": {
                 "session_type_id": "deep_research:v1",
-                "session_id": "run-123",
                 "trajectory_id": ""
             }
         }))

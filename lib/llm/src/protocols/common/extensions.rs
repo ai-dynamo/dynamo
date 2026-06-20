@@ -68,11 +68,6 @@ pub struct AgentContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_type_id: Option<String>,
 
-    /// Top-level agent run/session identifier.
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-
     /// Schedulable reasoning/tool trajectory identifier.
     pub trajectory_id: String,
 
@@ -281,7 +276,6 @@ impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
         Self {
             session_type_id: Some(values.session_type_id.to_string()),
-            session_id: values.session_id,
             trajectory_id: values.trajectory_id,
             parent_trajectory_id: values.parent_trajectory_id,
             trajectory_final: None,
@@ -296,8 +290,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
 /// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
-/// - coding-agent session headers -> `agent_context.session_id` and
-///   `agent_context.trajectory_id`
+/// - coding-agent session headers -> `agent_context.trajectory_id`
 /// - coding-agent child trajectory headers -> `agent_context.trajectory_id`
 /// - coding-agent source -> `agent_context.session_type_id`
 /// - configured coding-agent parent session headers ->
@@ -386,9 +379,6 @@ pub fn validate_nvext_semantics(nvext: Option<&NvExt>) -> anyhow::Result<()> {
     if let Some(agent_context) = nvext.agent_context.as_ref() {
         if let Some(session_type_id) = agent_context.session_type_id.as_ref() {
             validate_non_empty(session_type_id, "nvext.agent_context.session_type_id")?;
-        }
-        if let Some(session_id) = agent_context.session_id.as_ref() {
-            validate_non_empty(session_id, "nvext.agent_context.session_id")?;
         }
         validate_non_empty(
             &agent_context.trajectory_id,
@@ -742,7 +732,6 @@ mod tests {
         let nvext = NvExt::builder()
             .agent_context(AgentContext {
                 session_type_id: Some("deep_research:v1".to_string()),
-                session_id: Some("run-123".to_string()),
                 trajectory_id: " ".to_string(),
                 parent_trajectory_id: None,
                 trajectory_final: None,
@@ -768,7 +757,6 @@ mod tests {
         let nvext = serde_json::from_str::<NvExt>(json).unwrap();
         let agent_context = nvext.agent_context.unwrap();
         assert_eq!(agent_context.session_type_id, None);
-        assert_eq!(agent_context.session_id, None);
         assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
     }
 
@@ -776,8 +764,7 @@ mod tests {
     fn agent_context_serde_missing_trajectory_id_fails() {
         let json = r#"{
             "agent_context": {
-                "session_type_id": "deep_research:v1",
-                "session_id": "run-123"
+                "session_type_id": "deep_research:v1"
             }
         }"#;
 
@@ -874,23 +861,14 @@ mod tests {
                 "claude-run-1",
                 None,
                 "claude_code",
-                Some("claude-run-1"),
                 None,
             ),
-            (
-                "Session-ID",
-                "codex-run-1",
-                None,
-                "codex",
-                Some("codex-run-1"),
-                None,
-            ),
+            ("Session-ID", "codex-run-1", None, "codex", None),
             (
                 HEADER_CODEX_SESSION_ID,
                 "codex-run-2",
                 Some("opencode-parent"),
                 "codex",
-                Some("codex-run-2"),
                 None,
             ),
             (
@@ -898,7 +876,6 @@ mod tests {
                 "opencode-run-1",
                 Some("parent-run-1"),
                 "opencode",
-                Some("opencode-run-1"),
                 Some("parent-run-1"),
             ),
             (
@@ -906,7 +883,6 @@ mod tests {
                 "generic-run-1",
                 None,
                 "dynamo",
-                None,
                 None,
             ),
         ];
@@ -916,7 +892,6 @@ mod tests {
             header_value,
             parent_header_value,
             expected_session_type_id,
-            expected_session_id,
             expected_parent_trajectory_id,
         ) in cases
         {
@@ -936,13 +911,11 @@ mod tests {
             assert_eq!(
                 (
                     agent_context.session_type_id.as_deref(),
-                    agent_context.session_id.as_deref(),
                     agent_context.trajectory_id.as_str(),
                     agent_context.parent_trajectory_id.as_deref(),
                 ),
                 (
                     Some(expected_session_type_id),
-                    expected_session_id,
                     header_value,
                     expected_parent_trajectory_id,
                 )
@@ -968,7 +941,6 @@ mod tests {
             agent_context.session_type_id.as_deref(),
             Some("claude_code")
         );
-        assert_eq!(agent_context.session_id.as_deref(), Some("claude-session"));
         assert_eq!(agent_context.trajectory_id, "claude-agent");
         assert_eq!(
             agent_context.parent_trajectory_id.as_deref(),
@@ -988,7 +960,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(agent_context.session_type_id.as_deref(), Some("codex"));
-        assert_eq!(agent_context.session_id.as_deref(), Some("codex-run"));
         assert_eq!(agent_context.trajectory_id, "codex-run");
     }
 
@@ -1018,7 +989,6 @@ mod tests {
         headers.insert(HEADER_DYNAMO_TRAJECTORY_ID, "generic-run".parse().unwrap());
         let explicit = AgentContext::builder()
             .session_type_id("native".to_string())
-            .session_id("native-session".to_string())
             .trajectory_id("native-trajectory".to_string())
             .parent_trajectory_id("native-parent".to_string())
             .build()

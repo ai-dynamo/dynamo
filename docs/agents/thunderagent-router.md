@@ -95,7 +95,7 @@ bookkeeping so its tokens stop counting against worker utilization.
 ```jsonc
 // final request — released, no inference
 { "model": "...", "max_tokens": 1, "messages": [{"role":"user","content":"."}],
-  "nvext": { "agent_context": { "session_type_id": "...", "session_id": "...",
+  "nvext": { "agent_context": { "session_type_id": "...",
                                 "trajectory_id": "abc", "trajectory_final": true } } }
 ```
 

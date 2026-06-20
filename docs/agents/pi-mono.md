@@ -78,14 +78,14 @@ export DYNAMO_API_KEY=dummy
 
 export DYN_REQUEST_TRACE=1
 export DYN_AGENT_SESSION_TYPE_ID=pi_coding_agent
-export DYN_AGENT_SESSION_ID=pi-demo-001
 export DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
 
 pi --model dynamo/zai-org/GLM-4.7-Flash \
    -p "Run the tests in this folder, fix the smallest bug, and rerun the tests."
 ```
 
-`DYN_AGENT_SESSION_ID` becomes the trace's `session_id`; if `DYN_AGENT_TRAJECTORY_ID` is unset, Pi's session id is used as the trajectory id.
+If `DYN_AGENT_TRAJECTORY_ID` is unset, Pi's session id is used as the
+trajectory id.
 
 ### 4. View the trace in Perfetto
 
@@ -110,11 +110,10 @@ Open the result at [ui.perfetto.dev](https://ui.perfetto.dev). You'll see:
 | ------------------------------------ | -------------------------- | -------------------------------------------------------------------- |
 | `DYNAMO_BASE_URL`                    | `http://127.0.0.1:8000/v1` | Dynamo OpenAI-compatible endpoint root.                              |
 | `DYNAMO_API_KEY`                     | `dynamo-local`             | Bearer token. Local Dynamo usually accepts any value.                |
-| `DYN_REQUEST_TRACE`                  | unset                      | Provider-side switch for injecting `agent_context` and session control. |
+| `DYN_REQUEST_TRACE`                  | unset                      | Provider-side switch for session-header trajectory tracing and optional tool relay. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset              | Dynamo-bound ZMQ PULL endpoint Pi connects to for tool events.       |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    | `agent-tool-events` | First ZMQ frame; must match Dynamo when set.                         |
 | `DYN_AGENT_SESSION_TYPE_ID`          | `pi_coding_agent`          | Stable workload class for the trace.                                 |
-| `DYN_AGENT_SESSION_ID`               | unset                      | Session/run id. Falls back to Pi's session id for tool events.       |
 | `DYN_AGENT_TRAJECTORY_ID`            | unset                      | Trajectory id override; defaults to Pi's session id per request.     |
 | `DYN_AGENT_PARENT_TRAJECTORY_ID`     | unset                      | Parent trajectory id for nested or subagent workflows.               |
 
