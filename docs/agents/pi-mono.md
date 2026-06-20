@@ -77,7 +77,6 @@ export DYNAMO_BASE_URL=http://127.0.0.1:8000/v1
 export DYNAMO_API_KEY=dummy
 
 export DYN_REQUEST_TRACE=1
-export DYN_AGENT_SESSION_TYPE_ID=pi_coding_agent
 export DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
 
 pi --model dynamo/zai-org/GLM-4.7-Flash \
@@ -112,7 +111,6 @@ Open the result at [ui.perfetto.dev](https://ui.perfetto.dev). You'll see:
 | `DYN_REQUEST_TRACE`                  | unset                      | Provider-side switch for session-header trajectory tracing and optional tool relay. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset              | Dynamo-bound ZMQ PULL endpoint Pi connects to for tool events.       |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    | `agent-tool-events` | First ZMQ frame; must match Dynamo when set.                         |
-| `DYN_AGENT_SESSION_TYPE_ID`          | `pi_coding_agent`          | Stable workload class for the trace.                                 |
 | `DYN_AGENT_TRAJECTORY_ID`            | unset                      | Trajectory id override; defaults to Pi's session id per request.     |
 | `DYN_AGENT_PARENT_TRAJECTORY_ID`     | unset                      | Parent trajectory id for nested or subagent workflows.               |
 

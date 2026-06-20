@@ -567,11 +567,15 @@ def test_frontend_api_surface_compliance(
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
         _wait_for_frontend_healthy(frontend_port)
+        codex_trace_start = _request_trace_record_count(request_trace_path)
         _run_codex_exec_smoke(
             _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
         )
-        _assert_agent_context_in_trace(request_trace_path, "codex")
+        _assert_agent_context_in_trace(
+            request_trace_path, "codex", codex_trace_start
+        )
         _wait_for_frontend_healthy(frontend_port)
+        claude_trace_start = _request_trace_record_count(request_trace_path)
         _run_claude_exec_smoke(
             _claude_cli,
             _node_bin,
@@ -580,17 +584,26 @@ def test_frontend_api_surface_compliance(
             marker_filename,
             frontend_port,
         )
-        _assert_agent_context_in_trace(request_trace_path, "claude_code")
+        _assert_agent_context_in_trace(
+            request_trace_path, "claude_code", claude_trace_start
+        )
         _wait_for_frontend_healthy(frontend_port)
+        opencode_trace_start = _request_trace_record_count(request_trace_path)
         _run_opencode_smoke(
             _opencode_cli,
             _node_bin,
             opencode_home,
             opencode_cwd,
             request_trace_path,
+            opencode_trace_start,
         )
-        _assert_agent_context_in_trace(request_trace_path, "opencode")
-        _assert_agent_parent_context_in_trace(request_trace_path, "opencode")
+        _assert_agent_context_in_trace(
+            request_trace_path, "opencode", opencode_trace_start
+        )
+        _assert_agent_parent_context_in_trace(
+            request_trace_path, "opencode", opencode_trace_start
+        )
+        claude_subagent_trace_start = _request_trace_record_count(request_trace_path)
         _try_run_claude_subagent_smoke(
             _claude_cli,
             _node_bin,
@@ -599,6 +612,7 @@ def test_frontend_api_surface_compliance(
             marker_filename,
             frontend_port,
             request_trace_path,
+            claude_subagent_trace_start,
         )
 
 
@@ -699,13 +713,21 @@ def _read_request_trace_records(path: Path) -> list[dict]:
     return records
 
 
+def _request_trace_record_count(path: Path) -> int:
+    return len(_read_request_trace_records(path))
+
+
+def _read_request_trace_records_since(path: Path, start_index: int) -> list[dict]:
+    return _read_request_trace_records(path)[start_index:]
+
+
 def _assert_agent_context_in_trace(
-    trace_path: Path, source_label: str, timeout_s: float = 30.0
+    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
-        last_records = _read_request_trace_records(trace_path)
+        last_records = _read_request_trace_records_since(trace_path, start_index)
         if _trace_contains_agent_context(last_records):
             return
         time.sleep(0.2)
@@ -722,12 +744,12 @@ def _assert_agent_context_in_trace(
 
 
 def _assert_agent_parent_context_in_trace(
-    trace_path: Path, source_label: str, timeout_s: float = 30.0
+    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
-        last_records = _read_request_trace_records(trace_path)
+        last_records = _read_request_trace_records_since(trace_path, start_index)
         if _trace_contains_agent_parent_context(last_records):
             return
         time.sleep(0.2)
@@ -996,6 +1018,7 @@ def _try_run_claude_subagent_smoke(
     marker_filename: str,
     frontend_port: int,
     request_trace_path: Path,
+    trace_start_index: int,
 ) -> None:
     """Best-effort Claude subagent probe.
 
@@ -1097,7 +1120,9 @@ def _run_claude_subagent_smoke(
     deadline = time.monotonic() + 30.0
     last_records: list[dict] = []
     while time.monotonic() < deadline:
-        last_records = _read_request_trace_records(request_trace_path)
+        last_records = _read_request_trace_records_since(
+            request_trace_path, trace_start_index
+        )
         if _trace_contains_claude_subagent_context(last_records):
             logger.info("Optional Claude subagent smoke traced child agent_context")
             return
@@ -1120,6 +1145,7 @@ def _run_opencode_smoke(
     opencode_home: Path,
     cwd: Path,
     request_trace_path: Path,
+    trace_start_index: int,
 ) -> None:
     """Run `opencode run` until Dynamo traces its live subagent request."""
     logger.info("Running opencode smoke test against cwd=%s", cwd)
@@ -1156,7 +1182,7 @@ def _run_opencode_smoke(
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if _trace_contains_agent_parent_context(
-                _read_request_trace_records(request_trace_path), "opencode"
+                _read_request_trace_records_since(request_trace_path, trace_start_index)
             ):
                 trace_seen = True
                 break
@@ -1175,7 +1201,7 @@ def _run_opencode_smoke(
             stdout, stderr = process.communicate()
 
     trace_seen = trace_seen or _trace_contains_agent_parent_context(
-        _read_request_trace_records(request_trace_path), "opencode"
+        _read_request_trace_records_since(request_trace_path, trace_start_index)
     )
     result = subprocess.CompletedProcess(
         cmd,

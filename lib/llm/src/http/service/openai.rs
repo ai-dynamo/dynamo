@@ -46,8 +46,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, NvExt, agent_context_from_headers, apply_header_routing_overrides,
-    validate_nvext_semantics,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, NvExt, agent_context_from_headers,
+    apply_header_routing_overrides, validate_nvext_semantics,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -524,19 +524,22 @@ fn context_from_headers<T: Send + Sync + 'static>(
     Ok(request)
 }
 
-fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
+fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
 ) {
-    if !crate::request_trace::is_enabled() {
-        return;
-    }
-
-    if let Ok(x_request_id) = source.get::<String>(crate::request_trace::X_REQUEST_ID_CONTEXT_KEY) {
+    if crate::request_trace::is_enabled()
+        && let Ok(x_request_id) =
+            source.get::<String>(crate::request_trace::X_REQUEST_ID_CONTEXT_KEY)
+    {
         target.insert(
             crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             x_request_id.as_ref().clone(),
         );
+    }
+
+    if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
+        target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
     }
 }
 
@@ -872,7 +875,7 @@ async fn completions_batch(
             unique_request_id,
             request.metadata().clone(),
         );
-        copy_x_request_id(&request, &mut single_request_context);
+        copy_context_metadata(&request, &mut single_request_context);
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
@@ -3224,6 +3227,32 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn test_copy_context_metadata_preserves_agent_context() {
+        let mut source = Context::new(());
+        source.insert(
+            AGENT_CONTEXT_CONTEXT_KEY,
+            AgentContext {
+                trajectory_id: "traj-123".to_string(),
+                parent_trajectory_id: Some("parent-456".to_string()),
+                trajectory_final: Some(true),
+            },
+        );
+
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+
+        let agent_context = target
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context copied");
+        assert_eq!(agent_context.trajectory_id, "traj-123");
+        assert_eq!(
+            agent_context.parent_trajectory_id.as_deref(),
+            Some("parent-456")
+        );
+        assert_eq!(agent_context.trajectory_final, Some(true));
     }
 
     #[test]

@@ -20,7 +20,7 @@ them.
 flowchart LR
     Harness["Agent harness"]
     Headers["First-class headers"]
-    Custom["Custom header or nvext"]
+    Custom["Custom trajectory headers"]
     Normalize["Dynamo HTTP boundary"]
     Trajectory["trajectory_id + optional parent"]
     Consumers["tracing, replay, scheduling, cache policy"]
