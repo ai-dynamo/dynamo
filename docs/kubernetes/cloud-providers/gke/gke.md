@@ -16,37 +16,35 @@ export PROJECT_ID=<>
 export REGION=<>
 export ZONE=<>
 export CLUSTER_NAME=<>
-export CLUSTER_MACHINE_TYPE=n2-standard-4
-export NODE_POOL_MACHINE_TYPE=g2-standard-24
-export GPU_TYPE=nvidia-l4
-export GPU_COUNT=2
-export CPU_NODE=2
-export GPU_NODE=2
+export GENERAL_PURPOSE_MACHINE_TYPE=n2-standard-4
+export NUM_GENERAL_PURPOSE_NODES=1
 export DISK_SIZE=200
 
 gcloud container clusters create ${CLUSTER_NAME} \
  	--project=${PROJECT_ID} \
  	--location=${ZONE} \
 	--subnetwork=default \
-    --disk-size=${DISK_SIZE} \
-	--machine-type=${CLUSTER_MACHINE_TYPE} \
- 	--num-nodes=${CPU_NODE}
+  --disk-size=${DISK_SIZE} \
+  --machine-type=${GENERAL_PURPOSE_MACHINE_TYPE} \
+  --num-nodes=${NUM_GENERAL_PURPOSE_NODES}
 ```
 
 #### Create a GPU pool
 
 ```bash
+export GPU_MACHINE_TYPE=g2-standard-4
+export GPU_TYPE=nvidia-l4
+export NUM_GPU_NODES=1
+export GPU_COUNT=1
+
 gcloud container node-pools create gpu-pool \
  	--accelerator type=${GPU_TYPE},count=${GPU_COUNT},gpu-driver-version=latest \
  	--project=${PROJECT_ID} \
  	--location=${ZONE} \
  	--cluster=${CLUSTER_NAME} \
-	--machine-type=${NODE_POOL_MACHINE_TYPE} \
-    --disk-size=${DISK_SIZE} \
-    --num-nodes=${GPU_NODE} \
-    --enable-autoscaling \
-    --min-nodes=1 \
-    --max-nodes=3
+  --machine-type=${GPU_MACHINE_TYPE} \
+  --disk-size=${DISK_SIZE} \
+  --num-nodes=${NUM_GPU_NODES}
 ```
 
 ## Install Dynamo Kubernetes Platform
