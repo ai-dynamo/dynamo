@@ -70,54 +70,42 @@ export HF_TOKEN=<HF_TOKEN>
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN} -n ${INFERENCE_NAMESPACE}
 ```
 
+### Inspect the deployment gragh
+
+Inspect https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/v1beta1/agg.yaml.
+It contains DynamoGraphDeployment Custom Resource of the inference graph you will deploy.
+You might want to download and edit it, or you can just apply the above manifest AS IS.
+
+Note that the `args` field contains `LD_LIBRARY_PATH` and `PATH` to let GKE [find the correct GPU driver](https://cloud.google.com/kubernetes-engine/docs/how-to/gpus).
+
+For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/GKE/vllm.
+
 ### Perform the deployment
 
 We will deploy a LLM model to the Dynamo platform. Here we use `Qwen/Qwen3-0.6B` model with VLLM and disaggregated deployment as an example.
 
 In the deployment yaml file, some adjustments have to/ could be made:
 
-- **(Required)** Add args to change `LD_LIBRARY_PATH` and `PATH` of decoder container, to enable GKE find the correct GPU driver
-- Change VLLM  image to the desired one on NGC
-- Add namespace to metadata
-- Adjust GPU/CPU request and limits
-- Change model to deploy
+1.  Wait for the graph deployment to become ready:
 
-More configurations please refer to https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/GKE/vllm
+    ```bash
+    kubectl wait --for=condition=Ready dgd/vllm-agg -n ${INFERENCE_NAMESPACE} --timeout=30m
+    ```
 
-### Highlighted configurations in yaml file
-Please note that `LD_LIBRARY_PATH` needs to be set properly in GKE as per [Run GPUs in GKE](https://cloud.google.com/kubernetes-engine/docs/how-to/gpus)
+    Once the inference graph is ready, you get the following output from the comamnd above:
 
-The following snippet needs to be present in the `args` field of the deployment `yaml` file:
+    ```bash
+    dynamographdeployment.nvidia.com/vllm-agg condition met
+    ```
 
-```bash
-export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
-/sbin/ldconfig
-```
+1.  Check the inference graph components:
 
-For example, refer to [`examples/deployments/GKE/vllm/v1beta1/disagg.yaml`](../../../../examples/deployments/GKE/vllm/v1beta1/disagg.yaml):
-
-```yaml
-metadata:
-  name: vllm-disagg
-spec:
-  components:
-  - name: VllmDecodeWorker
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - |
-            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
-            /sbin/ldconfig
-            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
-          name: main
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-```
+    ```bash
+    kubectl get pods -n ${INFERENCE_NAMESPACE}
+    NAME                                                  READY   STATUS    RESTARTS   AGE
+    vllm-agg-frontend-76898f5988-p5bw6                    1/1     Running   0          5m
+    vllm-agg-vllmdecodeworker-2e88533b-6446cd9cdb-2n4sv   1/1     Running   0          5m
+    ```
 
 ## Deploy the model
 
