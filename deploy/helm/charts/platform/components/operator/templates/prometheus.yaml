@@ -48,6 +48,9 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
       targetLabel: dynamo_namespace
+  {{- with .Values.dynamo.metrics.podMonitors.frontendRelabelings }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: frontend
@@ -70,11 +73,21 @@ spec:
   - interval: 5s
     path: /metrics
     port: system
+    # honorLabels ensures dynamo_namespace and other labels set by the dynamo
+    # runtime (including router metrics embedded in the frontend) are preserved.
+    honorLabels: true
     relabelings:
     - action: replace
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+  {{- with .Values.dynamo.metrics.podMonitors.workerRelabelings }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   # Intra-pod GMS shadow-failover packs two engines into one pod, so each engine's
   # system port is renamed system-<engineID> (system-0, system-1) to avoid a clash
   # (see deploy/operator/internal/dynamo/failover.go). The default `system` endpoint
@@ -83,6 +96,9 @@ spec:
   - interval: 5s
     path: /metrics
     port: system-0
+    # honorLabels ensures dynamo_namespace and other labels set by the dynamo
+    # runtime (including router metrics embedded in the frontend) are preserved.
+    honorLabels: true
     relabelings:
     - action: replace
       sourceLabels:
@@ -93,9 +109,19 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
       targetLabel: dynamo_graph_deployment
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+  {{- with .Values.dynamo.metrics.podMonitors.workerRelabelings }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   - interval: 5s
     path: /metrics
     port: system-1
+    # honorLabels ensures dynamo_namespace and other labels set by the dynamo
+    # runtime (including router metrics embedded in the frontend) are preserved.
+    honorLabels: true
     relabelings:
     - action: replace
       sourceLabels:
@@ -105,15 +131,32 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
       targetLabel: dynamo_graph_deployment
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+{{- with .Values.dynamo.metrics.podMonitors.workerRelabelings }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
   - interval: 5s
     path: /metrics
     port: nixl
+    # honorLabels ensures dynamo_namespace and other labels set by the dynamo
+    # runtime (including router metrics embedded in the frontend) are preserved.
+    honorLabels: true
     relabelings:
     - action: replace
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+  {{- with .Values.dynamo.metrics.podMonitors.workerRelabelings }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- end }}
   selector:
     matchExpressions:
@@ -145,6 +188,17 @@ spec:
   - interval: 5s
     path: /metrics
     port: metrics
+    # honorLabels ensures dynamo_namespace and other labels set by the dynamo
+    # runtime (including router metrics embedded in the frontend) are preserved.
+    honorLabels: true
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+  {{- with .Values.dynamo.metrics.podMonitors.plannerRelabelings }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: planner
@@ -172,6 +226,8 @@ spec:
   podMetricsEndpoints:
   - interval: 5s
     path: /metrics
+    # honorLabels ensures dynamo_namespace and other labels set by the dynamo
+    # runtime (including router metrics embedded in the frontend) are preserved.
     honorLabels: true
     relabelings:
     # Force port 9090 (DYN_SYSTEM_PORT) without requiring containerPort in the pod spec.
@@ -187,6 +243,9 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
       targetLabel: dynamo_namespace
+  {{- with .Values.dynamo.metrics.podMonitors.routerRelabelings }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: default
