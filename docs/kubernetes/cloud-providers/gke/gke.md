@@ -82,9 +82,11 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
 
 ### Perform the deployment
 
-We will deploy a LLM model to the Dynamo platform. Here we use `Qwen/Qwen3-0.6B` model with VLLM and disaggregated deployment as an example.
+1.  Deploy the DynamoGraphDeployment manifest:
 
-In the deployment yaml file, some adjustments have to/ could be made:
+    ```bash
+    kubectl apply -n ${INFERENCE_NAMESPACE} -f https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/v1beta1/agg.yaml
+    ```
 
 1.  Wait for the graph deployment to become ready:
 
