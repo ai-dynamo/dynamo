@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: ThunderAgent Program Scheduler
 subtitle: Program-level scheduling with tool-boundary pause/resume on top of KV-aware routing
@@ -213,7 +213,7 @@ Enable these by lowering the log level for `dynamo.thunderagent_router`. They
 give the exact program identities behind each INFO summary count.
 
 For per-request tracing (token counts, cache hits, worker placement), the router
-also integrates with [Agent Tracing](agent-tracing.md): set
+also integrates with [Agent Tracing](agent-tracing.md#enable-output): set
 `DYN_REQUEST_TRACE=1` on the frontend to land a `request_end` record per LLM
 call. Harness tool-event spans are separate: they require
 `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` plus a configured publisher.
@@ -233,4 +233,4 @@ live in the
 - Repro fork (mini-swe-agent + agent_context injector): [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
 - Dynamo KV router: [Router Guide](../components/router/router-guide.md)
 - `nvext.agent_context` schema: [nvext reference](../components/frontend/nvext.md#agent-context)
-- [Agent Tracing](agent-tracing.md) and [Agent Hints](agent-hints.md)
+- [Trajectory IDs](trajectory-ids.md), [Agent Tracing](agent-tracing.md), and [Agent Hints](agent-hints.md)

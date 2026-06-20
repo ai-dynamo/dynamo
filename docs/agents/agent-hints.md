@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Agent Hints
 subtitle: Per-request serving hints for agentic workloads
@@ -10,7 +10,7 @@ Agent hints are optional per-request metadata that a harness sends under
 to the router and, where supported, backend runtimes.
 
 Use hints only for serving-relevant intent. Use
-[`nvext.agent_context`](agent-tracing.md#request-schema) for passive trace
+[trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for passive trace
 identity.
 
 ## Request Schema
@@ -67,9 +67,9 @@ Backend support is runtime-specific. For SGLang flags and behavior, see
 
 ## Related Request Extensions
 
-`agent_hints` is separate from `agent_context`:
+`agent_hints` is separate from trajectory identity:
 
-- `agent_context` is passive identity for traces and joins.
+- Trajectory IDs are passive identity for traces and joins.
 - `agent_hints` is active serving intent for routing, scheduling, and cache
   behavior.
 

@@ -1,11 +1,11 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Use Pi-Mono with Dynamo
-subtitle: Drive a real coding agent through Dynamo with agent context and tool tracing
+subtitle: Drive a real coding agent through Dynamo with trajectory identity and tool tracing
 ---
 
-[Pi-Mono](https://github.com/badlogic/pi-mono) is an open-source coding-agent harness whose clean plugin architecture has made it a popular substrate for patterns like subagents and planner/implementer loops. The [`pi-dynamo-provider`](https://github.com/ai-dynamo/pi-dynamo-provider) extension uses that plugin surface to register Dynamo as a Pi model provider. It runs in-process, adds Dynamo's [`agent_context`](agent-tracing.md) and [`agent_hints`](agent-hints.md) to each request, and emits Pi's tool lifecycle events to Dynamo over ZMQ.
+[Pi-Mono](https://github.com/badlogic/pi-mono) is an open-source coding-agent harness whose clean plugin architecture has made it a popular substrate for patterns like subagents and planner/implementer loops. The [`pi-dynamo-provider`](https://github.com/ai-dynamo/pi-dynamo-provider) extension uses that plugin surface to register Dynamo as a Pi model provider. It runs in-process, adds Dynamo [trajectory identity](trajectory-ids.md) and [`agent_hints`](agent-hints.md) to each request, and emits Pi's tool lifecycle events to Dynamo over ZMQ.
 
 This page is one worked example of how to wire a harness up to Dynamo's tracing and hint APIs — use it as a reference, not a prescription.
 
@@ -22,7 +22,7 @@ The integration works against any Dynamo backend — vLLM, SGLang, or TRT-LLM �
 
 - Registers a `dynamo` provider in Pi: `pi --model dynamo/<model-id>`.
 - Discovers models from Dynamo's `/v1/models`.
-- Injects `nvext.agent_context` (session/trajectory IDs) into every chat-completion request.
+- Injects trajectory IDs (`nvext.agent_context`) into every chat-completion request.
 - Adds `x-request-id` when one is not already set.
 - Relays Pi's `tool_start` / `tool_end` / `tool_error` events to Dynamo over ZMQ so LLM and tool spans share one trace.
 
@@ -68,7 +68,7 @@ export DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
 ./examples/backends/sglang/launch/agg_agent.sh
 ```
 
-By default this serves `zai-org/GLM-4.7-Flash` on TP 2. Override with `--model-path` / `--tp` if needed. See [Agent Tracing → Enable output](agent-tracing.md#enable-output) for the tracing reference. The provider works equally well against any Dynamo backend (vLLM, SGLang, TRT-LLM); the SGLang launcher is just the most batteries-included starting point.
+By default this serves `zai-org/GLM-4.7-Flash` on TP 2. Override with `--model-path` / `--tp` if needed. See [Agent Tracing](agent-tracing.md#enable-output) for the tracing reference. The provider works equally well against any Dynamo backend (vLLM, SGLang, TRT-LLM); the SGLang launcher is just the most batteries-included starting point.
 
 ### 3. Point Pi at Dynamo
 
@@ -133,5 +133,6 @@ See the [provider README](https://github.com/ai-dynamo/pi-dynamo-provider) for t
 ## Further reading
 
 - [pi-dynamo-provider repo](https://github.com/ai-dynamo/pi-dynamo-provider) — install, scripts, and source.
-- [Agent Tracing](agent-tracing.md) — the underlying trace protocol and `request_end` schema.
+- [Trajectory IDs](trajectory-ids.md) — trajectory identity and supported coding-agent headers.
+- [Agent Tracing](agent-tracing.md) — request traces, tool spans, Perfetto, and replay.
 - [Agent Hints](agent-hints.md) — per-request hints (`priority`, `osl`, `speculative_prefill`) Pi-Mono can forward via `nvext.agent_hints`.
