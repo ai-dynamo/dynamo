@@ -63,7 +63,7 @@ export INFERENCE_NAMESPACE=my-inference-graphs
 kubectl create namespace ${INFERENCE_NAMESPACE}
 ```
 
-### Create a secret to store your Hugging Face token (needed to download model weights from Hugging Face)
+### Create a secret to store your Hugging Face token (required to download model weights)
 
 ```bash
 export HF_TOKEN=<HF_TOKEN>
