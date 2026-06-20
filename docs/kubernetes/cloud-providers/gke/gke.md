@@ -49,7 +49,8 @@ gcloud container node-pools create gpu-pool \
 
 ## Install Dynamo Kubernetes Platform
 
-[See installation steps](../../installation-guide.md#overview)
+Perform steps 2 and (optionally) 3 in [Dynamo Installation Guide](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide#overview). On GKE, [the recommended way](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/gpu-operator)
+is not to install NVIDIA GPU operator. This is why you skip [step 1](../../installation-guide.md#step-1-install-the-gpu-operator).
 
 ## Deploy Inference Graph
 
