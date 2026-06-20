@@ -23,9 +23,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            initialDelaySeconds: 180
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
           workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
@@ -46,7 +44,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
