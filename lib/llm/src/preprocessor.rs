@@ -57,7 +57,7 @@ use dynamo_parsers::{
 };
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
-    AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
+    AsyncEngineContext, Context as PipelineContext, Error, ManyOut, Operator, SingleIn, async_trait,
 };
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
@@ -254,6 +254,17 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
+
+fn attach_agent_context_from_context(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    if let Ok(agent_context) = context.get::<crate::protocols::common::extensions::AgentContext>(
+        crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
+    ) {
+        request.agent_context = Some(agent_context.as_ref().clone());
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
@@ -837,7 +848,6 @@ impl OpenAIPreprocessor {
             let hints = nvext.agent_hints.as_ref();
             let (priority_jump, strict_priority, priority) = routing_priorities(hints);
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
-            builder.agent_context(nvext.agent_context.clone());
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
@@ -2878,6 +2888,7 @@ impl
         let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
+        attach_agent_context_from_context(&mut common_request, &context);
 
         let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
             &request,
@@ -3047,6 +3058,7 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        attach_agent_context_from_context(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,

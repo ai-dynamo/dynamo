@@ -12,8 +12,7 @@ replay, routing hints, priority, and cache-aware serving.
 
 The common identity concept is `trajectory_id`: one stable ID for one agent
 reasoning/tool chain. Supported coding agents can rely on the HTTP headers they
-already emit, and custom clients can send `x-dynamo-trajectory-id`, a generic
-header, or the `nvext` body form. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs)
+already emit, and custom clients can send Dynamo trajectory headers. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs)
 for the exact contract.
 
 ## Core Concepts
@@ -21,7 +20,7 @@ for the exact contract.
 | Concept | Purpose |
 |---------|---------|
 | [Dynamo for Agents](introduction.md) | Conceptual model for trajectories, requests, tool events, and the split between passive identity and active serving policy. |
-| [Trajectory IDs](trajectory-ids.md) | Stable agent trajectory identity from first-class coding-agent headers, `x-dynamo-trajectory-id`, or the `nvext` body form. |
+| [Trajectory IDs](trajectory-ids.md) | Stable agent trajectory identity from first-class coding-agent headers or Dynamo trajectory headers. |
 | [Agent Tracing](agent-tracing.md) | Request trace output, inferred tool-call metadata, optional harness tool spans, Perfetto conversion, and request replay. |
 | [Agent Hints](agent-hints.md) | Optional per-request hints such as priority, expected output length, and speculative prefill. |
 | [Priority Scheduling](priority-scheduling.md) | Request priority semantics across the router queue, backend engines, and cache policy. |
@@ -41,22 +40,25 @@ varies by runtime.
 
 ## Request Surface
 
-Agent-facing body metadata lives under `nvext` on OpenAI-compatible requests.
-Use this body form when headers are not enough, for example when a custom
-harness needs to include `parent_trajectory_id`:
+Agent trajectory identity is header-only. Agent-facing body metadata under
+`nvext` is reserved for serving hints and controls, not identity:
 
-```json
-{
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer sk-dummy' \
+  -H 'x-dynamo-trajectory-id: research-run-42:researcher' \
+  -H 'x-dynamo-parent-trajectory-id: research-run-42:planner' \
+  -d '{
+    "model": "my-model",
+    "messages": [{"role": "user", "content": "..."}],
     "nvext": {
-        "agent_context": {
-            "trajectory_id": "research-run-42:researcher"
-        },
-        "agent_hints": {
-            "priority": 5,
-            "osl": 1024
-        }
+      "agent_hints": {
+        "priority": 5,
+        "osl": 1024
+      }
     }
-}
+  }'
 ```
 
 Use trajectory IDs when you want traceability across LLM calls, tool calls, and

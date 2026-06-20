@@ -569,8 +569,6 @@ pub fn chat_completion_to_anthropic_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engines::ValidateRequest;
-    use crate::protocols::common::extensions::AgentContext;
 
     #[test]
     fn test_simple_user_message_conversion() {
@@ -618,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nvext_agent_context_conversion() {
+    fn test_nvext_agent_context_is_rejected() {
         let json = r#"{
             "model": "test-model",
             "max_tokens": 100,
@@ -632,20 +630,14 @@ mod tests {
         }"#;
 
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        ValidateRequest::validate(&chat_req).unwrap();
+        let err = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
 
-        assert_eq!(
-            chat_req.nvext.and_then(|ext| ext.agent_context),
-            Some(AgentContext {
-                trajectory_id: "run-123:researcher-0".to_string(),
-                parent_trajectory_id: Some("run-123:root".to_string()),
-            })
-        );
+        assert!(err.to_string().contains("invalid nvext"));
+        assert!(err.to_string().contains("unknown field `agent_context`"));
     }
 
     #[test]
-    fn test_nvext_invalid_agent_context_validates_in_llm_layer() {
+    fn test_nvext_agent_context_empty_id_is_still_unknown_field() {
         let json = r#"{
             "model": "test-model",
             "max_tokens": 100,
@@ -658,13 +650,10 @@ mod tests {
         }"#;
 
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let err = ValidateRequest::validate(&chat_req).unwrap_err();
+        let err = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("nvext.agent_context.trajectory_id must not be empty")
-        );
+        assert!(err.to_string().contains("invalid nvext"));
+        assert!(err.to_string().contains("unknown field `agent_context`"));
     }
 
     #[test]

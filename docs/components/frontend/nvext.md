@@ -41,7 +41,6 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
 | `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
-| `agent_context` | object | `None` | Preprocessor | Passive trajectory identity for request traces. See [Agent Context](#agent-context) below and [Trajectory IDs](../../agents/trajectory-ids.md). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
@@ -67,35 +66,10 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 | `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
 | `x-prefill-dp-rank` | `prefill_dp_rank` |
 
-## Agent Context
+Trajectory identity is header-only. Use the coding-agent headers or Dynamo
+trajectory headers described in [Trajectory IDs](../../agents/trajectory-ids.md);
+`nvext` does not accept trajectory identity fields.
 
-The `agent_context` sub-object carries passive trajectory identity for agentic
-requests. Dynamo uses this metadata to emit enriched request traces when request
-tracing is enabled. It does not change routing, scheduling, or cache behavior.
-
-Supported coding-agent clients can send their native identity headers instead
-of a body `agent_context`; generic HTTP clients can send
-`x-dynamo-trajectory-id`. Dynamo synthesizes the passive identity at the HTTP
-boundary. For the supported header table, precedence rules, and tracing
-contract, see [Trajectory IDs](../../agents/trajectory-ids.md#trajectory-id-inputs).
-
-| Field | Type | Required | Description |
-|-------|------|:--------:|-------------|
-| `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
-| `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
-
-```json
-{
-    "nvext": {
-        "agent_context": {
-            "trajectory_id": "research-run-42:researcher",
-            "parent_trajectory_id": "research-run-42:planner"
-        }
-    }
-}
-```
-
-For identity semantics, see [Trajectory IDs](../../agents/trajectory-ids.md).
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../agents/agent-tracing.md).
 

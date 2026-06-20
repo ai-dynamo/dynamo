@@ -368,6 +368,7 @@ mod tests {
                 agent_context: AgentContext {
                     trajectory_id: "root".to_string(),
                     parent_trajectory_id: None,
+                    trajectory_final: None,
                 },
                 request_model: "test-model".to_string(),
                 request_tracker: Some(tracker.clone()),
@@ -439,6 +440,7 @@ mod tests {
         request.agent_context = Some(AgentContext {
             trajectory_id: "root".to_string(),
             parent_trajectory_id: None,
+            trajectory_final: None,
         });
         let tracker = Some(Arc::new(RequestTracker::new()));
         let context = Context::new(());

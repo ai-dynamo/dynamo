@@ -22,7 +22,7 @@ The integration works against any Dynamo backend â€” vLLM, SGLang, or TRT-LLM â€
 
 - Registers a `dynamo` provider in Pi: `pi --model dynamo/<model-id>`.
 - Discovers models from Dynamo's `/v1/models`.
-- Injects trajectory IDs (`nvext.agent_context`) into every chat-completion request.
+- Injects trajectory IDs as Dynamo HTTP headers on every chat-completion request.
 - Adds `x-request-id` when one is not already set.
 - Relays Pi's `tool_start` / `tool_end` / `tool_error` events to Dynamo over ZMQ so LLM and tool spans share one trace.
 
@@ -34,7 +34,7 @@ sequenceDiagram
     participant Trace as Request trace sink
 
     Pi->>Provider: streamSimple(model, context)
-    Provider->>Dynamo: POST /v1/chat/completions<br/>nvext.agent_context, x-request-id
+    Provider->>Dynamo: POST /v1/chat/completions<br/>trajectory headers, x-request-id
     Dynamo-->>Provider: SSE chunks
     Dynamo->>Trace: request_end
     Pi->>Provider: tool_execution_start / _end

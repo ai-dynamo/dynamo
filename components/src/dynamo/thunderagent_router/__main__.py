@@ -9,8 +9,8 @@ Usage:
         --router-block-size 64
 
 Serves ``{namespace}.thunderagent_router.generate``. Pause/resume is
-opt-in per-request via ``nvext.agent_context.trajectory_id``; requests
-without it are routed via plain KvRouter with no lifecycle.
+opt-in per-request via header-derived ``trajectory_id``; requests without it
+are routed via plain KvRouter with no lifecycle.
 """
 
 from __future__ import annotations
@@ -54,14 +54,7 @@ def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
 
 
 def _is_trajectory_final(request: dict[str, Any]) -> bool:
-    """``nvext.agent_context.trajectory_final`` marks a trajectory's
-    last turn. The router releases the program and short-circuits -- the request is NOT
-    forwarded to the engine (an empty completion returns), so producers send it as a
-    dedicated minimal request (e.g. ``max_tokens=1``; the body is just a carrier).
-    It is a separate close ping rather than a flag on the last real turn because a
-    reactive agent loop only learns a turn was terminal from its response -- so a run's
-    end is typically known only after its last real turn already returned (e.g.
-    pi-dynamo-provider fires it on ``agent_end``)."""
+    """``x-dynamo-trajectory-final`` marks a trajectory's last turn internally."""
     ctx = request.get("agent_context")
     return isinstance(ctx, dict) and bool(ctx.get("trajectory_final"))
 
@@ -148,7 +141,6 @@ class ThunderAgentRouterHandler:
             return
 
         # Path A: no program_id -> behave like the standalone router.
-        # Backward compat for clients that don't send agent_context.
         if program_id is None:
             preprocessed = _wrap_preprocessed_request(request)
             async for chunk in await self._kv_router.generate_from_request(

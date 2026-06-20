@@ -11,6 +11,8 @@ pub(crate) const HEADER_CODEX_SESSION_ID: &str = "session-id";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
 pub(crate) const HEADER_DYNAMO_TRAJECTORY_ID: &str = "x-dynamo-trajectory-id";
+pub(crate) const HEADER_DYNAMO_PARENT_TRAJECTORY_ID: &str = "x-dynamo-parent-trajectory-id";
+pub(crate) const HEADER_DYNAMO_TRAJECTORY_FINAL: &str = "x-dynamo-trajectory-final";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentHeaderMapping {
@@ -45,6 +47,7 @@ const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
 pub(crate) struct AgentContextHeaderValues {
     pub(crate) trajectory_id: String,
     pub(crate) parent_trajectory_id: Option<String>,
+    pub(crate) trajectory_final: Option<bool>,
 }
 
 fn header_value(headers: &HeaderMap, header_name: &str) -> Option<String> {
@@ -53,6 +56,8 @@ fn header_value(headers: &HeaderMap, header_name: &str) -> Option<String> {
 }
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
+    let trajectory_final = header_bool(headers, HEADER_DYNAMO_TRAJECTORY_FINAL);
+
     for mapping in AGENT_HEADER_MAPPINGS {
         let Some(session_id) = header_value(headers, mapping.session_header) else {
             continue;
@@ -72,25 +77,23 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
         return Some(AgentContextHeaderValues {
             trajectory_id,
             parent_trajectory_id,
+            trajectory_final,
         });
     }
     header_value(headers, HEADER_DYNAMO_TRAJECTORY_ID).map(|trajectory_id| {
         AgentContextHeaderValues {
             trajectory_id,
-            parent_trajectory_id: None,
+            parent_trajectory_id: header_value(headers, HEADER_DYNAMO_PARENT_TRAJECTORY_ID),
+            trajectory_final,
         }
     })
 }
 
-pub(crate) fn has_agent_headers(headers: &HeaderMap) -> bool {
-    headers.contains_key(HEADER_DYNAMO_TRAJECTORY_ID)
-        || AGENT_HEADER_MAPPINGS.iter().any(|mapping| {
-            headers.contains_key(mapping.session_header)
-                || mapping
-                    .trajectory_header
-                    .is_some_and(|trajectory_header| headers.contains_key(trajectory_header))
-                || mapping
-                    .parent_session_header
-                    .is_some_and(|parent_header| headers.contains_key(parent_header))
-        })
+fn header_bool(headers: &HeaderMap, header_name: &str) -> Option<bool> {
+    let value = header_value(headers, header_name)?;
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
 }

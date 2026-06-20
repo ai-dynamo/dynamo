@@ -48,11 +48,10 @@ agents. Header lookup is case-insensitive.
 | Claude Code | `x-claude-code-session-id`; `x-claude-code-agent-id` for child agents | Inferred from `x-claude-code-session-id` when `x-claude-code-agent-id` differs | Root turns use the session header as `trajectory_id`; child-agent turns use the agent header as `trajectory_id` and the session header as `parent_trajectory_id`. |
 | Codex | `session-id` | None | `session-id` becomes the `trajectory_id`. |
 | OpenCode | `x-session-id` | `x-parent-session-id` | `x-session-id` becomes the `trajectory_id`; `x-parent-session-id` becomes `parent_trajectory_id` when present. |
-| Generic Dynamo client | `x-dynamo-trajectory-id` | None | The header value becomes `trajectory_id`. |
+| Generic Dynamo client | `x-dynamo-trajectory-id` | `x-dynamo-parent-trajectory-id` | The header value becomes `trajectory_id`; the parent header becomes `parent_trajectory_id` when present. |
 
 OpenCode `x-session-affinity` is routing intent, not trajectory identity. Use
-the first-class headers above, the generic `x-dynamo-trajectory-id` header, or
-the body form below.
+the first-class headers above or the Dynamo trajectory headers below.
 
 ### Custom clients
 
@@ -64,40 +63,18 @@ curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer sk-dummy' \
   -H 'x-dynamo-trajectory-id: research-run-42:researcher' \
+  -H 'x-dynamo-parent-trajectory-id: research-run-42:planner' \
   -d '{"model":"my-model","messages":[{"role":"user","content":"..."}]}'
 ```
 
-Use the `nvext` body form when you need the optional `parent_trajectory_id`:
+| Header | Required | Meaning |
+|--------|:--------:|---------|
+| `x-dynamo-trajectory-id` | Yes | One reasoning/tool chain inside the run. |
+| `x-dynamo-parent-trajectory-id` | No | Parent trajectory when using subagents. |
+| `x-dynamo-trajectory-final` | No | `true` marks the trajectory's last request for lifecycle-aware consumers. |
 
-```json
-{
-  "model": "my-model",
-  "messages": [{ "role": "user", "content": "..." }],
-  "nvext": {
-    "agent_context": {
-      "trajectory_id": "research-run-42:researcher",
-      "parent_trajectory_id": "research-run-42:planner"
-    }
-  }
-}
-```
-
-| Field                  | Required | Meaning                                  |
-| ---------------------- | :------: | ---------------------------------------- |
-| `trajectory_id`        |   Yes    | One reasoning/tool chain inside the run. |
-| `parent_trajectory_id` |    No    | Parent trajectory when using subagents.  |
-
-The body form takes precedence over all identity headers.
-
-Precedence:
-
-1. `nvext` body fields.
-2. First-class coding-agent headers.
-3. Generic `x-dynamo-trajectory-id`.
-4. No trajectory identity.
-
-No Dynamo imports are required in the harness. The metadata is plain JSON under
-`nvext`; just propagate the trajectory ID across threads/processes wherever
+No Dynamo imports are required in the harness. The metadata is plain HTTP
+headers; just propagate the trajectory ID across threads/processes wherever
 those paths call the model.
 
 ## Boundaries

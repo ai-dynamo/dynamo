@@ -6,8 +6,8 @@ subtitle: Program-level scheduling with tool-boundary pause/resume on top of KV-
 ---
 
 > **Experimental — not a released component.** Run it from a source checkout,
-> not from a `pip install ai-dynamo`. The CLI flags, the `nvext.agent_context`
-> schema, and the lifecycle hooks are all unstable and will change. Build and
+> not from a `pip install ai-dynamo`. The CLI flags, trajectory headers, and
+> lifecycle hooks are all unstable and will change. Build and
 > launch specifics live next to the code in
 > [`components/src/dynamo/thunderagent_router/README.md`](../../components/src/dynamo/thunderagent_router/README.md).
 
@@ -37,8 +37,8 @@ ways:
 
 ## The Scheduler
 
-The algorithm groups requests by `program_id` (the `trajectory_id` from
-`nvext.agent_context`) and runs an outer scheduler that moves each program
+The algorithm groups requests by `program_id` (the header-derived
+`trajectory_id`) and runs an outer scheduler that moves each program
 through `(REASONING | ACTING) × (ACTIVE | PAUSED)`. A program enters ACTING at a
 tool boundary. Under memory pressure the scheduler pauses ACTING programs —
 logically, with no decode preemption — so the engine is free to evict their KV.
@@ -82,11 +82,11 @@ program from being paused and immediately resumed within one tick.
 
 ### Program Lifetime
 
-A program is created on its first turn, keyed by `trajectory_id`. The public
-`nvext.agent_context` contract only carries `trajectory_id` and the optional
-`parent_trajectory_id`; explicit close markers are not part of the request
-surface. Program bookkeeping must therefore be bounded by router policy, such as
-idle expiry or token-weight decay.
+A program is created on its first turn, keyed by `trajectory_id`. Public
+trajectory identity is carried in headers such as `x-dynamo-trajectory-id`,
+`x-dynamo-parent-trajectory-id`, and `x-dynamo-trajectory-final`. Program
+bookkeeping must still be bounded by router policy, such as idle expiry or
+token-weight decay.
 
 ## Utilization-Driven Control Loop
 
@@ -132,7 +132,7 @@ and reasoning parsers).
 ┌─────────────────────────────────────────────────────────────┐
 │ dynamo.frontend  (HTTP + auth + tracing sink)               │
 └────────────────────┬────────────────────────────────────────┘
-                     │  chat completions, with nvext.agent_context
+                     │  chat completions, with trajectory headers
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ dynamo.thunderagent_router  (this service)                  │
@@ -211,7 +211,6 @@ live in the
 
 - ThunderAgent paper: [arxiv.org/abs/2602.13692](https://arxiv.org/abs/2602.13692)
 - Upstream ThunderAgent reference: [HaoKang-Timmy/ThunderAgent](https://github.com/HaoKang-Timmy/ThunderAgent)
-- Repro fork (mini-swe-agent + agent_context injector): [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
+- Repro fork (mini-swe-agent + trajectory injector): [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
 - Dynamo KV router: [Router Guide](../components/router/router-guide.md)
-- `nvext.agent_context` schema: [nvext reference](../components/frontend/nvext.md#agent-context)
 - [Trajectory IDs](trajectory-ids.md), [Agent Tracing](agent-tracing.md), and [Agent Hints](agent-hints.md)

@@ -46,7 +46,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    NvExt, apply_header_routing_overrides, validate_nvext_semantics,
+    AGENT_CONTEXT_CONTEXT_KEY, NvExt, agent_context_from_headers, apply_header_routing_overrides,
+    validate_nvext_semantics,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -517,6 +518,9 @@ fn context_from_headers<T: Send + Sync + 'static>(
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
+    if let Some(agent_context) = agent_context_from_headers(headers) {
+        request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+    }
     Ok(request)
 }
 
@@ -539,7 +543,6 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 /// Warn (once per request) when nvext data is dropped because the extension is
 /// disabled. Only called from the disabled branch, so the default path is free.
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
-    use crate::protocols::agents::has_agent_headers;
     use crate::protocols::common::extensions::{
         HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
         HEADER_WORKER_INSTANCE_ID,
@@ -552,8 +555,7 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
         HEADER_PREFILL_DP_RANK,
     ]
     .iter()
-    .any(|h| headers.contains_key(*h))
-        || has_agent_headers(headers);
+    .any(|h| headers.contains_key(*h));
 
     if nvext_present || header_present {
         tracing::warn!(
@@ -3213,22 +3215,15 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_openai_nvext_rejects_invalid_agent_context() {
-        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+    fn test_openai_nvext_rejects_agent_context() {
+        let err = serde_json::from_value::<NvExt>(serde_json::json!({
             "agent_context": {
-                "trajectory_id": ""
+                "trajectory_id": "run-123"
             }
         }))
-        .unwrap();
+        .unwrap_err();
 
-        let err = validate_openai_nvext(Some(&nvext)).unwrap_err();
-
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(
-            err.1
-                .message
-                .contains("nvext.agent_context.trajectory_id must not be empty")
-        );
+        assert!(err.to_string().contains("unknown field `agent_context`"));
     }
 
     #[test]
