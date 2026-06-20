@@ -59,8 +59,8 @@ In this section you deploy VLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B
 ### Create a namespace for your inference graph deployments
 
 ```bash
-export INFERENCE_NAMESPACE=my-inference
-kubectl create namespace $INFERENCE_NAMESPACE
+export INFERENCE_NAMESPACE=my-inference-graphs
+kubectl create namespace ${INFERENCE_NAMESPACE}
 ```
 
 ### Create a secret to store your Hugging Face token (needed to download model weights from Hugging Face)
