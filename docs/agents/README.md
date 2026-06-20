@@ -43,13 +43,12 @@ varies by runtime.
 
 Agent-facing body metadata lives under `nvext` on OpenAI-compatible requests.
 Use this body form when headers are not enough, for example when a custom
-harness needs to include `parent_trajectory_id` or `trajectory_final`:
+harness needs to include `parent_trajectory_id`:
 
 ```json
 {
     "nvext": {
         "agent_context": {
-            "session_type_id": "deep_research",
             "trajectory_id": "research-run-42:researcher"
         },
         "agent_hints": {

@@ -366,10 +366,8 @@ mod tests {
         let state = RequestEndTraceState {
             agent: Some(AgentContextTraceState {
                 agent_context: AgentContext {
-                    session_type_id: Some("agent_harness".to_string()),
                     trajectory_id: "root".to_string(),
                     parent_trajectory_id: None,
-                    trajectory_final: None,
                 },
                 request_model: "test-model".to_string(),
                 request_tracker: Some(tracker.clone()),
@@ -439,10 +437,8 @@ mod tests {
             ..Default::default()
         });
         request.agent_context = Some(AgentContext {
-            session_type_id: Some("agent_harness".to_string()),
             trajectory_id: "root".to_string(),
             parent_trajectory_id: None,
-            trajectory_final: None,
         });
         let tracker = Some(Arc::new(RequestTracker::new()));
         let context = Context::new(());

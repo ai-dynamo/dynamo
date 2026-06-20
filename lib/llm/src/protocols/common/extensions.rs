@@ -63,11 +63,6 @@ where
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentContext {
-    /// Reusable session/profile class.
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_type_id: Option<String>,
-
     /// Schedulable reasoning/tool trajectory identifier.
     pub trajectory_id: String,
 
@@ -75,12 +70,6 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_trajectory_id: Option<String>,
-
-    /// Optional terminal marker: when true, this request signals that the
-    /// trajectory is complete.
-    #[builder(default, setter(strip_option))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trajectory_final: Option<bool>,
 }
 
 impl AgentContext {
@@ -275,10 +264,8 @@ const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
         Self {
-            session_type_id: Some(values.session_type_id.to_string()),
             trajectory_id: values.trajectory_id,
             parent_trajectory_id: values.parent_trajectory_id,
-            trajectory_final: None,
         }
     }
 }
@@ -292,11 +279,9 @@ impl From<AgentContextHeaderValues> for AgentContext {
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
 /// - coding-agent session headers -> `agent_context.trajectory_id`
 /// - coding-agent child trajectory headers -> `agent_context.trajectory_id`
-/// - coding-agent source -> `agent_context.session_type_id`
 /// - configured coding-agent parent session headers ->
 ///   `agent_context.parent_trajectory_id`
 /// - `x-dynamo-trajectory-id` -> generic `agent_context.trajectory_id`
-///   with `session_type_id=dynamo`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// Explicit `nvext.agent_context` takes priority over coding-agent headers.
@@ -377,9 +362,6 @@ pub fn validate_nvext_semantics(nvext: Option<&NvExt>) -> anyhow::Result<()> {
     };
 
     if let Some(agent_context) = nvext.agent_context.as_ref() {
-        if let Some(session_type_id) = agent_context.session_type_id.as_ref() {
-            validate_non_empty(session_type_id, "nvext.agent_context.session_type_id")?;
-        }
         validate_non_empty(
             &agent_context.trajectory_id,
             "nvext.agent_context.trajectory_id",
@@ -731,10 +713,8 @@ mod tests {
     fn shared_agent_context_semantics_reject_empty_required_ids() {
         let nvext = NvExt::builder()
             .agent_context(AgentContext {
-                session_type_id: Some("deep_research:v1".to_string()),
                 trajectory_id: " ".to_string(),
                 parent_trajectory_id: None,
-                trajectory_final: None,
             })
             .build()
             .unwrap();
@@ -756,7 +736,6 @@ mod tests {
 
         let nvext = serde_json::from_str::<NvExt>(json).unwrap();
         let agent_context = nvext.agent_context.unwrap();
-        assert_eq!(agent_context.session_type_id, None);
         assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
     }
 
@@ -764,11 +743,21 @@ mod tests {
     fn agent_context_serde_missing_trajectory_id_fails() {
         let json = r#"{
             "agent_context": {
-                "session_type_id": "deep_research:v1"
+                "parent_trajectory_id": "root-1"
             }
         }"#;
 
         assert!(serde_json::from_str::<NvExt>(json).is_err());
+    }
+
+    #[test]
+    fn agent_context_serde_rejects_internal_fields() {
+        for json in [
+            r#"{"agent_context":{"trajectory_id":"run-123","session_type_id":"deep_research:v1"}}"#,
+            r#"{"agent_context":{"trajectory_id":"run-123","trajectory_final":true}}"#,
+        ] {
+            assert!(serde_json::from_str::<NvExt>(json).is_err());
+        }
     }
 
     #[test]
@@ -856,44 +845,24 @@ mod tests {
         use axum::http::{HeaderMap, HeaderName};
 
         let cases = [
-            (
-                HEADER_CLAUDE_CODE_SESSION_ID,
-                "claude-run-1",
-                None,
-                "claude_code",
-                None,
-            ),
-            ("Session-ID", "codex-run-1", None, "codex", None),
+            (HEADER_CLAUDE_CODE_SESSION_ID, "claude-run-1", None, None),
+            ("Session-ID", "codex-run-1", None, None),
             (
                 HEADER_CODEX_SESSION_ID,
                 "codex-run-2",
                 Some("opencode-parent"),
-                "codex",
                 None,
             ),
             (
                 HEADER_OPENCODE_SESSION_ID,
                 "opencode-run-1",
                 Some("parent-run-1"),
-                "opencode",
                 Some("parent-run-1"),
             ),
-            (
-                HEADER_DYNAMO_TRAJECTORY_ID,
-                "generic-run-1",
-                None,
-                "dynamo",
-                None,
-            ),
+            (HEADER_DYNAMO_TRAJECTORY_ID, "generic-run-1", None, None),
         ];
 
-        for (
-            header_name,
-            header_value,
-            parent_header_value,
-            expected_session_type_id,
-            expected_parent_trajectory_id,
-        ) in cases
+        for (header_name, header_value, parent_header_value, expected_parent_trajectory_id) in cases
         {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -908,17 +877,10 @@ mod tests {
                 .unwrap()
                 .agent_context
                 .unwrap();
+            assert_eq!(agent_context.trajectory_id.as_str(), header_value);
             assert_eq!(
-                (
-                    agent_context.session_type_id.as_deref(),
-                    agent_context.trajectory_id.as_str(),
-                    agent_context.parent_trajectory_id.as_deref(),
-                ),
-                (
-                    Some(expected_session_type_id),
-                    header_value,
-                    expected_parent_trajectory_id,
-                )
+                agent_context.parent_trajectory_id.as_deref(),
+                expected_parent_trajectory_id
             );
         }
     }
@@ -937,10 +899,6 @@ mod tests {
             .agent_context
             .unwrap();
 
-        assert_eq!(
-            agent_context.session_type_id.as_deref(),
-            Some("claude_code")
-        );
         assert_eq!(agent_context.trajectory_id, "claude-agent");
         assert_eq!(
             agent_context.parent_trajectory_id.as_deref(),
@@ -959,7 +917,6 @@ mod tests {
             .agent_context
             .unwrap();
 
-        assert_eq!(agent_context.session_type_id.as_deref(), Some("codex"));
         assert_eq!(agent_context.trajectory_id, "codex-run");
     }
 
@@ -988,7 +945,6 @@ mod tests {
         );
         headers.insert(HEADER_DYNAMO_TRAJECTORY_ID, "generic-run".parse().unwrap());
         let explicit = AgentContext::builder()
-            .session_type_id("native".to_string())
             .trajectory_id("native-trajectory".to_string())
             .parent_trajectory_id("native-parent".to_string())
             .build()

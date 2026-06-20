@@ -700,13 +700,13 @@ def _read_request_trace_records(path: Path) -> list[dict]:
 
 
 def _assert_agent_context_in_trace(
-    trace_path: Path, session_type_id: str, timeout_s: float = 30.0
+    trace_path: Path, source_label: str, timeout_s: float = 30.0
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
         last_records = _read_request_trace_records(trace_path)
-        if _trace_contains_agent_context(last_records, session_type_id):
+        if _trace_contains_agent_context(last_records):
             return
         time.sleep(0.2)
 
@@ -716,19 +716,19 @@ def _assert_agent_context_in_trace(
         if record.get("agent_context")
     ]
     pytest.fail(
-        f"request trace did not contain agent_context for {session_type_id!r} "
+        f"request trace did not contain agent_context after {source_label!r} "
         f"within {timeout_s}s; saw {seen}"
     )
 
 
 def _assert_agent_parent_context_in_trace(
-    trace_path: Path, session_type_id: str, timeout_s: float = 30.0
+    trace_path: Path, source_label: str, timeout_s: float = 30.0
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
         last_records = _read_request_trace_records(trace_path)
-        if _trace_contains_agent_parent_context(last_records, session_type_id):
+        if _trace_contains_agent_parent_context(last_records):
             return
         time.sleep(0.2)
 
@@ -738,17 +738,15 @@ def _assert_agent_parent_context_in_trace(
         if record.get("agent_context")
     ]
     pytest.fail(
-        f"request trace did not contain parent agent_context for {session_type_id!r} "
+        f"request trace did not contain parent agent_context after {source_label!r} "
         f"within {timeout_s}s; saw {seen}"
     )
 
 
-def _trace_contains_agent_context(records: list[dict], session_type_id: str) -> bool:
+def _trace_contains_agent_context(records: list[dict]) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
-            continue
-        if agent_context.get("session_type_id") != session_type_id:
             continue
 
         trajectory_id = agent_context.get("trajectory_id")
@@ -758,14 +756,10 @@ def _trace_contains_agent_context(records: list[dict], session_type_id: str) -> 
     return False
 
 
-def _trace_contains_agent_parent_context(
-    records: list[dict], session_type_id: str
-) -> bool:
+def _trace_contains_agent_parent_context(records: list[dict]) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
-            continue
-        if agent_context.get("session_type_id") != session_type_id:
             continue
         parent_trajectory_id = agent_context.get("parent_trajectory_id")
         if not parent_trajectory_id:
@@ -784,8 +778,6 @@ def _trace_contains_claude_subagent_context(records: list[dict]) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
-            continue
-        if agent_context.get("session_type_id") != "claude_code":
             continue
 
         trajectory_id = agent_context.get("trajectory_id")

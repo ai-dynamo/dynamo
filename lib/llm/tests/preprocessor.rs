@@ -554,7 +554,6 @@ pub mod openai_preprocessor_tests {
             NvExt::builder()
                 .agent_context(
                     AgentContext::builder()
-                        .session_type_id("deep_research:v1".to_string())
                         .trajectory_id("run-123:researcher-0".to_string())
                         .parent_trajectory_id("run-123:orchestrator".to_string())
                         .build()
@@ -573,10 +572,6 @@ pub mod openai_preprocessor_tests {
         let agent_context = preprocessed_request
             .agent_context
             .expect("agent_context should propagate");
-        assert_eq!(
-            agent_context.session_type_id.as_deref(),
-            Some("deep_research:v1")
-        );
         assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
         assert_eq!(
             agent_context.parent_trajectory_id.as_deref(),

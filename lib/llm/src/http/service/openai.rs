@@ -3216,7 +3216,6 @@ mod tests {
     fn test_validate_openai_nvext_rejects_invalid_agent_context() {
         let nvext: NvExt = serde_json::from_value(serde_json::json!({
             "agent_context": {
-                "session_type_id": "deep_research:v1",
                 "trajectory_id": ""
             }
         }))

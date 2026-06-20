@@ -80,32 +80,13 @@ program from being paused and immediately resumed within one tick.
   re-enter ahead of fresh admissions, and a forced-resume cap
   (`--resume-timeout-seconds`) guarantees no program is starved indefinitely.
 
-### Program Close (trajectory_final)
+### Program Lifetime
 
-A program is created on its first turn (keyed by `trajectory_id`) and otherwise
-lives ACTIVE↔PAUSED for the process lifetime — a single LLM `finish_reason` cannot
-mark a *program* done, since the agent typically keeps issuing turns. To release a
-program deterministically, the harness sets the optional terminal marker
-**`nvext.agent_context.trajectory_final: true`** on a final request (e.g. on the
-agent's `agent_end`). When the router sees it, it **deletes the program from its
-table (and paused set) and short-circuits the request — it is never forwarded to a
-worker** (the response is an empty completion). This frees the program's scheduling
-bookkeeping so its tokens stop counting against worker utilization.
-
-```jsonc
-// final request — released, no inference
-{ "model": "...", "max_tokens": 1, "messages": [{"role":"user","content":"."}],
-  "nvext": { "agent_context": { "session_type_id": "...",
-                                "trajectory_id": "abc", "trajectory_final": true } } }
-```
-
-The close is best-effort from the harness side; if it never arrives (crash, black-box
-harness) the program lingers in the table, but its token weight decays toward zero so it
-stops counting against worker utilization — the scheduling impact self-heals even without
-an explicit close. `pi-dynamo-provider` fires the close automatically on `agent_end` /
-`session_shutdown` (a dedicated `max_tokens: 1` request — a reactive agent loop only
-learns a turn was terminal from its response, so a run's end is typically known only
-after its last real turn already returned, leaving no live turn to flag).
+A program is created on its first turn, keyed by `trajectory_id`. The public
+`nvext.agent_context` contract only carries `trajectory_id` and the optional
+`parent_trajectory_id`; explicit close markers are not part of the request
+surface. Program bookkeeping must therefore be bounded by router policy, such as
+idle expiry or token-weight decay.
 
 ## Utilization-Driven Control Loop
 

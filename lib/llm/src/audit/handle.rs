@@ -106,7 +106,6 @@ mod tests {
             "store": true,
             "nvext": {
                 "agent_context": {
-                    "session_type_id": "deep_research",
                     "trajectory_id": "run-123:researcher",
                     "parent_trajectory_id": "run-123:planner"
                 }

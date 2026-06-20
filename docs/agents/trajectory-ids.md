@@ -67,8 +67,7 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"my-model","messages":[{"role":"user","content":"..."}]}'
 ```
 
-Use the `nvext` body form when you need optional fields such as
-`parent_trajectory_id`, `session_type_id`, or `trajectory_final`:
+Use the `nvext` body form when you need the optional `parent_trajectory_id`:
 
 ```json
 {
@@ -76,7 +75,6 @@ Use the `nvext` body form when you need optional fields such as
   "messages": [{ "role": "user", "content": "..." }],
   "nvext": {
     "agent_context": {
-      "session_type_id": "deep_research",
       "trajectory_id": "research-run-42:researcher",
       "parent_trajectory_id": "research-run-42:planner"
     }
@@ -87,9 +85,7 @@ Use the `nvext` body form when you need optional fields such as
 | Field                  | Required | Meaning                                  |
 | ---------------------- | :------: | ---------------------------------------- |
 | `trajectory_id`        |   Yes    | One reasoning/tool chain inside the run. |
-| `session_type_id`      |    No    | Workload class.                          |
 | `parent_trajectory_id` |    No    | Parent trajectory when using subagents.  |
-| `trajectory_final`     |    No    | `true` marks the trajectory's last request as a cleanup hint. |
 
 The body form takes precedence over all identity headers.
 
@@ -99,21 +95,6 @@ Precedence:
 2. First-class coding-agent headers.
 3. Generic `x-dynamo-trajectory-id`.
 4. No trajectory identity.
-
-`trajectory_final` is an optional terminal marker: set it to `true` to signal that a
-trajectory is finished. Lifecycle-aware backends use it to release whatever
-per-trajectory state they hold (scheduling bookkeeping, routing affinity, cached
-identity) right away instead of waiting for an idle timeout; backends that don't track
-per-trajectory lifecycle ignore it.
-
-Send it as a **dedicated minimal request** (e.g. `max_tokens: 1` with a placeholder
-message), not piggybacked on a real turn. A reactive agent loop only learns a turn was
-terminal from its *response*, so the run's end is typically known only after the last
-real turn already returned; there is no live turn left to flag. (A harness with a hard
-turn budget may know earlier, but early termination still leaves the real last turn
-unflagged, so a post-hoc close is the robust contract.) Because a backend that acts on
-the marker may skip generation entirely, the request body is just a carrier. Keep it
-minimal.
 
 No Dynamo imports are required in the harness. The metadata is plain JSON under
 `nvext`; just propagate the trajectory ID across threads/processes wherever

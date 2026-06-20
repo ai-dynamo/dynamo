@@ -11,11 +11,9 @@ pub(crate) const HEADER_CODEX_SESSION_ID: &str = "session-id";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
 pub(crate) const HEADER_DYNAMO_TRAJECTORY_ID: &str = "x-dynamo-trajectory-id";
-pub(crate) const DEFAULT_DYNAMO_SESSION_TYPE_ID: &str = "dynamo";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentHeaderMapping {
-    session_type_id: &'static str,
     session_header: &'static str,
     trajectory_header: Option<&'static str>,
     parent_session_header: Option<&'static str>,
@@ -24,21 +22,18 @@ struct AgentHeaderMapping {
 
 const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
     AgentHeaderMapping {
-        session_type_id: "claude_code",
         session_header: HEADER_CLAUDE_CODE_SESSION_ID,
         trajectory_header: Some(HEADER_CLAUDE_CODE_AGENT_ID),
         parent_session_header: None,
         infer_parent_from_session_for_child: true,
     },
     AgentHeaderMapping {
-        session_type_id: "codex",
         session_header: HEADER_CODEX_SESSION_ID,
         trajectory_header: None,
         parent_session_header: None,
         infer_parent_from_session_for_child: false,
     },
     AgentHeaderMapping {
-        session_type_id: "opencode",
         session_header: HEADER_OPENCODE_SESSION_ID,
         trajectory_header: None,
         parent_session_header: Some(HEADER_OPENCODE_PARENT_SESSION_ID),
@@ -48,7 +43,6 @@ const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentContextHeaderValues {
-    pub(crate) session_type_id: &'static str,
     pub(crate) trajectory_id: String,
     pub(crate) parent_trajectory_id: Option<String>,
 }
@@ -76,14 +70,12 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             });
 
         return Some(AgentContextHeaderValues {
-            session_type_id: mapping.session_type_id,
             trajectory_id,
             parent_trajectory_id,
         });
     }
     header_value(headers, HEADER_DYNAMO_TRAJECTORY_ID).map(|trajectory_id| {
         AgentContextHeaderValues {
-            session_type_id: DEFAULT_DYNAMO_SESSION_TYPE_ID,
             trajectory_id,
             parent_trajectory_id: None,
         }

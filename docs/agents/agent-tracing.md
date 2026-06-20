@@ -58,7 +58,6 @@ IDs and names only; arguments are intentionally not stored.
   "event_time_unix_ms": 1777312801000,
   "event_source": "dynamo",
   "agent_context": {
-    "session_type_id": "deep_research",
     "trajectory_id": "research-run-42:researcher",
     "parent_trajectory_id": "research-run-42:planner"
   },
@@ -161,7 +160,6 @@ Example `tool_end`:
   "event_time_unix_ms": 1777312801500,
   "event_source": "harness",
   "agent_context": {
-    "session_type_id": "deep_research",
     "trajectory_id": "research-run-42:researcher"
   },
   "tool": {
@@ -306,7 +304,6 @@ omits conversational payload by design.
 |--------|------|
 | `trajectory_id` | Branch within run |
 | `parent_trajectory_id` | Subagent link |
-| `session_type_id` | Profile or workload type |
 
 </details>
 

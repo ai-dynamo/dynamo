@@ -82,15 +82,12 @@ contract, see [Trajectory IDs](../../agents/trajectory-ids.md#trajectory-id-inpu
 | Field | Type | Required | Description |
 |-------|------|:--------:|-------------|
 | `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
-| `session_type_id` | `string` | No | Reusable profile or agent class label. |
 | `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
-| `trajectory_final` | `bool` | No | Terminal marker for lifecycle-aware consumers; ignored by consumers that do not track trajectory lifecycle. |
 
 ```json
 {
     "nvext": {
         "agent_context": {
-            "session_type_id": "deep_research",
             "trajectory_id": "research-run-42:researcher",
             "parent_trajectory_id": "research-run-42:planner"
         }

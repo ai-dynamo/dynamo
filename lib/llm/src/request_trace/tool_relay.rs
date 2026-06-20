@@ -173,10 +173,8 @@ mod tests {
             event_time_unix_ms: 1,
             event_source: Some(RequestTraceEventSource::Harness),
             agent_context: Some(AgentContext {
-                session_type_id: Some("agent_harness".to_string()),
                 trajectory_id: "run-1:agent".to_string(),
                 parent_trajectory_id: None,
-                trajectory_final: None,
             }),
             request: None,
             tool: Some(RequestTraceToolEvent {

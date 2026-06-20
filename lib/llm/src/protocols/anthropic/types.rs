@@ -625,10 +625,8 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "nvext": {
                 "agent_context": {
-                    "session_type_id": "deep_research:v1",
                     "trajectory_id": "run-123:researcher-0",
-                    "parent_trajectory_id": "run-123:root",
-                    "trajectory_final": false
+                    "parent_trajectory_id": "run-123:root"
                 }
             }
         }"#;
@@ -640,10 +638,8 @@ mod tests {
         assert_eq!(
             chat_req.nvext.and_then(|ext| ext.agent_context),
             Some(AgentContext {
-                session_type_id: Some("deep_research:v1".to_string()),
                 trajectory_id: "run-123:researcher-0".to_string(),
                 parent_trajectory_id: Some("run-123:root".to_string()),
-                trajectory_final: Some(false),
             })
         );
     }
@@ -656,7 +652,6 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "nvext": {
                 "agent_context": {
-                    "session_type_id": "deep_research:v1",
                     "trajectory_id": ""
                 }
             }
