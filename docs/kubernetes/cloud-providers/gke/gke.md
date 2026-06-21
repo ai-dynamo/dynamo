@@ -100,7 +100,7 @@ kubectl create namespace ${INFERENCE_NAMESPACE}
 ### Create a secret to store your Hugging Face token (required to download model weights)
 
 ```bash
-export HF_TOKEN=<HF_TOKEN>
+export HF_TOKEN=<your Hugging Face token>
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN} -n ${INFERENCE_NAMESPACE}
 ```
 
