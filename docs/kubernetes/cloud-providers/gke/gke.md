@@ -130,7 +130,7 @@ gke-my-cluster-gpu-pool-6b65a2ea-7p04       1
 
 For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/GKE/vllm.
 
-### Perform the deployment
+### Deploy
 
 1.  Deploy the DynamoGraphDeployment manifest:
 
