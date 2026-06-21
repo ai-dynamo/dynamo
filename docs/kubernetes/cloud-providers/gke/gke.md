@@ -112,8 +112,6 @@ Clone the Dynamo GitHub repository:
 ```bash
 git clone https://github.com/ai-dynamo/dynamo.git
 cd dynamo
-
-git checkout release/1.2.1
 ```
 
 Inspect [examples/deployments/GKE/vllm/v1beta1/agg.yaml](../../../../examples/deployments/GKE/vllm/v1beta1/agg.yaml).
