@@ -24,6 +24,7 @@ import (
 	"fmt"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
@@ -65,10 +66,25 @@ func ReconcileModelServicesForComponents(
 		}
 		seenBaseModels[baseModelName] = true
 
+		annotations := make(map[string]string)
+		if owner.GetObjectKind().GroupVersionKind().Kind == "DynamoGraphDeployment" {
+			dgd, ok := owner.(*nvidiacomv1beta1.DynamoGraphDeployment)
+			if !ok {
+				err := fmt.Errorf("failed to sync headless service annotations for model %s", baseModelName)
+				logger.Error(err, "Failed to get DGD for model services",
+					"kind", owner.GetObjectKind().GroupVersionKind().Kind,
+					"componentName", componentName,
+					"baseModelName", baseModelName)
+				return err
+			}
+			annotations = GetDGDComponentResourceAnnotations(dgd, componentName, component)
+		}
+
 		// Generate headless service with deterministic name based on model name
 		headlessService := generateHeadlessServiceForModel(
 			namespace,
 			baseModelName,
+			annotations,
 		)
 
 		// Sync the service (create or update)
@@ -103,12 +119,18 @@ func ReconcileModelServicesForComponents(
 func generateHeadlessServiceForModel(
 	namespace string,
 	baseModelName string,
+	annotations map[string]string,
 ) *corev1.Service {
 	// Generate deterministic service name from model name
 	serviceName := GenerateServiceName(baseModelName)
 
 	// Hash the base model name for use in labels (no length or character restrictions)
 	modelHash := HashModelName(baseModelName)
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	// Original name for humans
+	annotations[commonconsts.KubeAnnotationDynamoBaseModel] = baseModelName
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -118,9 +140,7 @@ func generateHeadlessServiceForModel(
 				commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
 				"nvidia.com/managed-by":                   "dynamo-operator",
 			},
-			Annotations: map[string]string{
-				commonconsts.KubeAnnotationDynamoBaseModel: baseModelName, // Original name for humans
-			},
+			Annotations: annotations,
 		},
 		Spec: corev1.ServiceSpec{
 			// Headless service - no ClusterIP, no load balancing
