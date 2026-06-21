@@ -24,7 +24,6 @@ import (
 	"fmt"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
@@ -67,16 +66,7 @@ func ReconcileModelServicesForComponents(
 		seenBaseModels[baseModelName] = true
 
 		annotations := make(map[string]string)
-		if owner.GetObjectKind().GroupVersionKind().Kind == "DynamoGraphDeployment" {
-			dgd, ok := owner.(*nvidiacomv1beta1.DynamoGraphDeployment)
-			if !ok {
-				err := fmt.Errorf("failed to sync headless service annotations for model %s", baseModelName)
-				logger.Error(err, "Failed to get DGD for model services",
-					"kind", owner.GetObjectKind().GroupVersionKind().Kind,
-					"componentName", componentName,
-					"baseModelName", baseModelName)
-				return err
-			}
+		if dgd, ok := owner.(*v1beta1.DynamoGraphDeployment); ok {
 			annotations = GetDGDComponentResourceAnnotations(dgd, componentName, component)
 		}
 
