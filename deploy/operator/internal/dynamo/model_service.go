@@ -67,7 +67,9 @@ func ReconcileModelServicesForComponents(
 
 		annotations := make(map[string]string)
 		if dgd, ok := owner.(*v1beta1.DynamoGraphDeployment); ok {
-			annotations = GetDGDComponentResourceAnnotations(dgd, componentName, component)
+			if dgd.Spec.Annotations != nil {
+				annotations = dgd.Spec.Annotations
+			}
 		}
 
 		// Generate headless service with deterministic name based on model name
