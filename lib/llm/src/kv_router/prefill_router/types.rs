@@ -87,11 +87,19 @@ pub enum PrefillQueryOutcome {
 
 pub(super) fn build_decode_router_override(
     existing_override: Option<RouterConfigOverride>,
+    allow_decode_overlap_affinity: bool,
 ) -> RouterConfigOverride {
-    RouterConfigOverride {
-        overlap_score_credit: Some(0.0),
-        assume_kv_reuse: Some(false),
-        track_prefill_tokens: Some(false),
-        ..existing_override.unwrap_or_default()
+    let mut override_config = existing_override.unwrap_or_default();
+
+    // Normal disagg keeps decode routing load-only by forcing zero overlap
+    // credit. Conditional-disagg decode affinity leaves this unset so the base
+    // router `overlap_score_credit` applies, unless the request already carried
+    // a more specific override.
+    if !allow_decode_overlap_affinity {
+        override_config.overlap_score_credit = Some(0.0);
     }
+    override_config.assume_kv_reuse = Some(false);
+    override_config.track_prefill_tokens = Some(false);
+
+    override_config
 }

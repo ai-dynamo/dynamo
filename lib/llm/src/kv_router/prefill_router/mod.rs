@@ -422,13 +422,17 @@ impl
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
 
                 // Set router_config_override for decode:
-                // - overlap_score_credit = 0 (no KV cache overlap scoring for decode)
                 // - assume_kv_reuse = false (generate random hashes since decode workers
                 //   may already have blocks cached from prefill transfer)
                 // - track_prefill_tokens = false (decode router should ignore prompt-side load)
+                // - overlap_score_credit is forced to 0 for normal disagg, but
+                //   left unset when conditional-disagg is enabled so decode
+                //   affinity inherits the base router overlap_score_credit.
                 let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override =
-                    Some(build_decode_router_override(existing_override));
+                decode_req.router_config_override = Some(build_decode_router_override(
+                    existing_override,
+                    self.conditional_disagg_policy.is_enabled(),
+                ));
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);
@@ -530,13 +534,43 @@ mod tests {
     use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
 
     #[test]
-    fn decode_router_override_disables_overlap_and_prefill_tracking() {
-        let override_config = build_decode_router_override(Some(RouterConfigOverride {
-            router_temperature: Some(0.7),
-            ..Default::default()
-        }));
+    fn decode_router_override_is_load_only_by_default() {
+        let override_config = build_decode_router_override(
+            Some(RouterConfigOverride {
+                overlap_score_credit: Some(0.5),
+                router_temperature: Some(0.7),
+                ..Default::default()
+            }),
+            false,
+        );
 
         assert_eq!(override_config.overlap_score_credit, Some(0.0));
+        assert_eq!(override_config.assume_kv_reuse, Some(false));
+        assert_eq!(override_config.track_prefill_tokens, Some(false));
+        assert_eq!(override_config.router_temperature, Some(0.7));
+    }
+
+    #[test]
+    fn decode_router_override_inherits_base_overlap_when_conditional_disagg_allows_it() {
+        let override_config = build_decode_router_override(None, true);
+
+        assert_eq!(override_config.overlap_score_credit, None);
+        assert_eq!(override_config.assume_kv_reuse, Some(false));
+        assert_eq!(override_config.track_prefill_tokens, Some(false));
+    }
+
+    #[test]
+    fn decode_router_override_preserves_request_overlap_when_conditional_disagg_allows_it() {
+        let override_config = build_decode_router_override(
+            Some(RouterConfigOverride {
+                overlap_score_credit: Some(0.25),
+                router_temperature: Some(0.7),
+                ..Default::default()
+            }),
+            true,
+        );
+
+        assert_eq!(override_config.overlap_score_credit, Some(0.25));
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));

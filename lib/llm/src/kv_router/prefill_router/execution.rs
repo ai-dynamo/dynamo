@@ -184,15 +184,15 @@ impl PrefillRouter {
         // this MVP. The control signal (`decode_chosen_worker_busy`) and the
         // gate decision below are sufficient to see when the gate fires.
         let decode_gate_decision = if !policy_says_bypass {
-            "declined_by_policy"
+            "bypass_declined_by_policy"
         } else if self.conditional_disagg_decode_busy_threshold.is_none() {
-            "allow_bypass_gate_disabled"
+            "bypass_allowed_decode_gate_disabled"
         } else if decode_busy.is_none() {
-            "allow_bypass_signal_unavailable"
+            "bypass_allowed_decode_busy_unknown"
         } else if decode_busy == Some(true) {
-            "deny_bypass_decode_busy"
+            "bypass_denied_decode_busy"
         } else {
-            "allow_bypass_decode_calm"
+            "bypass_allowed_decode_not_busy"
         };
 
         tracing::debug!(
