@@ -135,7 +135,7 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
 1.  Deploy the DynamoGraphDeployment manifest:
 
     ```bash
-    kubectl apply -n ${INFERENCE_NAMESPACE} -f https://raw.githubusercontent.com/VadimEisenberg/dynamo/refs/heads/main/examples/deployments/GKE/vllm/v1beta1/agg.yaml
+    kubectl apply -n ${INFERENCE_NAMESPACE} -f agg.yaml
     ```
 
 1.  Wait for the graph deployment to become ready:
@@ -200,7 +200,7 @@ Dynamo Kubernetes Platform, delete the GPU node pool and delete the Kubernetes c
 1.  Undeploy the inference graph.
 
     ```bash
-    kubectl delete -n ${INFERENCE_NAMESPACE} -f https://raw.githubusercontent.com/VadimEisenberg/dynamo/refs/heads/main/examples/deployments/GKE/vllm/v1beta1/agg.yaml
+    kubectl delete -n ${INFERENCE_NAMESPACE} -f agg.yaml
     ```
 
 1.  Delete the Hugging Face secret:
