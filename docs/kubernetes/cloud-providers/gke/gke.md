@@ -88,7 +88,7 @@ is not to install NVIDIA GPU operator.
 
 ## Deploy an Inference Graph
 
-In this section you deploy VLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B`.
+In this section you deploy vLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B`.
 
 ### Create a Namespace for your Inference Graph Deployments
 
