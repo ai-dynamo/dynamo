@@ -53,7 +53,7 @@ https://cloud.google.com/sdk/docs/install
     --num-nodes=${NUM_GENERAL_PURPOSE_NODES}
     ```
 
-#### Create a GPU pool
+#### Create a GPU node pool
 
 1.  Set environment variables to store your node pool parameters:
 
