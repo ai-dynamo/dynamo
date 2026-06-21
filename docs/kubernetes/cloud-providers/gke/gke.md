@@ -6,46 +6,59 @@ title: Google Kubernetes Engine (GKE)
 
 ## Pre-requisites
 
+
 ### Install gcloud CLI
 https://cloud.google.com/sdk/docs/install
 
 ### Create a GKE cluster
 
-```bash
-export PROJECT_ID=<>
-export REGION=<>
-export ZONE=<>
-export CLUSTER_NAME=<>
-export GENERAL_PURPOSE_MACHINE_TYPE=n2-standard-4
-export NUM_GENERAL_PURPOSE_NODES=1
-export DISK_SIZE=200
+1.  Set environment variables to store your cluster parameters:
 
-gcloud container clusters create ${CLUSTER_NAME} \
- 	--project=${PROJECT_ID} \
- 	--location=${ZONE} \
-	--subnetwork=default \
-  --disk-size=${DISK_SIZE} \
-  --machine-type=${GENERAL_PURPOSE_MACHINE_TYPE} \
-  --num-nodes=${NUM_GENERAL_PURPOSE_NODES}
-```
+    ```bash
+    export PROJECT_ID=<>
+    export REGION=<>
+    export ZONE=<>
+    export CLUSTER_NAME=<>
+    export GENERAL_PURPOSE_MACHINE_TYPE=n2-standard-4
+    export NUM_GENERAL_PURPOSE_NODES=1
+    export DISK_SIZE=200
+    ```
+
+1.  Create a cluster:
+
+    ```bash
+    gcloud container clusters create ${CLUSTER_NAME} \
+    --project=${PROJECT_ID} \
+    --location=${ZONE} \
+    --subnetwork=default \
+    --disk-size=${DISK_SIZE} \
+    --machine-type=${GENERAL_PURPOSE_MACHINE_TYPE} \
+    --num-nodes=${NUM_GENERAL_PURPOSE_NODES}
+    ```
 
 #### Create a GPU pool
 
-```bash
-export GPU_MACHINE_TYPE=g2-standard-4
-export GPU_TYPE=nvidia-l4
-export NUM_GPU_NODES=1
-export GPU_COUNT=1
+1.  Set environment variables to store your node pool parameters:
 
-gcloud container node-pools create gpu-pool \
- 	--accelerator type=${GPU_TYPE},count=${GPU_COUNT},gpu-driver-version=latest \
- 	--project=${PROJECT_ID} \
- 	--location=${ZONE} \
- 	--cluster=${CLUSTER_NAME} \
-  --machine-type=${GPU_MACHINE_TYPE} \
-  --disk-size=${DISK_SIZE} \
-  --num-nodes=${NUM_GPU_NODES}
-```
+    ```bash
+    export GPU_MACHINE_TYPE=g2-standard-4
+    export GPU_TYPE=nvidia-l4
+    export NUM_GPU_NODES=1
+    export GPU_COUNT=1
+    ```
+
+1.  Create a node pool:
+
+    ```bash
+    gcloud container node-pools create gpu-pool \
+    --accelerator type=${GPU_TYPE},count=${GPU_COUNT},gpu-driver-version=latest \
+    --project=${PROJECT_ID} \
+    --location=${ZONE} \
+    --cluster=${CLUSTER_NAME} \
+    --machine-type=${GPU_MACHINE_TYPE} \
+    --disk-size=${DISK_SIZE} \
+    --num-nodes=${NUM_GPU_NODES}
+    ```
 
 ## Install Dynamo Kubernetes Platform
 
