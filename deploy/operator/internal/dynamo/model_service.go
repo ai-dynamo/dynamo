@@ -96,6 +96,25 @@ func ReconcileModelServicesForComponents(
 			return fmt.Errorf("failed to sync headless service for model %s: %w", baseModelName, err)
 		}
 
+		if syncedService.Annotations == nil {
+			syncedService.Annotations = make(map[string]string)
+		}
+		var updateAnnotations bool
+		for key, value := range annotations {
+			if val, ok := syncedService.Annotations[key]; !ok || val != value {
+				syncedService.Annotations[key] = value
+				updateAnnotations = true
+			}
+		}
+		if updateAnnotations {
+			err = reconciler.Update(ctx, syncedService)
+			if err != nil {
+				logger.Error(err, fmt.Sprintf("Failed to update model service %s.", componentName))
+				reconciler.GetRecorder().Eventf(owner, corev1.EventTypeWarning, "UpdateService", "Failed to update model Service %s: %s", componentName, err)
+				return fmt.Errorf("failed to update main component service %s: %w", componentName, err)
+			}
+		}
+
 		logger.Info("Synced headless service for model",
 			"serviceName", syncedService.GetName(),
 			"baseModelName", baseModelName,
