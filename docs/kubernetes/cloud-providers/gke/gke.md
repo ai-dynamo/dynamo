@@ -107,6 +107,15 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN
 
 ### Inspect the Gragh Deployment
 
+Clone the Dynamo GitHub repository:
+
+```bash
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo
+
+git checkout release/1.2.1
+```
+
 Inspect [examples/deployments/GKE/vllm/v1beta1/agg.yaml](../../../../examples/deployments/GKE/vllm/v1beta1/agg.yaml).
 
 It contains
@@ -137,7 +146,7 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
 1.  Deploy the DynamoGraphDeployment manifest:
 
     ```bash
-    kubectl apply -n ${INFERENCE_NAMESPACE} -f agg.yaml
+    kubectl apply -n ${INFERENCE_NAMESPACE} -f examples/deployments/GKE/vllm/v1beta1/agg.yaml
     ```
 
 1.  Wait for the graph deployment to become ready:
@@ -203,7 +212,7 @@ Follow the steps in the subsections below to delete the components added in this
 1.  Undeploy the inference graph.
 
     ```bash
-    kubectl delete -n ${INFERENCE_NAMESPACE} -f agg.yaml
+    kubectl delete -n ${INFERENCE_NAMESPACE} -f examples/deployments/GKE/vllm/v1beta1/agg.yaml
     ```
 
 1.  Delete the Hugging Face secret:
