@@ -110,7 +110,20 @@ Inspect https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/v
 It contains DynamoGraphDeployment Custom Resource of the inference graph you will deploy.
 You might want to download and edit it, or you can just apply the above manifest AS IS.
 
-Note that the `args` field contains `LD_LIBRARY_PATH` and `PATH` to let GKE [find the correct GPU driver](https://cloud.google.com/kubernetes-engine/docs/how-to/gpus).
+Points to note in the container spec of `VllmDecodeWorker`:
+- the `args` field contains `LD_LIBRARY_PATH` and `PATH` to let GKE [find the correct GPU driver](https://cloud.google.com/kubernetes-engine/docs/how-to/gpus).
+- the `resources` field uses the `nvidia.com/gpu` resource type to request one GPU.
+Modify this feild if you use other resource type to designate the GPUs in your cluster or if you use
+[DRA](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/).
+
+Verify that your cluster has nodes with GPUs and GPU allocation is configured:
+
+```bash
+kubectl get nodes -o custom-columns="NAME:.metadata.name,GPU:.status.allocatable['nvidia\.com/gpu']"
+NAME                                        GPU
+gke-my-cluster-default-pool-81c691d5-v7pn   <none>
+gke-my-cluster-gpu-pool-6b65a2ea-7p04       1
+```
 
 For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/GKE/vllm.
 
