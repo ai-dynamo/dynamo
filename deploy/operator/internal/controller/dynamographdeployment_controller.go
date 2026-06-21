@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -1083,6 +1084,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
 			}
 			if syncedMainComponentService != nil {
+				if syncedMainComponentService.Annotations == nil {
+					syncedMainComponentService.Annotations = make(map[string]string)
+				}
+				maps.Copy(syncedMainComponentService.Annotations, dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component))
 				mainComponentServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentService,
 					func() (bool, string) {
 						return true, ""
