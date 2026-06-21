@@ -9,21 +9,35 @@ areas:
   - components/src/dynamo/frontend/
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
+  - lib/bindings/python/rust/parsers.rs
+  - lib/bindings/python/tests/test_parsers.py
+  - lib/llm/src/entrypoint.rs
   - lib/llm/src/entrypoint/
+  - lib/llm/src/entrypoint/input.rs
   - lib/llm/src/entrypoint/input/
+  - lib/llm/src/grpc.rs
   - lib/llm/src/grpc/
   - lib/llm/src/grpc/protos/
+  - lib/llm/src/grpc/service.rs
   - lib/llm/src/grpc/service/
+  - lib/llm/src/http.rs
   - lib/llm/src/http/
+  - lib/llm/src/http/service.rs
   - lib/llm/src/http/service/
+  - lib/llm/src/lora.rs
   - lib/llm/src/lora/
   - lib/llm/src/preprocessor.rs
   - lib/llm/src/preprocessor/
   - lib/llm/src/preprocessor/tools/
+  - lib/llm/src/protocols.rs
   - lib/llm/src/protocols/
   - lib/llm/src/protocols/anthropic/
+  - lib/llm/src/protocols/common.rs
   - lib/llm/src/protocols/common/
+  - lib/llm/src/protocols/openai.rs
   - lib/llm/src/protocols/openai/
+  - lib/llm/tests/test_reasoning_parser.rs
+  - lib/llm/tests/test_streaming_tool_parsers.rs
   - lib/protocols/
   - lib/protocols/src/types/
   - lib/protocols/tests/
@@ -32,19 +46,7 @@ areas:
   - tests/frontend/grpc/
 - label: agents
   github_team: '@ai-dynamo/dynamo-agents-codeowners'
-  path_globs:
-  - lib/llm/src/agents/
-  - lib/llm/src/agents/trace/
-- label: parsers
-  github_team: '@ai-dynamo/dynamo-parsers-codeowners'
-  path_globs:
-  - lib/bindings/python/rust/parsers.rs
-  - lib/bindings/python/tests/test_parsers.py
-  - lib/llm/tests/test_reasoning_parser.rs
-  - lib/llm/tests/test_streaming_tool_parsers.rs
-  - lib/parsers/
-  - lib/parsers/src/reasoning/
-  - lib/parsers/src/tool_calling/
+  path_globs: []
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
@@ -59,6 +61,7 @@ areas:
   - lib/kv-router/src/sequences/
   - lib/kv-router/src/zmq_wire/
   - lib/kv-router/tests/
+  - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
   - lib/llm/src/kv_router/indexer/
   - lib/llm/src/kv_router/prefill_router/
@@ -71,6 +74,8 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
+  - lib/vllm-rs-backend/Cargo.toml/
+  - lib/vllm-rs-backend/src/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-trtllm-codeowners'
   path_globs:
@@ -133,25 +138,41 @@ areas:
   - lib/kvbm-physical/src/manager/
   - lib/kvbm-physical/src/testing/
   - lib/kvbm-physical/src/transfer/
+  - lib/llm/src/block_manager.md
+  - lib/llm/src/block_manager.rs
   - lib/llm/src/block_manager/
+  - lib/llm/src/block_manager/block.rs
   - lib/llm/src/block_manager/block/
+  - lib/llm/src/block_manager/connector.rs
   - lib/llm/src/block_manager/connector/
+  - lib/llm/src/block_manager/controller.rs
   - lib/llm/src/block_manager/controller/
+  - lib/llm/src/block_manager/distributed.rs
   - lib/llm/src/block_manager/distributed/
   - lib/llm/src/block_manager/kv_consolidator/
+  - lib/llm/src/block_manager/layout.rs
   - lib/llm/src/block_manager/layout/
+  - lib/llm/src/block_manager/offload.rs
   - lib/llm/src/block_manager/offload/
+  - lib/llm/src/block_manager/pool.rs
   - lib/llm/src/block_manager/pool/
+  - lib/llm/src/block_manager/state.rs
   - lib/llm/src/block_manager/state/
+  - lib/llm/src/block_manager/storage.rs
   - lib/llm/src/block_manager/storage/
+  - lib/llm/src/block_manager/v2.rs
   - lib/llm/src/block_manager/v2/
   - lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/
+  - lib/llm/src/kv.rs
   - lib/llm/src/kv/
   - lib/memory/
   - lib/memory/bin/
+  - lib/memory/src/nixl.rs
   - lib/memory/src/nixl/
   - lib/memory/src/numa/
   - lib/memory/src/pool/
+  - lib/tokens/
+  - lib/tokens/docs/
   - tests/kvbm_integration/
   - tests/lmcache/
 - label: multimodal
@@ -164,6 +185,7 @@ areas:
   - components/src/dynamo/vllm/multimodal_handlers/
   - components/src/dynamo/vllm/multimodal_utils/
   - components/src/dynamo/vllm/omni/
+  - lib/llm/src/preprocessor/media.rs
   - lib/llm/src/preprocessor/media/
   - lib/renderer/
   - tests/benchmarks/multimodal/
@@ -241,8 +263,6 @@ areas:
   - lib/runtime/src/transports/
   - lib/runtime/src/utils/
   - lib/runtime/tests/
-  - lib/tokens/
-  - lib/tokens/docs/
   - tests/
   - tests/CLAUDE.md
   - tests/README.md
@@ -270,6 +290,7 @@ areas:
   - dev/docker-observability.yml
   - dev/observability/
   - lib/llm/src/telemetry/
+  - lib/runtime/src/metrics.rs
   - lib/runtime/src/metrics/
 - label: fault-tolerance
   github_team: '@ai-dynamo/dynamo-fault-tolerance-codeowners'
@@ -349,7 +370,7 @@ areas:
   - DCO.md
   - LICENSE
   - SECURITY.md
-  - skills/
+  - skills
 - label: operator
   github_team: '@ai-dynamo/dynamo-operator-codeowners'
   path_globs:
@@ -460,13 +481,19 @@ areas:
   path_globs:
   - benchmarks/README.md
   - benchmarks/__init__.py
-  - benchmarks/agent_trace/
   - benchmarks/burstgpt_loadgen/
   - benchmarks/frontend/
   - benchmarks/incluster/
+  - benchmarks/mocker/README.md/
+  - benchmarks/mocker/bench_aic_concurrency.py/
+  - benchmarks/mocker/bench_aic_rust_callback.py/
   - benchmarks/nat_trace/
   - benchmarks/prefix_data_generator/
   - benchmarks/pyproject.toml
+  - benchmarks/request_trace/README.md/
+  - benchmarks/request_trace/__init__.py/
+  - benchmarks/request_trace/convert_to_perfetto.py/
+  - benchmarks/request_trace/validate_convert_to_perfetto.py/
   - benchmarks/router/
   - benchmarks/sin_load_generator/
   - components/src/dynamo/mocker/
@@ -474,6 +501,7 @@ areas:
   - components/src/dynamo/mocker/utils/
   - components/src/dynamo/replay/
   - examples/backends/mocker/
+  - lib/backend-common/examples/mocker/
   - lib/bench/
   - lib/bench/coding/
   - lib/bench/kv_router/
@@ -721,10 +749,6 @@ shared:
   owners:
   - operator
   - observability
-- glob: lib/llm/src/agents/trace/
-  owners:
-  - agents
-  - observability
 - glob: lib/llm/src/audit/
   owners:
   - runtime
@@ -751,7 +775,7 @@ shared:
   - diffusion
 - glob: lib/llm/src/request_trace/
   owners:
-  - runtime
+  - agents
   - observability
 - glob: lib/runtime/src/health_check.rs
   owners:
