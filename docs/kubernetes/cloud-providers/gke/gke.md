@@ -107,8 +107,11 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN
 ### Inspect the Gragh Deployment
 
 Inspect https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/v1beta1/agg.yaml.
-It contains DynamoGraphDeployment Custom Resource of the inference graph you will deploy.
-You might want to download and edit it, or you can just apply the above manifest AS IS.
+It contains
+[DynamoGraphDeployment](https://docs.nvidia.com/dynamo/latest/kubernetes-deployment/start-here/kubernetes-quickstart#understand-dynamo-deployment-resources)
+[Custom Resource](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
+of the inference graph you will deploy.
+You might want to download and edit it, or you can just apply the above manifest as is.
 
 Points to note in the container spec of `VllmDecodeWorker`:
 - the `args` field contains `LD_LIBRARY_PATH` and `PATH` to let GKE [find the correct GPU driver](https://cloud.google.com/kubernetes-engine/docs/how-to/gpus).
