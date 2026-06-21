@@ -79,8 +79,12 @@ https://cloud.google.com/sdk/docs/install
 
 ## Install Dynamo Kubernetes Platform
 
-Perform steps 2 and (optionally) 3 in [Dynamo Installation Guide](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide#overview). On GKE, [the recommended way](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/gpu-operator)
-is not to install NVIDIA GPU operator. This is why you skip [step 1](../../installation-guide.md#step-1-install-the-gpu-operator).
+Perform [steps 2](../../installation-guide.md#step-2-install-the-dynamo-platform) and (optionally)
+[steps 3](../../installation-guide.md#step-3-install-optional-components) in
+[Dynamo Installation Guide](../../installation-guide#overview).
+You skip [step 1](../../installation-guide.md#step-1-install-the-gpu-operator) since on GKE
+[the recommended way](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/gpu-operator#why)
+is not to install NVIDIA GPU operator.
 
 ## Deploy Inference Graph
 
