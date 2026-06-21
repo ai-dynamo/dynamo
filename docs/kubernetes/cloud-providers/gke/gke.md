@@ -27,7 +27,7 @@ The GPU node will have [NVIDIA Kubernetes Device Plugin](https://github.com/NVID
 ### Install gcloud CLI
 https://cloud.google.com/sdk/docs/install
 
-### Create a GKE cluster
+### Create a GKE Cluster
 
 1.  Set environment variables to store your cluster parameters:
 
@@ -53,7 +53,7 @@ https://cloud.google.com/sdk/docs/install
     --num-nodes=${NUM_GENERAL_PURPOSE_NODES}
     ```
 
-#### Create a GPU node pool
+#### Create a GPU Node Pool
 
 1.  Set environment variables to store your node pool parameters:
 
@@ -86,25 +86,25 @@ You skip [step 1](../../installation-guide.md#step-1-install-the-gpu-operator) s
 [the recommended way](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/gpu-operator#why)
 is not to install NVIDIA GPU operator.
 
-## Deploy Inference Graph
+## Deploy an Inference Graph
 
 In this section you deploy VLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B`.
 
-### Create a namespace for your inference graph deployments
+### Create a Namespace for your Inference Graph Deployments
 
 ```bash
 export INFERENCE_NAMESPACE=my-inference-graphs
 kubectl create namespace ${INFERENCE_NAMESPACE}
 ```
 
-### Create a secret to store your Hugging Face token
+### Create a Secret to store your Hugging Face Token
 
 ```bash
 export HF_TOKEN=<your Hugging Face token>
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN} -n ${INFERENCE_NAMESPACE}
 ```
 
-### Inspect the deployment gragh
+### Inspect the Gragh Deployment
 
 Inspect https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/v1beta1/agg.yaml.
 It contains DynamoGraphDeployment Custom Resource of the inference graph you will deploy.
