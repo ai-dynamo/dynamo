@@ -194,8 +194,9 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
 
 ### Cleanup
 
-The following steps show how to undeploy the inference graph. You may want to perform steps 2-6 to undeploy
-Dynamo Kubernetes Platform, delete the GPU node pool and delete the Kubernetes cluster.
+Follow the steps in the subsections below to delete the components added in this guide.
+
+#### Undeploy the Inference Graph
 
 1.  Kill the port-forwarding command you ran in a separate terminal.
 
@@ -211,6 +212,14 @@ Dynamo Kubernetes Platform, delete the GPU node pool and delete the Kubernetes c
     kubectl delete secret hf-token-secret -n ${INFERENCE_NAMESPACE}
     ```
 
+1.  Delete the namespace:
+
+    ```bash
+    kubectl delete namespace ${INFERENCE_NAMESPACE}
+    ```
+
+#### Undeploy Dynamo Kubernetes Platform
+
 1.  Undeploy Dynamo Kubernetes Platform:
 
     ```bash
@@ -223,6 +232,17 @@ Dynamo Kubernetes Platform, delete the GPU node pool and delete the Kubernetes c
     ```bash
     kubectl get crd -o name | grep 'dynamo.*\.nvidia\.com'
     ```
+
+1.  Delete the Dynamo Kubernetes Platform namespace:
+
+    ```bash
+    export NAMESPACE="dynamo-system"
+    kubectl delete namespace ${NAMESPACE}
+    ```
+
+#### Delete the GKE Cluster
+
+If you want to delete the GKE cluster you created in [Create a GKE Cluster](#create-a-gke-cluster), perform the following steps.
 
 1.  Delete the node pool:
 
