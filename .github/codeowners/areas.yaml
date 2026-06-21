@@ -560,6 +560,22 @@ shared:
   owners:
   - process
   - agents
+- glob: lib/llm/src/protocols/agents.rs
+  owners:
+  - frontend
+  - agents
+- glob: docs/agents/
+  owners:
+  - docs
+  - agents
+- glob: docs/digest/agentic-inference/
+  owners:
+  - docs
+  - agents
+- glob: docs/backends/sglang/agents.md
+  owners:
+  - docs
+  - agents
 - glob: components/src/dynamo/vllm/multimodal_handlers/
   owners:
   - backend-vllm
