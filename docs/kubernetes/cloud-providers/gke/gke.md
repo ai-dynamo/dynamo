@@ -161,10 +161,10 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
 
 ### Test
 
-1.  In a separate terminal, forward the port of the frontend of the inference graph to your local machine:
+1.  In a separate terminal, forward the port of the frontend service of the inference graph to your local machine:
 
     ```bash
-    kubectl port-forward deployment/vllm-agg-frontend 8000:8000 -n ${INFERENCE_NAMESPACE}
+    kubectl port-forward service/vllm-agg-frontend 8000:8000 -n ${INFERENCE_NAMESPACE}
     ```
 
 1.  Send a chat completion request:
