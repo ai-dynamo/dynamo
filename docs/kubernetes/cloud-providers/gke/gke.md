@@ -106,7 +106,8 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN
 
 ### Inspect the Gragh Deployment
 
-Inspect https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/v1beta1/agg.yaml.
+Inspect [examples/deployments/GKE/vllm/v1beta1/agg.yaml](../../../../examples/deployments/GKE/vllm/agg.yaml).
+
 It contains
 [DynamoGraphDeployment](https://docs.nvidia.com/dynamo/latest/kubernetes-deployment/start-here/kubernetes-quickstart#understand-dynamo-deployment-resources)
 [Custom Resource](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
