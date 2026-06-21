@@ -8,9 +8,9 @@ from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.core.types import FpmObservations, TrafficObservation
 from dynamo.planner.environment.interface import (
-    PlannerConnector,
     PlannerEnvironment,
     RuntimeNamespaceSource,
 )
