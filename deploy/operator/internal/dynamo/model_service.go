@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -68,7 +69,7 @@ func ReconcileModelServicesForComponents(
 		annotations := make(map[string]string)
 		if dgd, ok := owner.(*v1beta1.DynamoGraphDeployment); ok {
 			if dgd.Spec.Annotations != nil {
-				annotations = dgd.Spec.Annotations
+				maps.Copy(annotations, dgd.Spec.Annotations)
 			}
 		}
 
@@ -121,8 +122,12 @@ func generateHeadlessServiceForModel(
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
+	serviceAnnotations := make(map[string]string)
+	if annotations != nil {
+		serviceAnnotations = maps.Clone(annotations)
+	}
 	// Original name for humans
-	annotations[commonconsts.KubeAnnotationDynamoBaseModel] = baseModelName
+	serviceAnnotations[commonconsts.KubeAnnotationDynamoBaseModel] = baseModelName
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -132,7 +137,7 @@ func generateHeadlessServiceForModel(
 				commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
 				"nvidia.com/managed-by":                   "dynamo-operator",
 			},
-			Annotations: annotations,
+			Annotations: serviceAnnotations,
 		},
 		Spec: corev1.ServiceSpec{
 			// Headless service - no ClusterIP, no load balancing
