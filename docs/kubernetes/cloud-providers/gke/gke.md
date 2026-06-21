@@ -68,7 +68,7 @@ https://cloud.google.com/sdk/docs/install
 
     ```bash
     gcloud container node-pools create gpu-pool \
-    --accelerator type=${GPU_TYPE},count=${GPU_COUNT},gpu-driver-version=latest \
+    --accelerator type=${GPU_TYPE},count=${GPU_COUNT},gpu-driver-version=default \
     --project=${PROJECT_ID} \
     --location=${ZONE} \
     --cluster=${CLUSTER_NAME} \
