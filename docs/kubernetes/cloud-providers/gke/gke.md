@@ -8,7 +8,7 @@ title: Google Kubernetes Engine (GKE)
 
 - [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) v1.24+
 - [helm](https://helm.sh/docs/intro/install/) v3.0+
-- [Hugging Face access token](https://huggingface.co/docs/hub/security-tokens)
+- [Hugging Face access token](https://huggingface.co/docs/hub/security-tokens), required to download model weights.
 - A GKE cluster (v1.24+) with GPU nodes and GPU allocation plugins, for example
 [NVIDIA Kubernetes Device Plugin](https://github.com/NVIDIA/k8s-device-plugin) or
 [DRA Driver for NVIDIA GPUs](https://dra-driver-nvidia-gpu.sigs.k8s.io/docs/).
@@ -97,7 +97,7 @@ export INFERENCE_NAMESPACE=my-inference-graphs
 kubectl create namespace ${INFERENCE_NAMESPACE}
 ```
 
-### Create a secret to store your Hugging Face token (required to download model weights)
+### Create a secret to store your Hugging Face token
 
 ```bash
 export HF_TOKEN=<your Hugging Face token>
