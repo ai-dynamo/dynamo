@@ -211,7 +211,7 @@ Dynamo Kubernetes Platform, delete the GPU node pool and delete the Kubernetes c
 
 1.  Undeploy Dynamo Kubernetes Platform:
 
-    ```
+    ```bash
     export NAMESPACE="dynamo-system"
     helm delete dynamo-platform -n ${NAMESPACE}
     ```
