@@ -4,8 +4,25 @@
 title: Google Kubernetes Engine (GKE)
 ---
 
-## Pre-requisites
+## Prerequisites
 
+- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) v1.24+
+- [helm](https://helm.sh/docs/intro/install/) v3.0+
+- [Hugging Face access token](https://huggingface.co/docs/hub/security-tokens)
+- A GKE cluster (v1.24+) with GPU nodes and GPU allocation plugins, for example
+[NVIDIA Kubernetes Device Plugin](https://github.com/NVIDIA/k8s-device-plugin) or
+[DRA Driver for NVIDIA GPUs](https://dra-driver-nvidia-gpu.sigs.k8s.io/docs/).
+
+Follow the instuctions in the following section to create an example Kubernetes cluster or proceed to
+the [Install Dynamo Kubernetes Platform](#install-dynamo-kubernetes-platform) section.
+
+## Create an example GKE cluster
+
+If you already have a GKE cluster, proceed to
+the [Install Dynamo Kubernetes Platform](#install-dynamo-kubernetes-platform) section.
+
+In this section you create a GKE cluster with one general purpose node and one GPU node.
+The GPU node will have [NVIDIA Kubernetes Device Plugin](https://github.com/NVIDIA/k8s-device-plugin) installed.
 
 ### Install gcloud CLI
 https://cloud.google.com/sdk/docs/install
