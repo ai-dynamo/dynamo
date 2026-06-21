@@ -2765,6 +2765,7 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 		DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decode),
 		ComponentName:   "VllmDecodeWorker",
 		Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decode),
+		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decode),
 		IsK8sDiscovery:  true,
 	})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
