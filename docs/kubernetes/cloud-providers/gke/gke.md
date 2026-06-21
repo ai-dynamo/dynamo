@@ -203,6 +203,12 @@ Dynamo Kubernetes Platform, delete the GPU node pool and delete the Kubernetes c
     kubectl delete -n ${INFERENCE_NAMESPACE} -f https://raw.githubusercontent.com/VadimEisenberg/dynamo/refs/heads/main/examples/deployments/GKE/vllm/v1beta1/agg.yaml
     ```
 
+1.  Delete the Hugging Face secret:
+
+    ```bash
+    kubectl delete secret hf-token-secret -n ${INFERENCE_NAMESPACE}
+    ```
+
 1.  Undeploy Dynamo Kubernetes Platform:
 
     ```
