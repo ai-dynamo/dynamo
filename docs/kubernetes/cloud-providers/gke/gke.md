@@ -13,7 +13,7 @@ title: Google Kubernetes Engine (GKE)
 [NVIDIA Kubernetes Device Plugin](https://github.com/NVIDIA/k8s-device-plugin) or
 [DRA Driver for NVIDIA GPUs](https://dra-driver-nvidia-gpu.sigs.k8s.io/docs/).
 
-Follow the instuctions in the following section to create an example Kubernetes cluster or proceed to
+Follow the instuctions in the next section to create an example Kubernetes cluster or proceed to
 the [Install Dynamo Kubernetes Platform](#install-dynamo-kubernetes-platform) section.
 
 ## Create an example GKE cluster
