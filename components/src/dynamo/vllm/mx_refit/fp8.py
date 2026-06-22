@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from unittest.mock import patch
 
 import torch
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager
@@ -134,11 +133,6 @@ def apply_fp8_patches(_worker, fp8_config: FP8Config) -> None:
                 process_weights_after_loading,
             ),
             (
-                "vllm.model_executor.layers.quantization.fp8."
-                "Fp8MoEMethod.process_weights_after_loading",
-                process_weights_after_loading_moe,
-            ),
-            (
                 "vllm.model_executor.layers.quantization.kv_cache."
                 "BaseKVCacheMethod.process_weights_after_loading",
                 process_weights_after_loading_kv,
@@ -213,8 +207,6 @@ def _get_module_from_param_name(model: torch.nn.Module, name: str):
     current_module = model
     try:
         for part in module_path:
-            if isinstance(current_module, FusedMoE):
-                return current_module
             if isinstance(current_module, torch.nn.ModuleList):
                 current_module = current_module[int(part)]
             else:
@@ -229,13 +221,8 @@ def _is_fp8_weight(name: str, model: torch.nn.Module) -> bool:
         fp8_state.seen_params.add(name)
         if name.endswith("weight"):
             module = _get_module_from_param_name(model, name)
-            if (
-                isinstance(module, LinearBase)
-                and module.weight.dtype == torch.float8_e4m3fn
-            ) or (
-                isinstance(module, FusedMoE)
-                and module.w13_weight.dtype == torch.float8_e4m3fn
-                and module.w2_weight.dtype == torch.float8_e4m3fn
+            if isinstance(module, LinearBase) and (
+                module.weight.dtype == torch.float8_e4m3fn
             ):
                 fp8_state.fp8_param_names.add(name)
     return name in fp8_state.fp8_param_names
@@ -370,46 +357,6 @@ def process_weights_after_loading(self, layer) -> None:
     maybe_post_process_fp8_weight_block(layer)
     if not hasattr(layer, "input_scale"):
         layer.input_scale = None
-
-
-def process_weights_after_loading_moe(self, layer) -> None:
-    """Patch vLLM FP8 MoE post-load to preserve refittable Parameters."""
-    from vllm.model_executor.layers.quantization.fp8 import (
-        convert_to_fp8_moe_kernel_format,
-        make_fp8_moe_kernel,
-    )
-
-    w13 = layer.w13_weight.data
-    w2 = layer.w2_weight.data
-    w13_scale = getattr(layer, f"w13_{self.weight_scale_name}").data
-    w2_scale = getattr(layer, f"w2_{self.weight_scale_name}").data
-
-    w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-        fp8_backend=self.fp8_backend,
-        layer=layer,
-        w13=w13,
-        w2=w2,
-        w13_scale=w13_scale,
-        w2_scale=w2_scale,
-        w13_input_scale=layer.w13_input_scale,
-        w2_input_scale=layer.w2_input_scale,
-    )
-
-    layer.w13_weight.copy_(w13)
-    layer.w2_weight.copy_(w2)
-    getattr(layer, f"w13_{self.weight_scale_name}").copy_(w13_scale)
-    getattr(layer, f"w2_{self.weight_scale_name}").copy_(w2_scale)
-
-    self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-    if self.moe_quant_config:
-        self.moe_kernel = make_fp8_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            fp8_backend=self.fp8_backend,
-            experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
-            shared_experts=layer.shared_experts,
-        )
 
 
 def process_weights_after_loading_kv(self, layer) -> None:

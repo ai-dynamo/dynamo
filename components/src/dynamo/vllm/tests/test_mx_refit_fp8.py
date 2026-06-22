@@ -39,6 +39,11 @@ def test_mx_refit_fp8_modules_do_not_import_nemo_rl():
     assert "from nemo_rl" not in source
 
 
+def test_mx_refit_fp8_helper_keeps_v6_scope():
+    source = inspect.getsource(fp8)
+    assert "Fp8MoEMethod" not in source
+
+
 def test_maybe_init_mx_refit_fp8_requires_mx_env(monkeypatch):
     monkeypatch.delenv("DYN_MX_REFIT_ENABLED", raising=False)
     args = SimpleNamespace(
@@ -139,3 +144,34 @@ def test_load_fp8_qkv_scale_weights_keeps_unresolved_scales_for_vllm_loader():
     remaining = extension._load_fp8_qkv_scale_weights(weights, torch.nn.Linear(1, 1))
 
     assert remaining == weights
+
+
+def test_fp8_load_weights_quantizes_refit_weight(monkeypatch):
+    loaded_weights = []
+
+    class Model:
+        def load_weights(self, weights):
+            loaded_weights.extend(weights)
+
+    fp8_name = "model.layers.0.mlp.gate_proj.weight"
+
+    def fake_is_fp8_weight(name, _model):
+        return name == fp8_name
+
+    monkeypatch.setattr(fp8, "_is_fp8_weight", fake_is_fp8_weight)
+    dense_weight = torch.arange(4, dtype=torch.bfloat16).reshape(2, 2)
+    norm_weight = torch.ones(2, dtype=torch.bfloat16)
+
+    fp8.load_weights(
+        [(fp8_name, dense_weight), ("model.norm.weight", norm_weight)],
+        SimpleNamespace(model=Model()),
+    )
+
+    assert [name for name, _ in loaded_weights] == [
+        fp8_name,
+        f"{fp8_name}_scale_inv",
+        "model.norm.weight",
+    ]
+    assert loaded_weights[0][1].dtype == torch.float8_e4m3fn
+    assert loaded_weights[1][1].dtype == torch.float32
+    assert loaded_weights[2][1] is norm_weight
