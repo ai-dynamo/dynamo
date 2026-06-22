@@ -169,8 +169,6 @@ uv run --no-project python benchmarks/request_trace/convert_to_perfetto.py \
   --output "${DYN_REQUEST_TRACE_OUTPUT_PATH}.perfetto.json"
 ```
 
-Open the output in [Perfetto UI](https://ui.perfetto.dev/). Useful flags include `--include-markers` and `--no-stages`.
-
-Request slices include flattened finish metadata when present, such as `finish.finish_reason`, `finish.backend_finish_reason`, `finish.stop_reason`, `finish.tool_call_count`, `finish.tool_call_names`, and per-choice summaries like `finish.choice_finish_reasons`.
+Open the output in [Perfetto UI](https://ui.perfetto.dev/). The default view shows the normal request stack for LLM requests, backend stages, and tool spans when present.
 
 To replay collected traces using the dynamo mock inference engines, see [Agent Simulation](agent-simulation.md).
