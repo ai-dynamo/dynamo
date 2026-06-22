@@ -92,6 +92,14 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
   branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 2
 ```
 
+**Branch-sharded depth=3 (2 shards × 4 workers):**
+```bash
+cargo bench --package dynamo-bench --bench mooncake_bench -- \
+  $(git rev-parse --show-toplevel)/lib/kv-router/traces/mooncake_trace.jsonl \
+  --trace-simulation-duration-ms 10000 --benchmark-duration-ms 30000 --benchmark-runs 5 -d 7 \
+  branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 3
+```
+
 **Optional branch-sharded depth=4 (2 shards × 4 workers):**
 ```bash
 cargo bench --package dynamo-bench --bench mooncake_bench -- \
@@ -107,17 +115,17 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
 cargo bench --package dynamo-bench --bench mooncake_bench -- \
   $(git rev-parse --show-toplevel)/lib/kv-router/traces/mooncake_trace.jsonl \
   --trace-simulation-duration-ms 10000 -d 7 \
-  --sweep --sweep-min-ms 1000 --sweep-max-ms 30000 --sweep-steps 8 \
+  --sweep --sweep-min-ms 750 --sweep-max-ms 60000 --sweep-steps 10 \
   concurrent-radix-tree-compressed --num-event-workers 8
 ```
 
-**Branch-sharded depth=2 — sweep:**
+**Branch-sharded depth=3 — sweep:**
 ```bash
 cargo bench --package dynamo-bench --bench mooncake_bench -- \
   $(git rev-parse --show-toplevel)/lib/kv-router/traces/mooncake_trace.jsonl \
   --trace-simulation-duration-ms 10000 -d 7 \
-  --sweep --sweep-min-ms 1000 --sweep-max-ms 30000 --sweep-steps 8 \
-  branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 2
+  --sweep --sweep-min-ms 750 --sweep-max-ms 60000 --sweep-steps 10 \
+  branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 3
 ```
 
 ### Worker scaling
@@ -217,80 +225,102 @@ For a larger branch-sharded worker pool, use `--num-event-workers-per-shard 8` (
 | `--num-event-workers-per-shard` | 4 | OS threads per shard for KV event processing |
 | `--prefix-depth` | 2 | Maximum routing-trie depth before dispatching to one shard |
 
-Note: `branch-sharded-crtc` uses trie/anchor routing and does not support approximate pruning. It provides a stronger routing-correctness model for out-of-order events, at the cost of higher routing latency and a hot-branch shard collapse risk on dominant-prefix workloads (see Known Issues).
+Note: `branch-sharded-crtc` uses trie/anchor routing and does not support approximate pruning. It provides a stronger routing-correctness model for out-of-order events, at the cost of higher routing latency and residual hot-continuation or lifetime-skew risks on dominant-prefix workloads (see Known Issues).
 
 ---
 
 ## Results
 
-Trace: `mooncake_trace.jsonl` (Mooncake FAST25 arxiv trace). Config: 2 shards × 4 workers for branch-sharded, 8 workers for CRTC baseline, `--trace-simulation-duration-ms 10000`, `--benchmark-duration-ms 30000`, `-d 7`.
+Trace: `mooncake_trace.jsonl` (Mooncake FAST25 arxiv trace). Config: 2 shards × 4 workers for branch-sharded depth=3, 8 workers for CRTC baseline, `--trace-simulation-duration-ms 10000`, `--benchmark-duration-ms 30000`, `--benchmark-runs 5`, `-d 7`.
+
+For interpretation of the BSI correctness/performance tradeoff and next-step recommendations, see [`BSI_FINDINGS.md`](./BSI_FINDINGS.md).
 
 ### Steady-state — p99 at trace request rate (~17,268 ops/s offered)
 
-| Indexer | Achieved ops/s | p99 | Routing outcome | Avg routing | Avg shard |
-|---------|---------------|-----|-----------------|-------------|-----------|
-| CRTC baseline (8w) | 17,201 | 1,093 µs | — | — | — |
-| Branch-sharded depth=2 (2×4w) | 17,064 | 1,510 µs | 91.3% dispatched / 8.7% shallow | 388 µs | 161 µs |
-| Branch-sharded depth=4 (2×4w) | 16,939 | 5,263 µs | 86.1% dispatched / 13.9% shallow | 678 µs | 244 µs |
+| Indexer | Achieved ops/s mean | Block ops/s mean | p99 mean | p99 p50 / p90 / max | Routing outcome | Avg routing | Avg shard | Block split |
+|---------|--------------------:|-----------------:|---------:|---------------------:|-----------------|------------:|----------:|-------------|
+| CRTC baseline (8w) | 17,217.3 | 168,552.7 | 1,538 µs | 1,494 / 1,924 / 1,924 µs | — | — | — | — |
+| Branch-sharded depth=3 (2×4w) | 16,806.3 | 164,528.8 | 4,830 µs | 4,863 / 6,672 / 6,672 µs | 88.1% dispatched / 11.9% shallow | 393 µs | 327 µs | 55.5% / 44.5% |
 
-All listed configs keep up with the offered trace rate. On this hot-prefix arxiv trace, branch-sharded routing is slower than CRTC in steady-state p99 because the routing TRIE does materially more work before dispatch and the stored block load collapses almost entirely onto one shard.
+Both configs keep up with the offered trace rate. Corrected deterministic child sharding removes the previous all-block shard collapse, but branch-sharded still trails CRTC by about 2.4% on achieved ops/s and has about 3.1x higher mean p99 on this 5-run steady-state comparison.
 
 The true-miss rate remains effectively zero in these runs.
 
-The routing TRIE provides a structural routing model that keeps shallow router state and shard anchors consistent, but it does not yet solve hot-branch load collapse. These numbers are useful for correctness and hot-prefix performance, but they do not show ideal multi-shard scaling.
+The routing TRIE provides a structural routing model that keeps shallow router state and shard anchors consistent. It now spreads divergent children by sequence hash instead of preserving creation-order placement, but it still does not prove ideal multi-shard scaling for every hot-prefix workload.
 
-> **Shard imbalance warning (this trace):** `mooncake_trace.jsonl` contains two dominant depth-2 prefixes: `[46,47]` appears 9,203 times and `[74,75]` appears 3,449 times. Branch-sharded routing can therefore collapse most stored blocks onto one shard until adaptive hot-branch splitting is implemented.
+> **Shard imbalance warning (this trace):** `mooncake_trace.jsonl` contains two dominant depth-2 prefixes: `[46,47]` appears 9,203 times and `[74,75]` appears 3,449 times. Deterministic child sharding spreads their observed continuations in the 2-shard runs above, but a genuinely dominant single continuation can still overload one shard until adaptive hot-branch splitting is implemented.
 
 Shard block distribution:
 ```text
-branch depth=2:  shard 0: 574 blocks (0.0%), 14 workers  shard 1: 2,094,155 blocks (100.0%), 7,000 workers
-branch depth=4:  shard 0: 80,570 blocks (4.0%), 3,983 workers  shard 1: 1,922,501 blocks (96.0%), 7,000 workers
+branch depth=3:  shard 0: 1,161,601 blocks (55.5%), 7,000 workers  shard 1: 930,496 blocks (44.5%), 6,951 workers
 ```
 
-See Known Issues below for the current hot-branch collapse behavior.
+See Known Issues below for the remaining hot-continuation and lifetime-skew behavior.
 
-### Peak throughput sweep — `mooncake_trace.jsonl`
+### 3x pressure — 10s benchmark window (~51,805 ops/s offered)
 
-Clean peak is defined as the highest achieved ops/s where the benchmark keeps up with the offered block throughput. Rows marked ⚠ were overloaded and should not be treated as clean throughput ceilings. The sweep runs shortest windows first for multithreaded indexers, so use the standalone steady-state run above for trace-rate p99.
+| Indexer | Achieved ops/s mean | Block ops/s mean | p99 mean | Warning? | Avg routing | Avg shard |
+|---------|--------------------:|-----------------:|---------:|----------|------------:|----------:|
+| CRTC baseline (8w) | 51,377.6 | 502,973.4 | 1,339 µs | No | — | — |
+| Branch-sharded depth=3 (2×4w) | 38,769.1 | 379,539.5 | 6,853 µs | Yes | 420 µs | 409 µs |
 
-| Indexer | Clean peak achieved ops/s | p99 at clean peak | Notes |
-|---------|--------------------------:|-------------------|-------|
-| CRTC baseline (8w) | **118,157** | 1,087 µs | Best clean throughput on this hot-prefix trace |
-| Branch-sharded depth=2 (2×4w) | 16,699 | 12,332 µs | Sweep degrades heavily after overload; use steady-state run for normal p99 |
+At 3x pressure, CRTC still keeps up with offered load while branch-sharded saturates. This is the clearest local evidence that the remaining branch-sharded bottleneck is not shard placement alone: the block split is stable at about 55.5% / 44.5%, but exact router scoring plus shard dispatch/merge cost dominates under pressure.
 
-On this arxiv trace, CRTC has the highest clean throughput in the sweep. The hot-prefix distribution limits branch-sharded shard parallelism and caps clean peak throughput. This is the main reason the arxiv trace is a useful primary benchmark: it exposes the routing model under a less favorable and more realistic hot-prefix workload.
+### Peak throughput and ceiling — `mooncake_trace.jsonl`
 
-Full sweep data:
+Clean peak is defined here as the highest targeted run where achieved ops/s stayed at or above 95% of offered ops/s and the benchmark did not warn. The raw sweep is useful for finding candidate windows, but several sweep rows were noisier than standalone reruns in this pass, so targeted reruns are the source of truth for capacity claims.
+
+| Indexer | Highest clean targeted offered ops/s | Achieved ops/s mean | p99 mean | First unstable/overloaded target | Notes |
+|---------|-----------------------------------:|--------------------:|---------:|----------------------------------:|-------|
+| CRTC baseline (8w) | 148,014.0 | **143,174.7** | 896 µs | 160,287.4 offered ops/s, 151,197.9 achieved, below 95% keep-up | About 3.5x branch-sharded clean throughput by achieved ops/s |
+| Branch-sharded depth=3 (2×4w) | 43,170.8 | 41,429.0 | 3,520 µs | 45,047.7 offered ops/s; two reruns warned | Correct and balanced, but exact routing/merge work caps clean throughput |
+
+On this arxiv trace, CRTC has the highest clean throughput. Branch-sharded reaches higher achieved rates in overloaded rows, but those runs warn or fail the 95% keep-up threshold and should not be used as clean capacity claims.
+
+Targeted rerun data:
 
 **CRTC baseline:**
 
 | Benchmark window | Offered ops/s | Achieved ops/s | p99 |
 |-----------------|--------------|----------------|-----|
-| 30,000 ms | 17,268 | 17,219 | 1,027 µs |
-| 18,455 ms | 28,071 | 27,955 | 741 µs |
-| 11,352 ms | 45,635 | 45,309 | 771 µs |
-| 6,983 ms | 74,187 | 73,298 | 683 µs |
-| 4,296 ms | 120,589 | 118,157 | 1,087 µs |
-| 2,643 ms ⚠ | 196,008 | 160,615 | 1,281 µs |
-| 1,626 ms ⚠ | 318,603 | 178,812 | 1,236 µs |
-| 1,000 ms ⚠ | 518,049 | 164,820 | 1,511 µs |
+| 7,000 ms | 74,007.0 | 73,219.3 | 648 µs |
+| 6,000 ms | 86,341.5 | 84,124.1 | 814 µs |
+| 5,259 ms | 98,507.1 | 97,260.7 | 702 µs |
+| 4,000 ms | 129,512.2 | 126,750.0 | 1,078 µs |
+| 3,500 ms | 148,014.0 | 143,174.7 | 896 µs |
+| 3,232 ms ⚠ | 160,287.4 | 151,197.9 | 1,164 µs |
 
-**Branch-sharded depth=2:**
+**Branch-sharded depth=3:**
 
 | Benchmark window | Offered ops/s | Achieved ops/s | p99 |
 |-----------------|--------------|----------------|-----|
-| 30,000 ms | 17,268 | 16,699 | 12,332 µs |
-| 18,455 ms ⚠ | 28,071 | 19,965 | 16,423 µs |
-| 11,352 ms ⚠ | 45,635 | 23,088 | 14,922 µs |
-| 6,983 ms ⚠ | 74,187 | 25,232 | 13,322 µs |
-| 4,296 ms ⚠ | 120,589 | 26,185 | 11,384 µs |
-| 2,643 ms ⚠ | 196,008 | 29,912 | 9,832 µs |
-| 1,626 ms ⚠ | 318,603 | 35,720 | 6,970 µs |
-| 1,000 ms ⚠ | 518,049 | 37,076 | 6,743 µs |
+| 22,659 ms | 22,862.8 | 22,406.3 | 2,020 µs |
+| 13,925 ms | 37,202.8 | 36,043.0 | 2,641 µs |
+| 12,000 ms | 43,170.8 | 41,429.0 | 3,520 µs |
+| 11,500 ms ⚠ | 45,047.7 | 40,849.8 | 5,202 µs |
+| 11,500 ms rerun ⚠ | 45,047.7 | 38,574.2 | 6,190 µs |
+| 11,000 ms ⚠ | 47,095.4 | 43,373.4 | 4,446 µs |
+| 10,000 ms ⚠ | 51,804.9 | 38,769.1 | 6,853 µs |
 
-⚠ = bench warned it could not keep up with the offered rate.
+⚠ = overloaded by warning or by falling below the 95% keep-up threshold.
 
-### Worker scaling — branch-sharded depth=2
+### Duplicated-Mooncake stress
+
+Config: `--trace-duplication-factor 2`, `--benchmark-duration-ms 30000`, `--benchmark-runs 5`, same CRTC and BSI worker counts as above.
+
+| Source | Indexer | Warnings | Achieved ops/s mean | Block ops/s mean | p99 mean |
+|--------|---------|---------:|--------------------:|-----------------:|---------:|
+| Earlier stress run | CRTC baseline (8w) | 0 | 34,379 | — | 6,238 µs |
+| Earlier stress run | BSI before borrowed suffixes | 0 | 33,758 | — | 5,822 µs |
+| Earlier stress run | BSI with borrowed suffixes | 0 | 34,216 | — | 2,072 µs |
+| Current rerun | CRTC baseline (8w) | 0 | 34,447.0 | 337,220.6 | 1,094 µs |
+| Current rerun | Branch-sharded depth=3 (2×4w) | 0 | 34,225.3 | 335,050.4 | 2,215 µs |
+
+The current BSI rerun sustains the duplicated target and stays near a 2 ms p99. The current same-run CRTC baseline is stronger, so use the current same-run comparison for present-day BSI-vs-CRTC claims.
+
+### Historical worker scaling — branch-sharded depth=2
+
+This section is retained as older stress-shape evidence. It was not rerun in the current pass after deterministic child placement and borrowed suffixes, so do not use it as a current BSI-vs-CRTC capacity claim.
 
 Config: 2 shards × 4 workers per shard, `--num-unique-inference-workers 1000`, `-d 7`, `--benchmark-duration-ms 30000`. `--trace-duplication-factor` duplicates request/hash spaces while keeping the worker identity count fixed; it increases branch diversity and event volume, but it does not multiply the number of worker identities.
 
@@ -307,7 +337,9 @@ Config: 2 shards × 4 workers per shard, `--num-unique-inference-workers 1000`, 
 
 Duplication increases branch diversity, but it does not reliably balance stored blocks because the hot routing path and branch lifetime skew still dominate. Achieved throughput saturates around 35-43k ops/s in the overloaded rows, and anchor installs scale roughly with event volume.
 
-### Repeated overload benchmark
+### Historical repeated overload benchmark
+
+This saturated stress run is also older and was not rerun after the current BSI changes. It remains useful for command shape and overload behavior, not for current capacity claims.
 
 Config: `--num-unique-inference-workers 128`, `--trace-duplication-factor 20`, `--trace-length-factor 4`, `--benchmark-duration-ms 750`, `--benchmark-runs 20`. These runs generated 2,163,500 events: 1,007,958 `Stored` and 1,155,542 `Removed`. Every run warned that the benchmarker could not keep up, and macOS emitted malloc range-group warnings during event generation. Treat this as saturated stress data, not clean capacity.
 
@@ -326,17 +358,17 @@ Config: `--num-unique-inference-workers 128`, `--trace-duplication-factor 20`, `
 | CRTC baseline | 138 µs | 312 µs | 380 µs | 158 µs |
 | Branch-sharded depth=2 | 352 µs | 484 µs | 560 µs | 370 µs |
 
-Branch-sharded lands below CRTC on achieved ops/s in this overload run and has higher p99 lookup latency. Routing averages roughly 18-27 µs, shard traversal roughly 12-19 µs, and stored blocks still collapse heavily onto one shard (usually about 93-100% on shard 1), so this is not a balanced-sharding result. This command is dominated by event processing, especially `Removed` events; branch-sharded adds routing-TRIE and anchor bookkeeping on that path while CRTC applies events directly.
+Branch-sharded landed below CRTC on achieved ops/s in this overload run and had higher p99 lookup latency. Routing averaged roughly 18-27 µs, shard traversal roughly 12-19 µs, and stored blocks collapsed heavily onto one shard (usually about 93-100% on shard 1), so this was not a balanced-sharding result. This command was dominated by event processing, especially `Removed` events; branch-sharded added routing-TRIE and anchor bookkeeping on that path while CRTC applied events directly.
 
 ---
 
 ## Known Issues
 
-### Hot-branch shard collapse and lifetime block skew
+### Hot-continuation shard collapse and lifetime block skew
 
-`BranchShardedIndexer` uses a routing TRIE with static divergent-child shard assignment: the first child under a routing node stays with the parent shard, and later divergent siblings may split to other shards. Two skew modes remain:
+`BranchShardedIndexer` uses a routing TRIE with deterministic divergent-child shard assignment based on each child's sequence hash. The old creation-order behavior, where the first child under a routing node stayed with the parent shard, is no longer used. Two skew modes remain:
 
-1. **Shared-prefix collapse:** if many requests share the same first `prefix_depth` blocks, they share the same routing path and land on one shard. On `mooncake_trace.jsonl`, the two hottest depth-2 prefixes account for 12,652 of 23,608 requests, and the branch-sharded depth=2 steady-state run above stores effectively all blocks on one shard.
+1. **Hot-continuation collapse:** if many requests share the same first block after `prefix_depth`, they still share the same routed child and land on one shard. On `mooncake_trace.jsonl`, the corrected two-shard steady-state runs above are balanced, but this is workload-dependent.
 2. **Lifetime skew:** even when branch counts are distributed, branches are placed permanently and some conversations accumulate far more blocks than others. Over time, a few heavy branches can dominate one shard.
 
 The hot shard's larger tree drives up p99.

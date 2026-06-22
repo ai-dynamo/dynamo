@@ -14,12 +14,11 @@
 
 use std::{
     collections::VecDeque,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
+#[cfg(feature = "bench")]
+use std::sync::atomic::Ordering;
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
@@ -27,9 +26,9 @@ use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
+use super::shard_handle::AsyncShardHandle;
 #[cfg(feature = "bench")]
 use super::ShardedIndexerMetrics;
-use super::shard_handle::AsyncShardHandle;
 use super::{
     AnchorCapableSyncIndexer, AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError,
     ShardSizeSnapshot, ThreadPoolIndexer,
@@ -43,7 +42,7 @@ struct RoutingNode {
     key: Option<LocalBlockHash>,
     external_hash: Option<ExternalSequenceBlockHash>,
     depth: usize,
-    shard: AtomicUsize,
+    shard: usize,
     children: DashMap<LocalBlockHash, Arc<RoutingNode>, FxBuildHasher>,
     create_lock: Mutex<()>,
     live_workers: DashSet<WorkerWithDpRank, FxBuildHasher>,
@@ -55,7 +54,7 @@ impl RoutingNode {
             key: None,
             external_hash: None,
             depth: 0,
-            shard: AtomicUsize::new(0),
+            shard: 0,
             children: DashMap::with_hasher(FxBuildHasher),
             create_lock: Mutex::new(()),
             live_workers: DashSet::with_hasher(FxBuildHasher),
@@ -72,7 +71,7 @@ impl RoutingNode {
             key: Some(key),
             external_hash: Some(external_hash),
             depth,
-            shard: AtomicUsize::new(shard),
+            shard,
             children: DashMap::with_hasher(FxBuildHasher),
             create_lock: Mutex::new(()),
             live_workers: DashSet::with_hasher(FxBuildHasher),
@@ -80,7 +79,7 @@ impl RoutingNode {
     }
 
     fn shard(&self) -> usize {
-        self.shard.load(Ordering::Relaxed)
+        self.shard
     }
 }
 
@@ -187,23 +186,16 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         Self::new(shards, prefix_depth, kv_block_size)
     }
 
-    fn static_divergent_shard(
-        &self,
-        parent_shard: usize,
-        parent: &RoutingNode,
-        block: &KvCacheStoredBlockData,
-    ) -> usize {
+    fn static_child_shard(&self, parent: &RoutingNode, block: &KvCacheStoredBlockData) -> usize {
         if self.num_shards == 1 {
             return 0;
         }
 
-        // TODO: Static hashing still cannot split one very hot branch after it
-        // lands on a shard. If real traces remain imbalanced, add adaptive or
-        // deeper hot-branch splitting on top of this deterministic baseline.
+        // Hash every child, including the first one. The earlier "first child
+        // inherits parent" rule made two-shard routing collapse all later root
+        // siblings onto the opposite shard when a rare prefix arrived first.
         let parent_seq_hash = parent.external_hash.map(|hash| hash.0).unwrap_or(0);
-        let hash = compute_next_seq_hash(parent_seq_hash, block.tokens_hash);
-        let slot = (hash as usize) % (self.num_shards - 1);
-        if slot >= parent_shard { slot + 1 } else { slot }
+        compute_next_seq_hash(parent_seq_hash, block.tokens_hash) as usize % self.num_shards
     }
 
     fn anchor_for_parent(&self, parent: &RoutingNode) -> Option<AnchorRef> {
@@ -233,12 +225,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             return child.clone();
         }
 
-        let parent_shard = parent.shard();
-        let shard = if parent.children.is_empty() {
-            parent_shard
-        } else {
-            self.static_divergent_shard(parent_shard, parent, block)
-        };
+        let shard = self.static_child_shard(parent, block);
 
         let child = Arc::new(RoutingNode::new(
             block.tokens_hash,
@@ -334,7 +321,9 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         depth: usize,
     ) {
         let score = depth as u32;
-        scores.scores.reserve(active.len());
+        scores
+            .scores
+            .reserve(active.len().saturating_sub(scores.scores.len()));
         for &worker in active {
             let entry = scores.scores.entry(worker).or_insert(0);
             *entry = (*entry).max(score);
@@ -342,10 +331,10 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn collect_live_workers(node: &RoutingNode) -> FxHashSet<WorkerWithDpRank> {
-        let mut active =
+        let mut workers =
             FxHashSet::with_capacity_and_hasher(node.live_workers.len(), FxBuildHasher);
-        active.extend(node.live_workers.iter().map(|worker| *worker));
-        active
+        workers.extend(node.live_workers.iter().map(|worker| *worker));
+        workers
     }
 
     fn reconcile_active_workers(
@@ -354,12 +343,6 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         node: &RoutingNode,
         drop_depth: usize,
     ) {
-        if active
-            .iter()
-            .all(|worker| node.live_workers.contains(worker))
-        {
-            return;
-        }
         let score = drop_depth as u32;
         scores
             .scores
@@ -381,6 +364,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         sequence: &[LocalBlockHash],
         mut scores: OverlapScores,
         active: FxHashSet<WorkerWithDpRank>,
+        fallback_depth: usize,
     ) -> Result<OverlapScores, KvRouterError> {
         if active.is_empty() {
             return Ok(scores);
@@ -400,16 +384,30 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             &[]
         };
         let shard = Arc::clone(&self.shards[shard_idx]);
-        let mut shard_scores = shard
+        let shard_scores = shard
             .as_ref()
             .find_matches_from_anchor(anchor, suffix)
             .await?;
-        for (worker, shard_score) in shard_scores.scores.drain() {
+        let fallback_score = fallback_depth as u32;
+        let mut matched_active = 0usize;
+        for (worker, shard_score) in shard_scores.scores {
             if !active.contains(&worker) {
                 continue;
             }
+            matched_active += 1;
             let entry = scores.scores.entry(worker).or_insert(0);
-            *entry = (*entry).max(shard_score);
+            *entry = (*entry).max(shard_score.max(fallback_score));
+        }
+        if matched_active < active.len() {
+            scores.scores.reserve(
+                active
+                    .len()
+                    .saturating_sub(matched_active)
+                    .saturating_sub(scores.scores.len()),
+            );
+            for &worker in &active {
+                scores.scores.entry(worker).or_insert(fallback_score);
+            }
         }
         Ok(scores)
     }
@@ -525,10 +523,9 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn dump_router_events(&self) -> (Vec<RouterEvent>, DumpedBlockSet) {
-        // TODO: Static shard routing treats the first structural child under a
-        // parent as special. This dump is replayable, but it does not yet make
-        // sibling traversal canonical by original creation order, so byte-stable
-        // dump -> replay -> dump comparisons are not guaranteed for siblings.
+        // This dump is replayable, but sibling traversal still follows DashMap
+        // iteration order, so byte-stable dump -> replay -> dump comparisons
+        // are not guaranteed for siblings.
         let mut events = Vec::new();
         let mut dumped_blocks = FxHashSet::default();
         let mut event_id = 0u64;
@@ -729,13 +726,12 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
 
         for hash in &sequence {
             if depth == self.max_routing_depth {
-                Self::add_active_scores(&mut router_scores, &active, depth);
                 #[cfg(feature = "bench")]
                 let routing_ns = t_routing.elapsed().as_nanos() as u64;
                 #[cfg(feature = "bench")]
                 let t_shard = Instant::now();
                 let result = self
-                    .dispatch_read(node, &sequence, router_scores, active)
+                    .dispatch_read(node, &sequence, router_scores, active, depth)
                     .await;
                 #[cfg(feature = "bench")]
                 {
@@ -1112,7 +1108,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linear_chain_inherits_parent_and_caps_construction() {
+    async fn linear_chain_uses_deterministic_child_shards_and_caps_construction() {
         let index = make_indexer(2, 4);
         index.apply_event(store_event(0, &[1, 2, 3, 4, 5, 6])).await;
 
@@ -1121,10 +1117,11 @@ mod tests {
         let c = child(&b, 3);
         let d = child(&c, 4);
 
-        assert_eq!(a.shard(), 0);
-        assert_eq!(b.shard(), 0);
-        assert_eq!(c.shard(), 0);
-        assert_eq!(d.shard(), 0);
+        let blocks = stored_blocks(&[1, 2, 3, 4]);
+        assert_eq!(a.shard(), index.static_child_shard(&index.root, &blocks[0]));
+        assert_eq!(b.shard(), index.static_child_shard(&a, &blocks[1]));
+        assert_eq!(c.shard(), index.static_child_shard(&b, &blocks[2]));
+        assert_eq!(d.shard(), index.static_child_shard(&c, &blocks[3]));
         assert!(d.children.get(&LocalBlockHash(5)).is_none());
 
         let lookup = index.worker_block_index.get(&worker(0)).unwrap();
@@ -1132,7 +1129,7 @@ mod tests {
         let suffix_entry = lookup
             .get(&ExternalSequenceBlockHash(seq_hashes[5]))
             .expect("suffix block should be reverse-indexed");
-        assert_eq!(suffix_entry.shard_idx, 0);
+        assert_eq!(suffix_entry.shard_idx, d.shard());
         assert!(!suffix_entry.affects_router_node);
         assert!(Arc::ptr_eq(&suffix_entry.routing_node, &d));
     }
@@ -1145,7 +1142,8 @@ mod tests {
         let a = child(&index.root, 1);
         let b = child(&a, 2);
         let c = child(&b, 3);
-        assert_eq!(c.shard(), 0);
+        let c_block = stored_blocks(&[1, 2, 3]).remove(2);
+        assert_eq!(c.shard(), index.static_child_shard(&b, &c_block));
 
         index
             .apply_event(remove_hash_event(0, 0, &[1, 2, 3], 2))
@@ -1155,23 +1153,24 @@ mod tests {
 
         index.apply_event(store_event(1, &[1, 2, 5])).await;
         let e = child(&b, 5);
-        assert_eq!(e.shard(), 1);
+        let e_block = stored_blocks(&[1, 2, 5]).remove(2);
+        assert_eq!(e.shard(), index.static_child_shard(&b, &e_block));
 
         index.apply_event(store_event(2, &[1, 2, 6])).await;
         let f = child(&b, 6);
-        assert_eq!(f.shard(), 1);
+        let f_block = stored_blocks(&[1, 2, 6]).remove(2);
+        assert_eq!(f.shard(), index.static_child_shard(&b, &f_block));
         assert_eq!(b.children.len(), 3);
     }
 
     #[tokio::test]
-    async fn static_divergent_assignment_excludes_parent_shard() {
+    async fn static_child_assignment_is_deterministic() {
         let index = make_indexer(4, 4);
         index.apply_event(store_event(0, &[1, 2, 3])).await;
 
         let b = child(&child(&index.root, 1), 2);
         let block = stored_blocks(&[1, 2, 5]).remove(2);
-        let expected = index.static_divergent_shard(b.shard(), &b, &block);
-        assert_ne!(expected, b.shard());
+        let expected = index.static_child_shard(&b, &block);
 
         index.apply_event(store_event(1, &[1, 2, 5])).await;
         let e = child(&b, 5);
@@ -1179,7 +1178,45 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_sibling_creation_under_hot_prefix_has_one_first_child() {
+    fn two_shard_child_hashing_does_not_special_case_creation_order() {
+        let index = make_indexer(2, 4);
+        let ab_blocks = stored_blocks(&[1, 2]);
+        let a = index.get_or_create_child(&index.root, &ab_blocks[0]);
+        let parent = index.get_or_create_child(&a, &ab_blocks[1]);
+        let parent_shard = parent.shard();
+        let parent_seq_hash = parent.external_hash.unwrap().0;
+
+        let mut first_child_case = None;
+        let mut later_child_case = None;
+        for key in 10..200 {
+            let block = stored_blocks(&[1, 2, key]).remove(2);
+            let expected = compute_next_seq_hash(parent_seq_hash, block.tokens_hash) as usize
+                % index.num_shards;
+            if expected != parent_shard && first_child_case.is_none() {
+                first_child_case = Some((block, expected));
+            } else if expected == parent_shard && later_child_case.is_none() {
+                later_child_case = Some((block, expected));
+            }
+            if first_child_case.is_some() && later_child_case.is_some() {
+                break;
+            }
+        }
+
+        let (first_block, first_expected) =
+            first_child_case.expect("test range should include a child for the opposite shard");
+        let first_child = index.get_or_create_child(&parent, &first_block);
+        assert_eq!(first_child.shard(), first_expected);
+        assert_ne!(first_child.shard(), parent_shard);
+
+        let (later_block, later_expected) =
+            later_child_case.expect("test range should include a child for the parent shard");
+        let later_child = index.get_or_create_child(&parent, &later_block);
+        assert_eq!(later_child.shard(), later_expected);
+        assert_eq!(later_child.shard(), parent_shard);
+    }
+
+    #[test]
+    fn concurrent_sibling_creation_under_hot_prefix_uses_deterministic_shards() {
         let index = Arc::new(make_indexer(2, 4));
         let ab_blocks = stored_blocks(&[1, 2]);
         let a = index.get_or_create_child(&index.root, &ab_blocks[0]);
@@ -1204,12 +1241,10 @@ mod tests {
             .into_iter()
             .map(|handle| handle.join().unwrap())
             .collect();
-        let inherited_children = children
-            .iter()
-            .filter(|node| node.shard() == b.shard())
-            .count();
-
-        assert_eq!(inherited_children, 1);
+        for (key, node) in (10..(10 + sibling_count as u64)).zip(children.iter()) {
+            let block = stored_blocks(&[1, 2, key]).remove(2);
+            assert_eq!(node.shard(), index.static_child_shard(&b, &block));
+        }
         assert_eq!(b.children.len(), sibling_count);
     }
 
@@ -1321,6 +1356,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn depth_dispatch_keeps_router_only_boundary_workers() {
+        let index = make_indexer(2, 2);
+        index.apply_event(store_event(0, &[1, 2])).await;
+        index.apply_event(store_event(1, &[1, 2, 3])).await;
+        index.flush().await;
+
+        let scores = index.find_matches(local_hashes(&[1, 2, 9])).await.unwrap();
+
+        assert_eq!(score(&scores, worker(0)), Some(2));
+        assert_eq!(score(&scores, worker(1)), Some(2));
+    }
+
+    #[tokio::test]
     async fn anchor_installed_by_one_worker_is_visible_to_another_worker_queue() {
         let index = make_indexer(2, 3);
         index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
@@ -1388,7 +1436,8 @@ mod tests {
         let b = child(&child(&index.root, 1), 2);
         let e = child(&b, 5);
         assert_eq!(b.children.len(), 2);
-        assert_eq!(e.shard(), 1);
+        let e_block = stored_blocks(&[1, 2, 5]).remove(2);
+        assert_eq!(e.shard(), index.static_child_shard(&b, &e_block));
         assert_eq!(e.live_workers.len(), worker_count);
         let total_anchors: usize = index
             .worker_anchor_index
@@ -1742,5 +1791,38 @@ mod tests {
                 "dump replay changed scores for query {query:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dump_replay_does_not_resurrect_zombie_descendants_after_parent_remove() {
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index
+            .apply_event(remove_hash_event(0, 0, &[1, 2, 3, 4], 2))
+            .await;
+        index.flush().await;
+
+        let c = child(&child(&child(&index.root, 1), 2), 3);
+        let d = child(&c, 4);
+        assert!(c.live_workers.is_empty());
+        assert!(d.live_workers.contains(&worker(0)));
+
+        let expected = normalized_scores(&index, &[1, 2, 3, 4]).await;
+        assert_eq!(expected, vec![(worker(0), 2)]);
+
+        let restored = make_indexer(2, 4);
+        for event in index.dump_events().await.unwrap() {
+            restored.apply_event(event).await;
+        }
+        restored.flush().await;
+
+        assert_eq!(normalized_scores(&restored, &[1, 2, 3, 4]).await, expected);
+        assert!(
+            child(&child(&restored.root, 1), 2)
+                .children
+                .get(&LocalBlockHash(3))
+                .is_none(),
+            "dump replay must not recreate a child whose parent has no live workers"
+        );
     }
 }
