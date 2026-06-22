@@ -167,7 +167,7 @@ galil-seiferas = { version = "0.1" }
 
 # preprocessor
 bs62 = { version = "0.1" }
-minijinja = { version = "2.20.0", features = ["loader", "loop_controls"] }
+minijinja = { version = "2.21.0", features = ["loader", "loop_controls"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor

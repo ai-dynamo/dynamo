@@ -27,8 +27,8 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
 tracing = { workspace = true }
 
-minijinja = { version = "2.20.0", features = ["loader", "loop_controls"] }
-minijinja-contrib = { version = "2.20.0", features = ["pycompat"] }
+minijinja = { version = "2.21.0", features = ["loader", "loop_controls"] }
+minijinja-contrib = { version = "2.21.0", features = ["pycompat"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
