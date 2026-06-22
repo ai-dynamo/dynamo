@@ -37,8 +37,8 @@ binary serves both.
 
 LIMITATIONS:
 
-Concern | Gap vs the Full Dynamo Stack
--- | --
+| | This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
+|---|---|---|
 Duplicate store/remove (vLLM "retries") | parity
 In-stream ordering |  parity
 Transient disconnects | parity-ish
