@@ -97,6 +97,9 @@ type PodSnapshotStatus struct {
 
 // PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
 // for a captured container checkpoint and is consumed by restore paths.
+//
+// No conversion: this type exists only in v1alpha1 (no other API version), so it
+// is not part of any conversion scheme.
 type PodSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

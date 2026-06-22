@@ -57,9 +57,6 @@ const (
 
 	// snapshotContentDeleteRequeue is the delay between cascade-delete progress checks.
 	snapshotContentDeleteRequeue = time.Second
-
-	// maxResourceNameLength is the Kubernetes object name limit (RFC 1123 subdomain).
-	maxResourceNameLength = 253
 )
 
 // errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled and the
@@ -113,6 +110,14 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := validateSourcePod(pod); err != nil {
 		logger.V(1).Info("Source pod not ready, backing off", "snapshot", snap.Name, "reason", err.Error())
 		return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
+	}
+
+	// Provenance guard: when the PodSnapshot pins a source pod UID, refuse to capture a same-named
+	// recreation as the wrong workload. This is creation-time guarding (the spec UID, if set, does
+	// not change); a content already bound from an earlier UID-less reconcile is out of scope.
+	if wantUID := snap.Spec.Source.PodRef.UID; wantUID != "" && pod.UID != wantUID {
+		return sr.failPodSnapshot(ctx, snap, "StalePodReference",
+			fmt.Errorf("source pod %q UID %q does not match PodSnapshot source UID %q", pod.Name, pod.UID, wantUID))
 	}
 
 	// The content is named from the PodSnapshot UID, not the checkpoint ID: the ID is a
@@ -259,10 +264,14 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiac
 		return ctrl.Result{}, nil
 	}
 
-	// status.BoundPodSnapshotContentName is the authoritative record of the content we created.
-	// If it is unset, nothing was bound, so drop the finalizer. (Accepted orphan risk: a content
-	// created via SSA but whose status write did not land before the process crashed AND the
-	// PodSnapshot was deleted during that downtime would leak; deemed acceptable, not guarded.)
+	// status.BoundPodSnapshotContentName is the authoritative record of the content we created;
+	// cascade-delete keys off it (we do NOT reconstruct the name from the PodSnapshot UID, because
+	// a future bring-your-own-content mode will let the content name diverge from podsnapshotcontent-
+	// <uid>). If it is unset, nothing was bound, so drop the finalizer.
+	//
+	// Accepted orphan risk (deemed acceptable, not guarded here): a content created via SSA whose
+	// status write did not land before the process crashed AND the PodSnapshot was deleted during
+	// that downtime would leak. A future GC/cleanup policy will reclaim unbound content.
 	contentName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, "")
 	if contentName == "" {
 		controllerutil.RemoveFinalizer(snap, podSnapshotFinalizer)

@@ -98,6 +98,9 @@ type PodSnapshotContentStatus struct {
 
 // PodSnapshotContent is the Schema for the snapshotcontents API. It is the
 // cluster-scoped artifact-of-record for a captured container checkpoint.
+//
+// No conversion: this type exists only in v1alpha1 (no other API version), so it
+// is not part of any conversion scheme.
 type PodSnapshotContent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
