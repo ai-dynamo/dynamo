@@ -368,12 +368,8 @@ where
             let by_worker = effective_cached_tokens
                 .iter()
                 .map(|(worker, cached_tokens)| {
-                    let delta = isl_tokens.checked_sub(*cached_tokens).unwrap_or_else(|| {
-                        tracing::error!(
-                            "prefill_tokens < 0 with ISL {isl_tokens} < cached_tokens {cached_tokens}, returning 0"
-                        );
-                        0
-                    });
+                    let delta =
+                        super::prefill_load::effective_prefill_tokens(isl_tokens, *cached_tokens);
                     (*worker, delta)
                 })
                 .collect();

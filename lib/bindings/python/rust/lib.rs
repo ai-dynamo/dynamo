@@ -204,6 +204,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
     }
     m.add_class::<llm::replay::PlannerReplayBridge>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::SelectionService>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
@@ -1007,7 +1009,7 @@ impl DistributedRuntime {
     /// Register an async Python callback for /engine/{route_name}
     ///
     /// Args:
-    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     route_name: Route path (e.g., "control/start_profile" → /engine/control/start_profile)
     ///     callback: Async function with signature: async def(body: dict) -> dict
     ///
     /// Example:
@@ -1016,7 +1018,7 @@ impl DistributedRuntime {
     ///     await engine.start_profile(**body)
     ///     return {"status": "ok"}
     ///
-    /// runtime.register_engine_route("start_profile", start_profile)
+    /// runtime.register_engine_route("control/start_profile", start_profile)
     /// ```
     #[pyo3(signature = (route_name, callback))]
     fn register_engine_route(
