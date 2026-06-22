@@ -128,7 +128,7 @@ spec:
       serviceAccountName: qwen-epp
       containers:
         - name: epp
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image:  docker.io/lambda108/epp-inference-extension-dynamo:disagg-test
           ports:
             - name: grpc
               containerPort: 9002

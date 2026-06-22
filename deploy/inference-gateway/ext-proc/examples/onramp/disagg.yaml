@@ -176,14 +176,9 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
-        # --- OPTIONAL: decode-side P/D routing sidecar -------------------------
-        # Reads `x-prefiller-host-port` (set by the EPP) and runs vLLM's
-        # kv_transfer_params handshake against the selected prefill pod. Provide
-        # your own image here; the EPP only emits the header, it does not run
-        # the transfer. See issue #10426 (non-goals) for why this lives on the
-        # decode side rather than in the EPP.
-        # - name: pd-router-sidecar
-        #   image: <your-pd-routing-sidecar>
+        # decode-side P/D routing sidecar -------------------------
+        - name: pd-router-sidecar
+          image: docker.io/lambda108/pd-sidecar-dynamo:disagg-test
       tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -245,7 +240,7 @@ spec:
       serviceAccountName: qwen-epp
       containers:
         - name: epp
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image:  docker.io/lambda108/epp-inference-extension-dynamo:disagg-test
           ports:
             - name: grpc
               containerPort: 9002
