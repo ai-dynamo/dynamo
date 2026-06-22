@@ -53,6 +53,7 @@ class SnapshotConfig:
         logger.info("Pausing model")
         await pause_controller.pause(*pause_args)
 
+        hf_hub_offline = _force_hf_hub_offline_for_capture()
         try:
             with open(self.ready_file, "w", encoding="utf-8") as ready_file:
                 ready_file.write("ready")
@@ -65,6 +66,7 @@ class SnapshotConfig:
 
             event = await self._wait_for_sentinel()
         finally:
+            _restore_env("HF_HUB_OFFLINE", hf_hub_offline)
             self._cleanup_ready_and_sentinels()
 
         if event == "restore":
@@ -103,15 +105,6 @@ class SnapshotConfig:
 
 
 def configure_snapshot_transport_env() -> None:
-    hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
-    if hf_hub_offline and hf_hub_offline != "1":
-        logger.warning(
-            "Overriding HF_HUB_OFFLINE=%r with '1' for snapshot mode "
-            "to avoid external Hugging Face sockets in snapshotted processes",
-            hf_hub_offline,
-        )
-    os.environ["HF_HUB_OFFLINE"] = "1"
-
     nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
     if nccl_cumem_enable and nccl_cumem_enable != "0":
         logger.warning(
@@ -167,6 +160,25 @@ def configure_snapshot_transport_env() -> None:
         )
     os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
     os.environ.setdefault("TORCH_NCCL_DUMP_ON_TIMEOUT", "0")
+
+
+def _force_hf_hub_offline_for_capture() -> str | None:
+    hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
+    if hf_hub_offline and hf_hub_offline != "1":
+        logger.warning(
+            "Overriding HF_HUB_OFFLINE=%r with '1' while ready for snapshot "
+            "to avoid external Hugging Face sockets in snapshotted processes",
+            hf_hub_offline,
+        )
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    return hf_hub_offline
+
+
+def _restore_env(name: str, value: str | None) -> None:
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
 
 
 @dataclass
