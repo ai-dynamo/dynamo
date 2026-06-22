@@ -1009,7 +1009,8 @@ use async_trait::async_trait;
 use dynamo_backend_common::engine::GenerateContext;
 use dynamo_backend_common::{
     BackendError, CommonArgs, DynamoError, EngineConfig, ErrorType, FinishReason, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, chunk, usage,
+    LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, PreprocessedRequest, WorkerConfig,
+    chunk, usage,
 };
 use futures::stream::BoxStream;
 use tokio::sync::RwLock;
@@ -1137,11 +1138,16 @@ async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
     Ok(EngineConfig {
         model: self.model.clone(),
         served_model_name: Some(self.model.clone()),
-        context_length: Some(8192),
-        kv_cache_block_size: Some(64),     // None if no block-structured KV
-        total_kv_blocks: Some(16384),
-        max_num_seqs: Some(256),
-        max_num_batched_tokens: Some(8192),
+        // Token-pipeline metadata goes in the `llm` sub-record (RawEngines
+        // leave it None).
+        llm: Some(LlmRegistration {
+            context_length: Some(8192),
+            kv_cache_block_size: Some(64),     // None if no block-structured KV
+            total_kv_blocks: Some(16384),
+            max_num_seqs: Some(256),
+            max_num_batched_tokens: Some(8192),
+            ..Default::default()
+        }),
         ..Default::default()
     })
 }

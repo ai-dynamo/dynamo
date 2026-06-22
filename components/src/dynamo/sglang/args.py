@@ -61,6 +61,26 @@ class Config:
             return DisaggregationMode.AGGREGATED
 
 
+def use_modelexpress_remote_instance(args: Any) -> bool:
+    return (
+        getattr(args, "load_format", None) == "remote_instance"
+        and getattr(args, "remote_instance_weight_loader_backend", None)
+        == "modelexpress"
+    )
+
+
+def is_object_storage_path(model_path: str) -> bool:
+    return model_path.startswith(("s3://", "gs://", "az://"))
+
+
+def should_fetch_model(args: Any, model_path: str) -> bool:
+    if os.path.exists(model_path):
+        return False
+    if is_object_storage_path(model_path):
+        return False
+    return not use_modelexpress_remote_instance(args)
+
+
 # Register SGLang-specific encoders with the shared system
 @register_encoder(Config)
 def _preprocess_for_encode_config(
@@ -70,9 +90,9 @@ def _preprocess_for_encode_config(
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
-        "serving_mode": config.serving_mode.value
-        if config.serving_mode is not None
-        else "None",
+        "serving_mode": (
+            config.serving_mode.value if config.serving_mode is not None else "None"
+        ),
     }
 
 
@@ -329,7 +349,7 @@ async def parse_args(args: list[str]) -> Config:
     # sglang will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
-    if not os.path.exists(model_path):
+    if should_fetch_model(parsed_args, model_path):
         await fetch_model(model_path)
 
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to

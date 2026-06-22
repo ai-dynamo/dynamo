@@ -38,11 +38,12 @@ from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
-    TEST_LOGITS_PROCESSOR_ENV,
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     LogitsProcessorSpec,
     is_generation_stage,
     logits_processors_for_request,
@@ -291,7 +292,7 @@ class TrtllmLLMEngine(LLMEngine):
         # explicit user `skip_tokenizer_init=True` can't starve the processor.
         # Gated to generation roles for the same reason as the spec resolution
         # below. The flag is TRT-LLM-shaped; each backend sets its own.
-        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
             _TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode]
         ):
             engine_args["skip_tokenizer_init"] = False
@@ -382,11 +383,13 @@ class TrtllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
-            context_length=self.max_seq_len,
-            kv_cache_block_size=self.kv_block_size,
-            max_num_seqs=self.max_batch_size,
-            max_num_batched_tokens=self.max_num_tokens,
-            data_parallel_size=self._attention_dp_size,
+            llm=LlmRegistration(
+                context_length=self.max_seq_len,
+                kv_cache_block_size=self.kv_block_size,
+                max_num_seqs=self.max_batch_size,
+                max_num_batched_tokens=self.max_num_tokens,
+                data_parallel_size=self._attention_dp_size,
+            ),
         )
 
     # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
@@ -819,6 +822,8 @@ class TrtllmLLMEngine(LLMEngine):
             elif self.max_seq_len is not None:
                 sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
 
+        # TODO: mirror visible/hidden stop-token handling from the disagg
+        # path (handler_base.py) into a shared helper. See PR #9778.
         ignore_eos = stop_conditions.get("ignore_eos")
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos

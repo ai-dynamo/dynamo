@@ -14,7 +14,7 @@ pub(super) struct SglangRequest {
     pub(super) uuid: Uuid,
     pub(super) prompt_tokens: Vec<u64>,
     pub(super) max_output_tokens: usize,
-    pub(super) output_ids: Vec<u64>,
+    pub(super) output_ids: Vec<u32>,
     pub(super) last_node: Option<NodeId>,
     pub(super) kv_indices: Vec<usize>,
     pub(super) materialized_tokens: usize,
@@ -60,7 +60,7 @@ impl SglangRequest {
 
     pub(super) fn sequence_tokens(&self) -> Vec<u64> {
         let mut sequence = self.prompt_tokens.clone();
-        sequence.extend_from_slice(&self.output_ids);
+        sequence.extend(self.output_ids.iter().map(|&token| token as u64));
         sequence
     }
 
@@ -71,18 +71,22 @@ impl SglangRequest {
         }
 
         let mut prefix = self.prompt_tokens.clone();
-        prefix.extend_from_slice(&self.output_ids[..len - prompt_len]);
+        prefix.extend(
+            self.output_ids[..len - prompt_len]
+                .iter()
+                .map(|&token| token as u64),
+        );
         prefix
     }
 
-    pub(super) fn next_output_token(&self) -> u64 {
+    pub(super) fn next_output_token(&self) -> u32 {
         let mut hasher = DefaultHasher::new();
         self.uuid.hash(&mut hasher);
         self.output_len().hash(&mut hasher);
-        hasher.finish()
+        hasher.finish() as u32
     }
 
-    pub(super) fn append_output_token(&mut self, token: u64) {
+    pub(super) fn append_output_token(&mut self, token: u32) {
         self.output_ids.push(token);
         self.materialized_tokens += 1;
     }

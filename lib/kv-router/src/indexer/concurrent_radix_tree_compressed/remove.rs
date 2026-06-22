@@ -78,6 +78,12 @@ impl ConcurrentRadixTreeCompressed {
             };
 
             loop {
+                // TODO(CORRECTNESS): Invalidate this worker throughout the descendant
+                // subtree when a mid-edge removal leaves the node alive for another
+                // worker. Otherwise stale descendants can be reused as store parents,
+                // reactivated by restoring only the removed block, or emitted by dumps
+                // without a valid worker-specific parent. Preserve CRTC's locking and
+                // snapshot guarantees when implementing the traversal.
                 match cur_node.remove_worker_for_hash(worker, block_hash) {
                     Some(outcome) => {
                         if let Some(wl) = lookup.get_mut(&worker) {

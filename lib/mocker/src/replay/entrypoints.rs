@@ -18,6 +18,26 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
+use crate::scheduler::RouterEventVisibility;
+
+/// Replay artifact KV-event timestamp visibility override.
+///
+/// This is intended for parity tests that need to normalize event visibility
+/// across mock engines while leaving each engine's production default intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayKvEventVisibility {
+    PassStart,
+    PassEnd,
+}
+
+impl From<ReplayKvEventVisibility> for RouterEventVisibility {
+    fn from(visibility: ReplayKvEventVisibility) -> Self {
+        match visibility {
+            ReplayKvEventVisibility::PassStart => Self::PassStart,
+            ReplayKvEventVisibility::PassEnd => Self::PassEnd,
+        }
+    }
+}
 
 fn load_trace_from_file(
     trace_path: &Path,
@@ -82,6 +102,20 @@ pub fn generate_trace_worker_artifacts_offline(
 ) -> Result<ReplayWorkerArtifacts> {
     let args = args.normalized()?;
     crate::replay::offline::generate_trace_worker_artifacts(args, trace)
+}
+
+/// Generate offline replay artifacts with a test visibility override for KV events.
+pub fn generate_trace_worker_artifacts_offline_with_kv_event_visibility(
+    args: MockEngineArgs,
+    trace: Trace,
+    visibility: ReplayKvEventVisibility,
+) -> Result<ReplayWorkerArtifacts> {
+    let args = args.normalized()?;
+    crate::replay::offline::generate_trace_worker_artifacts_with_visibility(
+        args,
+        trace,
+        Some(visibility.into()),
+    )
 }
 
 pub fn simulate_trace_file(
@@ -1088,9 +1122,51 @@ pub fn simulate_concurrency_live_workload_with_router_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocols::{EngineType, SglangArgs};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use uuid::Uuid;
+
+    #[test]
+    fn one_worker_sglang_impossible_request_returns_dead_end_error() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(1)
+            .speedup_ratio(1000.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(8),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let request = DirectRequest {
+            tokens: vec![1; 8],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        };
+
+        let err = simulate_trace_requests_with_router_mode(
+            args,
+            None,
+            None,
+            vec![request],
+            1,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "offline replay reached a dead end with 1 in-flight requests remaining"
+        );
+    }
 
     #[test]
     fn agentic_mooncake_trace_file_loads_and_scales_timing() {
@@ -1143,6 +1219,7 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![1],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
                 SessionTrace {
@@ -1153,6 +1230,7 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![2],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -1179,6 +1257,7 @@ mod tests {
                     max_output_tokens: 1,
                     hash_ids: vec![1],
                     delay_after_previous_ms: 0.0,
+                    ..Default::default()
                 }],
             }],
         };
@@ -1204,12 +1283,14 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![1],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![2],
                         delay_after_previous_ms: 10.0,
+                        ..Default::default()
                     },
                 ],
             }],

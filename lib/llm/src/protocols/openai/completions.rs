@@ -14,8 +14,10 @@ use super::{
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     common_ext::{CommonExt, CommonExtProvider},
-    nvext::{NvExt, NvExtProvider},
     validate,
+};
+use crate::protocols::common::extensions::{
+    NvExt, NvExtProvider, validate_completion_token_ids_single_choice, validate_nvext_semantics,
 };
 
 mod aggregator;
@@ -34,6 +36,7 @@ pub struct NvCreateCompletionRequest {
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
 
     // metadata - passthrough parameter without restrictions
@@ -460,10 +463,11 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
         validate::validate_n(self.inner.n)?;
-        super::nvext::validate_completion_token_ids_single_choice(
+        validate_completion_token_ids_single_choice(
             get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
+        validate_nvext_semantics(self.nvext.as_ref())?;
         // none for stream
         // none for stream_options
         validate::validate_logprobs(self.inner.logprobs)?;

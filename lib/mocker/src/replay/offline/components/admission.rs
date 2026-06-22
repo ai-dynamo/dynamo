@@ -45,21 +45,16 @@ impl AdmissionQueue {
         self.mode
     }
 
-    pub(in crate::replay::offline) fn next_ready_time_ms(
-        &mut self,
-        cluster_in_flight: usize,
-    ) -> Option<f64> {
+    pub(in crate::replay::offline) fn next_ready_time_ms(&mut self) -> Option<f64> {
         match (&self.mode, &mut self.source) {
             (ReplayMode::Trace, AdmissionSource::Requests(pending)) => pending
                 .front()
                 .and_then(|request| request.arrival_timestamp_ms),
             (ReplayMode::Trace, AdmissionSource::Workload(driver)) => driver.next_ready_time_ms(),
-            (ReplayMode::Concurrency { max_in_flight }, AdmissionSource::Workload(driver)) => {
-                if cluster_in_flight < *max_in_flight {
-                    driver.next_ready_time_ms()
-                } else {
-                    None
-                }
+            // Concurrency: the driver owns the session cap and gates admission, so defer to
+            // it directly (no in-flight clamp needed here).
+            (ReplayMode::Concurrency { .. }, AdmissionSource::Workload(driver)) => {
+                driver.next_ready_time_ms()
             }
             (ReplayMode::Concurrency { .. }, AdmissionSource::Requests(_)) => None,
         }
@@ -123,13 +118,11 @@ impl AdmissionQueue {
                 }
                 Ok(ready)
             }
-            (ReplayMode::Concurrency { max_in_flight }, AdmissionSource::Workload(driver)) => {
-                let available = max_in_flight.saturating_sub(cluster_in_flight);
-                if available == 0 {
-                    return Ok(Vec::new());
-                }
+            (ReplayMode::Concurrency { .. }, AdmissionSource::Workload(driver)) => {
+                // The driver owns the session cap and only ever holds active sessions'
+                // turns in its heap, so drain everything ready in heap (i.e. limit=usize MAX).
                 Ok(driver
-                    .pop_ready(now_ms, available)
+                    .pop_ready(now_ms, usize::MAX)
                     .into_iter()
                     .map(|ready| ReadyArrival {
                         request: ready.request,

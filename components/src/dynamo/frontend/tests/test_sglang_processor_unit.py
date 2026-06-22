@@ -250,6 +250,25 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] is None
 
+    def test_metadata_upload_nvext_is_forwarded_to_backend(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {
+                    "metadata_upload": {
+                        "url": "s3://bucket/root/rollouts",
+                    },
+                },
+            },
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["extra_args"]["nvext"]["metadata_upload"] == {
+            "url": "s3://bucket/root/rollouts",
+        }
+
     def test_model_name_and_token_ids(self):
         """Model name and token_ids are set correctly."""
         result = _build_dynamo_preproc(
@@ -1399,6 +1418,84 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["role"] == "system"
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
+
+    def test_deepseek_v4_tool_call_arguments_reach_encoder_as_json_string(
+        self, monkeypatch
+    ):
+        """Assistant tool_call arguments must reach the V4 encoder as a JSON
+        string, not a dict.
+
+        _materialize_messages parses ``arguments`` from the OpenAI-wire JSON
+        string to a dict (for Jinja templates that iterate ``arguments|items``),
+        but the V4 encoder's ``encode_arguments_to_dsml`` ``json.loads()``es a
+        string; a dict trips its fallback into a single ``name="arguments"``
+        parameter wrapping the whole object, which the model then imitates as a
+        spurious nested ``{"arguments": {...}}`` call. The render path must
+        re-serialize to a string.
+        """
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, prompt):
+                return [1, 2, 3]
+
+        tool_args = {"city": "Paris", "unit": "celsius"}
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [
+                {"role": "user", "content": "Weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                # OpenAI wire format: arguments is a JSON string.
+                                "arguments": json.dumps(tool_args),
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "{}"},
+                {"role": "user", "content": "And in Tokyo?"},
+            ],
+        }
+
+        preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek-v4",
+        )
+
+        assistant = next(
+            m for m in captured["messages"] if m.get("role") == "assistant"
+        )
+        args = assistant["tool_calls"][0]["function"]["arguments"]
+        # Must arrive as the JSON *string* the V4 encoder expects (not a dict),
+        # round-tripping to the original arguments.
+        assert isinstance(args, str)
+        assert json.loads(args) == tool_args
 
     def test_deepseek_v4_accepts_openai_thinking_payload(self, monkeypatch):
         """OpenAI-style thinking payload maps to DS-V4 thinking."""

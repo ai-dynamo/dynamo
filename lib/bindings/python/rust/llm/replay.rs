@@ -171,7 +171,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -197,6 +197,7 @@ impl MockEngineArgs {
         aic_attention_dp_size: Option<usize>,
         aic_nextn: Option<usize>,
         aic_nextn_accept_rates: Option<String>,
+        aic_mtp_seed: u64,
         gpu_memory_utilization: Option<f64>,
         mem_fraction_static: Option<f64>,
         free_gpu_memory_fraction: Option<f64>,
@@ -256,6 +257,7 @@ impl MockEngineArgs {
             .aic_attention_dp_size(aic_attention_dp_size)
             .aic_nextn(aic_nextn)
             .aic_nextn_accept_rates(aic_nextn_accept_rates)
+            .aic_mtp_seed(aic_mtp_seed)
             .gpu_memory_utilization(gpu_memory_utilization)
             .mem_fraction_static(mem_fraction_static)
             .free_gpu_memory_fraction(free_gpu_memory_fraction)
@@ -535,6 +537,16 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn aic_mtp_seed(&self) -> u64 {
+        self.inner.aic_mtp_seed
+    }
+
+    #[setter]
+    fn set_aic_mtp_seed(&mut self, value: u64) {
+        self.inner.aic_mtp_seed = value;
+    }
+
+    #[getter]
     fn gpu_memory_utilization(&self) -> Option<f64> {
         self.inner.gpu_memory_utilization
     }
@@ -618,7 +630,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -636,6 +648,7 @@ impl MockEngineArgs {
         aic_attention_dp_size: Option<usize>,
         aic_nextn: Option<usize>,
         aic_nextn_accept_rates: Option<String>,
+        aic_mtp_seed: Option<u64>,
         gpu_memory_utilization: Option<f64>,
         mem_fraction_static: Option<f64>,
         free_gpu_memory_fraction: Option<f64>,
@@ -689,6 +702,9 @@ impl MockEngineArgs {
         }
         if let Some(rates) = aic_nextn_accept_rates {
             inner.aic_nextn_accept_rates = Some(rates);
+        }
+        if let Some(seed) = aic_mtp_seed {
+            inner.aic_mtp_seed = seed;
         }
         if let Some(gpu_memory_utilization) = gpu_memory_utilization {
             inner.gpu_memory_utilization = Some(gpu_memory_utilization);
@@ -1255,7 +1271,7 @@ fn materialize_replay_mocker_args(
         let moe_ep_size = args.aic_moe_ep_size;
         let attention_dp_size = args.aic_attention_dp_size;
         let nextn = args.aic_nextn;
-        let nextn_accept_rates = args.aic_nextn_accept_rates.clone();
+        let undiscounted_accept_rates = args.undiscounted_aic_accept_rates();
         // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
         // here, after candidate TP/backend/model overrides have been applied.
         if !extra_args.num_gpu_blocks_explicit() {
@@ -1295,7 +1311,7 @@ fn materialize_replay_mocker_args(
             moe_ep_size,
             attention_dp_size,
             nextn,
-            nextn_accept_rates.as_deref(),
+            undiscounted_accept_rates.as_deref(),
         )
         .map_err(|e| {
             PyException::new_err(format!(
@@ -1546,6 +1562,7 @@ fn build_synthetic_requests(
             dp_rank: 0,
             arrival_timestamp_ms: include_arrival_timestamps
                 .then_some(request_idx as f64 * arrival_interval_ms),
+            ..Default::default()
         });
     }
 
@@ -1601,6 +1618,19 @@ fn fpm_snapshots_to_json(
 /// calls `advance_to()` to run the simulation forward, collects FPM/traffic
 /// metrics, feeds them to the planner state machine, then calls
 /// `apply_scaling()` to resize worker pools.
+/// Reject a goodput SLA threshold that is not a finite, non-negative value;
+/// `None` (unset) is allowed and means "do not gate on this dimension".
+fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
+    if let Some(v) = value
+        && (!v.is_finite() || v < 0.0)
+    {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be a finite, non-negative value, got {v}"
+        )));
+    }
+    Ok(())
+}
+
 #[pyclass(unsendable)]
 pub struct PlannerReplayBridge {
     handle: Option<dynamo_mocker::replay::PlannerReplayHandle>,
@@ -1610,7 +1640,8 @@ pub struct PlannerReplayBridge {
 impl PlannerReplayBridge {
     /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
     #[new]
-    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512))]
+    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         trace_file: PathBuf,
         extra_engine_args: &MockEngineArgs,
@@ -1619,11 +1650,22 @@ impl PlannerReplayBridge {
         router_config: Option<KvRouterConfig>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
     ) -> PyResult<Self> {
         let args =
             Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
         let router_mode = parse_replay_router_mode(router_mode)?;
         let router_config = load_replay_router_config(router_config);
+        validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+        validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+        validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+        let sla = dynamo_mocker::replay::SlaThresholds {
+            ttft_ms: sla_ttft_ms,
+            itl_ms: sla_itl_ms,
+            e2e_ms: sla_e2e_ms,
+        };
 
         let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file(
             args,
@@ -1634,6 +1676,7 @@ impl PlannerReplayBridge {
             num_workers,
             arrival_speedup_ratio,
             router_mode,
+            sla,
         )
         .map_err(to_pyerr)?;
 
@@ -1644,7 +1687,7 @@ impl PlannerReplayBridge {
 
     /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
     #[staticmethod]
-    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512))]
+    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_disagg(
         trace_file: PathBuf,
@@ -1656,6 +1699,9 @@ impl PlannerReplayBridge {
         router_config: Option<KvRouterConfig>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
     ) -> PyResult<Self> {
         let prefill_args =
             Python::with_gil(|py| materialize_replay_mocker_args(py, prefill_engine_args.clone()))?;
@@ -1669,6 +1715,14 @@ impl PlannerReplayBridge {
         };
         let router_mode = parse_replay_router_mode(router_mode)?;
         let router_config = load_replay_router_config(router_config);
+        validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+        validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+        validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+        let sla = dynamo_mocker::replay::SlaThresholds {
+            ttft_ms: sla_ttft_ms,
+            itl_ms: sla_itl_ms,
+            e2e_ms: sla_e2e_ms,
+        };
 
         let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file_disagg(
             config,
@@ -1678,6 +1732,7 @@ impl PlannerReplayBridge {
             trace_block_size,
             arrival_speedup_ratio,
             router_mode,
+            sla,
         )
         .map_err(to_pyerr)?;
 
@@ -1728,6 +1783,9 @@ impl PlannerReplayBridge {
     ///   - `avg_itl_ms`      (f64): mean inter-token latency in milliseconds,
     ///                              averaged only over requests that generated
     ///                              at least one token gap (0.0 when no samples)
+    ///   - `avg_accept_length` (f64 | None): mean visible tokens per decode
+    ///                              request-forward, including the base token
+    ///                              (`None` when no decode forwards were observed)
     ///   - `avg_kv_hit_rate` (f64): arithmetic mean of per-request
     ///                              ``overlap_blocks / isl_blocks`` ratios
     ///                              across router admissions in the window
@@ -1753,6 +1811,7 @@ impl PlannerReplayBridge {
             "avg_osl": stats.avg_osl,
             "avg_ttft_ms": stats.avg_ttft_ms,
             "avg_itl_ms": stats.avg_itl_ms,
+            "avg_accept_length": stats.avg_accept_length,
             "avg_kv_hit_rate": stats.avg_kv_hit_rate,
         });
 
