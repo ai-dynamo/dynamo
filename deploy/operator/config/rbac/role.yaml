@@ -228,6 +228,7 @@ rules:
   - dynamographdeploymentscalingadapters
   - dynamomodels
   - podsnapshotcontents
+  - podsnapshots
   verbs:
   - create
   - delete
@@ -262,16 +263,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - nvidia.com
-  resources:
-  - podsnapshots
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - resource.k8s.io
   resources:
