@@ -241,25 +241,18 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// scheduler to cancel compute early).
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Optional early-exit signal for the prefill drain: is the engine
-    /// quiescent — are in-flight KV transfers done so cleanup can release GPU
-    /// memory?
+    /// Whether in-flight KV transfers are done, so `cleanup` may release GPU
+    /// memory. The `Worker` polls this on prefill workers between the grace
+    /// period and [`cleanup`](LLMEngine::cleanup):
     ///
-    /// Reports engine **state**; the framework owns the **policy**. Polled
-    /// **only for prefill workers** (the framework skips drain for
-    /// aggregated/decode), between the grace-period sleep and
-    /// [`cleanup`](LLMEngine::cleanup). The drain loop exits early on
-    /// `Ok(Some(true))` (quiescent); on `Ok(Some(false))` (busy) it keeps
-    /// polling; on `Ok(None)` (no introspection — the default) it also keeps
-    /// polling until the budget expires, then proceeds to cleanup regardless.
+    /// - `Ok(Some(true))`  — quiescent; exit the drain loop now.
+    /// - `Ok(Some(false))` — busy; poll again next tick.
+    /// - `Ok(None)`        — no introspection (default); poll until the drain
+    ///   budget expires, then cleanup. Never frees KV early.
+    /// - `Err(_)`          — logged and treated as `Ok(None)`.
     ///
-    /// So the default `Ok(None)` is safe-by-default: a prefill engine that
-    /// can't introspect waits the full budget and never frees KV early.
-    /// Engines that can confirm quiescence (e.g. polling a connector / engine
-    /// scheduler) override this to return `Some(true)`/`Some(false)`.
-    ///
-    /// Failures are logged and treated like `None`; the loop continues until
-    /// the deadline.
+    /// Aggregated/decode workers are never polled. Override only if the engine
+    /// can observe transfer completion (e.g. a connector or scheduler).
     async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         Ok(None)
     }
@@ -430,10 +423,8 @@ pub trait RawEngine: Send + Sync + 'static {
     /// [`LLMEngine::abort`].
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Prefill-drain early-exit signal (optional, default `Ok(None)`). See
-    /// [`LLMEngine::is_quiescent`]. Raw media engines are aggregated, so the
-    /// `Worker` never polls this in practice; the method exists only to keep
-    /// the engine interface uniform across the two traits.
+    /// See [`LLMEngine::is_quiescent`]. Raw engines are aggregated, so the
+    /// `Worker` never polls this; the default suffices.
     async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         Ok(None)
     }

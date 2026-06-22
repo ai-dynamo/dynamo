@@ -37,24 +37,14 @@ logger = logging.getLogger(__name__)
 
 
 def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
-    """Stop the wrapped engine from claiming SIGTERM/SIGINT via
-    ``loop.add_signal_handler``.
+    """Suppress engine ``loop.add_signal_handler`` calls for SIGTERM/SIGINT.
 
-    The Rust ``Worker`` owns graceful shutdown (discovery unregister -> grace
-    period -> ``is_quiescent`` drain loop -> ``cleanup``, issue #7319) through its
-    own OS-level signal handlers, and the unified-backend contract is that
-    engines do teardown in ``cleanup()`` — not in a signal handler. Some
-    engines register loop signal handlers during ``start()`` anyway (SGLang's
-    ``tokenizer_manager.auto_create_handle_loop`` does, lazily on warmup /
-    first request); asyncio's ``add_signal_handler`` reinstalls the process
-    ``sigaction``, which silently overrides the Worker's handler and bypasses
-    the drain. Suppressing SIGTERM/SIGINT registrations here keeps the Worker
-    in control for every backend (and any future one) from a single place,
-    rather than each engine re-discovering the conflict.
-
-    Installed once for the loop's lifetime; only SIGTERM/SIGINT are suppressed,
-    so an engine remains free to register handlers for other signals (e.g.
-    SGLang's SIGQUIT child-failure watchdog).
+    The Rust ``Worker`` owns graceful shutdown via its own OS signal handlers;
+    engines must do teardown in ``cleanup()``, not a signal handler. Some
+    engines register loop handlers during ``start()`` anyway (e.g. SGLang's
+    tokenizer manager), which would reinstall the process ``sigaction`` and
+    override the Worker. Only SIGTERM/SIGINT are suppressed — other signals
+    (e.g. SGLang's SIGQUIT watchdog) pass through.
     """
     orig_add_signal_handler = loop.add_signal_handler
     owned = frozenset({signal.SIGINT, signal.SIGTERM})

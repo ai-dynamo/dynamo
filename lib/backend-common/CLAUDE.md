@@ -73,22 +73,16 @@ opt-out and lets `run.rs` stay non-generic.
   using RAII; use `abort` only for out-of-band notifications (e.g.
   telling a remote scheduler to cancel compute early).
 - `is_quiescent(&self) -> Result<Option<bool>, DynamoError>` — optional,
-  default `Ok(None)`. A *state predicate*, not an action: are in-flight KV
-  transfers done so it's safe to release GPU memory? Polled **only for
-  prefill workers** (the `Worker` skips drain for aggregated/decode), after
-  the discovery unregister + grace-period sleep but BEFORE `cleanup`, in a
-  loop (`DRAIN_POLL_INTERVAL_S`). The loop exits early on `Ok(Some(true))`
-  (quiescent); on `Ok(Some(false))` (busy) or `Ok(None)` (no introspection)
-  it keeps polling until the drain budget expires, then proceeds to cleanup.
-  The budget is `DYN_PREFILL_DRAIN_TIMEOUT_S` (default 30s) capped at
-  `graceful_shutdown_timeout - CLEANUP_RESERVE_S` so it can't starve
-  `cleanup`. The default `Ok(None)` is safe-by-default: a prefill engine that
-  can't introspect (e.g. vLLM's NixlConnector, TRT-LLM — whose iteration
-  stats don't emit when idle) waits the full budget and never frees KV early
-  (issue #7319). Engines that can confirm quiescence (SGLang counts in-flight
-  prefill streams) override to return `Some(true)/Some(false)`. Errors are
-  treated as `None`. The mode-gate, poll/timeout/heartbeat logic, and the
-  SIGTERM/SIGINT ownership all live in the `Worker` — engines stay stateless.
+  default `Ok(None)`. Whether in-flight KV transfers are done so GPU memory
+  can be released. Polled **only on prefill workers**, every
+  `DRAIN_POLL_INTERVAL_S` between the grace period and `cleanup`:
+  `Ok(Some(true))` exits the loop; `Ok(Some(false))`/`Ok(None)`/`Err`
+  keep polling until the budget expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S`
+  (default 30s) capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+  The default `Ok(None)` never frees KV early — vLLM and TRT-LLM keep it (no
+  reliable idle signal); SGLang overrides it by counting in-flight prefill
+  streams. The mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the
+  `Worker`.
 - `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
   Runs after `start()` returns Ok on shutdown (even if registration /
   serve fails), **and** after `start()` raises — so implementations

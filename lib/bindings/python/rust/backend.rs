@@ -877,8 +877,7 @@ impl PyEngineCore {
             .map_err(py_err_to_dynamo)?;
         Python::with_gil(|py| -> PyResult<Option<bool>> {
             let bound = py_obj.bind(py);
-            // `None` from Python => "no introspection" — the drain loop keeps
-            // polling until the deadline (same as Some(false)).
+            // Python `None` maps to `Ok(None)`; a bool to `Some(bool)`.
             if bound.is_none() {
                 return Ok(None);
             }

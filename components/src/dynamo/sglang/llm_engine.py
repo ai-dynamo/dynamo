@@ -126,11 +126,9 @@ class SglangLLMEngine(LLMEngine):
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
-        # Count of prefill streams still draining their KV transfer, across
-        # BOTH the Bootstrap path (awaited inline in generate()) and the
-        # Completed path (spawned task). is_quiescent() gates on this so graceful
-        # shutdown waits for in-flight NIXL transfers regardless of routing
-        # path. Single-threaded asyncio mutation, no lock needed.
+        # Prefill streams still draining their KV transfer, counted across both
+        # the bootstrap (inline) and completed (spawned) paths. is_quiescent()
+        # reads this. Single-threaded asyncio mutation, no lock needed.
         self._inflight_prefill_streams: int = 0
         # Set by attach_snapshot_publisher when component_metrics_dp_ranks
         # is non-empty. `_metrics_pull_loop` pushes ComponentSnapshots into
@@ -182,14 +180,10 @@ class SglangLLMEngine(LLMEngine):
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id  # SGLang bootstrap uses host/port/room triples
 
-        # NOTE: SGLang's tokenizer_manager claims SIGTERM/SIGINT via
-        # loop.add_signal_handler() in auto_create_handle_loop() (lazily, on
-        # warmup / first request), which would override the Rust Worker's
-        # graceful-shutdown handlers and bypass the prefill drain (#7319). The
-        # unified Worker shim suppresses those registrations centrally for all
-        # backends — see worker.py::_guard_loop_signal_handlers — so nothing is
-        # needed here. SGLang teardown still happens in cleanup() via
-        # engine.shutdown().
+        # SGLang's tokenizer_manager registers its own SIGTERM/SIGINT handlers
+        # via loop.add_signal_handler() (lazily, on warmup). The unified Worker
+        # shim suppresses those centrally (worker.py::_guard_loop_signal_handlers)
+        # so they can't override the Rust Worker's shutdown; nothing to do here.
         self.engine = sgl.Engine(server_args=self.server_args)
         self._pause_controller = SGLangEnginePauseController(self.engine)
 
@@ -441,12 +435,11 @@ class SglangLLMEngine(LLMEngine):
                 "index": 0,
                 "disaggregated_params": dict(bootstrap_kwargs),
             }
-            # Mark this prefill stream in-flight *now*, synchronously, before
-            # the spawn/await below. Incrementing inside _consume_prefill_stream
-            # would leave a create_task -> task-first-run window (Completed path)
-            # where is_quiescent() observes 0 and the drain loop exits early,
-            # letting cleanup cancel a still-pending KV transfer (#7319). The
-            # matching decrement is in _consume_prefill_stream's finally.
+            # Count this stream in-flight now, before the spawn/await below.
+            # Incrementing inside _consume_prefill_stream instead would leave a
+            # create_task -> first-run gap where is_quiescent() reads 0 and the
+            # drain exits early, cancelling a live transfer. Decrement is in
+            # _consume_prefill_stream's finally.
             self._inflight_prefill_streams += 1
             # Bootstrap path (router-populated bootstrap_info): drain
             # inline so cancellation propagates to engine.abort().
@@ -712,13 +705,9 @@ class SglangLLMEngine(LLMEngine):
             logger.debug("Aborted request %s", rid)
 
     async def is_quiescent(self) -> Optional[bool]:
-        """Quiescent when no prefill stream is still draining its KV transfer.
-        SGLang's ``engine.async_generate`` stream stays alive through the KV
-        transfer; we count streams on BOTH the Bootstrap path (awaited inline
-        in ``generate``) and the Completed path (spawned task) — a plain
-        ``done()`` check over ``_prefill_consume_tasks`` would miss the
-        inline-awaited bootstrap streams and report quiescent while a NIXL
-        transfer is still in flight."""
+        """``True`` when no prefill stream is still draining its KV transfer.
+        SGLang's ``async_generate`` stream stays alive through the transfer, so
+        the in-flight count tracks it directly."""
         return self._inflight_prefill_streams == 0
 
     async def cleanup(self) -> None:
@@ -833,17 +822,15 @@ class SglangLLMEngine(LLMEngine):
         context: Context,
         rid: str | None,
     ) -> None:
-        """Drain a prefill engine stream after the bootstrap chunk has
-        been yielded. Awaited inline on the Bootstrap path, run as a
-        background task on the Completed path (see ``generate``).
+        """Drain a prefill engine stream after the bootstrap chunk is yielded.
+        Awaited inline on the bootstrap path, spawned as a task on the completed
+        path (see ``generate``).
 
-        On stream failure (NIXL transport error, engine crash) abort the
-        SGLang request so the decode peer's NIXL connect fails fast
-        instead of hanging on a KV transfer that will not arrive.
+        On stream failure, abort the SGLang request so the decode peer's NIXL
+        connect fails fast instead of hanging on a transfer that won't arrive.
 
-        ``_inflight_prefill_streams`` is incremented by the caller
-        (``generate``) before this runs — see the note there — and decremented
-        here in ``finally`` so the count is balanced across both call paths.
+        ``generate`` increments ``_inflight_prefill_streams`` before this runs;
+        the ``finally`` here decrements it.
         """
         try:
             async for _ in stream:

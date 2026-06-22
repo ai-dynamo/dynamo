@@ -820,13 +820,12 @@ def test_sglang_deployment(
 
 
 # ---------------------------------------------------------------------------
-# Prefill drain on graceful shutdown (#7319), unified entry point. A concurrent
-# burst gives the prefill worker in-flight work; the prefill worker is then
-# SIGTERMed mid-flight, and the test asserts the Rust Worker drove a graceful
-# shutdown (drain -> cleanup). This also covers two SGLang-specific fixes: the
-# framework's signal guard keeping SGLang's own SIGTERM handler from preempting
-# the Worker, and is_quiescent() counting both bootstrap- and completed-path
-# prefill streams so the drain sees in-flight NIXL transfers.
+# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
+# gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
+# the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
+# Also covers two SGLang specifics: the signal guard keeping SGLang's SIGTERM
+# handler from preempting the Worker, and is_quiescent() counting both the
+# bootstrap and completed prefill-stream paths.
 # ---------------------------------------------------------------------------
 _PREFILL_DRAIN_CONFIG = SGLangConfig(
     name="prefill_drain_unified",

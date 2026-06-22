@@ -108,26 +108,15 @@ def assert_rust_worker_drained(
     *,
     deadline_s: float = 90.0,
 ) -> bool:
-    """Assert the Rust backend-common Worker drove graceful shutdown to
-    completion (drain loop -> cleanup) on this worker, and report whether the
-    drain loop observably engaged.
+    """Assert the Rust Worker reached ``Engine cleanup complete`` within
+    ``deadline_s`` of the prefill SIGTERM (proving drain -> cleanup ran), and
+    return whether the drain loop observably engaged.
 
-    Why a log, not a metric: the drain runs at *shutdown* and the worker
-    process exits right after, so its ``/metrics`` (the structured surface we'd
-    normally assert per ``tests/CLAUDE.md``) is gone before we could scrape it.
-    The persisted worker log is the only durable artifact of a shutdown-time
-    event, so we isolate that log-format coupling in this one shared helper
-    (the guidance's "parse a log/trace-only fact through a shared test helper")
-    and key off stable lifecycle tokens.
-
-    Asserts ``Engine cleanup complete`` (deterministic: proves the unified
-    Rust-owned shutdown ran end-to-end — and for SGLang that the framework's
-    signal guard kept the engine's own SIGTERM handler from preempting it).
-    Returns whether ``drain: waiting for prefill to quiesce`` was seen — a
-    *diagnostic* only, not asserted: it's emitted whenever the drain loop polls
-    at all (so it's always present for engines that can't introspect, like vLLM
-    and TRT-LLM, which return None), and the drain-loop logic itself is covered
-    by the Rust unit tests.
+    Keyed off worker-log tokens, not metrics: the drain runs at shutdown and the
+    process exits right after, so ``/metrics`` is already gone. The log-format
+    coupling is isolated here per ``tests/CLAUDE.md``. The returned
+    ``drain: waiting for prefill to quiesce`` flag is a diagnostic only (always
+    present for engines that return None); the loop logic is unit-tested in Rust.
     """
     end = time.time() + deadline_s
     while True:
@@ -304,10 +293,8 @@ def _prepare_deployment(
 def _sigterm_prefill_worker(
     server_process: EngineProcess, logger: logging.Logger
 ) -> bool:
-    """Send SIGTERM to the prefill worker's main launcher process (the one
-    running the Rust backend-common Worker), found by its `--disaggregation-mode
-    prefill` cmdline under the launch script's process tree. Returns False if no
-    matching process is found."""
+    """SIGTERM the prefill worker's launcher process, found under the script's
+    process tree by its cmdline. Returns False if not found."""
     import psutil
 
     try:
@@ -320,11 +307,8 @@ def _sigterm_prefill_worker(
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
         joined = " ".join(cmdline)
-        # Match the launcher that runs the Rust Worker: `python -m
-        # dynamo.<backend>.unified_main ... --disaggregation-mode prefill`.
-        # Requiring the `unified_main` module token (not just `-m` + the disagg
-        # arg) avoids signaling an engine-spawned child/MPI rank that inherited
-        # the same args — those don't carry the unified entry-point module.
+        # Require the `unified_main` token, not just the disagg arg, so we don't
+        # signal an engine-spawned child/MPI rank that inherited the same args.
         if "unified_main" in joined and "--disaggregation-mode prefill" in joined:
             logger.info("Sending SIGTERM to prefill worker pid=%d", proc.pid)
             proc.send_signal(signal.SIGTERM)
@@ -342,17 +326,13 @@ def run_prefill_drain_deployment(
     burst_prompt: str = "The quick brown fox jumps over the lazy dog. " * 160,
 ) -> None:
     """Prefill-drain e2e: launch a disaggregated deployment, fire a concurrent
-    burst, SIGTERM *only* the prefill worker while requests are in flight, and
-    assert the Rust Worker drove graceful shutdown (drain -> cleanup) to
-    completion via :func:`assert_rust_worker_drained`.
+    burst, SIGTERM only the prefill worker while requests are in flight, and
+    assert the Rust Worker drove graceful shutdown via
+    :func:`assert_rust_worker_drained`.
 
-    Backend-agnostic by design — the same burst exercises vLLM, SGLang and
-    TRT-LLM. The assertion is the durable, structured outcome (the pipeline
-    served + the Rust Worker owned a clean shutdown), not a timing-dependent
-    log race; the drain-loop *logic* (waits for is_quiescent, mode-gate,
-    default) is covered by the Rust unit tests. Signaling the prefill worker
-    directly (not via harness teardown) avoids the harness's ~8s SIGKILL
-    window so the drain can run to completion.
+    Backend-agnostic — the same burst exercises all three engines. Signaling the
+    worker directly (not via harness teardown) avoids the harness's ~8s SIGKILL
+    so the drain can run to completion.
     """
     logger = logging.getLogger(request.node.name)
     logger.info("Starting %s prefill-drain test", config.name)
@@ -371,10 +351,8 @@ def run_prefill_drain_deployment(
         with EngineProcess.from_script(
             prep.config, request, extra_env=prep.merged_env
         ) as server:
-            # Warm-up: confirm the prefill->decode pipeline serves before we
-            # stress it. Retry: disagg readiness can briefly 5xx right after
-            # the workers register (e.g. the prefill router activating), which
-            # the health gate doesn't fully cover.
+            # Warm-up: confirm the pipeline serves before stressing it. Retry
+            # because disagg readiness can briefly 5xx just after registration.
             warm = None
             for attempt in range(5):
                 warm = send_request(
@@ -404,10 +382,9 @@ def run_prefill_drain_deployment(
             ]
             logger.info("Fired burst of %d concurrent requests", burst_size)
 
-            # Gate on the burst being *observably* in flight (client-side)
-            # rather than a fixed sleep — deterministic regardless of GPU speed.
-            # Requests are long (large prompt), so they stay pending for
-            # seconds; SIGTERM once a healthy fraction is in flight.
+            # Gate on the burst being observably in flight (not a fixed sleep)
+            # so the SIGTERM lands while transfers are pending, regardless of
+            # GPU speed.
             want_in_flight = max(burst_size // 2, 8)
             gate_deadline = time.time() + 15.0
             in_flight = 0
@@ -422,15 +399,11 @@ def run_prefill_drain_deployment(
                 server, logger
             ), "could not locate the prefill worker process to signal"
 
-            # Durable, structured assertion: the Rust Worker ran graceful
-            # shutdown to completion. (drain-loop engagement is returned for
-            # diagnostics only — see the helper.)
             drain_engaged = assert_rust_worker_drained(server, logger)
 
-            # Functional floor (structured HTTP): the pipeline actually served
-            # under load — at least the warm-up + some burst requests complete.
-            # Requests routed after the prefill unregister legitimately fail
-            # (no prefill worker), so this is a floor, not "all succeed".
+            # Functional floor: some burst requests served. Requests routed
+            # after the prefill unregister legitimately fail, so this is a
+            # floor, not "all succeed".
             ok = 0
             try:
                 for fut in concurrent.futures.as_completed(futures, timeout=200):

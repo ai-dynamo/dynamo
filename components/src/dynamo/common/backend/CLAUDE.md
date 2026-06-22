@@ -52,14 +52,12 @@ Python engine authors keep the split API.)
    written); `0.0` is a legitimate zero-hit measurement.
 6. `generate(request, context)` -- streaming inference, called concurrently.
 7. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-8. `is_quiescent()` -- optional early-exit signal for the prefill drain
-   (default `None`). The `Worker` drains **prefill workers** after the
-   discovery unregister + grace period and before cleanup, waiting the full
-   drain budget by default; it polls `is_quiescent` only to exit early. Return
-   `True` once in-flight NIXL transfers are done (issue #7319), `False` while
-   they're pulling, or `None` (default) if the engine can't introspect (waits
-   the budget). Aggregated/decode workers are never polled (drain is
-   prefill-only).
+8. `is_quiescent()` -- whether in-flight KV transfers are done so GPU memory
+   can be released (default `None`). Polled only on **prefill workers**,
+   between the grace period and cleanup: `True` exits the drain early, `False`
+   and `None` (default) keep polling until the budget expires. Override only if
+   the engine can observe transfer completion; aggregated/decode are never
+   polled.
 9. `cleanup()` -- called exactly once. Runs after `start()` succeeded
    on shutdown, **and** after `start()` raised — so implementations
    must be null-safe against partial state (inner engine handle,
@@ -167,11 +165,9 @@ What the **engine** does with the mode (consumed in each backend's
   engine's resume-from-KV-transfer call.
 - `Aggregated`: existing path, no branching.
 
-`is_quiescent()` is the prefill-shutdown early-exit signal: the `Worker`
-drains prefill workers by default and polls `is_quiescent` to exit early
-once in-flight NIXL transfers finish, before GPU memory is released (issue
-#7319). Engines that can't introspect leave the default `None` (wait the
-budget); aggregated/decode workers are never drained.
+`is_quiescent()` lets a prefill worker exit the drain early once its KV
+transfers finish, before GPU memory is released. Engines that can't introspect
+leave the default `None` (wait the budget); aggregated/decode are never drained.
 
 `disagg.py` ships `enforce_prefill_max_tokens`, `extract_prefill_result`,
 and `require_prefill_result` — small helpers backends call from inside

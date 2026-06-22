@@ -1280,10 +1280,8 @@ class VllmLLMEngine(LLMEngine):
             logger.debug("Aborted request %s", request_id)
 
     # No is_quiescent() override: vLLM's NixlConnector exposes no idle signal,
-    # so the engine inherits the base default (None = "no introspection") and
-    # the framework drains prefill workers for the full budget — the
-    # conservative, safe-by-default behavior. The framework skips drain for
-    # aggregated/decode.
+    # so it inherits the base None and the framework drains prefill workers for
+    # the full budget.
 
     async def health_check_payload(self) -> Optional[dict[str, Any]]:
         if self.disaggregation_mode == DisaggregationMode.DECODE:

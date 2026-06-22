@@ -194,22 +194,17 @@ class BaseEngine(ABC):
         """
 
     async def is_quiescent(self) -> Optional[bool]:
-        """Optional early-exit signal for the prefill drain: is the engine
-        quiescent — are in-flight KV transfers done so :meth:`cleanup` can
-        release GPU memory?
+        """Whether in-flight KV transfers are done, so :meth:`cleanup` may
+        release GPU memory. The Rust ``Worker`` polls this on prefill workers
+        between the grace period and :meth:`cleanup`:
 
-        Reports engine **state**; the framework owns the **policy**. Polled by
-        the Rust ``Worker`` **only for prefill workers** (the framework skips
-        drain for aggregated/decode), between the grace-period sleep and
-        :meth:`cleanup`. The drain loop exits early on ``True`` (quiescent); on
-        ``False`` (busy) it keeps polling; on ``None`` (no introspection — the
-        default) it also keeps polling until the drain budget
-        (``DYN_PREFILL_DRAIN_TIMEOUT_S``) expires, then proceeds to cleanup.
+        - ``True``  — quiescent; exit the drain loop now.
+        - ``False`` — busy; poll again next tick.
+        - ``None``  — no introspection (default); poll until the drain budget
+          (``DYN_PREFILL_DRAIN_TIMEOUT_S``) expires. Never frees KV early.
 
-        So the default ``None`` is safe-by-default: an engine that can't
-        introspect waits the full budget and never frees KV early. Engines that
-        can confirm quiescence (e.g. polling a connector / engine scheduler)
-        override this to return ``True``/``False``.
+        Aggregated/decode workers are never polled. Override only if the engine
+        can observe transfer completion.
         """
         return None
 

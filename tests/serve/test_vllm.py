@@ -748,13 +748,10 @@ def test_serve_deployment(
 
 
 # ---------------------------------------------------------------------------
-# Prefill drain on graceful shutdown (#7319). Prefill + decode share one GPU on
-# the unified entry point (the Rust backend-common Worker owns the drain). A
-# concurrent burst gives the prefill worker in-flight work; the prefill worker
-# is then SIGTERMed mid-flight, and the test asserts the Rust Worker drove a
-# graceful shutdown (drain -> cleanup) so a decode peer never reads freed GPU
-# memory. vLLM ships no is_quiescent() override (no connector signal), so it
-# exercises the framework's safe-by-default path: drain prefill for the budget.
+# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
+# gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
+# the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
+# vLLM has no is_quiescent() override, so the drain waits the full budget.
 # ---------------------------------------------------------------------------
 _PREFILL_DRAIN_CONFIG = VLLMConfig(
     name="prefill_drain_unified",

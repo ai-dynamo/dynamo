@@ -661,13 +661,11 @@ def test_deployment(
 
 
 # ---------------------------------------------------------------------------
-# Prefill drain on graceful shutdown (#7319), unified entry point. A concurrent
-# burst keeps the prefill worker busy; the prefill worker is SIGTERMed
-# mid-flight, and the test asserts the Rust Worker drove a graceful shutdown
-# (drain -> cleanup) to completion. TRT-LLM's `llm.shutdown()` aborts the MPI
-# job if it races the executor with disaggregated KV transfers still pending,
-# so the drain budget must give those transfers time to finish before cleanup;
-# the burst is sized small (see the call site) so they reliably do.
+# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
+# keeps the prefill worker busy; it's then SIGTERMed mid-flight, and the test
+# asserts the Rust Worker drove a graceful shutdown (drain -> cleanup). TRT-LLM's
+# llm.shutdown() aborts the MPI job if it races pending KV transfers, so the
+# burst is sized small (see the call site) for the drain budget to clear them.
 # ---------------------------------------------------------------------------
 _PREFILL_DRAIN_CONFIG = TRTLLMConfig(
     name="prefill_drain_unified",
@@ -712,14 +710,10 @@ def test_prefill_drain_unified(
     config = dataclasses.replace(
         _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    # TRT-LLM's MPI teardown aborts the job if `llm.shutdown()` races the
-    # executor while disaggregated KV transfers are still pending, and the abort
-    # likelihood scales with how much is still in flight at cleanup. TRT-LLM has
-    # no reliable quiescence signal (see `TrtllmLLMEngine`), so it waits the full
-    # drain budget rather than exiting early — the robust fix is to keep the
-    # burst small with short decode so decode drains *all* the KV well within the
-    # budget, leaving little-to-nothing in flight at cleanup. The burst is still
-    # large enough (vs the client-side in-flight gate) to engage the drain.
+    # Keep the burst small with short decode: TRT-LLM has no quiescence signal
+    # so it waits the full drain budget, and a small burst lets decode clear the
+    # KV before cleanup — otherwise llm.shutdown() racing pending transfers can
+    # abort the MPI job. Still large enough (vs the in-flight gate) to engage.
     run_prefill_drain_deployment(
         config,
         request,

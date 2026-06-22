@@ -1054,19 +1054,11 @@ class TrtllmLLMEngine(LLMEngine):
             extras={"priority": 1.0},
         )
 
-    # NOTE: TRT-LLM intentionally does *not* override `is_quiescent`; it inherits
-    # the base default (`None`), which tells the framework "I can't introspect —
-    # wait the full drain budget." TRT-LLM has no reliable signal for "all
-    # pending disaggregated KV transfers are done" on a prefill worker:
-    #   - iteration stats (`get_stats`) are emitted *per iteration*, so once the
-    #     worker is idle (just holding KV for transfer) no fresh sample arrives
-    #     and `active == 0` is never observed; and
-    #   - `_active_requests` is popped at handoff (see `generate`), *before*
-    #     decode pulls the KV, so it can't represent the transfer window either.
-    # The safe behavior is therefore to wait the budget; a generous budget gives
-    # decode time to drain all transfers before cleanup. Contrast SGLang, whose
-    # prefill worker awaits stream consumption and can count it (see
-    # `SGLangLLMEngine.is_quiescent`).
+    # TRT-LLM deliberately does not override is_quiescent (inherits None: wait
+    # the full drain budget). It has no signal for "pending KV transfers done":
+    # iteration stats stop arriving once the worker is idle, so active == 0 is
+    # never observed; and _active_requests is popped at handoff, before decode
+    # pulls the KV. The budget alone gives decode time to drain.
 
     async def cleanup(self) -> None:
         # Stop the publisher threads BEFORE engine shutdown so they don't
@@ -1080,12 +1072,9 @@ class TrtllmLLMEngine(LLMEngine):
         self._metrics_thread = None
         self._kv_publishers.clear()
         self._pause_controller = None
-        # Abort any requests still tracked at teardown so `llm.shutdown()` runs
-        # on an idle engine. For a prefill worker this is usually a no-op (the
-        # request is popped at handoff); it matters for decode/aggregated workers
-        # that may still be mid-generation. It does NOT cover executor-internal
-        # pending KV transfers (those aren't request-level state) — the prefill
-        # drain budget is what gives those time to complete before we get here.
+        # Abort any still-tracked requests so llm.shutdown() runs on an idle
+        # engine. Mostly a no-op for prefill (popped at handoff); matters for
+        # decode/aggregated workers mid-generation.
         for result in list(self._active_requests.values()):
             try:
                 result.abort()

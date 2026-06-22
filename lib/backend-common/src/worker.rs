@@ -42,20 +42,16 @@ const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 /// Shared with the Python helper so a single env var controls both.
 const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
 
-/// Max time the drain loop polls `engine.is_quiescent()` before proceeding to
-/// cleanup. Capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S` (see
-/// [`Worker::drain_until_idle_or_deadline`]) so a never-idle engine can't
-/// run the budget to the deadline and starve `cleanup()` into the 911
-/// hard-exit path.
+/// Default drain budget: max time spent polling `is_quiescent` before cleanup.
+/// Capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
 const DEFAULT_DRAIN_TIMEOUT_S: f64 = 30.0;
 const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
 /// Interval between `engine.is_quiescent()` polls during drain.
 const DRAIN_POLL_INTERVAL_S: f64 = 0.5;
 /// Cadence at which the drain loop emits a progress log.
 const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
-/// Time reserved out of the graceful-shutdown budget for `cleanup()` so the
-/// drain loop can never consume the whole deadline and force the 911
-/// hard-exit, which would skip engine cleanup (e.g. freeing GPU memory).
+/// Budget reserved for `cleanup()` so the drain loop can't consume the whole
+/// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
 const CLEANUP_RESERVE_S: f64 = 5.0;
 
 /// Operator override for the health-check canary, mirrors the Python helper
@@ -260,9 +256,7 @@ impl EngineKind {
         }
     }
 
-    /// Prefill-drain early-exit signal. Both engine kinds expose it; the
-    /// `Worker` only polls it for prefill workers (raw/aggregated return early
-    /// from the drain loop), so a raw engine's value is never consulted.
+    /// See [`LLMEngine::is_quiescent`].
     async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.is_quiescent().await,
@@ -1010,30 +1004,14 @@ impl Worker {
         self.cleanup_once().await;
     }
 
-    /// Drain in-flight prefill KV transfers before cleanup releases GPU memory.
+    /// Hold a prefill worker open until its KV transfers finish, so cleanup
+    /// doesn't free GPU memory a decode peer is still pulling.
     ///
-    /// Drain is a **prefill-only** concern (issue #7319): only prefill workers
-    /// hold KV blocks for a decode peer's in-flight NIXL pull. Aggregated and
-    /// decode workers have nothing to drain, so the framework skips them
-    /// entirely here — engines don't need to special-case the mode in
-    /// `is_quiescent()`.
-    ///
-    /// For prefill workers, poll `engine.is_quiescent()` until it reports ready or
-    /// the drain budget expires. `is_quiescent()` is an **optional early-exit
-    /// signal**: the trait default is `Ok(None)` (no introspection), so a
-    /// prefill engine that doesn't override it waits the full budget
-    /// conservatively — safe by default. Engines that can confirm their
-    /// transfers are done (e.g. SGLang, which counts in-flight prefill streams)
-    /// override `is_quiescent()` to return `Some(true)` and exit early. Engines
-    /// with no reliable quiescence signal (e.g. vLLM, TRT-LLM) leave the default
-    /// and wait the budget.
-    ///
-    /// The budget is the configured `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
-    /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`. The grace sleep is
-    /// already spent before drain starts, so ~`graceful_shutdown_timeout`
-    /// remains of the overall deadline (= timeout + grace); reserving
-    /// `CLEANUP_RESERVE_S` guarantees `cleanup()` always gets scheduled
-    /// rather than being cut off by the outer 911 hard-exit.
+    /// Prefill-only: aggregated/decode workers return immediately. Otherwise
+    /// poll [`is_quiescent`](LLMEngine::is_quiescent) every
+    /// `DRAIN_POLL_INTERVAL_S`, exiting on `Some(true)` or when the budget
+    /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
+    /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
     async fn drain_until_idle_or_deadline(&self) {
         if !self.config.disaggregation_mode.is_prefill() {
             return;
@@ -1064,10 +1042,7 @@ impl Worker {
                 }
             }
             if !announced {
-                // Not quiescent on the first poll (busy, or the engine can't
-                // introspect and returned None) — announce that we're waiting.
-                // Don't claim work *is* present: a None engine never reported
-                // that, it only reported "can't tell".
+                // First non-quiescent poll: announce once that we're waiting.
                 tracing::info!(
                     "drain: waiting for prefill to quiesce; polling is_quiescent (timeout={:.1}s)",
                     budget
