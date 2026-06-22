@@ -53,31 +53,41 @@ logger = logging.getLogger(__name__)
 
 
 def _dump_worker_log_dir(config_name: str) -> None:
-    """Dump the worker subprocess log dir into pytest's stream.
+    """Dump the worker subprocess log dir to stderr so it shows in CI.
 
-    The test framework writes worker stdout/stderr to
-    ``/tmp/dynamo_tests/<config_name>/`` but those files aren't otherwise
-    uploaded as CI artifacts. On failure we surface them inline so post-mortem
-    doesn't require a separate artifact-upload step.
+    Print direct to sys.stderr (with flush) — bypasses pytest's log capture,
+    which under xdist + the custom parallel runner doesn't reliably surface
+    captured logs in CI output. Uses broad try/except so a helper bug never
+    swallows the original test exception.
     """
-    from tests.utils.test_output import resolve_test_output_path
+    import sys
 
-    log_dir = resolve_test_output_path(config_name)
-    logger.error("=== Worker log_dir=%s ===", log_dir)
-    if not os.path.isdir(log_dir):
-        logger.error("(log_dir does not exist)")
-        return
-    for fname in sorted(os.listdir(log_dir)):
-        fpath = os.path.join(log_dir, fname)
-        if not os.path.isfile(fpath):
-            continue
-        try:
-            with open(fpath, errors="replace") as fh:
-                body = fh.read()
-        except Exception as e:
-            logger.error("(failed to read %s: %s)", fpath, e)
-            continue
-        logger.error("--- %s (%d bytes) ---\n%s", fname, len(body), body)
+    try:
+        from tests.utils.test_output import resolve_test_output_path
+
+        log_dir = resolve_test_output_path(config_name)
+        marker = "=" * 12
+        print(
+            f"\n{marker} WORKER LOG DUMP: {log_dir} {marker}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if not os.path.isdir(log_dir):
+            print(f"(log_dir does not exist: {log_dir})", file=sys.stderr, flush=True)
+            return
+        for fname in sorted(os.listdir(log_dir)):
+            fpath = os.path.join(log_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            print(f"\n--- {fname} ---", file=sys.stderr, flush=True)
+            try:
+                with open(fpath, errors="replace") as fh:
+                    print(fh.read(), file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"(failed to read {fpath}: {e})", file=sys.stderr, flush=True)
+        print(f"{marker} END WORKER LOG DUMP {marker}\n", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"_dump_worker_log_dir failed: {e!r}", file=sys.stderr, flush=True)
 
 
 def _is_cuda13() -> bool:
