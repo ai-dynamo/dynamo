@@ -65,11 +65,17 @@ impl SingleRuntime {
             AdmissionSource::Requests(pending) => pending.len(),
             AdmissionSource::Workload(driver) => driver.total_turns(),
         };
+        // The single-worker runtime has exactly one (decode) worker for the
+        // whole run and no event loop to integrate, so declare a static count;
+        // `finish()` derives worker-seconds as 1 × duration_s.
+        let mut collector = TraceCollector::default();
+        collector.set_static_worker_count(0, 1);
+        collector.set_gpus_per_worker(0, args.aic_gpus_per_worker());
         Self {
             current_time_ms: 0.0,
             admission,
             worker: ReplayWorkerCore::new(args),
-            collector: TraceCollector::default(),
+            collector,
             mode,
             progress: ReplayProgress::new(total_requests, "offline replay"),
             consecutive_no_progress_passes: 0,

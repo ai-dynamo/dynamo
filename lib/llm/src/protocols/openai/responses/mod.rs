@@ -34,8 +34,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse};
-use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
+use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
 /// Request body for `POST /v1/responses`. Uses a plain
 /// `#[derive(Deserialize)]` — the relaxed input shapes are handled by
@@ -61,6 +61,7 @@ pub struct NvCreateResponse {
     pub inner: dynamo_protocols::types::responses::CreateResponse,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
 }
 

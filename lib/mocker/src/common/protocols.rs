@@ -1146,6 +1146,16 @@ impl MockEngineArgs {
         MockEngineArgsBuilder::default()
     }
 
+    /// GPUs occupied by one worker (engine), derived from the AIC parallelism:
+    /// `aic_tp_size × aic_attention_dp_size` (the attention width, which by the
+    /// MoE constraint equals `aic_moe_tp_size × aic_moe_ep_size`). Falls back to
+    /// 1 when AIC parallelism is not configured (non-AIC / polynomial perf
+    /// model, where a worker is a single logical engine). Used to turn
+    /// provisioned worker-seconds into GPU-hours.
+    pub fn aic_gpus_per_worker(&self) -> usize {
+        self.aic_tp_size.unwrap_or(1) * self.aic_attention_dp_size.unwrap_or(1)
+    }
+
     pub fn normalized(mut self) -> anyhow::Result<Self> {
         self.materialize_defaults();
         self.validate_config()?;
