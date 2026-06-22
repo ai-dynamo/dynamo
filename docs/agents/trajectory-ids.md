@@ -7,15 +7,11 @@ subtitle: Identify agent trajectories from supported coding agents and custom cl
 
 A trajectory ID is the stable identifier Dynamo uses for one agent reasoning/tool chain. A root agent, planner, researcher subagent, or OpenCode subtask can each have its own trajectory. Every LLM request in that chain should carry the same `trajectory_id`; child trajectories can also carry a `parent_trajectory_id` so traces and replay tools can rebuild the tree.
 
-## How it works
-
-<add a mermaid da>
-
 ## Trajectory ID inputs
 
 ### First-class supported agents
 
-Dynamo recognizes the current stable identity headers emitted by the following coding agents (with more on the way). Since coding agents are evolving every day, we also have [CI](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) to ensure that we catch any sort of header change  
+Dynamo recognizes the current stable identity headers emitted by the following coding agents. The [frontend API surface compliance test](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) catches header changes as coding agents evolve.
 
 | Source | Trajectory input | Parent input | Dynamo behavior |
 |--------|------------------|--------------|-----------------|

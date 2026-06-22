@@ -297,8 +297,6 @@ navigation:
             slug: agents
             path: agents/README.md
             contents:
-              - page: Dynamo for Agents
-                path: agents/introduction.md
               - page: Trajectory IDs
                 path: agents/trajectory-ids.md
               - page: Agent Tracing

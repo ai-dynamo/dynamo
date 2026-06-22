@@ -5,7 +5,7 @@ title: Agents
 subtitle: Agent-aware serving features in Dynamo
 ---
 
-NVIDIA Dynamo optimizes agent workloads with lightweight headers and request extensions for the router, inference engine, and KV cache manager. These headers and extensions are non-invasive and extensible: the harness remains responsible for agent semantics, while Dynamo uses request metadata for observability, replay, routing, priority, and cache-aware serving.
+NVIDIA Dynamo optimizes agent workloads with lightweight headers and request extensions for the router, inference engine, and KV cache manager. The harness remains responsible for agent semantics, while Dynamo uses request metadata for observability, replay, routing, priority, and cache-aware serving.
 
 | Layer | Signal | Optimization |
 |-------|--------|--------------|
@@ -13,13 +13,21 @@ NVIDIA Dynamo optimizes agent workloads with lightweight headers and request ext
 | Router | Trajectory identity, priority, expected output length, and cache-overlap signals | Place requests for KV reuse, order queued work, and support agent-aware routing strategies. |
 | KV cache management | Priority and session metadata forwarded to the backend runtime | Influence engine scheduling, cache eviction, and subagent KV isolation where the backend supports it. |
 
-The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. For popular coding agents, Dynamo internally tranlates their header IDs to an internal `trajectory_id`. For custom harnesses, all you have to add is a `x-dynamo-trajectory-id` to take advantage of the entire stack. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for more information.
+The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. Dynamo maps supported coding-agent headers to `trajectory_id`, and custom harnesses can send `x-dynamo-trajectory-id` directly. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for the exact contract.
 
-## Core Concepts
+## Core Model
+
+| Concept | Role |
+|---------|------|
+| Trajectory | One reasoning/tool chain. Every LLM request in the chain should carry the same `trajectory_id`. |
+| Parent trajectory | The trajectory that spawned a child agent or subtask. Dynamo records this as `parent_trajectory_id` when the client provides or implies it. |
+| Request | One model call inside a trajectory. Dynamo records request timing, token counts, and finish metadata when tracing is enabled. |
+| Tool event | Optional harness-emitted timing for tool execution. Dynamo can join tool events with requests by trajectory and tool-call ID. |
+
+## Agent Guides
 
 | Concept | Purpose |
 |---------|---------|
-| [Dynamo for Agents](introduction.md) | Conceptual model for trajectories, requests, tool events, and serving policy. |
 | [Trajectory IDs](trajectory-ids.md) | Stable agent identity from coding-agent headers or Dynamo trajectory headers. |
 | [Agent Tracing](agent-tracing.md) | Request traces, inferred tool calls, optional harness tool spans, Perfetto conversion, and replay. |
 | [Agent Hints](agent-hints.md) | Per-request hints such as priority, expected output length, and speculative prefill. |
