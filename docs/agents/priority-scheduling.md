@@ -6,13 +6,12 @@ subtitle: Request priority across the Dynamo router and backend engines
 ---
 
 Priority scheduling lets a client mark one request as more important than
-another. In Dynamo, the user-facing request field is
-`nvext.agent_hints.priority`.
+another. Dynamo exposes two related request fields:
 
-Higher values mean higher priority at the Dynamo API layer. Clients should send
-the intended Dynamo value directly and should not invert the value for a
-specific backend. Dynamo normalizes backend-specific priority conventions before
-forwarding the request to the engine.
+- `nvext.agent_hints.priority` is a soft priority used by router policy scoring
+  and supported backend engines.
+- `nvext.agent_hints.strict_priority` is an unsigned router pending-queue tier.
+  Higher tiers always precede lower tiers.
 
 ```json
 {
@@ -22,7 +21,8 @@ forwarding the request to the engine.
     ],
     "nvext": {
         "agent_hints": {
-            "priority": 10
+            "priority": 10,
+            "strict_priority": 1
         }
     }
 }
@@ -34,14 +34,13 @@ Priority can affect three different layers. They are configured separately.
 
 | Layer | What It Controls | Required Configuration | Deep Details |
 |-------|------------------|------------------------|--------------|
-| Frontend API | The user-facing request schema and priority polarity. | Send `nvext.agent_hints.priority` on each request that needs a priority hint. | [`nvext.agent_hints.priority`](../components/frontend/nvext.md#priority) |
+| Frontend API | The user-facing request schema and priority polarity. | Send `priority` for soft router and engine priority, or `strict_priority` for a router-only pending tier. | [NVIDIA Request Extensions](../components/frontend/nvext.md#agent-hints) |
 | Router queue | Which waiting request is dispatched first when the router queue is non-empty. | KV routing plus `--router-queue-threshold` set to a value that actually causes queueing. | [`--router-queue-threshold`](../components/router/router-configuration.md#routing-behavior), [`--router-queue-policy`](../components/router/router-configuration.md#routing-behavior) |
 | Backend engine | Which admitted request the engine schedules first. | Backend-specific priority scheduling flag, such as vLLM `--scheduling-policy priority` or SGLang `--enable-priority-scheduling`. | [vLLM priority scheduling](../backends/vllm/vllm-reference-guide.md#priority-scheduling), [SGLang priority scheduling](../backends/sglang/agents.md#priority-scheduling) |
 | KV cache policy | Which cached blocks are retained or evicted first under memory pressure. | Backend-specific cache priority configuration, such as SGLang `--radix-eviction-policy priority`. | [SGLang priority-based KV cache eviction](../backends/sglang/agents.md#priority-based-kv-cache-eviction) |
 
-These layers are additive. For example, a request can jump ahead in the router
-queue but still use default engine scheduling if the backend priority flag is
-not enabled.
+These layers are additive. `strict_priority` does not propagate to backend
+engine scheduling; use `priority` for that layer.
 
 ## Router Queue Priority
 
@@ -52,8 +51,15 @@ priority hint will not change TTFT at the router layer.
 `--router-queue-threshold` controls when the router starts holding requests. A
 request waits in the router queue while every eligible worker is above the
 configured threshold. The queue drains when capacity is available, and
-higher-priority requests are selected before lower-priority requests according
-to the configured `--router-queue-policy`.
+higher-priority requests are selected according to the queue key:
+
+```text
+(strict_priority, configured_policy_key)
+```
+
+The strict tier is compared first. FCFS, LCFS, or Weighted Shortest Processing
+Time (WSPT) still computes the secondary key and orders requests within the same
+tier.
 
 The default policy is `fcfs`, which uses the priority value as a positive
 arrival-time bump. Higher values move the request earlier in the queue. Negative
@@ -83,6 +89,11 @@ harness or endpoint path inverted the value before it reached Dynamo.
 
 Priority is not Kubernetes `PriorityClass`, GPU preemption, or a hard admission
 control policy. It does not reserve capacity for high-priority requests.
+
+Strict priority applies only to requests already parked in one scheduler queue.
+It does not preempt admitted work, impose ordering across router replicas or
+upstream queues, or guarantee backend engine execution order. An eligible new
+arrival can still be admitted directly while other requests are pending.
 
 Priority also does not show an effect unless there is contention at a layer that
 uses it:

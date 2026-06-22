@@ -84,15 +84,19 @@ impl RuntimeConfig {
         // runtime threads spawn, matching the convention used by
         // `dynamo-runtime` itself in DistributedConfig::from_settings.
         unsafe {
-            if let Some(ref v) = self.discovery_backend {
-                std::env::set_var("DYN_DISCOVERY_BACKEND", v);
-            }
-            if let Some(ref v) = self.request_plane {
-                std::env::set_var("DYN_REQUEST_PLANE", v);
-            }
-            if let Some(ref v) = self.event_plane {
-                std::env::set_var("DYN_EVENT_PLANE", v);
-            }
+            self.apply_with(|key, value| std::env::set_var(key, value));
+        }
+    }
+
+    fn apply_with(&self, mut set: impl FnMut(&str, &str)) {
+        if let Some(ref value) = self.discovery_backend {
+            set("DYN_DISCOVERY_BACKEND", value);
+        }
+        if let Some(ref value) = self.request_plane {
+            set("DYN_REQUEST_PLANE", value);
+        }
+        if let Some(ref value) = self.event_plane {
+            set("DYN_EVENT_PLANE", value);
         }
     }
 }
@@ -288,6 +292,39 @@ impl EngineKind {
                 "status": "error",
                 "message": format!("unsupported engine control: {control}"),
             })),
+        }
+    }
+
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.supported_updates().await,
+            // Raw media engines advertise no semantic engine updates.
+            EngineKind::Raw(_) => Ok(Vec::new()),
+        }
+    }
+
+    async fn engine_update(
+        &self,
+        update: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.engine_update(update, body).await,
+            EngineKind::Raw(_) => Ok(serde_json::json!({
+                "status": "error",
+                "message": format!("unsupported engine update: {update}"),
+            })),
+        }
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.on_endpoint_ready(endpoint).await,
+            // Raw media engines publish no discovery records of their own.
+            EngineKind::Raw(_) => Ok(()),
         }
     }
 
@@ -635,9 +672,38 @@ impl Worker {
                 endpoint.clone(),
                 control_lock.clone(),
             );
-            registry.register(&control_name, callback);
+            // Namespace control routes under `/engine/control/<name>` so they
+            // share the `/engine/{*path}` route without colliding with updates.
+            registry.register(&format!("control/{control_name}"), callback);
         }
         tracing::info!(control_count, "registered engine management controls");
+        Ok(())
+    }
+
+    /// Register advertised engine updates on the runtime system server.
+    ///
+    /// Updates are a sibling surface to controls for operations that mutate
+    /// engine-managed assets (e.g. vLLM dynamic LoRA). They register under
+    /// `/engine/update/<name>` and, unlike controls, never toggle discovery
+    /// registration — so no quiesce/resume policy wrapper or serialization lock.
+    async fn register_engine_updates(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let updates = self.engine.supported_updates().await?;
+        if updates.is_empty() {
+            tracing::debug!("engine returned no management updates");
+            return Ok(());
+        }
+
+        let registry = endpoint.drt().engine_routes();
+        let update_count = updates.len();
+        for update_name in updates {
+            let callback = engine_update_callback(update_name.clone(), self.engine.clone());
+            // Namespace update routes under `/engine/update/<name>`.
+            registry.register(&format!("update/{update_name}"), callback);
+        }
+        tracing::info!(update_count, "registered engine management updates");
         Ok(())
     }
 
@@ -730,6 +796,16 @@ impl Worker {
         let mut local_model =
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
+
+        // Hand the engine its serving endpoint before registering the model
+        // with discovery. on_endpoint_ready is a fatal handoff: doing it first
+        // means a failure leaves nothing published, so there is no stale
+        // discovery entry to reclaim. Engines that publish their own discovery
+        // records (e.g. vLLM dynamic LoRA) stash the endpoint here, and this
+        // still runs before `register_engine_controls`, so `/engine/*` cannot
+        // fire before the engine has the endpoint.
+        self.engine.on_endpoint_ready(endpoint.clone()).await?;
+
         local_model
             .attach(
                 &endpoint,
@@ -747,7 +823,9 @@ impl Worker {
                 )
             })?;
         tracing::debug!("model registered with discovery");
+
         self.register_engine_controls(&endpoint).await?;
+        self.register_engine_updates(&endpoint).await?;
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -932,11 +1010,15 @@ fn graceful_shutdown_timeout() -> Duration {
         DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
     };
 
-    let secs = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(default);
+    let value = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT).ok();
+    let secs = graceful_shutdown_timeout_secs(value.as_deref(), default);
     Duration::from_secs(secs)
+}
+
+fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 /// Compose the post-signal shutdown deadline from the drain+cleanup
@@ -982,16 +1064,19 @@ fn stamp_canary_marker(mut value: serde_json::Value) -> Option<serde_json::Value
 /// Returns `None` when the env is unset or the value is invalid; an invalid
 /// value logs a warning so it can't silently disable the engine default.
 fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
-    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())?;
+    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV).ok();
+    load_health_check_payload(raw.as_deref())
+}
+
+fn load_health_check_payload(raw: Option<&str>) -> Option<serde_json::Value> {
+    let raw = raw.filter(|s| !s.is_empty())?;
     let parsed: Result<serde_json::Value, _> = if let Some(path) = raw.strip_prefix('@') {
         std::fs::read_to_string(path).map_or_else(
             |e| Err(format!("read {path}: {e}")),
             |s| serde_json::from_str(&s).map_err(|e| e.to_string()),
         )
     } else {
-        serde_json::from_str(&raw).map_err(|e| e.to_string())
+        serde_json::from_str(raw).map_err(|e| e.to_string())
     };
     match parsed {
         Ok(v) if v.is_object() => Some(v),
@@ -1012,8 +1097,13 @@ fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
 /// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
 /// matching the Python helper. Negative values clamp to 0.
 fn grace_period_secs() -> f64 {
-    match std::env::var(GRACE_PERIOD_ENV) {
-        Ok(s) if !s.is_empty() => match s.parse::<f64>() {
+    let value = std::env::var(GRACE_PERIOD_ENV).ok();
+    grace_period_secs_from(value.as_deref())
+}
+
+fn grace_period_secs_from(value: Option<&str>) -> f64 {
+    match value {
+        Some(s) if !s.is_empty() => match s.parse::<f64>() {
             Ok(v) if v >= 0.0 => v,
             Ok(_) => 0.0,
             Err(_) => {
@@ -1080,6 +1170,16 @@ fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Va
     }
 }
 
+fn update_request_body_error(body: &serde_json::Value) -> Option<serde_json::Value> {
+    if body.is_object() {
+        None
+    } else {
+        Some(control_error_response(
+            "engine update request body must be a JSON object",
+        ))
+    }
+}
+
 fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRouteCallback {
     Arc::new(move |body| {
         let engine = engine.clone();
@@ -1087,6 +1187,22 @@ fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRo
         Box::pin(async move {
             engine
                 .engine_control(control_name, body)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        })
+    })
+}
+
+fn engine_update_callback(update_name: String, engine: EngineKind) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let engine = engine.clone();
+        let update_name = update_name.clone();
+        Box::pin(async move {
+            if let Some(response) = update_request_body_error(&body) {
+                return Ok(response);
+            }
+            engine
+                .engine_update(update_name, body)
                 .await
                 .map_err(|e| anyhow::anyhow!(e.to_string()))
         })
@@ -1119,7 +1235,7 @@ fn wrap_engine_control_callback(
 
                     if let Err(e) = endpoint.unregister_endpoint_instance().await {
                         return Ok(control_error_response(format!(
-                            "failed to unregister endpoint before /engine/{control_name}: {e}"
+                            "failed to unregister endpoint before /engine/control/{control_name}: {e}"
                         )));
                     }
 
@@ -1153,12 +1269,12 @@ fn wrap_engine_control_callback(
                         && let Err(e) = endpoint.register_endpoint_instance().await
                     {
                         // The engine is serving-safe but absent from discovery. The
-                        // operation is idempotent: retrying /engine/{control_name}
+                        // operation is idempotent: retrying /engine/control/{control_name}
                         // re-registers without repeating the wake/resume work (the
                         // controller short-circuits "already awake/resumed"), so surface
                         // that it is safe to retry.
                         return Ok(control_error_response(format!(
-                            "engine resumed but re-registration failed after /engine/{control_name}: {e}; retry /engine/{control_name} to rejoin discovery"
+                            "engine resumed but re-registration failed after /engine/control/{control_name}: {e}; retry /engine/control/{control_name} to rejoin discovery"
                         )));
                     }
                     Ok(response)
@@ -1512,6 +1628,26 @@ mod tests {
             assert_eq!(
                 response.get("message").and_then(|value| value.as_str()),
                 Some("engine control request body must be a JSON object")
+            );
+        }
+    }
+
+    #[test]
+    fn update_request_body_validation_requires_json_object() {
+        assert!(update_request_body_error(&serde_json::json!({})).is_none());
+        assert!(update_request_body_error(&serde_json::json!({"lora_name": "a"})).is_none());
+
+        for body in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("bad"),
+            serde_json::json!(["lora_name"]),
+        ] {
+            let response = update_request_body_error(&body).unwrap();
+            assert!(control_response_is_error(&response));
+            assert_eq!(
+                response.get("message").and_then(|value| value.as_str()),
+                Some("engine update request body must be a JSON object")
             );
         }
     }
@@ -2028,82 +2164,32 @@ mod tests {
     // (and therefore `run_engine_shutdown_steps`) ever runs. So we don't
     // pin a contract for run_engine_shutdown_steps in the Stopped state.
 
-    // -------------------------------------------------------------------
-    // grace_period_secs env-var parsing
-    // -------------------------------------------------------------------
-    //
-    // These tests mutate process-wide environment state. tokio::test
-    // marks them async (each runs on its own current-thread runtime) but
-    // they are still serialized by `serial_test`-style discipline within
-    // the test name space — keep them in this single mod and access the
-    // env var only here.
-    //
-    // `ENV_LOCK` serializes all env-mutating tests in this module so cargo's
-    // parallel runner can't interleave a `with_env` setup on one thread with
-    // a read on another. Every helper that touches `std::env` acquires this
-    // lock for the duration of its critical section.
-
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_env<F: FnOnce() -> R, R>(key: &str, value: Option<&str>, f: F) -> R {
-        // Hold the lock for the entire snapshot → set → run → restore
-        // window so concurrent tests can't observe our temporary value or
-        // race the restore.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var(key).ok();
-        // SAFETY: ENV_LOCK serializes all env-mutating tests in this
-        // module; no other test thread reads or writes env state while
-        // this guard is held.
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-        let out = f();
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-        out
-    }
-
     #[test]
     fn grace_period_default_when_unset() {
-        with_env(GRACE_PERIOD_ENV, None, || {
-            assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
-        });
+        assert_eq!(grace_period_secs_from(None), DEFAULT_GRACE_PERIOD_SECS);
     }
 
     #[test]
     fn grace_period_parses_valid_value() {
-        with_env(GRACE_PERIOD_ENV, Some("2.5"), || {
-            assert_eq!(grace_period_secs(), 2.5);
-        });
+        assert_eq!(grace_period_secs_from(Some("2.5")), 2.5);
     }
 
     #[test]
     fn grace_period_clamps_negative_to_zero() {
-        with_env(GRACE_PERIOD_ENV, Some("-1"), || {
-            assert_eq!(grace_period_secs(), 0.0);
-        });
+        assert_eq!(grace_period_secs_from(Some("-1")), 0.0);
     }
 
     #[test]
     fn grace_period_falls_back_to_default_on_parse_error() {
-        with_env(GRACE_PERIOD_ENV, Some("not-a-number"), || {
-            assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
-        });
+        assert_eq!(
+            grace_period_secs_from(Some("not-a-number")),
+            DEFAULT_GRACE_PERIOD_SECS
+        );
     }
 
     #[test]
     fn grace_period_treats_empty_as_unset() {
-        with_env(GRACE_PERIOD_ENV, Some(""), || {
-            assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
-        });
+        assert_eq!(grace_period_secs_from(Some("")), DEFAULT_GRACE_PERIOD_SECS);
     }
 
     // -------------------------------------------------------------------
@@ -2112,21 +2198,13 @@ mod tests {
 
     #[test]
     fn health_check_payload_env_returns_object() {
-        with_env(
-            HEALTH_CHECK_PAYLOAD_ENV,
-            Some(r#"{"token_ids":[1]}"#),
-            || {
-                let got = load_health_check_payload_from_env().unwrap();
-                assert_eq!(got["token_ids"], serde_json::json!([1]));
-            },
-        );
+        let got = load_health_check_payload(Some(r#"{"token_ids":[1]}"#)).unwrap();
+        assert_eq!(got["token_ids"], serde_json::json!([1]));
     }
 
     #[test]
     fn health_check_payload_env_rejects_non_object() {
-        with_env(HEALTH_CHECK_PAYLOAD_ENV, Some("[1,2,3]"), || {
-            assert!(load_health_check_payload_from_env().is_none());
-        });
+        assert!(load_health_check_payload(Some("[1,2,3]")).is_none());
     }
 
     // -------------------------------------------------------------------
@@ -2165,12 +2243,6 @@ mod tests {
     // graceful_shutdown_timeout env-var parsing
     // -------------------------------------------------------------------
 
-    // Reference the same upstream constant the production code reads, so
-    // a rename of the env var in `dynamo-runtime` doesn't silently leave
-    // these tests pointing at a no-longer-honored name.
-    const SHUTDOWN_TIMEOUT_ENV: &str =
-        dynamo_runtime::config::environment_names::worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT;
-
     fn expected_default_timeout_secs() -> u64 {
         if cfg!(debug_assertions) {
             dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
@@ -2181,39 +2253,34 @@ mod tests {
 
     #[test]
     fn shutdown_timeout_default_when_unset() {
-        with_env(SHUTDOWN_TIMEOUT_ENV, None, || {
-            assert_eq!(
-                graceful_shutdown_timeout(),
-                Duration::from_secs(expected_default_timeout_secs())
-            );
-        });
+        assert_eq!(
+            graceful_shutdown_timeout_secs(None, expected_default_timeout_secs()),
+            expected_default_timeout_secs()
+        );
     }
 
     #[test]
     fn shutdown_timeout_parses_valid_value() {
-        with_env(SHUTDOWN_TIMEOUT_ENV, Some("42"), || {
-            assert_eq!(graceful_shutdown_timeout(), Duration::from_secs(42));
-        });
+        assert_eq!(
+            graceful_shutdown_timeout_secs(Some("42"), expected_default_timeout_secs()),
+            42
+        );
     }
 
     #[test]
     fn shutdown_timeout_falls_back_to_default_on_parse_error() {
-        with_env(SHUTDOWN_TIMEOUT_ENV, Some("not-a-number"), || {
-            assert_eq!(
-                graceful_shutdown_timeout(),
-                Duration::from_secs(expected_default_timeout_secs())
-            );
-        });
+        assert_eq!(
+            graceful_shutdown_timeout_secs(Some("not-a-number"), expected_default_timeout_secs()),
+            expected_default_timeout_secs()
+        );
     }
 
     #[test]
     fn shutdown_timeout_treats_empty_as_unset() {
-        with_env(SHUTDOWN_TIMEOUT_ENV, Some(""), || {
-            assert_eq!(
-                graceful_shutdown_timeout(),
-                Duration::from_secs(expected_default_timeout_secs())
-            );
-        });
+        assert_eq!(
+            graceful_shutdown_timeout_secs(Some(""), expected_default_timeout_secs()),
+            expected_default_timeout_secs()
+        );
     }
 
     // -------------------------------------------------------------------
@@ -2307,71 +2374,277 @@ mod tests {
 
     // -------------------------------------------------------------------
     // RuntimeConfig env application
-    //
-    // These tests touch DYN_DISCOVERY_BACKEND / DYN_REQUEST_PLANE /
-    // DYN_EVENT_PLANE directly (without `with_env`), so they must
-    // acquire `ENV_LOCK` themselves to keep parallel runs from racing
-    // each other or the `with_env`-using tests above.
     // -------------------------------------------------------------------
 
     #[test]
     fn runtime_config_apply_to_env_writes_set_fields() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let cfg = RuntimeConfig {
             discovery_backend: Some("file".to_string()),
             request_plane: Some("tcp".to_string()),
             event_plane: Some("zmq".to_string()),
         };
 
-        // Snapshot prior values so we don't leak state to other tests.
-        let prev: Vec<_> = [
-            "DYN_DISCOVERY_BACKEND",
-            "DYN_REQUEST_PLANE",
-            "DYN_EVENT_PLANE",
-        ]
-        .iter()
-        .map(|k| (*k, std::env::var(k).ok()))
-        .collect();
-
-        cfg.apply_to_env();
-        assert_eq!(std::env::var("DYN_DISCOVERY_BACKEND").unwrap(), "file");
-        assert_eq!(std::env::var("DYN_REQUEST_PLANE").unwrap(), "tcp");
-        assert_eq!(std::env::var("DYN_EVENT_PLANE").unwrap(), "zmq");
-
-        for (k, v) in prev {
-            unsafe {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
+        let mut applied = Vec::new();
+        cfg.apply_with(|key, value| applied.push((key.to_string(), value.to_string())));
+        assert_eq!(
+            applied,
+            vec![
+                ("DYN_DISCOVERY_BACKEND".to_string(), "file".to_string()),
+                ("DYN_REQUEST_PLANE".to_string(), "tcp".to_string()),
+                ("DYN_EVENT_PLANE".to_string(), "zmq".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn runtime_config_apply_to_env_leaves_unset_fields_untouched() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let key = "DYN_REQUEST_PLANE";
-        let prev = std::env::var(key).ok();
-        unsafe { std::env::set_var(key, "preexisting") };
-
         let cfg = RuntimeConfig {
             discovery_backend: Some("etcd".to_string()),
             request_plane: None,
             event_plane: None,
         };
-        cfg.apply_to_env();
 
-        // None field must not overwrite an existing value.
-        assert_eq!(std::env::var(key).unwrap(), "preexisting");
+        let mut applied = Vec::new();
+        cfg.apply_with(|key, value| applied.push((key.to_string(), value.to_string())));
+        assert_eq!(
+            applied,
+            vec![("DYN_DISCOVERY_BACKEND".to_string(), "etcd".to_string())]
+        );
+    }
+}
 
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
+// Integration tests for the `on_endpoint_ready` handoff. These need a real
+// `DistributedRuntime`/`Endpoint` (NATS-backed), so they live behind the
+// `integration` feature:
+//   cargo test -p dynamo-backend-common --features integration on_endpoint_ready
+#[cfg(all(test, feature = "integration"))]
+mod handoff_integration_tests {
+    use super::*;
+    use crate::engine::PreprocessedRequest;
+    use async_trait::async_trait;
+    use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+    use futures::stream::BoxStream;
+    use std::sync::Mutex as StdMutex;
+
+    /// Build a real serving `Endpoint` from a test DRT, mirroring how
+    /// `run_inner` resolves namespace → component → endpoint.
+    async fn test_endpoint() -> dynamo_runtime::component::Endpoint {
+        let drt = create_test_drt_async().await;
+        drt.namespace("handoff_ns")
+            .unwrap()
+            .component("handoff_comp")
+            .unwrap()
+            .endpoint("generate")
+    }
+
+    /// Mock engine that records the order of `on_endpoint_ready`,
+    /// `supported_controls`, and `supported_updates` calls, lets a test force
+    /// `on_endpoint_ready` to fail, and advertises configurable control/update
+    /// sets.
+    struct HandoffMockEngine {
+        log: Arc<StdMutex<Vec<&'static str>>>,
+        endpoint_ready_should_fail: bool,
+        controls: Vec<String>,
+        updates: Vec<String>,
+    }
+
+    impl HandoffMockEngine {
+        fn new(
+            endpoint_ready_should_fail: bool,
+            controls: Vec<String>,
+            updates: Vec<String>,
+        ) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let eng = Arc::new(Self {
+                log: log.clone(),
+                endpoint_ready_should_fail,
+                controls,
+                updates,
+            });
+            (eng, log)
+        }
+    }
+
+    #[async_trait]
+    impl LLMEngine for HandoffMockEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            unreachable!("not used in handoff tests")
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+
+        async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+            self.log.lock().unwrap().push("supported_controls");
+            Ok(self.controls.clone())
+        }
+
+        async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+            self.log.lock().unwrap().push("supported_updates");
+            Ok(self.updates.clone())
+        }
+
+        async fn on_endpoint_ready(
+            &self,
+            _endpoint: dynamo_runtime::component::Endpoint,
+        ) -> Result<(), DynamoError> {
+            self.log.lock().unwrap().push("on_endpoint_ready");
+            if self.endpoint_ready_should_fail {
+                Err(err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    "synthetic on_endpoint_ready failure",
+                ))
+            } else {
+                Ok(())
             }
         }
+    }
+
+    /// Engine that overrides only the required methods, so it inherits the
+    /// trait-default `on_endpoint_ready` / `supported_controls`.
+    struct DefaultsEngine;
+
+    #[async_trait]
+    impl LLMEngine for DefaultsEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            unreachable!("not used in handoff tests")
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    /// The trait default `on_endpoint_ready` is a no-op that succeeds against a
+    /// real `Endpoint`.
+    #[tokio::test]
+    async fn default_on_endpoint_ready_is_noop() {
+        let endpoint = test_endpoint().await;
+        let engine = Arc::new(DefaultsEngine);
+        engine
+            .on_endpoint_ready(endpoint)
+            .await
+            .expect("default on_endpoint_ready must succeed");
+    }
+
+    /// `serve_with_orchestrator` runs `on_endpoint_ready` before
+    /// `register_engine_controls` and `register_engine_updates`. Drive the same
+    /// three production calls in that order and assert: (1) the handoff is
+    /// observed before the engine is asked for its controls/updates, and (2) the
+    /// advertised control lands under `control/<name>` and the advertised update
+    /// under `update/<name>` in the DRT's engine-route registry, so
+    /// `/engine/control/<name>` and `/engine/update/<name>` become routable.
+    #[tokio::test]
+    async fn handoff_precedes_registration_and_populates_namespaced_registry() {
+        let endpoint = test_endpoint().await;
+        let (engine, log) = HandoffMockEngine::new(
+            false,
+            vec!["start_profile".to_string()],
+            vec!["load_lora".to_string()],
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+
+        // Mirror serve_with_orchestrator's handoff + registration calls exactly.
+        worker
+            .engine
+            .on_endpoint_ready(endpoint.clone())
+            .await
+            .expect("handoff should succeed");
+        worker
+            .register_engine_controls(&endpoint)
+            .await
+            .expect("control registration should succeed");
+        worker
+            .register_engine_updates(&endpoint)
+            .await
+            .expect("update registration should succeed");
+
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![
+                "on_endpoint_ready",
+                "supported_controls",
+                "supported_updates"
+            ],
+            "endpoint handoff must happen before controls/updates are enumerated/registered"
+        );
+        let routes = endpoint.drt().engine_routes();
+        assert!(
+            routes.get("control/start_profile").is_some(),
+            "advertised control must be registered under control/<name>"
+        );
+        assert!(
+            routes.get("update/load_lora").is_some(),
+            "advertised update must be registered under update/<name>"
+        );
+        // Bare (unprefixed) keys must NOT be registered by the unified Worker.
+        assert!(
+            routes.get("start_profile").is_none(),
+            "control must not be registered under its bare name"
+        );
+        assert!(
+            routes.get("load_lora").is_none(),
+            "update must not be registered under its bare name"
+        );
+    }
+
+    /// A failing `on_endpoint_ready` aborts startup: the `?` in
+    /// `serve_with_orchestrator` propagates the error before
+    /// `register_engine_controls`/`register_engine_updates` run, so nothing is
+    /// registered.
+    #[tokio::test]
+    async fn failed_handoff_is_fatal_and_skips_registration() {
+        let endpoint = test_endpoint().await;
+        let (engine, log) = HandoffMockEngine::new(
+            true,
+            vec!["start_profile".to_string()],
+            vec!["load_lora".to_string()],
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+
+        let result = worker.engine.on_endpoint_ready(endpoint.clone()).await;
+        assert!(result.is_err(), "failed handoff must surface as an error");
+
+        // Production code returns here via `?`; we do NOT call
+        // register_engine_controls/register_engine_updates. Confirm nothing
+        // was registered.
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(recorded, vec!["on_endpoint_ready"]);
+        let routes = endpoint.drt().engine_routes();
+        assert!(
+            routes.get("control/start_profile").is_none(),
+            "no controls should be registered after a fatal handoff"
+        );
+        assert!(
+            routes.get("update/load_lora").is_none(),
+            "no updates should be registered after a fatal handoff"
+        );
     }
 }

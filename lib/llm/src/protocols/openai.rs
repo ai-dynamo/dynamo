@@ -8,6 +8,7 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
+use crate::protocols::common::extensions::NvExt;
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::types::TokenIdType;
 
@@ -19,7 +20,6 @@ pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod images;
 pub mod models;
-pub mod nvext;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;
@@ -54,7 +54,7 @@ pub(crate) trait OpenAISamplingOptionsProvider {
 
     fn get_best_of(&self) -> Option<u8>;
 
-    fn nvext(&self) -> Option<&nvext::NvExt>;
+    fn nvext(&self) -> Option<&NvExt>;
 }
 
 pub(crate) trait OpenAIStopConditionsProvider {
@@ -68,7 +68,7 @@ pub(crate) trait OpenAIStopConditionsProvider {
         None
     }
 
-    fn nvext(&self) -> Option<&nvext::NvExt>;
+    fn nvext(&self) -> Option<&NvExt>;
 
     /// Get ignore_eos from CommonExt if the type supports it.
     /// Default returns None for types without CommonExt support.

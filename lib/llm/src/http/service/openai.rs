@@ -45,8 +45,10 @@ use super::{
 };
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
+use crate::protocols::common::extensions::{
+    NvExt, apply_header_routing_overrides, validate_nvext_semantics,
+};
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
@@ -220,9 +222,9 @@ impl ErrorMessage {
         )
     }
 
-    /// Service Unavailable with a structured message body. Used by topology
-    /// readiness to distinguish "model registered but topology incomplete"
-    /// from generic "service not ready".
+    /// Service Unavailable with a structured message body. Used by readiness
+    /// reporting to distinguish "model registered but not ready" from generic
+    /// "service not ready".
     pub fn service_unavailable_with_body(message: String) -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
         let error_type = map_error_code_to_error_type(code);
@@ -491,7 +493,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
 }
 
 fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, headers: &HeaderMap) {
-    if !crate::agents::trace::is_enabled() {
+    if !crate::request_trace::is_enabled() {
         return;
     }
 
@@ -500,7 +502,7 @@ fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, heade
         .and_then(|value| value.to_str().ok())
     {
         request.insert(
-            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             x_request_id.to_string(),
         );
     }
@@ -522,14 +524,41 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
 ) {
-    if !crate::agents::trace::is_enabled() {
+    if !crate::request_trace::is_enabled() {
         return;
     }
 
-    if let Ok(x_request_id) = source.get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY) {
+    if let Ok(x_request_id) = source.get::<String>(crate::request_trace::X_REQUEST_ID_CONTEXT_KEY) {
         target.insert(
-            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             x_request_id.as_ref().clone(),
+        );
+    }
+}
+
+/// Warn (once per request) when nvext data is dropped because the extension is
+/// disabled. Only called from the disabled branch, so the default path is free.
+fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
+    use crate::protocols::agents::has_agent_headers;
+    use crate::protocols::common::extensions::{
+        HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID,
+    };
+    let header_present = [
+        HEADER_WORKER_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID,
+        HEADER_DP_RANK,
+        HEADER_DP_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK,
+    ]
+    .iter()
+    .any(|h| headers.contains_key(*h))
+        || has_agent_headers(headers);
+
+    if nvext_present || header_present {
+        tracing::warn!(
+            endpoint,
+            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
         );
     }
 }
@@ -547,11 +576,16 @@ async fn handler_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("completions", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -971,11 +1005,16 @@ async fn completions_batch(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateEmbeddingRequest>,
+    Json(mut request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("embeddings", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -1142,7 +1181,12 @@ async fn handler_chat_completions(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("chat_completions", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -1871,6 +1915,15 @@ pub fn validate_completion_fields_generic(
     })
 }
 
+fn validate_openai_nvext(nvext: Option<&NvExt>) -> Result<(), ErrorResponse> {
+    validate_nvext_semantics(nvext).map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -1879,7 +1932,7 @@ async fn handler_responses(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready.
+    // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
     // don't bypass the gate.
     check_ready(&state)?;
@@ -1891,7 +1944,12 @@ async fn handler_responses(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    request.nvext = if state.nvext_enabled() {
+        apply_header_routing_overrides(request.nvext.take(), &headers)
+    } else {
+        warn_nvext_disabled("responses", request.nvext.is_some(), &headers);
+        None
+    };
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -2031,6 +2089,10 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    if let Err(err_response) = validate_openai_nvext(chat_request.nvext.as_ref()) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -2290,7 +2352,7 @@ pub(crate) fn check_model_serving_ready(
     }
     Err(ErrorMessage::service_unavailable_with_body(format!(
         "Model `{model_name}` is registered but no namespace has a complete worker set. \
-         At least one prefill/decode/encode role required by a registered worker is missing. \
+         At least one prefill/decode/encode worker type required by a registered worker is missing. \
          Check worker startup logs for the affected namespace."
     )))
 }
@@ -2435,13 +2497,23 @@ pub fn list_models_router(
     let retrieve_path = format!("{}/{{*model_id}}", openai_path);
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
     let doc_for_retrieve = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    // Doc-only: the readiness sub-resource is served by `get_model_openai` via
+    // the catch-all retrieve route above (a wildcard must be the terminal
+    // segment, so it can't be its own axum route). Advertised for discovery.
+    let doc_for_readiness = RouteDoc::new(
+        axum::http::Method::GET,
+        format!("{}/{{model_id}}/ready", openai_path),
+    );
 
     let router = Router::new()
         .route(&openai_path, get(list_models_openai))
         .route(&retrieve_path, get(get_model_openai))
         .with_state(state);
 
-    (vec![doc_for_openai, doc_for_retrieve], router)
+    (
+        vec![doc_for_openai, doc_for_retrieve, doc_for_readiness],
+        router,
+    )
 }
 
 /// Retrieve a single model by ID (OpenAI format).
@@ -2456,14 +2528,41 @@ async fn get_model_openai(
 
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
 
-    let models: HashSet<String> = state.manager().model_display_names();
-    if !models.contains(model_id) {
-        return Err(ErrorMessage::model_not_found());
+    // The retrieve route (`/v1/models/{*model_id}`) is a catch-all, so model
+    // IDs can contain '/' — and may even end in '/ready'. We therefore
+    // dispatch by precedence: an *exact* model match always wins, and only when
+    // there is no such model do we treat a trailing `/ready` as the
+    // per-model readiness sub-resource (Mechanism 4). This means a model
+    // literally named `foo/ready` is still retrievable and never shadowed.
+    //
+    // Exact match is resolved against ALL registered models (`get_model`), not
+    // just the displayable ones, so a registered-but-not-yet-ready `foo/ready`
+    // still wins over the readiness sub-resource of a sibling `foo`.
+    // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
+    if state.manager().get_model(model_id).is_some() {
+        return get_model_retrieve(&state, model_id);
     }
 
-    // GET /v1/models/{model} reports the model only if it is ready to
-    // serve. Mirrors the filter applied in list_models_openai.
-    check_model_serving_ready(&state, model_id)?;
+    // Readiness sub-resource. Resolves against all registered models (above
+    // exact check failed, so `model_id` is not itself a registered model);
+    // the whole point of this endpoint is to diagnose models that are
+    // registered but not yet ready, so it must find them too.
+    if let Some(base) = model_id.strip_suffix("/ready")
+        && state.manager().get_model(base).is_some()
+    {
+        return get_model_readiness(&state, base);
+    }
+
+    Err(ErrorMessage::model_not_found())
+}
+
+/// `GET /v1/models/{model}` — the OpenAI retrieve-model object. Reports the
+/// model only if it is ready to serve (mirrors the `list_models_openai` filter).
+fn get_model_retrieve(
+    state: &Arc<service_v2::State>,
+    model_id: &str,
+) -> Result<Response, ErrorResponse> {
+    check_model_serving_ready(state, model_id)?;
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2494,6 +2593,21 @@ async fn get_model_openai(
     .into_response())
 }
 
+/// `GET /v1/models/{model}/ready` — structured per-namespace worker readiness
+/// detail (Mechanism 4). Deliberately *not* readiness-gated: it exists to
+/// diagnose models that are not yet ready, so it returns 200 with the full
+/// breakdown regardless of whether the model would be served.
+fn get_model_readiness(
+    state: &Arc<service_v2::State>,
+    model_id: &str,
+) -> Result<Response, ErrorResponse> {
+    let model = state
+        .manager()
+        .get_model(model_id)
+        .ok_or_else(ErrorMessage::model_not_found)?;
+    Ok(Json(model.namespace_readiness()).into_response())
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
 /// If not path is provided, the default path is `/v1/responses`
 pub fn responses_router(
@@ -2517,7 +2631,7 @@ async fn images(
     Json(request): Json<NvCreateImageRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model topology check is deferred until after we resolve the
+    // (per-model readiness check is deferred until after we resolve the
     // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
@@ -2654,7 +2768,7 @@ async fn videos(
     headers: HeaderMap,
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
@@ -2944,7 +3058,7 @@ async fn audio_speech(
     Json(request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model topology check is deferred until after we resolve the
+    // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)
     check_ready(&state)?;
 
@@ -3062,6 +3176,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    use crate::protocols::common::extensions::NvExt;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -3095,6 +3210,27 @@ mod tests {
             },
             nvext: None,
         }
+    }
+
+    #[test]
+    fn test_validate_openai_nvext_rejects_invalid_agent_context() {
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "agent_context": {
+                "session_type_id": "deep_research:v1",
+                "session_id": "run-123",
+                "trajectory_id": ""
+            }
+        }))
+        .unwrap();
+
+        let err = validate_openai_nvext(Some(&nvext)).unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1
+                .message
+                .contains("nvext.agent_context.trajectory_id must not be empty")
+        );
     }
 
     #[test]

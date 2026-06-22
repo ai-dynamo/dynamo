@@ -69,8 +69,14 @@ def use_modelexpress_remote_instance(args: Any) -> bool:
     )
 
 
+def is_object_storage_path(model_path: str) -> bool:
+    return model_path.startswith(("s3://", "gs://", "az://"))
+
+
 def should_fetch_model(args: Any, model_path: str) -> bool:
     if os.path.exists(model_path):
+        return False
+    if is_object_storage_path(model_path):
         return False
     return not use_modelexpress_remote_instance(args)
 
@@ -84,9 +90,9 @@ def _preprocess_for_encode_config(
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
-        "serving_mode": config.serving_mode.value
-        if config.serving_mode is not None
-        else "None",
+        "serving_mode": (
+            config.serving_mode.value if config.serving_mode is not None else "None"
+        ),
     }
 
 

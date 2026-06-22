@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
+use super::prefill_load::effective_prefill_tokens;
+pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    DpRank, RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
+    WorkerWithDpRank,
 };
 use crate::sequences::WorkerLoadProjection;
 
@@ -27,14 +29,6 @@ pub struct TierOverlapBlocks {
     pub host_pinned: FxHashMap<WorkerWithDpRank, usize>,
     #[serde(default)]
     pub disk: FxHashMap<WorkerWithDpRank, usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PotentialLoad {
-    pub worker_id: WorkerId,
-    pub dp_rank: DpRank,
-    pub potential_prefill_tokens: usize,
-    pub potential_decode_blocks: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +97,7 @@ pub struct SchedulingRequest {
     pub router_config_override: Option<RouterConfigOverride>,
     pub track_prefill_tokens: bool,
     pub priority_jump: f64,
+    pub strict_priority: u32,
 
     // Overlap and cache signals.
     pub tier_overlap_blocks: TierOverlapBlocks,
@@ -155,7 +150,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
                 .unwrap_or(0),
         };
 
-        self.request.isl_tokens.saturating_sub(cached_tokens)
+        effective_prefill_tokens(self.request.isl_tokens, cached_tokens)
     }
 }
 

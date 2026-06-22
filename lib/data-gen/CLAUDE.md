@@ -6,7 +6,7 @@ hashing helper, and the JSONL writer.
 
 The crate is producer- and consumer-agnostic on purpose: it owns the schema
 once so that producers (`dynamo-bench`'s Claude exporter and
-`agent_trace_to_mooncake` binary) and consumers (`dynamo-mocker`'s load
+`request_trace_to_mooncake` binary) and consumers (`dynamo-mocker`'s load
 generator) can never drift.
 
 ## Guardrails

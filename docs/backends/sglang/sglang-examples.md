@@ -144,7 +144,7 @@ Options: `--wan-size 1b|14b`, `--num-frames`, `--height`, `--width`, `--num-infe
 
 For full details on all diffusion worker types (LLM, image, video), see [Diffusion](sglang-diffusion.md).
 
-### Kubernetes Deployment
+## Kubernetes Deployment
 
 For complete K8s deployment examples, see:
 
