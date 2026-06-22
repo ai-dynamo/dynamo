@@ -7,32 +7,15 @@ subtitle: Identify agent trajectories from supported coding agents and custom cl
 
 A trajectory ID is the stable identifier Dynamo uses for one agent reasoning/tool chain. A root agent, planner, researcher subagent, or OpenCode subtask can each have its own trajectory. Every LLM request in that chain should carry the same `trajectory_id`; child trajectories can also carry a `parent_trajectory_id` so traces and replay tools can rebuild the tree.
 
-Trajectory IDs are passive metadata. They let Dynamo join request rows, tool events, replay artifacts, and timeline slices without treating the ID as a routing, fairness, or cache-control command. Ordinary non-agent requests can omit them.
+## How it works
 
-```mermaid
-flowchart LR
-    Harness["Agent harness"]
-    Headers["First-class headers"]
-    Custom["Custom trajectory headers"]
-    Normalize["Dynamo HTTP boundary"]
-    Trajectory["trajectory_id + optional parent"]
-    Consumers["tracing, replay, scheduling, cache policy"]
-
-    Harness --> Headers
-    Harness --> Custom
-    Headers --> Normalize
-    Custom --> Normalize
-    Normalize --> Trajectory
-    Trajectory --> Consumers
-```
-
-Tracing is one use of trajectory IDs. See [Agent Tracing](agent-tracing.md) for request trace output, tool-call observability, Perfetto conversion, and replay.
+<add a mermaid da>
 
 ## Trajectory ID inputs
 
 ### First-class supported agents
 
-Dynamo recognizes the current stable identity headers emitted by these coding agents. Header lookup is case-insensitive.
+Dynamo recognizes the current stable identity headers emitted by the following coding agents (with more on the way). Since coding agents are evolving every day, we also have [CI](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) to ensure that we catch any sort of header change  
 
 | Source | Trajectory input | Parent input | Dynamo behavior |
 |--------|------------------|--------------|-----------------|
@@ -41,9 +24,7 @@ Dynamo recognizes the current stable identity headers emitted by these coding ag
 | OpenCode | `x-session-id` | `x-parent-session-id` | `x-session-id` becomes the `trajectory_id`; `x-parent-session-id` becomes `parent_trajectory_id` when present. |
 | Generic Dynamo client | `x-dynamo-trajectory-id` | `x-dynamo-parent-trajectory-id` | The header value becomes `trajectory_id`; the parent header becomes `parent_trajectory_id` when present. |
 
-OpenCode `x-session-affinity` is routing intent, not trajectory identity. Use the first-class headers above or the Dynamo trajectory headers below.
-
-### Custom clients
+### Custom agent harnesses
 
 For a custom HTTP client that only needs a trajectory ID, send the generic header:
 
@@ -52,7 +33,6 @@ curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer sk-dummy' \
   -H 'x-dynamo-trajectory-id: research-run-42:researcher' \
-  -H 'x-dynamo-parent-trajectory-id: research-run-42:planner' \
   -d '{"model":"my-model","messages":[{"role":"user","content":"..."}]}'
 ```
 
@@ -61,24 +41,3 @@ curl http://localhost:8000/v1/chat/completions \
 | `x-dynamo-trajectory-id` | Yes | One reasoning/tool chain inside the run. |
 | `x-dynamo-parent-trajectory-id` | No | Parent trajectory when using subagents. |
 | `x-dynamo-trajectory-final` | No | `true` marks the trajectory's last request for lifecycle-aware consumers. |
-
-No Dynamo imports are required in the harness. The metadata is plain HTTP headers; just propagate the trajectory ID across threads/processes wherever those paths call the model.
-
-## Boundaries
-
-Use trajectory IDs as untrusted request metadata. They identify agent work, but they do not prove who sent the request.
-
-- A `trajectory_id` is not a tenant ID, authorization subject, fairness ID, routing command, or cache-retention command.
-- OpenCode `x-session-affinity` is routing intent, not trajectory identity.
-- Codex `previous_response_id` points to a previous turn, not the root of an agent chain, so Dynamo does not use it as a trajectory ID.
-- Do not use raw caller-controlled trajectory IDs as unbounded metrics labels. Keep raw IDs in trace/debug artifacts when needed, and use bounded or hashed labels for metrics.
-
-### Contract coverage
-
-The live frontend API-surface smoke runs Codex, Claude Code, and OpenCode against Dynamo and asserts the expected trajectory identity appears in request traces. The test is [`tests/frontend/test_frontend_api_surface_compliance.py`](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) and carries the `frontend_api_surface_compliance`, `pre_merge`, `sglang`, and `gpu_1` pytest markers, so the SGLang pre-merge GPU lane selects it when that lane runs. Use the dedicated marker when you want to target this contract locally or in CI:
-
-```bash
-python -m pytest \
-  tests/frontend/test_frontend_api_surface_compliance.py \
-  -m frontend_api_surface_compliance
-```

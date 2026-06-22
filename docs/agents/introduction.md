@@ -26,14 +26,11 @@ Use each surface for a different kind of information.
 
 | Surface | Use It For | Start Here |
 |---------|------------|------------|
-| Trajectory identity | Passive identity for joining requests, tool events, replay rows, and timeline views. | [Trajectory IDs](trajectory-ids.md) |
+| Trajectory identity | Dynamo's way of understanding agentic trajectoires for scheduling, tracing, simulation, and more. | [Trajectory IDs](trajectory-ids.md) |
 | Agent tracing | Dynamo `request_end` rows, inferred tool-call finish metadata, optional harness tool spans, Perfetto, and request replay. | [Agent Tracing](agent-tracing.md) |
 | Agent hints | Active serving intent such as priority, expected output length, and speculative prefill. | [Agent Hints](agent-hints.md) |
 | Priority scheduling | Layer-by-layer priority behavior in the router queue, backend engine, and cache policy. | [Priority Scheduling](priority-scheduling.md) |
-| Backend features | Runtime-specific behavior such as SGLang priority scheduling, cache eviction, speculative prefill, and session control. | [SGLang for Agentic Workloads](../backends/sglang/agents.md) |
-| Trajectory scheduling | Experimental outer-loop scheduling keyed by trajectory identity for tool-boundary pause and resume. | [ThunderAgent Program Scheduler](thunderagent-router.md) |
-
-Keep passive identity separate from active policy. A `trajectory_id` tells Dynamo which requests belong together. It is not a tenant identity, fairness ID, routing command, or cache-retention command. Use `agent_hints`, `session_control`, router configuration, and backend flags for behavior that should affect serving.
+| Trajectory-aware scheduling | Router level scheduling for agentic trajectories. | [ThunderAgent Program Scheduler](thunderagent-router.md) |
 
 ## Reading Order
 

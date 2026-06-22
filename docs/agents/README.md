@@ -9,11 +9,11 @@ NVIDIA Dynamo optimizes agent workloads with lightweight headers and request ext
 
 | Layer | Signal | Optimization |
 |-------|--------|--------------|
-| Frontend API | Trajectory headers and `nvext` request extensions | Normalize agent identity and serving intent across OpenAI-compatible APIs. |
+| Frontend API | Trajectory headers and `nvext` request extensions | Normalize agent identity and serving intent across APIs. |
 | Router | Trajectory identity, priority, expected output length, and cache-overlap signals | Place requests for KV reuse, order queued work, and support agent-aware routing strategies. |
 | KV cache management | Priority and session metadata forwarded to the backend runtime | Influence engine scheduling, cache eviction, and subagent KV isolation where the backend supports it. |
 
-The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. Supported coding agents can rely on the HTTP headers they already emit, and custom clients can send Dynamo trajectory headers. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for the exact contract.
+The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. For popular coding agents, Dynamo internally tranlates their header IDs to an internal `trajectory_id`. For custom harnesses, all you have to add is a `x-dynamo-trajectory-id` to take advantage of the entire stack. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for more information.
 
 ## Core Concepts
 
