@@ -131,6 +131,23 @@ pub struct DecodeBlockReservation {
     blocks: Vec<MutableBlock<G1>>,
 }
 
+pub struct VllmDestinationReservation {
+    cached_prefix: Vec<(SequenceHash, ImmutableBlock<G1>)>,
+    unpublished_blocks: Vec<MutableBlock<G1>>,
+    layout: Option<MoveBlock>,
+}
+
+#[cfg(test)]
+impl VllmDestinationReservation {
+    pub(crate) fn block_ids(&self) -> Vec<usize> {
+        self.cached_prefix
+            .iter()
+            .map(|(_, block)| block.block_id())
+            .chain(self.unpublished_blocks.iter().map(MutableBlock::block_id))
+            .collect()
+    }
+}
+
 impl DecodeBlockReservation {
     fn take(&mut self) -> Option<MutableBlock<G1>> {
         self.blocks.pop()
@@ -711,6 +728,14 @@ impl KvManager {
     }
 
     pub fn reserve_decode_blocks(&mut self, count: usize) -> Option<DecodeBlockReservation> {
+        let blocks = self.allocate_unpublished_blocks(count)?;
+        Some(DecodeBlockReservation { blocks })
+    }
+
+    fn allocate_unpublished_blocks(&mut self, count: usize) -> Option<Vec<MutableBlock<G1>>> {
+        if count == 0 {
+            return Some(Vec::new());
+        }
         let (blocks, evicted_plhs) = self.block_manager.allocate_blocks_with_evictions(count)?;
         if self.should_block_on_g1_offload(&evicted_plhs) {
             self.handle_evictions_with_source_slots(evicted_plhs, blocks);
@@ -718,7 +743,148 @@ impl KvManager {
         }
 
         self.handle_evictions(evicted_plhs);
-        Some(DecodeBlockReservation { blocks })
+        Some(blocks)
+    }
+
+    pub(crate) fn reserve_destination(
+        &mut self,
+        sequence: &ActiveSequence,
+    ) -> Option<VllmDestinationReservation> {
+        let layout = sequence.prepare_allocation(sequence.num_input_tokens());
+        let Some(MoveBlock::Use(blocks, _, plhs, _, _)) = layout.as_ref() else {
+            return Some(VllmDestinationReservation {
+                cached_prefix: Vec::new(),
+                unpublished_blocks: Vec::new(),
+                layout,
+            });
+        };
+
+        let mut cached_prefix = Vec::new();
+        for (plh_idx, block) in blocks.iter().enumerate() {
+            let UniqueBlock::FullBlock(seq_hash) = block else {
+                break;
+            };
+            let plh = plhs[plh_idx];
+            if let Some(active) = self.active_full.get(seq_hash) {
+                cached_prefix.push((*seq_hash, active[0].clone()));
+                continue;
+            }
+            let Some(handle) = self.block_manager.match_blocks(&[plh]).into_iter().next() else {
+                break;
+            };
+            cached_prefix.push((*seq_hash, handle));
+        }
+
+        let unpublished_blocks =
+            self.allocate_unpublished_blocks(blocks.len() - cached_prefix.len())?;
+        Some(VllmDestinationReservation {
+            cached_prefix,
+            unpublished_blocks,
+            layout,
+        })
+    }
+
+    pub(crate) fn activate_destination(&mut self, reservation: VllmDestinationReservation) {
+        let VllmDestinationReservation {
+            cached_prefix,
+            unpublished_blocks,
+            layout,
+        } = reservation;
+        let Some(MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent)) = layout else {
+            debug_assert!(cached_prefix.is_empty());
+            debug_assert!(unpublished_blocks.is_empty());
+            return;
+        };
+
+        let prefix_len = cached_prefix.len();
+        let mut cached_prefix = cached_prefix.into_iter();
+        let mut unpublished_blocks = unpublished_blocks.into_iter();
+        let mut stored_seq_hashes = Vec::new();
+        let mut stored_local_hashes = Vec::new();
+        let mut stored_token_ids = token_ids.as_ref().map(|_| Vec::new());
+        let mut first_store_parent = None;
+        let mut metadata_parent_hash = match parent {
+            Some(UniqueBlock::FullBlock(hash)) => Some(hash),
+            Some(UniqueBlock::PartialBlock(_)) => panic!("parent block cannot be partial"),
+            None => None,
+        };
+        let mut plh_idx = 0usize;
+
+        for (block_idx, block) in blocks.into_iter().enumerate() {
+            match block {
+                UniqueBlock::FullBlock(seq_hash) => {
+                    let full_idx = plh_idx;
+                    let plh = plhs[plh_idx];
+                    plh_idx += 1;
+                    if block_idx < prefix_len {
+                        let (reserved_hash, handle) = cached_prefix
+                            .next()
+                            .expect("reserved prefix handle must exist");
+                        debug_assert_eq!(reserved_hash, seq_hash);
+                        self.active_full.entry(seq_hash).or_default().push(handle);
+                        metadata_parent_hash = Some(seq_hash);
+                        continue;
+                    }
+
+                    let mutable = unpublished_blocks
+                        .next()
+                        .expect("reserved destination block must exist");
+                    let complete = mutable
+                        .stage(plh, self.block_size)
+                        .expect("destination stage failed");
+                    let immutable = self.block_manager.register_block(complete);
+                    let block_id = immutable.block_id();
+                    self.active_full
+                        .entry(seq_hash)
+                        .or_default()
+                        .push(immutable);
+                    if stored_seq_hashes.is_empty() {
+                        first_store_parent = metadata_parent_hash;
+                    }
+                    let local_hash = local_hashes.get(full_idx).copied();
+                    let block_token_ids = token_ids
+                        .as_ref()
+                        .and_then(|all_ids| all_ids.get(full_idx).cloned());
+                    self.registered_blocks.insert(
+                        plh,
+                        RegisteredBlockInfo {
+                            seq_hash,
+                            block_id,
+                            parent_hash: metadata_parent_hash,
+                            local_hash,
+                            token_ids: block_token_ids.clone(),
+                        },
+                    );
+                    stored_seq_hashes.push(seq_hash);
+                    if let Some(local_hash) = local_hash {
+                        stored_local_hashes.push(local_hash);
+                    }
+                    if let (Some(stored), Some(block_token_ids)) =
+                        (stored_token_ids.as_mut(), block_token_ids)
+                    {
+                        stored.push(block_token_ids);
+                    }
+                    metadata_parent_hash = Some(seq_hash);
+                }
+                UniqueBlock::PartialBlock(uuid) => {
+                    let mutable = unpublished_blocks
+                        .next()
+                        .expect("reserved destination partial block must exist");
+                    let previous = self.active_partial.insert(uuid, mutable);
+                    debug_assert!(previous.is_none());
+                }
+            }
+        }
+
+        debug_assert!(cached_prefix.next().is_none());
+        debug_assert!(unpublished_blocks.next().is_none());
+        self.publish_kv_event(
+            stored_seq_hashes,
+            &stored_local_hashes,
+            first_store_parent,
+            true,
+            stored_token_ids,
+        );
     }
 
     pub fn process_decode_signal(
@@ -1292,6 +1458,24 @@ impl KvManager {
     /// Shared-prefix reuse inflates this above the distinct-block count.
     pub fn num_active_block_refs(&self) -> usize {
         self.active_partial.len() + self.active_full.values().map(|v| v.len()).sum::<usize>()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_block_ids(&self, sequence: &ActiveSequence) -> Vec<usize> {
+        sequence
+            .unique_blocks()
+            .iter()
+            .filter_map(|block| match block {
+                UniqueBlock::FullBlock(hash) => self
+                    .active_full
+                    .get(hash)
+                    .and_then(|handles| handles.last())
+                    .map(ImmutableBlock::block_id),
+                UniqueBlock::PartialBlock(uuid) => {
+                    self.active_partial.get(uuid).map(MutableBlock::block_id)
+                }
+            })
+            .collect()
     }
 
     pub fn get_active_perc(&self) -> f64 {

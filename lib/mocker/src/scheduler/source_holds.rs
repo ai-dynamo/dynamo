@@ -21,6 +21,25 @@ pub(crate) enum SchedulerCommand {
     CancelSource {
         handoff_id: HandoffId,
     },
+    ReserveDestination {
+        handoff_id: HandoffId,
+        request: DirectRequest,
+    },
+    ActivateDestination {
+        handoff_id: HandoffId,
+    },
+    CancelDestination {
+        handoff_id: HandoffId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SchedulerCommandResult {
+    Submitted(Uuid),
+    DestinationReserved { request_id: Uuid },
+    DestinationUnavailable,
+    Applied,
+    Noop,
 }
 
 pub(crate) enum SourceCompletion<T> {
@@ -51,6 +70,12 @@ impl<T> Default for SourceHolds<T> {
 }
 
 impl<T> SourceHolds<T> {
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        debug_assert_eq!(self.pending_by_request.len(), self.pending_by_handoff.len());
+        self.pending_by_request.is_empty() && self.held_prefills.is_empty()
+    }
+
     pub(crate) fn register(&mut self, request_id: Uuid, handoff_id: HandoffId) -> Result<()> {
         if self.pending_by_request.contains_key(&request_id) {
             bail!("source hold already registered for request {request_id}");
@@ -118,6 +143,63 @@ impl<T> SourceHolds<T> {
     #[cfg(test)]
     pub(crate) fn is_registered(&self, handoff_id: HandoffId) -> bool {
         self.pending_by_handoff.contains_key(&handoff_id)
+    }
+}
+
+pub(crate) struct DestinationHolds<T> {
+    by_handoff: FxHashMap<HandoffId, (Uuid, T)>,
+    by_request: FxHashMap<Uuid, HandoffId>,
+}
+
+impl<T> Default for DestinationHolds<T> {
+    fn default() -> Self {
+        Self {
+            by_handoff: FxHashMap::default(),
+            by_request: FxHashMap::default(),
+        }
+    }
+}
+
+impl<T> DestinationHolds<T> {
+    pub(crate) fn validate(&self, request_id: Uuid, handoff_id: HandoffId) -> Result<()> {
+        if self.by_request.contains_key(&request_id) {
+            bail!("destination reservation already exists for request {request_id}");
+        }
+        if self.by_handoff.contains_key(&handoff_id) {
+            bail!("destination handoff {handoff_id:?} is already active");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn insert(&mut self, request_id: Uuid, handoff_id: HandoffId, payload: T) {
+        debug_assert!(self.validate(request_id, handoff_id).is_ok());
+        let previous = self.by_handoff.insert(handoff_id, (request_id, payload));
+        debug_assert!(previous.is_none());
+        let previous = self.by_request.insert(request_id, handoff_id);
+        debug_assert!(previous.is_none());
+    }
+
+    pub(crate) fn remove(&mut self, handoff_id: HandoffId) -> Option<(Uuid, T)> {
+        let (request_id, payload) = self.by_handoff.remove(&handoff_id)?;
+        let removed = self.by_request.remove(&request_id);
+        debug_assert_eq!(removed, Some(handoff_id));
+        Some((request_id, payload))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        debug_assert_eq!(self.by_handoff.len(), self.by_request.len());
+        self.by_handoff.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, handoff_id: HandoffId) -> bool {
+        self.by_handoff.contains_key(&handoff_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, handoff_id: HandoffId) -> Option<&T> {
+        self.by_handoff.get(&handoff_id).map(|(_, payload)| payload)
     }
 }
 
