@@ -914,19 +914,10 @@ impl JailedStream {
         None
     }
 
-    /// Families whose contract is "never surface tool-call markup to the user"
-    /// (they opt into `discard_unparseable_wrapper` in the parser config). For
-    /// these, the finalize path strips/suppresses any residual markup instead of
-    /// releasing the raw buffer; every other parser and generic manual-sequence
-    /// jail keeps its release-verbatim path.
-    ///
-    /// This is a hardcoded allowlist, not a read of the parser config flag: the
-    /// pinned `dynamo-parsers` version predates the exported
-    /// `discard_unparseable_wrapper` field, so it can't be queried here yet.
-    /// Mirrors the existing qwen25/hermes name-keying in
-    /// `detect_and_parse_tool_call_with_recovery`. When a new family opts into
-    /// the never-leak contract, add it here (and switch to reading the config
-    /// flag once the dependency is new enough to expose it).
+    /// Whether this parser must never surface tool-call markup to the user, so
+    /// finalize strips residual markers rather than releasing the raw buffer.
+    /// Allowlisted by name (the pinned `dynamo-parsers` predates the config's
+    /// `discard_unparseable_wrapper` flag); extend when a new family opts in.
     fn suppresses_tool_call_markup(&self) -> bool {
         matches!(
             self.tool_call_parser.as_deref(),
@@ -1176,30 +1167,20 @@ impl JailedStream {
                         {
                             normal_text.as_deref().unwrap_or("").to_string()
                         } else if self.suppresses_tool_call_markup() {
-                            // hermes / qwen25 must never surface tool-call markup to the user.
-                            // The jail opened on a (real or bare-JSON-detected) start marker but
-                            // the parser recovered no call, so the buffer holds an incomplete or
-                            // garbage tool-call attempt. Strip / suppress the markers rather than
-                            // emitting the raw buffer — done here in the jail so it holds
-                            // regardless of the installed parser version. Scoped to these
-                            // families so every other parser and generic manual-sequence jail
-                            // keeps its existing release-verbatim contract.
+                            // No call parsed out of a jailed buffer: strip the markers rather
+                            // than leak the raw text. Handled in the jail so it holds regardless
+                            // of the installed parser version.
                             if let Some(prefix) =
                                 self.prefix_before_first_tool_call_marker(accumulated_content)
                             {
-                                // Start marker present (truncated body / unparseable wrapper):
-                                // keep only the prose before it, drop the rest. Mirrors the batch
-                                // unterminated-suppression / discard-unparseable-wrapper.
+                                // Truncated / unparseable wrapper: keep the prose before the
+                                // opening marker, drop the rest.
                                 prefix.trim_end().to_string()
                             } else if self.jail_end_sequences.iter().any(|seq| {
                                 !seq.is_empty() && accumulated_content.contains(seq.as_str())
                             }) {
-                                // Orphan end marker(s) with no opener (e.g. `{..}</tool_call>`
-                                // runs at a length cutoff): remove every occurrence of each end
-                                // marker, keep the surrounding text the model produced. Removing
-                                // all occurrences (not just trailing ones) ensures a stray marker
-                                // in the middle of the buffer can't leak when the stream is cut
-                                // off after it.
+                                // Orphan close marker(s) with no opener: remove every occurrence
+                                // (not just trailing) so a mid-buffer marker can't leak.
                                 let mut cleaned = accumulated_content.to_string();
                                 for seq in self.jail_end_sequences.iter().filter(|s| !s.is_empty())
                                 {
@@ -1207,13 +1188,11 @@ impl JailedStream {
                                 }
                                 cleaned.trim().to_string()
                             } else {
-                                // No markers in the buffer (false-positive jail entry on prose):
-                                // pass through verbatim.
+                                // No markers: false-positive jail entry on prose, pass through.
                                 accumulated_content.to_string()
                             }
                         } else {
-                            // Other parsers / generic manual-sequence jails: preserve the
-                            // existing contract and release the accumulated buffer verbatim.
+                            // Other parsers / generic jails: release the buffer verbatim.
                             accumulated_content.to_string()
                         };
                         create_choice_stream(

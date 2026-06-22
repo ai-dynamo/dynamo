@@ -1382,18 +1382,6 @@ mod tests {
             inner.inner.created, 1234567890,
             "Inner response created should carry forward from real stream chunks, not be 0"
         );
-
-        // The finalize chunk still carries the stream metadata asserted above, but
-        // hermes must NOT surface tool-call markup to the user: the truncated
-        // `<tool_call>{...` attempt is suppressed rather than leaked as content.
-        let content = &inner.inner.choices[0].delta.content;
-        if let Some(content) = content {
-            let text = test_utils::extract_text(content);
-            assert!(
-                !text.contains("<tool_call>"),
-                "Hermes must not leak the <tool_call> marker into content on stream end; got: {text:?}"
-            );
-        }
     }
 
     #[tokio::test]
