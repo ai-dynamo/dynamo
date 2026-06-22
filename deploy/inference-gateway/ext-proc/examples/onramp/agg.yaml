@@ -16,7 +16,7 @@ metadata:
   labels:
     app: vllm-qwen
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: vllm-qwen
