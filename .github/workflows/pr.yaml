@@ -570,7 +570,8 @@ jobs:
       cuda_version: '13.0'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
-    secrets: inherit
+    # No secrets: the audit scans the container's own filesystem (no registry
+    # auth / aws) — don't inherit repo secrets into a report-only job.
 
   sglang-compliance-audit:
     name: sglang-runtime # grouped in the UI with other sglang jobs
@@ -583,7 +584,6 @@ jobs:
       cuda_version: '13.0'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.sglang-build.outputs.baseline_sbom_file }}
-    secrets: inherit
 
   trtllm-compliance-audit:
     name: trtllm-runtime # grouped in the UI with other trtllm jobs
@@ -596,7 +596,6 @@ jobs:
       cuda_version: '13.1'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
-    secrets: inherit
 
   # planner / frontend stay on the legacy shared-compliance scan until they
   # migrate to the inline system that vllm/sglang/trtllm use above.
