@@ -916,11 +916,17 @@ impl JailedStream {
 
     /// Whether this parser must never surface tool-call markup to the user, so
     /// finalize strips residual markers rather than releasing the raw buffer.
-    /// Allowlisted by name (the pinned `dynamo-parsers` predates the config's
-    /// `discard_unparseable_wrapper` flag); extend when a new family opts in.
-    // TODO: read `discard_unparseable_wrapper` from the parser config once the
-    // `dynamo-parsers` dependency is bumped to a version that exports it, and
-    // drop this hardcoded name allowlist.
+    ///
+    /// The real source of truth is `dynamo-parsers`'
+    /// `JsonParserConfig::discard_unparseable_wrapper`, set by that crate's
+    /// `hermes()` / `qwen25()` configs (ai-dynamo/frontend-crates,
+    /// `parsers/src/tool_calling/config.rs`) and already honored by the batch
+    /// parser. We allowlist by name here only because the pinned `dynamo-parsers`
+    /// version predates that exported field, so it can't be read yet; extend the
+    /// list when a new family opts into the never-leak contract.
+    // TODO: read `discard_unparseable_wrapper` from the parser config and drop
+    // this name allowlist once the `dynamo-parsers` dependency is bumped to a
+    // version that exports the field.
     fn suppresses_tool_call_markup(&self) -> bool {
         matches!(
             self.tool_call_parser.as_deref(),
