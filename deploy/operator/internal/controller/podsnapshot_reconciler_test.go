@@ -152,6 +152,34 @@ func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {
 	assert.Empty(t, contents.Items)
 }
 
+func TestSnapshotReconciler_TerminalContentPropagatesWithoutSourcePod(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	// The content is already terminal but the source pod has been deleted. The reconcile must still
+	// mirror the terminal status instead of looping on the missing pod.
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid", Finalizers: []string{podSnapshotFinalizer}},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
+			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
+		},
+		Status: nvidiacomv1alpha1.PodSnapshotContentStatus{
+			Conditions: []metav1.Condition{{Type: nvidiacomv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Captured", Message: "done"}},
+		},
+	}
+	// No source pod is registered with the client.
+	r := makeSnapshotReconciler(s, snap, content)
+
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Zero(t, res.RequeueAfter)
+
+	updated := &nvidiacomv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+	cond := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+}
+
 func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

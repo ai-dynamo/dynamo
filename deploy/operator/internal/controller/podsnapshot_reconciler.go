@@ -103,9 +103,41 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
+	// The content is named deterministically from the PodSnapshot UID (immutable, already populated
+	// after the finalizer Update above). An existing PodSnapshotContent is the authoritative source
+	// of status, so look it up first and fast-path its status WITHOUT resolving the live source pod:
+	// a PodSnapshot whose pod is deleted after the content is created must still reach a terminal
+	// state instead of looping on a missing pod.
+	contentName := podSnapshotContentName(snap)
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
+	contentErr := sr.Get(ctx, client.ObjectKey{Name: contentName}, content)
+	switch {
+	case contentErr == nil:
+		// Validate the backlink (defense in depth: the UID-derived name makes a collision
+		// improbable, but never mirror a content bound to a different PodSnapshot).
+		if ref := content.Spec.PodSnapshotRef; ref.UID != "" && ref.UID != snap.UID {
+			return sr.failPodSnapshot(ctx, snap, "ContentBacklinkMismatch",
+				fmt.Errorf("PodSnapshotContent %q is bound to PodSnapshot UID %q, not %q", contentName, ref.UID, snap.UID))
+		}
+		// A terminal content is final: mirror it and stop. No source pod required.
+		if isPodSnapshotContentTerminal(content) {
+			return sr.propagateStatus(ctx, snap, content)
+		}
+	case !apierrors.IsNotFound(contentErr):
+		return ctrl.Result{}, contentErr
+	}
+
+	// The content is missing (must be created) or still capturing (guard against a node
+	// reschedule). Both require the live source pod.
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			if contentErr == nil {
+				// Content exists but is not yet terminal and the pod is gone: the node agent will
+				// write a terminal failure, re-enqueuing this PodSnapshot via the content watch.
+				// Mirror the current (pending) status and wait rather than looping on the pod.
+				return sr.propagateStatus(ctx, snap, content)
+			}
 			logger.V(1).Info("Source pod not found, backing off", "snapshot", snap.Name)
 			return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
 		}
@@ -124,15 +156,11 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			fmt.Errorf("source pod %q UID %q does not match PodSnapshot source UID %q", pod.Name, pod.UID, wantUID))
 	}
 
-	// The content is named from the PodSnapshot UID, not the checkpoint ID: the ID is a
-	// restore-time concern that lives on the pod's labels, and the content does not need it.
-	// UID is immutable and already populated here (the finalizer branch above round-tripped an
-	// Update), so the name is stable and deterministic for the PodSnapshot's lifetime.
-	contentName := podSnapshotContentName(snap)
-
-	content, err := sr.ensurePodSnapshotContent(ctx, snap, contentName, pod)
-	if err != nil {
-		return ctrl.Result{}, err
+	if apierrors.IsNotFound(contentErr) {
+		content, err = sr.ensurePodSnapshotContent(ctx, snap, contentName, pod)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	// A freshly-created content always matches; only a pre-existing content whose
 	// source pod was rescheduled to another node mismatches (spec is immutable).
@@ -143,6 +171,12 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	return sr.propagateStatus(ctx, snap, content)
+}
+
+// isPodSnapshotContentTerminal reports whether the content has reached a terminal condition.
+func isPodSnapshotContentTerminal(content *nvidiacomv1alpha1.PodSnapshotContent) bool {
+	return nvidiacomv1alpha1.IsPodSnapshotContentSucceeded(content) ||
+		nvidiacomv1alpha1.IsPodSnapshotContentFailed(content)
 }
 
 // getSourcePod loads the source pod referenced by the PodSnapshot.
