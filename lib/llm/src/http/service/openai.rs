@@ -493,7 +493,10 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, headers: &HeaderMap) {
+pub(super) fn attach_x_request_id<T: Send + Sync + 'static>(
+    request: &mut Context<T>,
+    headers: &HeaderMap,
+) {
     if !crate::request_trace::is_enabled() {
         return;
     }

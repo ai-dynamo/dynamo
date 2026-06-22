@@ -56,7 +56,7 @@ use crate::types::Annotated;
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::SanitizedError;
 use super::metadata::extract_metadata_from_http;
-use super::openai::{get_body_limit, get_or_create_request_id};
+use super::openai::{attach_x_request_id, get_body_limit, get_or_create_request_id};
 
 // ---------------------------------------------------------------------------
 // Router
@@ -170,6 +170,7 @@ async fn handler_anthropic_messages(
         )
     })?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    attach_x_request_id(&mut request, &headers);
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
