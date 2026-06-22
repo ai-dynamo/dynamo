@@ -31,6 +31,11 @@ import urllib.request
 from pathlib import Path
 
 EXCLUDE_PATH_SUBSTRINGS = ("/bindings/", "/examples/")
+# Workspace members never published from the on-demand flow: internal crates that
+# carry an independent version (not the workspace version) and that no published
+# crate depends on. kvbm-consolidator pins its own 1.2.0, so the version gate would
+# (correctly) abort the release; it is a leaf, so excluding it is closure-safe.
+EXCLUDE_NAMES = frozenset({"kvbm-consolidator"})
 RETRYABLE = re.compile(r"HTTP/2|stream error|INTERNAL_ERROR|connection error|timed out|50[23] ")
 ALREADY = re.compile(r"already exists|409 Conflict|already uploaded")
 
@@ -50,6 +55,8 @@ def publishable(meta: dict) -> dict[str, dict]:
         if p["id"] not in members:
             continue
         if any(s in p["manifest_path"] for s in EXCLUDE_PATH_SUBSTRINGS):
+            continue
+        if p["name"] in EXCLUDE_NAMES:
             continue
         if p.get("publish") == []:  # `publish = false` serializes to []
             continue
