@@ -80,7 +80,9 @@ runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
 
 ```bash
 kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml
-GW=$(kubectl get gateway inference-gateway -o jsonpath='{.status.addresses[0].value}')
+kubectl apply  -n <ns> -f http-route.yaml # adjust per your namespace
+GW=$(kubectl -n agentgateway-system get gateway inference-gateway -o jsonpath='{.status.addresses[0].value}')
+echo "$GW"
 curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
   "model": "Qwen/Qwen3-0.6B",
   "messages": [{"role":"user","content":"hello"}]
