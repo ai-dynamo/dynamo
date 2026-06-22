@@ -11,7 +11,7 @@ behind a Gateway-API gateway with the Inference Extension (GAIE).
 
 If you already run GAIE + vLLM, you **replace only your EndpointPicker (EPP)**
 with the Dynamo EPP and you are done — no Dynamo operator, no Dynamo runtime,
-no Dynamo worker.
+no Dynamo worker. For disaggreaged serving you also need to build the disag sidecar.
 
 | | This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
 |---|---|---|
@@ -25,10 +25,22 @@ no Dynamo worker.
 The two modes are selected at startup by **`DYN_EPP_MODE`** (`full-dynamo-stack` | `router-only`). The same EPP
 binary serves both.
 
+LIMITATIONS:
+
+Concern | Gap vs the Dynamo/NATS path
+-- | --
+Duplicate store/remove (vLLM "retries") | parity
+In-stream ordering |  parity
+Transient disconnects | parity-ish
+Dropped events / gaps | Not handled. (NATS/JetStream is durable + replayable; the standalone indexer does seq-watermark gap detection + replay.)
+Initial cache state | Not handled. (The Dynamo path does an initial worker dump).
+Backpressure / EPP restart | PUB drops to slow subscribers (HWM) → silent loss; on restart the index is empty and only re-warms from new traffic.
+Data Parallelism | Not supported
+
 ## Files
 
 - `agg.yaml` — aggregated: one vLLM pool, KV-aware load balancing.
-- `disagg.yaml` — disaggregated: prefill + decode pools, KV-aware P/D selection.
+- `disagg.yaml` — disaggregated: prefill + decode pools, KV-aware P/D selection. Note that for the disaggregated serving you need to also build the sidecar to orchestrate the pull of the kv cache from the prefill worker.
 
 ## Prerequisites (install once)
 
