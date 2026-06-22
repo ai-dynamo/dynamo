@@ -78,13 +78,25 @@ def _response_payload(response_id: str, status: str) -> dict:
 
 
 class _Turn:
-    """State for a single in-flight response turn.
+    """One request->response cycle: a committed span of input audio and the
+    single OpenAI-spec ``response`` it produces.
 
-    Audio chunks arrive on ``audio_queue`` as float32 waveforms while the client
-    appends them; ``None`` is the end-of-input sentinel pushed on the final
-    commit (or when the client stream ends). ``audio_ref`` tracks the last
-    emitted waveform so cumulative engine outputs are de-duplicated into true
-    deltas.
+    Processing workflow (driven by ``RealtimeOmniHandler.generate``):
+
+      1. ``ensure_turn`` opens a turn on the first ``input_audio_buffer.append``
+         / ``.commit`` and spawns ``_run_turn`` as ``task``.
+      2. ``append`` pushes decoded float32 audio onto ``audio_queue``; the final
+         ``commit`` (or end of the client stream) pushes ``None`` to close input.
+      3. ``_run_turn`` -- serialized via the connection lock so only one turn is
+         in flight -- drives the engine over this turn's audio and emits
+         ``response.created`` -> ``response.output_audio.delta``* ->
+         ``response.output_audio.done`` -> ``response.done``.
+
+    Fields: ``response_id`` / ``item_id`` tag every event of this turn;
+    ``audio_queue`` carries the float32 input (``None`` = end of input);
+    ``audio_ref`` tracks the last emitted waveform so cumulative engine outputs
+    are de-duplicated into true deltas; ``output_modalities`` is snapshotted from
+    the latest ``session.update``.
     """
 
     def __init__(self, output_modalities: list[str] | None = None) -> None:
