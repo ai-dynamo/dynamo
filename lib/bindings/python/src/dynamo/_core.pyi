@@ -189,7 +189,7 @@ class DistributedRuntime:
         Register an async callback for /engine/{route_name} on the system status server.
 
         Args:
-            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            route_name: The route path (e.g., "control/start_profile" creates /engine/control/start_profile)
             callback: Async function with signature: async def(body: dict) -> dict
 
         Example:
@@ -197,7 +197,7 @@ class DistributedRuntime:
                 await engine.start_profile(**body)
                 return {"status": "ok", "message": "Profiling started"}
 
-            runtime.register_engine_route("start_profile", start_profile)
+            runtime.register_engine_route("control/start_profile", start_profile)
 
         The callback receives the JSON request body as a dict and should return
         a dict that will be serialized as the JSON response.
@@ -688,6 +688,83 @@ class WorkerMetricsPublisher:
             active_decode_blocks: Optional scheduler-compatible decode-block signal
             kv_used_blocks: Optional authoritative total KV blocks currently in use
         """
+        ...
+
+class SelectionService:
+    """
+    In-process handle to a runtime-free Dynamo selection core.
+    """
+
+    def __init__(self, *, indexer_threads: int = 4) -> None:
+        """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Stop the service: cancel KV-event listeners and scheduling so that
+        in-flight and queued selections fail fast.
+
+        The KV indexer thread pool is released when the handle is dropped.
+        Idempotent, and also runs automatically on drop.
+        """
+        ...
+
+    async def upsert_worker(self, worker: JsonLike) -> JsonLike:
+        """Upsert a worker and subscribe to its live KV events; returns its catalog record."""
+        ...
+
+    async def delete_worker(self, worker_id: int) -> JsonLike:
+        """Remove a worker and tear down its KV-event listener; returns its catalog record."""
+        ...
+
+    def list_workers(
+        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> JsonLike:
+        """List catalog records, optionally filtered by model and tenant."""
+        ...
+
+    def ready(self) -> JsonLike:
+        """Readiness: whether at least one worker is schedulable, plus catalog state."""
+        ...
+
+    async def overlap_scores(self, request: JsonLike) -> JsonLike:
+        """Per-worker KV-overlap scores for a prompt."""
+        ...
+
+    async def select(self, request: JsonLike) -> JsonLike:
+        """Select the best worker by KV-overlap + load, without booking."""
+        ...
+
+    async def select_and_reserve(self, request: JsonLike) -> JsonLike:
+        """Select the best worker and book its load."""
+        ...
+
+    async def create_reservation(self, request: JsonLike) -> JsonLike:
+        """Book a request's load against a chosen worker."""
+        ...
+
+    async def prefill_complete(self, reservation_id: str) -> None:
+        """Mark a reservation's prefill complete; its load shifts prefill -> decode."""
+        ...
+
+    def add_output_block(
+        self, reservation_id: str, *, decay_fraction: Optional[float] = None
+    ) -> None:
+        """Record one decode output block for a reservation, advancing its decode load."""
+        ...
+
+    async def free_reservation(self, reservation_id: str) -> None:
+        """Free a finished reservation, releasing its tracked load."""
+        ...
+
+    def loads(
+        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> JsonLike:
+        """Current per-model active load (pending counts + per-worker potential loads)."""
+        ...
+
+    async def potential_loads(self, request: JsonLike) -> JsonLike:
+        """Per-worker potential loads for a prompt, without booking."""
         ...
 
 class ModelDeploymentCard:
@@ -2307,6 +2384,9 @@ class PlannerReplayBridge:
         router_config: Optional[KvRouterConfig] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
     ) -> None: ...
 
     @staticmethod
@@ -2320,6 +2400,9 @@ class PlannerReplayBridge:
         router_config: Optional[KvRouterConfig] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
     ) -> "PlannerReplayBridge": ...
 
     def advance_to(self, until_ms: float) -> Dict[str, Any]: ...
@@ -2944,6 +3027,17 @@ class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
     ...
+
+class SelectionServiceError(DynamoException):
+    """
+    Raised by `SelectionService` for selector failures that are not malformed
+    input.
+    """
+
+    # Stable, machine-readable error category, e.g. "not_ready".
+    kind: str
+    # HTTP-style status code for the failure, e.g. 503.
+    status_code: int
 
 # ---------------------------------------------------------------------------
 # `dynamo._core.backend` submodule.

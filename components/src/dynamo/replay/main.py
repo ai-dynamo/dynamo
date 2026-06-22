@@ -325,8 +325,16 @@ def _run_planner_replay(
     trace_block_size: int,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
+    sla_ttft_ms: float | None = None,
+    sla_itl_ms: float | None = None,
+    sla_e2e_ms: float | None = None,
 ):
     """Run an offline replay with planner-in-the-loop (agg or disagg).
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the **goodput** SLA used
+    to classify SLA-satisfying requests in the report. They are independent of
+    the planner's own scaling SLA in ``planner_config`` and are never read from
+    it — pass whatever goodput threshold the caller wants measured.
 
     # TODO(jthomson04): SLA-based scaling (optimization_target="sla") with
     # disagg mode requires planner_profile_data (NPZ) or AIC-backed engine
@@ -355,6 +363,9 @@ def _run_planner_replay(
             router_config=router_config,
             arrival_speedup_ratio=arrival_speedup_ratio,
             trace_block_size=trace_block_size,
+            sla_ttft_ms=sla_ttft_ms,
+            sla_itl_ms=sla_itl_ms,
+            sla_e2e_ms=sla_e2e_ms,
         )
         capabilities = WorkerCapabilities(decode=_engine_caps(extra_engine_args))
 
@@ -373,6 +384,9 @@ def _run_planner_replay(
             router_config=router_config,
             arrival_speedup_ratio=arrival_speedup_ratio,
             trace_block_size=trace_block_size,
+            sla_ttft_ms=sla_ttft_ms,
+            sla_itl_ms=sla_itl_ms,
+            sla_e2e_ms=sla_e2e_ms,
         )
         capabilities = WorkerCapabilities(
             prefill=_engine_caps(prefill_engine_args),
@@ -508,6 +522,9 @@ def _run_planner_replay(
                             f"(prefill={len(prefill_fpms)}, decode={len(decode_fpms)})\n"
                         )
 
+    # gpu_hours (and prefill/decode_gpus_per_worker) are computed in the mocker
+    # from its own worker parallelism (aic_tp x aic_attention_dp) and ride the
+    # report dict — no per-engine GPU count from the planner config is needed.
     return adapter.run()
 
 
@@ -618,6 +635,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="optional cap on simulated wall-clock duration for offline replay (disagg and agg); when set, replay stops once the simulated clock would exceed this many seconds, leaving in-flight requests as incomplete in the report",
     )
+    # Goodput SLA — the threshold a request must meet to count toward goodput in
+    # the report. This is INDEPENDENT of the planner's own scaling SLA (in
+    # --planner-config); the two can hold different values and are never read
+    # from each other. Set --sla-ttft-ms + --sla-itl-ms, or --sla-e2e-ms alone.
+    parser.add_argument(
+        "--sla-ttft-ms",
+        type=float,
+        default=None,
+        help="goodput SLA: max time-to-first-token (ms). Independent of the planner's scaling SLA. "
+        "When an SLA is set, the report adds goodput_* (SLA-satisfying throughput).",
+    )
+    parser.add_argument(
+        "--sla-itl-ms",
+        type=float,
+        default=None,
+        help="goodput SLA: max average inter-token latency (ms), per request (e2e - ttft)/(osl - 1) "
+        "(aiperf definition). Independent of the planner's scaling SLA.",
+    )
+    parser.add_argument(
+        "--sla-e2e-ms",
+        type=float,
+        default=None,
+        help="goodput SLA: max end-to-end latency (ms); use instead of --sla-ttft-ms/--sla-itl-ms. "
+        "Independent of the planner's scaling SLA.",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     using_trace_file = args.trace_file is not None
@@ -664,6 +706,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 "--max-sim-time-seconds currently only supports trace-file replay"
             )
+    if (
+        any(v is not None for v in (args.sla_ttft_ms, args.sla_itl_ms, args.sla_e2e_ms))
+        and args.planner_config is None
+    ):
+        parser.error(
+            "goodput SLA (--sla-ttft-ms/--sla-itl-ms/--sla-e2e-ms) currently requires --planner-config"
+        )
 
     extra_engine_args = _load_engine_args(args.extra_engine_args)
     prefill_engine_args = _load_engine_args(args.prefill_engine_args)
@@ -701,6 +750,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace_block_size=args.trace_block_size,
             planner_config_arg=args.planner_config,
             benchmark_granularity=args.benchmark_granularity,
+            sla_ttft_ms=args.sla_ttft_ms,
+            sla_itl_ms=args.sla_itl_ms,
+            sla_e2e_ms=args.sla_e2e_ms,
         )
         report = planner_report.trace_report
         if planner_report.scaling_events:

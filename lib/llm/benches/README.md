@@ -60,11 +60,11 @@ RUN_BENCH=1 BATCH_SIZE=64 cargo bench --bench tokenizer_dataset -p dynamo-llm
 | `MAX_SAMPLES` | `503` | Maximum number of samples to process |
 | `BATCH_SIZE` | unset | If set, runs batched mode instead of sequential |
 
-## agent_trace_finish_metadata
+## request_trace_finish_metadata
 
 Measures request finish metadata overhead with tracing disabled/enabled, plus
 tool-call metadata recording across increasing numbers of calls.
 
 ```bash
-cargo bench --bench agent_trace_finish_metadata -p dynamo-llm --features agent-trace-bench
+cargo bench --bench request_trace_finish_metadata -p dynamo-llm --features request-trace-bench
 ```

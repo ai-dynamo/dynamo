@@ -295,6 +295,39 @@ impl EngineKind {
         }
     }
 
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.supported_updates().await,
+            // Raw media engines advertise no semantic engine updates.
+            EngineKind::Raw(_) => Ok(Vec::new()),
+        }
+    }
+
+    async fn engine_update(
+        &self,
+        update: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.engine_update(update, body).await,
+            EngineKind::Raw(_) => Ok(serde_json::json!({
+                "status": "error",
+                "message": format!("unsupported engine update: {update}"),
+            })),
+        }
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.on_endpoint_ready(endpoint).await,
+            // Raw media engines publish no discovery records of their own.
+            EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
     /// Raw media engines (image/video/audio) register name-only — the engine
     /// loads the model itself and the model has no LLM artifacts (tokenizer /
     /// chat template / config.json) for Dynamo to fetch.
@@ -639,9 +672,38 @@ impl Worker {
                 endpoint.clone(),
                 control_lock.clone(),
             );
-            registry.register(&control_name, callback);
+            // Namespace control routes under `/engine/control/<name>` so they
+            // share the `/engine/{*path}` route without colliding with updates.
+            registry.register(&format!("control/{control_name}"), callback);
         }
         tracing::info!(control_count, "registered engine management controls");
+        Ok(())
+    }
+
+    /// Register advertised engine updates on the runtime system server.
+    ///
+    /// Updates are a sibling surface to controls for operations that mutate
+    /// engine-managed assets (e.g. vLLM dynamic LoRA). They register under
+    /// `/engine/update/<name>` and, unlike controls, never toggle discovery
+    /// registration — so no quiesce/resume policy wrapper or serialization lock.
+    async fn register_engine_updates(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let updates = self.engine.supported_updates().await?;
+        if updates.is_empty() {
+            tracing::debug!("engine returned no management updates");
+            return Ok(());
+        }
+
+        let registry = endpoint.drt().engine_routes();
+        let update_count = updates.len();
+        for update_name in updates {
+            let callback = engine_update_callback(update_name.clone(), self.engine.clone());
+            // Namespace update routes under `/engine/update/<name>`.
+            registry.register(&format!("update/{update_name}"), callback);
+        }
+        tracing::info!(update_count, "registered engine management updates");
         Ok(())
     }
 
@@ -734,6 +796,16 @@ impl Worker {
         let mut local_model =
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
+
+        // Hand the engine its serving endpoint before registering the model
+        // with discovery. on_endpoint_ready is a fatal handoff: doing it first
+        // means a failure leaves nothing published, so there is no stale
+        // discovery entry to reclaim. Engines that publish their own discovery
+        // records (e.g. vLLM dynamic LoRA) stash the endpoint here, and this
+        // still runs before `register_engine_controls`, so `/engine/*` cannot
+        // fire before the engine has the endpoint.
+        self.engine.on_endpoint_ready(endpoint.clone()).await?;
+
         local_model
             .attach(
                 &endpoint,
@@ -751,7 +823,9 @@ impl Worker {
                 )
             })?;
         tracing::debug!("model registered with discovery");
+
         self.register_engine_controls(&endpoint).await?;
+        self.register_engine_updates(&endpoint).await?;
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -1096,6 +1170,16 @@ fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Va
     }
 }
 
+fn update_request_body_error(body: &serde_json::Value) -> Option<serde_json::Value> {
+    if body.is_object() {
+        None
+    } else {
+        Some(control_error_response(
+            "engine update request body must be a JSON object",
+        ))
+    }
+}
+
 fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRouteCallback {
     Arc::new(move |body| {
         let engine = engine.clone();
@@ -1103,6 +1187,22 @@ fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRo
         Box::pin(async move {
             engine
                 .engine_control(control_name, body)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        })
+    })
+}
+
+fn engine_update_callback(update_name: String, engine: EngineKind) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let engine = engine.clone();
+        let update_name = update_name.clone();
+        Box::pin(async move {
+            if let Some(response) = update_request_body_error(&body) {
+                return Ok(response);
+            }
+            engine
+                .engine_update(update_name, body)
                 .await
                 .map_err(|e| anyhow::anyhow!(e.to_string()))
         })
@@ -1135,7 +1235,7 @@ fn wrap_engine_control_callback(
 
                     if let Err(e) = endpoint.unregister_endpoint_instance().await {
                         return Ok(control_error_response(format!(
-                            "failed to unregister endpoint before /engine/{control_name}: {e}"
+                            "failed to unregister endpoint before /engine/control/{control_name}: {e}"
                         )));
                     }
 
@@ -1169,12 +1269,12 @@ fn wrap_engine_control_callback(
                         && let Err(e) = endpoint.register_endpoint_instance().await
                     {
                         // The engine is serving-safe but absent from discovery. The
-                        // operation is idempotent: retrying /engine/{control_name}
+                        // operation is idempotent: retrying /engine/control/{control_name}
                         // re-registers without repeating the wake/resume work (the
                         // controller short-circuits "already awake/resumed"), so surface
                         // that it is safe to retry.
                         return Ok(control_error_response(format!(
-                            "engine resumed but re-registration failed after /engine/{control_name}: {e}; retry /engine/{control_name} to rejoin discovery"
+                            "engine resumed but re-registration failed after /engine/control/{control_name}: {e}; retry /engine/control/{control_name} to rejoin discovery"
                         )));
                     }
                     Ok(response)
@@ -1528,6 +1628,26 @@ mod tests {
             assert_eq!(
                 response.get("message").and_then(|value| value.as_str()),
                 Some("engine control request body must be a JSON object")
+            );
+        }
+    }
+
+    #[test]
+    fn update_request_body_validation_requires_json_object() {
+        assert!(update_request_body_error(&serde_json::json!({})).is_none());
+        assert!(update_request_body_error(&serde_json::json!({"lora_name": "a"})).is_none());
+
+        for body in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("bad"),
+            serde_json::json!(["lora_name"]),
+        ] {
+            let response = update_request_body_error(&body).unwrap();
+            assert!(control_response_is_error(&response));
+            assert_eq!(
+                response.get("message").and_then(|value| value.as_str()),
+                Some("engine update request body must be a JSON object")
             );
         }
     }
@@ -2289,6 +2409,242 @@ mod tests {
         assert_eq!(
             applied,
             vec![("DYN_DISCOVERY_BACKEND".to_string(), "etcd".to_string())]
+        );
+    }
+}
+
+// Integration tests for the `on_endpoint_ready` handoff. These need a real
+// `DistributedRuntime`/`Endpoint` (NATS-backed), so they live behind the
+// `integration` feature:
+//   cargo test -p dynamo-backend-common --features integration on_endpoint_ready
+#[cfg(all(test, feature = "integration"))]
+mod handoff_integration_tests {
+    use super::*;
+    use crate::engine::PreprocessedRequest;
+    use async_trait::async_trait;
+    use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+    use futures::stream::BoxStream;
+    use std::sync::Mutex as StdMutex;
+
+    /// Build a real serving `Endpoint` from a test DRT, mirroring how
+    /// `run_inner` resolves namespace → component → endpoint.
+    async fn test_endpoint() -> dynamo_runtime::component::Endpoint {
+        let drt = create_test_drt_async().await;
+        drt.namespace("handoff_ns")
+            .unwrap()
+            .component("handoff_comp")
+            .unwrap()
+            .endpoint("generate")
+    }
+
+    /// Mock engine that records the order of `on_endpoint_ready`,
+    /// `supported_controls`, and `supported_updates` calls, lets a test force
+    /// `on_endpoint_ready` to fail, and advertises configurable control/update
+    /// sets.
+    struct HandoffMockEngine {
+        log: Arc<StdMutex<Vec<&'static str>>>,
+        endpoint_ready_should_fail: bool,
+        controls: Vec<String>,
+        updates: Vec<String>,
+    }
+
+    impl HandoffMockEngine {
+        fn new(
+            endpoint_ready_should_fail: bool,
+            controls: Vec<String>,
+            updates: Vec<String>,
+        ) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let eng = Arc::new(Self {
+                log: log.clone(),
+                endpoint_ready_should_fail,
+                controls,
+                updates,
+            });
+            (eng, log)
+        }
+    }
+
+    #[async_trait]
+    impl LLMEngine for HandoffMockEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            unreachable!("not used in handoff tests")
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+
+        async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+            self.log.lock().unwrap().push("supported_controls");
+            Ok(self.controls.clone())
+        }
+
+        async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+            self.log.lock().unwrap().push("supported_updates");
+            Ok(self.updates.clone())
+        }
+
+        async fn on_endpoint_ready(
+            &self,
+            _endpoint: dynamo_runtime::component::Endpoint,
+        ) -> Result<(), DynamoError> {
+            self.log.lock().unwrap().push("on_endpoint_ready");
+            if self.endpoint_ready_should_fail {
+                Err(err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    "synthetic on_endpoint_ready failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Engine that overrides only the required methods, so it inherits the
+    /// trait-default `on_endpoint_ready` / `supported_controls`.
+    struct DefaultsEngine;
+
+    #[async_trait]
+    impl LLMEngine for DefaultsEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            unreachable!("not used in handoff tests")
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    /// The trait default `on_endpoint_ready` is a no-op that succeeds against a
+    /// real `Endpoint`.
+    #[tokio::test]
+    async fn default_on_endpoint_ready_is_noop() {
+        let endpoint = test_endpoint().await;
+        let engine = Arc::new(DefaultsEngine);
+        engine
+            .on_endpoint_ready(endpoint)
+            .await
+            .expect("default on_endpoint_ready must succeed");
+    }
+
+    /// `serve_with_orchestrator` runs `on_endpoint_ready` before
+    /// `register_engine_controls` and `register_engine_updates`. Drive the same
+    /// three production calls in that order and assert: (1) the handoff is
+    /// observed before the engine is asked for its controls/updates, and (2) the
+    /// advertised control lands under `control/<name>` and the advertised update
+    /// under `update/<name>` in the DRT's engine-route registry, so
+    /// `/engine/control/<name>` and `/engine/update/<name>` become routable.
+    #[tokio::test]
+    async fn handoff_precedes_registration_and_populates_namespaced_registry() {
+        let endpoint = test_endpoint().await;
+        let (engine, log) = HandoffMockEngine::new(
+            false,
+            vec!["start_profile".to_string()],
+            vec!["load_lora".to_string()],
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+
+        // Mirror serve_with_orchestrator's handoff + registration calls exactly.
+        worker
+            .engine
+            .on_endpoint_ready(endpoint.clone())
+            .await
+            .expect("handoff should succeed");
+        worker
+            .register_engine_controls(&endpoint)
+            .await
+            .expect("control registration should succeed");
+        worker
+            .register_engine_updates(&endpoint)
+            .await
+            .expect("update registration should succeed");
+
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![
+                "on_endpoint_ready",
+                "supported_controls",
+                "supported_updates"
+            ],
+            "endpoint handoff must happen before controls/updates are enumerated/registered"
+        );
+        let routes = endpoint.drt().engine_routes();
+        assert!(
+            routes.get("control/start_profile").is_some(),
+            "advertised control must be registered under control/<name>"
+        );
+        assert!(
+            routes.get("update/load_lora").is_some(),
+            "advertised update must be registered under update/<name>"
+        );
+        // Bare (unprefixed) keys must NOT be registered by the unified Worker.
+        assert!(
+            routes.get("start_profile").is_none(),
+            "control must not be registered under its bare name"
+        );
+        assert!(
+            routes.get("load_lora").is_none(),
+            "update must not be registered under its bare name"
+        );
+    }
+
+    /// A failing `on_endpoint_ready` aborts startup: the `?` in
+    /// `serve_with_orchestrator` propagates the error before
+    /// `register_engine_controls`/`register_engine_updates` run, so nothing is
+    /// registered.
+    #[tokio::test]
+    async fn failed_handoff_is_fatal_and_skips_registration() {
+        let endpoint = test_endpoint().await;
+        let (engine, log) = HandoffMockEngine::new(
+            true,
+            vec!["start_profile".to_string()],
+            vec!["load_lora".to_string()],
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+
+        let result = worker.engine.on_endpoint_ready(endpoint.clone()).await;
+        assert!(result.is_err(), "failed handoff must surface as an error");
+
+        // Production code returns here via `?`; we do NOT call
+        // register_engine_controls/register_engine_updates. Confirm nothing
+        // was registered.
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(recorded, vec!["on_endpoint_ready"]);
+        let routes = endpoint.drt().engine_routes();
+        assert!(
+            routes.get("control/start_profile").is_none(),
+            "no controls should be registered after a fatal handoff"
+        );
+        assert!(
+            routes.get("update/load_lora").is_none(),
+            "no updates should be registered after a fatal handoff"
         );
     }
 }

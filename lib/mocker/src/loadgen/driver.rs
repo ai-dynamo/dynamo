@@ -66,6 +66,8 @@ struct TurnRuntime {
     tokens: Vec<u32>,
     max_output_tokens: usize,
     delay_after_previous_ms: f64,
+    priority: i32,
+    strict_priority: u32,
     replay_hashes: Option<ReplayRequestHashes>,
 }
 
@@ -326,6 +328,8 @@ impl WorkloadDriver {
                     tokens,
                     max_output_tokens: turn.max_output_tokens,
                     delay_after_previous_ms: turn.delay_after_dependencies_ms,
+                    priority: turn.priority,
+                    strict_priority: turn.strict_priority,
                     replay_hashes,
                 }],
                 cumulative_tokens: Vec::new(),
@@ -397,6 +401,8 @@ impl WorkloadDriver {
                             tokens: turn.synthesize_tokens(trace_block_size)?,
                             max_output_tokens: turn.max_output_tokens,
                             delay_after_previous_ms: turn.delay_after_previous_ms,
+                            priority: turn.priority,
+                            strict_priority: turn.strict_priority,
                             replay_hashes,
                         })
                     })
@@ -511,6 +517,8 @@ impl WorkloadDriver {
                 uuid: Some(request_uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms,
+                priority: turn.priority,
+                strict_priority: turn.strict_priority,
             };
             session.in_flight = Some(request_uuid);
             session.next_ready_at_ms = None;
@@ -693,12 +701,14 @@ mod tests {
                             max_output_tokens: 1,
                             hash_ids: vec![1, 2],
                             delay_after_previous_ms: 0.0,
+                            ..Default::default()
                         },
                         TurnTrace {
                             input_length: 2,
                             max_output_tokens: 1,
                             hash_ids: vec![3, 4],
                             delay_after_previous_ms: 5.0,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -710,6 +720,7 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![5, 6],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -728,6 +739,7 @@ mod tests {
                 max_output_tokens: 1,
                 hash_ids: vec![7, 8],
                 delay_after_previous_ms: 0.0,
+                ..Default::default()
             }],
         });
         trace
@@ -1045,12 +1057,16 @@ mod tests {
                         max_output_tokens: 1,
                         hash_ids: vec![10, 11],
                         delay_after_previous_ms: 0.0,
+                        priority: 3,
+                        strict_priority: 4,
                     },
                     TurnTrace {
                         input_length: 3,
                         max_output_tokens: 1,
                         hash_ids: vec![12],
                         delay_after_previous_ms: 5.0,
+                        priority: -2,
+                        strict_priority: 7,
                     },
                 ],
             }],
@@ -1060,6 +1076,8 @@ mod tests {
         let first = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].request.tokens, vec![10, 10, 10, 10, 11, 11]);
+        assert_eq!(first[0].request.priority, 3);
+        assert_eq!(first[0].request.strict_priority, 4);
         driver.on_complete(first[0].request_uuid, 10.0).unwrap();
 
         let second = driver.pop_ready(15.0, usize::MAX);
@@ -1068,6 +1086,8 @@ mod tests {
             second[0].request.tokens,
             vec![10, 10, 10, 10, 11, 11, 12, 12, 12]
         );
+        assert_eq!(second[0].request.priority, -2);
+        assert_eq!(second[0].request.strict_priority, 7);
     }
 
     #[test]
@@ -1085,6 +1105,7 @@ mod tests {
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
                     prefix_reset: true,
+                    ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "r2".into(),
@@ -1096,6 +1117,7 @@ mod tests {
                     delay_after_dependencies_ms: 5.0,
                     wait_for: vec!["r1".into()],
                     prefix_reset: false,
+                    ..Default::default()
                 },
             ],
         };
@@ -1129,6 +1151,7 @@ mod tests {
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
                     prefix_reset: true,
+                    ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "r2".into(),
@@ -1140,6 +1163,7 @@ mod tests {
                     delay_after_dependencies_ms: 5.0,
                     wait_for: vec!["r1".into()],
                     prefix_reset: true,
+                    ..Default::default()
                 },
             ],
         };
@@ -1171,6 +1195,7 @@ mod tests {
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
                     prefix_reset: true,
+                    ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "b".into(),
@@ -1182,6 +1207,7 @@ mod tests {
                     delay_after_dependencies_ms: 0.0,
                     wait_for: Vec::new(),
                     prefix_reset: true,
+                    ..Default::default()
                 },
                 AgenticTurnTrace {
                     request_id: "join".into(),
@@ -1193,6 +1219,7 @@ mod tests {
                     delay_after_dependencies_ms: 2.0,
                     wait_for: vec!["a".into(), "b".into()],
                     prefix_reset: false,
+                    ..Default::default()
                 },
             ],
         };
