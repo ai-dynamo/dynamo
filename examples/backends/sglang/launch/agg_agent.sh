@@ -55,7 +55,8 @@ print_launch_banner "Launching Aggregated + Session Control" "$MODEL" "$HTTP_POR
 # Session control activates automatically when requests carry nvext.session_control
 python3 -m dynamo.frontend \
   --router-mode kv \
-  --router-reset-states &
+  --router-reset-states \
+  --enable-anthropic-api &
 
 # Worker with streaming sessions, KV events, and metrics
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \

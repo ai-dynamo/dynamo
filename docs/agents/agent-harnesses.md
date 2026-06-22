@@ -1,134 +1,112 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Use Pi-Mono with Dynamo
-subtitle: Drive a real coding agent through Dynamo with trajectory identity and tool tracing
+title: Agent Harnesses
+subtitle: Point coding-agent CLIs at a Dynamo deployment
 ---
 
-[Pi-Mono](https://github.com/badlogic/pi-mono) is an open-source coding-agent harness whose clean plugin architecture has made it a popular substrate for patterns like subagents and planner/implementer loops. The [`pi-dynamo-provider`](https://github.com/ai-dynamo/pi-dynamo-provider) extension uses that plugin surface to register Dynamo as a Pi model provider. It runs in-process, adds Dynamo [trajectory identity](trajectory-ids.md) and [`agent_hints`](agent-hints.md) to each request, and emits Pi's tool lifecycle events to Dynamo over ZMQ.
+Use this page to point common coding-agent harnesses at a running NVIDIA Dynamo frontend. Dynamo reads each harness's existing session headers and normalizes them into `trajectory_id`; see [Trajectory IDs](trajectory-ids.md) for the exact mapping.
 
-This page is one worked example of how to wire a harness up to Dynamo's tracing and hint APIs — use it as a reference, not a prescription.
+## Local Dynamo
 
-## Why run Pi through Dynamo
-
-You can already point Pi at any OpenAI-compatible endpoint — Ollama, vLLM, a hosted API, or Dynamo out of the box. Routing through Dynamo *with this extension* gives you two things you don't get from plain hosting:
-
-- **Harness-aware observability.** Pi's session and trajectory IDs flow into Dynamo's `request_end` traces, and Pi's tool spans land on the same timeline. One Perfetto view shows LLM requests, prefill/decode stages, and tool calls together.
-- **Harness-aware orchestration.** Once Dynamo knows which trajectory a request belongs to, it can act on agent hints (priority, expected output length, speculative prefill) for smarter scheduling and KV-aware routing. That same trajectory awareness is what lets backends like [SGLang](../backends/sglang/agents.md) apply priority-based radix eviction and session-scoped KV isolation.
-
-The integration works against any Dynamo backend — vLLM, SGLang, or TRT-LLM — without backend-specific glue.
-
-## What the extension does
-
-- Registers a `dynamo` provider in Pi: `pi --model dynamo/<model-id>`.
-- Discovers models from Dynamo's `/v1/models`.
-- Injects trajectory IDs as Dynamo HTTP headers on every chat-completion request.
-- Adds `x-request-id` when one is not already set.
-- Relays Pi's `tool_start` / `tool_end` / `tool_error` events to Dynamo over ZMQ so LLM and tool spans share one trace.
-
-```mermaid
-sequenceDiagram
-    participant Pi as Pi-Mono
-    participant Provider as pi-dynamo-provider
-    participant Dynamo as Dynamo frontend
-    participant Trace as Request trace sink
-
-    Pi->>Provider: streamSimple(model, context)
-    Provider->>Dynamo: POST /v1/chat/completions<br/>trajectory headers, x-request-id
-    Dynamo-->>Provider: SSE chunks
-    Dynamo->>Trace: request_end
-    Pi->>Provider: tool_execution_start / _end
-    Provider->>Dynamo: ZMQ PUSH tool record
-    Dynamo->>Trace: tool_start / tool_end
-```
-
-## Quickstart
-
-### 1. Install the provider
-
-Build from source and install it into Pi:
-
-```bash
-git clone git@github.com:ai-dynamo/pi-dynamo-provider.git
-cd pi-dynamo-provider
-npm install && npm run build
-pi install /absolute/path/to/pi-dynamo-provider
-```
-
-### 2. Launch Dynamo with tracing enabled
-
-Use the in-repo SGLang launcher (`examples/backends/sglang/launch/agg_agent.sh`), which starts a frontend with KV routing plus one SGLang worker with streaming sessions, KV events, and reasoning/tool parsers wired up. Export the request-trace env vars first so the frontend records traces to a JSONL file and binds the ZMQ socket Pi will connect to:
+For a local SGLang-backed smoke test, use the in-repo agent launcher. It starts a Dynamo frontend on port `8000` and an SGLang worker for `zai-org/GLM-4.7-Flash`.
 
 ```bash
 export DYN_REQUEST_TRACE=1
 export DYN_REQUEST_TRACE_SINKS=jsonl
 export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-request-trace.jsonl
-export DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
 
-./examples/backends/sglang/launch/agg_agent.sh
+bash examples/backends/sglang/launch/agg_agent.sh
 ```
 
-By default this serves `zai-org/GLM-4.7-Flash` on TP 2. Override with `--model-path` / `--tp` if needed. See [Agent Tracing](agent-tracing.md#enable-output) for the tracing reference. The provider works equally well against any Dynamo backend (vLLM, SGLang, TRT-LLM); the SGLang launcher is just the most batteries-included starting point.
+Set `DYN_HTTP_PORT` before launching if your deployment should listen on a different port.
 
-### 3. Point Pi at Dynamo
+## Codex
+
+Codex should use Dynamo's OpenAI-compatible Responses API. Add a local provider in `~/.codex/config.toml`:
+
+```toml
+model_max_output_tokens = 4096
+
+[model_providers.dynamo]
+name = "dynamo"
+base_url = "http://localhost:8000/v1"
+wire_api = "responses"
+env_key = "DYNAMO_API_KEY"
+```
+
+Then set one API-key env var and run Codex against the Dynamo model name:
 
 ```bash
-export DYNAMO_BASE_URL=http://127.0.0.1:8000/v1
 export DYNAMO_API_KEY=dummy
 
-export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
-
-pi --model dynamo/zai-org/GLM-4.7-Flash \
-   -p "Run the tests in this folder, fix the smallest bug, and rerun the tests."
+codex -m zai-org/GLM-4.7-Flash \
+  -c model_provider=dynamo \
+  exec "Say ok"
 ```
 
-If `DYN_AGENT_TRAJECTORY_ID` is unset, Pi's session id is used as the trajectory id.
+Dynamo maps Codex's `session-id` header to `trajectory_id`.
 
-### 4. View the trace in Perfetto
+## Claude Code
+
+Claude Code should use Dynamo's Anthropic-compatible Messages API. The local launcher above starts `dynamo.frontend` with `--enable-anthropic-api`; for other deployments, pass that flag when starting the frontend. Then set:
 
 ```bash
-python benchmarks/request_trace/convert_to_perfetto.py \
-  /tmp/dynamo-request-trace.jsonl \
-  --include-markers \
-  --output /tmp/dynamo-request-trace.perfetto.json
+export ANTHROPIC_BASE_URL=http://localhost:8000
+export ANTHROPIC_AUTH_TOKEN=dummy
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS=4096
+
+claude --model zai-org/GLM-4.7-Flash -p "Say ok"
 ```
 
-Open the result at [ui.perfetto.dev](https://ui.perfetto.dev). You'll see:
+For longer Claude Code sessions, also set `DYN_STRIP_ANTHROPIC_PREAMBLE=1` on the Dynamo frontend to remove Claude Code's billing preamble from the prompt before routing. Dynamo maps `x-claude-code-session-id` to `trajectory_id`; child-agent requests that include `x-claude-code-agent-id` use that header as the child trajectory and the session ID as the parent.
 
-- `dynamo.llm` spans for each LLM request.
-- `dynamo.llm.stage` spans for prefill/decode when Dynamo records them.
-- `dynamo.agent.tool` spans for every Pi tool invocation.
+## OpenCode
 
-<details>
-<summary>Pi environment variables</summary>
+OpenCode uses a project-local JSONC provider config; setting an endpoint env var alone is not enough. Create `.opencode/opencode.jsonc` in the project you run OpenCode from:
 
-| Variable                             | Default                    | Purpose                                                              |
-| ------------------------------------ | -------------------------- | -------------------------------------------------------------------- |
-| `DYNAMO_BASE_URL`                    | `http://127.0.0.1:8000/v1` | Dynamo OpenAI-compatible endpoint root.                              |
-| `DYNAMO_API_KEY`                     | `dynamo-local`             | Bearer token. Local Dynamo usually accepts any value.                |
-| `DYN_REQUEST_TRACE`                  | unset                      | Provider-side switch for session-header trajectory tracing and optional tool relay. |
-| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset              | Dynamo-bound ZMQ PULL endpoint Pi connects to for tool events.       |
-| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    | `agent-tool-events` | First ZMQ frame; must match Dynamo when set.                         |
-| `DYN_AGENT_TRAJECTORY_ID`            | unset                      | Trajectory id override; defaults to Pi's session id per request.     |
-| `DYN_AGENT_PARENT_TRAJECTORY_ID`     | unset                      | Parent trajectory id for nested or subagent workflows.               |
+```jsonc
+{
+  "provider": {
+    "dynamo": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Dynamo",
+      "env": ["DYNAMO_API_KEY"],
+      "models": {
+        "zai-org/GLM-4.7-Flash": {
+          "id": "zai-org/GLM-4.7-Flash",
+          "name": "GLM 4.7 Flash",
+          "limit": { "context": 131072, "output": 8192 },
+          "cost": { "input": 0, "output": 0 }
+        }
+      },
+      "options": {
+        "baseURL": "http://localhost:8000/v1"
+      }
+    }
+  },
+  "permission": {
+    "task": "allow"
+  }
+}
+```
 
-See the [provider README](https://github.com/ai-dynamo/pi-dynamo-provider) for the full variable list, aliases, and ZMQ wire format.
+Run OpenCode with the provider/model pair:
 
-</details>
+```bash
+export DYNAMO_API_KEY=dummy
 
-## Troubleshooting
+opencode run -m dynamo/zai-org/GLM-4.7-Flash "Say ok"
+```
 
-| Symptom                                   | Likely cause                                            | Fix                                                                                       |
-| ----------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `pi` reports the model is unknown         | `/v1/models` returned empty during Pi startup           | `curl -s "$DYNAMO_BASE_URL/models"` to confirm; restart Pi after Dynamo is ready.         |
-| LLM spans appear, tool spans do not       | Tool-event endpoint not configured on both sides        | Set `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` on Dynamo and Pi to the same value. |
-| Tool spans appear, request spans do not   | Dynamo trace sinks not enabled                          | Set `DYN_REQUEST_TRACE=1`, `DYN_REQUEST_TRACE_SINKS=jsonl`, and `DYN_REQUEST_TRACE_OUTPUT_PATH` on Dynamo. |
-| Authentication fails                      | Dynamo expects a specific token                         | Set `DYNAMO_API_KEY` to match your deployment. Local Dynamo usually accepts `dummy`.      |
+Dynamo maps OpenCode's `x-session-id` header to `trajectory_id` and `x-parent-session-id` to `parent_trajectory_id`.
 
-## Further reading
+## Hermes Agent
 
-- [pi-dynamo-provider repo](https://github.com/ai-dynamo/pi-dynamo-provider) — install, scripts, and source.
-- [Trajectory IDs](trajectory-ids.md) — trajectory identity and supported coding-agent headers.
-- [Agent Tracing](agent-tracing.md) — request traces, tool spans, Perfetto, and replay.
-- [Agent Hints](agent-hints.md) — per-request hints (`priority`, `osl`, `speculative_prefill`) Pi-Mono can forward via `nvext.agent_hints`.
+This section is intentionally left blank while the Hermes-specific setup settles.
+
+## See Also
+
+- [Trajectory IDs](trajectory-ids.md)
+- [Agent Tracing](agent-tracing.md)
+- [SGLang for Agentic Workloads](../backends/sglang/agents.md)

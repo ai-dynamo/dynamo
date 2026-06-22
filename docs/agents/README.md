@@ -19,7 +19,7 @@ The common identity concept is `trajectory_id`: one stable ID for one agent reas
 
 | Concept | Purpose |
 |---------|---------|
-| [Use Coding Agents with Dynamo](coding-agents.md) | Quickstart for running popular agent harnesses through Dynamo |
+| [Agent Harnesses](agent-harnesses.md) | Quickstart for running popular agent harnesses through Dynamo. |
 | [Trajectory IDs](trajectory-ids.md) | Stable agent identity for scheduling, tracing, and more |
 | [Agent Tracing](agent-tracing.md) | Request traces, inferred tool calls, optional harness tool spans, Perfetto conversion, and replay. |
 | [Agent Hints](agent-hints.md) | Per-request hints such as priority, expected output length, and speculative prefill. |
