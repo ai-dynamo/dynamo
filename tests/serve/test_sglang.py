@@ -52,6 +52,34 @@ from tests.utils.payloads import (
 logger = logging.getLogger(__name__)
 
 
+def _dump_worker_log_dir(config_name: str) -> None:
+    """Dump the worker subprocess log dir into pytest's stream.
+
+    The test framework writes worker stdout/stderr to
+    ``/tmp/dynamo_tests/<config_name>/`` but those files aren't otherwise
+    uploaded as CI artifacts. On failure we surface them inline so post-mortem
+    doesn't require a separate artifact-upload step.
+    """
+    from tests.utils.test_output import resolve_test_output_path
+
+    log_dir = resolve_test_output_path(config_name)
+    logger.error("=== Worker log_dir=%s ===", log_dir)
+    if not os.path.isdir(log_dir):
+        logger.error("(log_dir does not exist)")
+        return
+    for fname in sorted(os.listdir(log_dir)):
+        fpath = os.path.join(log_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            with open(fpath, errors="replace") as fh:
+                body = fh.read()
+        except Exception as e:
+            logger.error("(failed to read %s: %s)", fpath, e)
+            continue
+        logger.error("--- %s (%d bytes) ---\n%s", fname, len(body), body)
+
+
 def _is_cuda13() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
     return v.startswith("13")
@@ -1050,9 +1078,13 @@ def test_sglang_aggregated_s3_model_path(
     config = dataclasses.replace(
         config, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_serve_deployment(
-        config,
-        request,
-        ports=dynamo_dynamic_ports,
-        extra_env=minio_config.get_env_vars(),
-    )
+    try:
+        run_serve_deployment(
+            config,
+            request,
+            ports=dynamo_dynamic_ports,
+            extra_env=minio_config.get_env_vars(),
+        )
+    except Exception:
+        _dump_worker_log_dir(config.name)
+        raise
