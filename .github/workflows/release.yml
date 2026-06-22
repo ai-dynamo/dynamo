@@ -346,6 +346,80 @@ jobs:
           echo "${NGC_TOKEN}" | docker login nvcr.io -u "${NGC_USERNAME}" --password-stdin
           echo "${NGC_TOKEN}" | crane auth login nvcr.io -u "${NGC_USERNAME}" --password-stdin
 
+      - name: Inventory selected container images in ECR
+        run: |
+          set -uo pipefail
+          # Report-only inventory of which selected container images are in ECR. Never fails.
+          # Mirrors the copy step's subset gating, nightly rules, and source tags.
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+          NIGHTLY_TAG_SUFFIX=""
+          [ "${NIGHTLY}" = "true" ] && NIGHTLY_TAG_SUFFIX="-nightly"
+
+          SUBSET="all"
+          [ "${ON_DEMAND}" = "true" ] && SUBSET="${CONTAINER_SUBSET:-all}"
+          want() {
+            [ "${SUBSET}" = "all" ] && return 0
+            case ",${SUBSET}," in *,"$1",*) return 0 ;; esac
+            return 1
+          }
+
+          # token|ECR source tag — must match the "Copy images to NGC" sources.
+          ENTRIES=(
+            "vllm-runtime|${COMMIT_SHA}-vllm-runtime${NIGHTLY_TAG_SUFFIX}"
+            "sglang-runtime|${COMMIT_SHA}-sglang-runtime${NIGHTLY_TAG_SUFFIX}"
+            "trtllm-runtime|${COMMIT_SHA}-trtllm-runtime${NIGHTLY_TAG_SUFFIX}"
+          )
+          if [ "${NIGHTLY}" != "true" ]; then
+            ENTRIES+=(
+              "vllm-efa|${COMMIT_SHA}-vllm-runtime-efa"
+              "sglang-efa|${COMMIT_SHA}-sglang-runtime-efa"
+              "trtllm-efa|${COMMIT_SHA}-trtllm-runtime-efa"
+              "frontend|${COMMIT_SHA}-frontend"
+              "operator|${COMMIT_SHA}-operator"
+              "planner|${COMMIT_SHA}-dynamo-planner"
+              "snapshot|${COMMIT_SHA}-snapshot-agent"
+            )
+          fi
+
+          {
+            echo "### Container image availability (ECR)"
+            echo ""
+            echo "Selection: \`${SUBSET}\`"
+            echo ""
+            echo "| Token | ECR tag | Status |"
+            echo "|-------|---------|--------|"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          avail=0; missing=0; selected=0
+          echo "=== Container image availability (selection: ${SUBSET}) ==="
+          for E in "${ENTRIES[@]}"; do
+            IFS='|' read -r TOKEN TAG <<<"${E}"
+            want "${TOKEN}" || continue
+            selected=$((selected+1))
+            REF="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${TAG}"
+            if crane manifest "${REF}" >/dev/null 2>&1; then
+              echo "  available: ${TOKEN} (${TAG})"
+              echo "| ${TOKEN} | \`${TAG}\` | available |" >> "${GITHUB_STEP_SUMMARY}"
+              avail=$((avail+1))
+            else
+              echo "  MISSING:   ${TOKEN} (${TAG})"
+              echo "| ${TOKEN} | \`${TAG}\` | **missing** |" >> "${GITHUB_STEP_SUMMARY}"
+              missing=$((missing+1))
+            fi
+          done
+
+          if [ "${selected}" -eq 0 ]; then
+            echo "No container images selected (subset='${SUBSET}')."
+            echo "_No container images selected._" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          echo "Summary: ${avail} available, ${missing} missing (of ${selected} selected)."
+          {
+            echo ""
+            echo "**${avail} available, ${missing} missing** (of ${selected} selected)."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Copy images to NGC
         id: copy_images
         env:
@@ -794,6 +868,62 @@ jobs:
 
           echo "upload_dir=${OUT}" >> $GITHUB_OUTPUT
 
+      - name: Inventory selected wheels
+        env:
+          UPLOAD_DIR: ${{ steps.extract.outputs.upload_dir }}
+        run: |
+          set -uo pipefail
+          # Report-only inventory of which selected wheels were extracted. Never fails
+          # (kvbm is built conditionally, so 'all' may legitimately omit it).
+          WSUB="all"
+          [ "${ON_DEMAND}" = "true" ] && WSUB="${WHEEL_SUBSET:-all}"
+          want_wheel() {
+            [ "${WSUB}" = "all" ] && return 0
+            case ",${WSUB}," in *,"$1",*) return 0 ;; esac
+            return 1
+          }
+          # token|filename glob (relative to the upload dir)
+          ENTRIES=(
+            "ai-dynamo|ai_dynamo-*-py3-none-any.whl"
+            "ai-dynamo-runtime|ai_dynamo_runtime-*.whl"
+            "kvbm|kvbm-*.whl"
+          )
+
+          {
+            echo "### Wheel availability"
+            echo ""
+            echo "Selection: \`${WSUB}\`"
+            echo ""
+            echo "| Token | Wheels found | Status |"
+            echo "|-------|--------------|--------|"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          shopt -s nullglob
+          avail=0; missing=0; selected=0
+          echo "=== Wheel availability (selection: ${WSUB}) ==="
+          for E in "${ENTRIES[@]}"; do
+            IFS='|' read -r TOKEN GLOB <<<"${E}"
+            want_wheel "${TOKEN}" || continue
+            selected=$((selected+1))
+            FILES=( "${UPLOAD_DIR}"/${GLOB} )
+            if [ "${#FILES[@]}" -gt 0 ]; then
+              echo "  available: ${TOKEN} -> ${FILES[*]##*/}"
+              echo "| ${TOKEN} | ${#FILES[@]} | available |" >> "${GITHUB_STEP_SUMMARY}"
+              avail=$((avail+1))
+            else
+              echo "  MISSING:   ${TOKEN} (no ${GLOB})"
+              echo "| ${TOKEN} | 0 | **missing** |" >> "${GITHUB_STEP_SUMMARY}"
+              missing=$((missing+1))
+            fi
+          done
+          shopt -u nullglob
+
+          echo "Summary: ${avail} available, ${missing} missing (of ${selected} selected)."
+          {
+            echo ""
+            echo "**${avail} available, ${missing} missing** (of ${selected} selected)."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Verify wheel versions match prepare-release expected tag
         env:
           EXPECTED_WHEEL_VERSION: ${{ needs.prepare-release.outputs.wheel_version }}
@@ -903,29 +1033,21 @@ jobs:
             rm -f "${BODY_FILE}"
           done
 
-  # ============================================================================
-  # ARTIFACTORY STAGING: publish the publishable workspace crates to the
-  # Artifactory cargo registry (location from the ARTIFACTORY_CARGO_INDEX secret)
-  # via `cargo publish`, dependency-ordered. Runs inside the dynamo build image
-  # (cargo + native deps for the per-crate `cargo check`). On-demand releases only.
-  # ============================================================================
+  # ARTIFACTORY STAGING: publish workspace crates to the Artifactory cargo registry
+  # (from ARTIFACTORY_CARGO_INDEX), dependency-ordered. Artifactory only, never crates.io.
+  # cargo needs the native toolchain, so we `docker run` the ECR build image on
+  # prod-builder-amd-v1 (the DinD builder release-publish uses) instead of a job-level
+  # `container:` on a k8s-hooks tester (its per-job pod stayed Pending). On-demand only.
 
   stage-crates-artifactory:
     name: Stage Crates to Artifactory
     needs: [prepare-release]
     if: ${{ needs.prepare-release.result == 'success' && needs.prepare-release.outputs.on_demand == 'true' && inputs.crates != 'none' && inputs.crates != '' }}
-    runs-on: prod-tester-amd-v2
+    runs-on: prod-builder-amd-v1
     environment: automated-release
-    container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ needs.prepare-release.outputs.commit_sha }}-dynamo-runtime-test
-      env:
-        HOME: /__w/dynamo/dynamo
-        USER: dynamo
     env:
-      RUSTFLAGS: --cfg tokio_unstable
-      # The image bakes CARGO_TARGET_DIR=/opt/dynamo/target (uid 1000, not writable
-      # by the runner uid); redirect to a writable path.
-      CARGO_TARGET_DIR: /tmp/cargo-target
+      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - name: Checkout at source commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -944,7 +1066,37 @@ jobs:
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
 
-      - name: Publish crates to Artifactory cargo registry
+      - name: Login to ECR
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          echo "ECR_IMAGE=${ECR_HOSTNAME}/ai-dynamo/dynamo:${COMMIT_SHA}-dynamo-runtime-test" >> "${GITHUB_ENV}"
+
+      - name: Inventory crate build image in ECR
+        env:
+          CRATE_SUBSET: ${{ inputs.crates }}
+        run: |
+          set -uo pipefail
+          # Report-only: is the crate build image in ECR? Never fails (publish step errors if absent).
+          TAG="${COMMIT_SHA}-dynamo-runtime-test"
+          {
+            echo "### Crate build image availability (ECR)"
+            echo ""
+            echo "Crate selection: \`${CRATE_SUBSET:-all}\`"
+            echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if aws ecr describe-images --repository-name "ai-dynamo/dynamo" \
+               --image-ids imageTag="${TAG}" --region "${AWS_DEFAULT_REGION}" >/dev/null 2>&1; then
+            echo "available: build image ai-dynamo/dynamo:${TAG}"
+            echo "- available: \`ai-dynamo/dynamo:${TAG}\`" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "MISSING: build image ai-dynamo/dynamo:${TAG}"
+            echo "- **missing**: \`ai-dynamo/dynamo:${TAG}\` (crate publish will fail to pull)" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Publish crates to Artifactory cargo registry (inside build image)
         env:
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_CARGO_INDEX: ${{ secrets.ARTIFACTORY_CARGO_INDEX }}
@@ -952,7 +1104,21 @@ jobs:
           CRATE_SUBSET: ${{ inputs.crates }}
         run: |
           set -euo pipefail
-          python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory --only "${CRATE_SUBSET}"
+          # Run stage_crates.py inside the ECR build image: repo mounted at /work, cargo uses
+          # the image toolchain, root so it can write Cargo.lock/.cargo and the target dir.
+          docker run --rm --user 0:0 \
+            --network host \
+            --ulimit nofile=65536:65536 \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            -e HOME=/tmp \
+            -e RUSTFLAGS="--cfg tokio_unstable" \
+            -e CARGO_TARGET_DIR=/tmp/cargo-target \
+            -e ARTIFACTORY_TOKEN \
+            -e ARTIFACTORY_CARGO_INDEX \
+            -e EXPECT_VERSION \
+            -e CRATE_SUBSET \
+            "${ECR_IMAGE}" \
+            bash -lc 'python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory --only "${CRATE_SUBSET}"'
 
   # Combined NGC + Artifactory staging reply on the nightly thread.
   notify-slack-staging:

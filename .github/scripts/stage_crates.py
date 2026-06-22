@@ -158,6 +158,13 @@ def main() -> int:
                          "empty/'all' = every publishable crate")
     args = ap.parse_args()
 
+    # ARTIFACTORY ONLY — never crates.io. Refuse a crates.io alias outright; every
+    # `cargo publish` below passes --registry <this alias> and write_cargo_config
+    # sets it as the default registry, so crates.io is never a publish target.
+    if args.registry in ("crates-io", "crates.io", "crates_io"):
+        print("::error::refusing to publish to crates.io; this stages to Artifactory only", file=sys.stderr)
+        return 1
+
     # Reuse the wheel-upload token; keep the registry location out of the workflow
     # via the ARTIFACTORY_CARGO_INDEX secret.
     token = os.environ.get("ARTIFACTORY_TOKEN", "")
