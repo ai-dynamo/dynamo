@@ -27,7 +27,7 @@ binary serves both.
 
 LIMITATIONS:
 
-Concern | Gap vs the Dynamo/NATS path
+Concern | Gap vs the Full Dynamo Stack
 -- | --
 Duplicate store/remove (vLLM "retries") | parity
 In-stream ordering |  parity
