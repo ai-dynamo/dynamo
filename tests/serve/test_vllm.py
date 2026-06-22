@@ -49,42 +49,47 @@ from tests.utils.payloads import (
 logger = logging.getLogger(__name__)
 
 
-def _dump_worker_log_dir(config_name: str) -> None:
-    """Dump the worker subprocess log dir to stderr so it shows in CI.
+def _collect_worker_log_dir(config_name: str) -> str:
+    """Collect the worker subprocess log dir contents as a string.
 
-    Print direct to sys.stderr (with flush) — bypasses pytest's log capture,
-    which under xdist + the custom parallel runner doesn't reliably surface
-    captured logs in CI output. Uses broad try/except so a helper bug never
-    swallows the original test exception.
+    Returned text is appended to the test failure's exception message — pytest
+    always shows the exception message in the traceback, so this is the most
+    reliable surface for surfacing worker logs in CI output (more reliable
+    than logger.error or print-to-stderr, which xdist + the custom parallel
+    runner may suppress on failure).
     """
-    import sys
-
     try:
         from tests.utils.test_output import resolve_test_output_path
 
         log_dir = resolve_test_output_path(config_name)
-        marker = "=" * 12
-        print(
-            f"\n{marker} WORKER LOG DUMP: {log_dir} {marker}",
-            file=sys.stderr,
-            flush=True,
-        )
+        out = [f"\n=== WORKER LOG DUMP: {log_dir} ==="]
         if not os.path.isdir(log_dir):
-            print(f"(log_dir does not exist: {log_dir})", file=sys.stderr, flush=True)
-            return
+            out.append(f"(log_dir does not exist: {log_dir})")
+            return "\n".join(out)
         for fname in sorted(os.listdir(log_dir)):
             fpath = os.path.join(log_dir, fname)
             if not os.path.isfile(fpath):
                 continue
-            print(f"\n--- {fname} ---", file=sys.stderr, flush=True)
+            out.append(f"\n--- {fname} ---")
             try:
                 with open(fpath, errors="replace") as fh:
-                    print(fh.read(), file=sys.stderr, flush=True)
+                    body = fh.read()
+                # Cap individual files at 64 KB so an enormous worker log
+                # doesn't blow up pytest's error display.
+                out.append(
+                    body if len(body) <= 65536 else body[-65536:] + "\n[truncated]"
+                )
             except Exception as e:
-                print(f"(failed to read {fpath}: {e})", file=sys.stderr, flush=True)
-        print(f"{marker} END WORKER LOG DUMP {marker}\n", file=sys.stderr, flush=True)
+                out.append(f"(failed to read {fpath}: {e})")
+        out.append("=== END WORKER LOG DUMP ===")
+        return "\n".join(out)
     except Exception as e:
-        print(f"_dump_worker_log_dir failed: {e!r}", file=sys.stderr, flush=True)
+        return f"\n(_collect_worker_log_dir failed: {e!r})"
+
+
+def _dump_worker_log_dir(config_name: str) -> None:
+    """Backwards-compatible no-op; the new pattern is to use
+    _collect_worker_log_dir and append to the exception message."""
 
 
 def _is_cuda12() -> bool:
@@ -1296,6 +1301,10 @@ def test_vllm_aggregated_s3_model(
             ports=dynamo_dynamic_ports,
             extra_env=minio_config.get_env_vars(),
         )
-    except Exception:
-        _dump_worker_log_dir(config.name)
-        raise
+    except Exception as exc:
+        # Append worker subprocess log to the exception message so it shows
+        # in pytest's traceback in CI. logger.error and print-to-stderr both
+        # got swallowed by the xdist parallel runner; the exception message
+        # is the most reliable surface.
+        worker_log = _collect_worker_log_dir(config.name)
+        raise type(exc)(f"{exc}{worker_log}") from exc
