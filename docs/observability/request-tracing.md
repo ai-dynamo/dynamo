@@ -121,17 +121,14 @@ Agent-enriched row:
 }
 ```
 
-Optional harness tool events use the same request trace schema:
+Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to sinks.
 
 ```json
 {
   "schema": "dynamo.request.trace.v1",
   "event_type": "tool_end",
   "event_time_unix_ms": 1777312801500,
-  "event_source": "harness",
-  "agent_context": {
-    "trajectory_id": "research-run-42:researcher"
-  },
+  "trajectory_id": "research-run-42:researcher",
   "tool": {
     "tool_call_id": "call-abc",
     "tool_class": "web_search",

@@ -98,9 +98,11 @@ tool_wait(turn N) ~= next.request_received_ms - this.event_time_unix_ms
 <details>
 <summary>Optional explicit tool events over ZMQ</summary>
 
-For precise tool call timing information, you can have your agent harness send tool call events with the relevant `trajectory_id` attached. This allows Dynamo to get an understanding of exactly how long each tool call took. You can set `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` to bind the ingress, then have the harness publish tool events. Use this when you need per-tool attribution: `duration_ms`, `status`, output size, or error type. 
+For precise tool call timing information, you can have your agent harness send tool call events with the relevant `trajectory_id` attached. Set `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` to bind the ingress, then have the harness publish tool events. Use this when you need per-tool attribution: `duration_ms`, `status`, output size, or error type.
 
-Wire format is `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`; the default topic is `agent-tool-events`. Use a background publisher, bounded queue, monotonic sequence, and PUSH with HWM. Terminal `tool_end` and `tool_error` rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`) even if `tool_start` was dropped. Use the same trajectory identity as the surrounding LLM calls. `tool_call_id` should be unique per trajectory. You can do offline analysis by joining on `trajectory_id` and `tool_call_id`.
+Wire format is `[topic, seq_be_u64, msgpack(RequestTraceToolEventIngress)]`; the default topic is `agent-tool-events`. Use a background publisher, bounded queue, monotonic sequence, and PUSH with HWM. Terminal `tool_end` and `tool_error` rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`) even if `tool_start` was dropped.
+
+Use the same trajectory identity as the surrounding LLM calls. Dynamo converts `trajectory_id` and `parent_trajectory_id` into the internal request trace context. `tool_call_id` should be unique per trajectory. Join offline on `trajectory_id` and `tool_call_id`.
 
 Example `tool_end`:
 
@@ -109,10 +111,7 @@ Example `tool_end`:
   "schema": "dynamo.request.trace.v1",
   "event_type": "tool_end",
   "event_time_unix_ms": 1777312801500,
-  "event_source": "harness",
-  "agent_context": {
-    "trajectory_id": "research-run-42:researcher"
-  },
+  "trajectory_id": "research-run-42:researcher",
   "tool": {
     "tool_call_id": "call-abc",
     "tool_class": "web_search",
@@ -124,7 +123,7 @@ Example `tool_end`:
 }
 ```
 
-Optional `tool` keys: `output_tokens`, `output_bytes`, `tool_name_hash`, `error_type`. Status values: `running`, `succeeded`, `error`, `cancelled`; synonyms `ok`/`success`, `failed`, `timeout`, and `canceled` also deserialize.
+Optional top-level key: `parent_trajectory_id`. Optional `tool` keys: `output_tokens`, `output_bytes`, `tool_name_hash`, `error_type`. Status values: `running`, `succeeded`, `error`, `cancelled`; synonyms `ok`/`success`, `failed`, `timeout`, and `canceled` also deserialize.
 
 </details>
 
