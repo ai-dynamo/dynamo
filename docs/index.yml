@@ -70,7 +70,7 @@ navigation:
             path: benchmarks/qwen3-32b-kv-routing.mdx
             slug: qwen3-32b-kv-routing
             hidden: true
-          - page: Kimi-K2.5 Feature Stack
+          - page: Agentic Coding Throughput Stack - Kimi-K2.5
             path: benchmarks/kimi-k2-5-feature-stack.mdx
             slug: kimi-k2-5-feature-stack
             hidden: true
