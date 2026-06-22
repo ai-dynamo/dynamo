@@ -173,4 +173,4 @@ Open the output in [Perfetto UI](https://ui.perfetto.dev/). Useful flags include
 
 Request slices include flattened finish metadata when present, such as `finish.finish_reason`, `finish.backend_finish_reason`, `finish.stop_reason`, `finish.tool_call_count`, `finish.tool_call_names`, and per-choice summaries like `finish.choice_finish_reasons`.
 
-For replay and simulation, see [Agent Simulation](agent-simulation.md).
+To replay collected traces using the dynamo mock inference engines, see [Agent Simulation](agent-simulation.md).
