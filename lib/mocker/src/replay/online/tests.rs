@@ -55,6 +55,7 @@ fn request(uuid: u128, token: u32, arrival_timestamp_ms: Option<f64>) -> DirectR
         uuid: Some(Uuid::from_u128(uuid)),
         dp_rank: 0,
         arrival_timestamp_ms,
+        ..Default::default()
     }
 }
 
@@ -81,6 +82,7 @@ fn reject_request(uuid: u128, prompt_tokens: u32, max_output: usize) -> DirectRe
         uuid: Some(Uuid::from_u128(uuid)),
         dp_rank: 0,
         arrival_timestamp_ms: None,
+        ..Default::default()
     }
 }
 
@@ -112,12 +114,14 @@ fn multiturn_trace() -> Trace {
                         max_output_tokens: 2,
                         hash_ids: vec![11, 12, 13, 14],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 6,
                         max_output_tokens: 2,
                         hash_ids: vec![21, 22, 23, 24, 25, 26],
                         delay_after_previous_ms: 5.0,
+                        ..Default::default()
                     },
                 ],
             },
@@ -129,6 +133,7 @@ fn multiturn_trace() -> Trace {
                     max_output_tokens: 2,
                     hash_ids: vec![31, 32, 33, 34, 35],
                     delay_after_previous_ms: 0.0,
+                    ..Default::default()
                 }],
             },
         ],
@@ -327,12 +332,14 @@ async fn test_workload_wakeup_is_not_lost_when_completion_happens_before_await()
                     max_output_tokens: 1,
                     hash_ids: vec![1, 2, 3, 4],
                     delay_after_previous_ms: 0.0,
+                    ..Default::default()
                 },
                 TurnTrace {
                     input_length: 4,
                     max_output_tokens: 1,
                     hash_ids: vec![5, 6, 7, 8],
                     delay_after_previous_ms: 5.0,
+                    ..Default::default()
                 },
             ],
         }],
@@ -568,6 +575,7 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
         uuid: Some(Uuid::from_u128(9)),
         dp_rank: 0,
         arrival_timestamp_ms: Some(0.0),
+        ..Default::default()
     }];
 
     let (_, stats) =

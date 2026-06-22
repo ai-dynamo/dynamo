@@ -9,29 +9,29 @@ use either::Either;
 use minijinja::{Environment, Value, context};
 use serde_json::json;
 
+/// Renders the `default` template with the given `messages` and
+/// `add_generation_prompt=false`, returning the output (empty string on any
+/// error). Shared probe used by the load-time template-capability detectors
+/// (`detect_content_array_usage`, `detect_passthrough_template`).
+fn render_default_probe(env: &Environment, messages: serde_json::Value) -> String {
+    let ctx = context! {
+        messages => messages,
+        add_generation_prompt => false,
+    };
+    env.get_template("default")
+        .and_then(|t| t.render(&ctx))
+        .unwrap_or_default()
+}
+
 /// Detects if a template requires content as arrays (multimodal) vs strings (text-only).
 /// Returns true if the template only works with array format.
 fn detect_content_array_usage(env: &Environment) -> bool {
-    // Test with array format
-    let array_msg = context! {
-        messages => json!([{"role": "user", "content": [{"type": "text", "text": "template_test"}]}]),
-        add_generation_prompt => false,
-    };
-
-    // Test with string format
-    let string_msg = context! {
-        messages => json!([{"role": "user", "content": "template_test"}]),
-        add_generation_prompt => false,
-    };
-
-    let out_array = env
-        .get_template("default")
-        .and_then(|t| t.render(&array_msg))
-        .unwrap_or_default();
-    let out_string = env
-        .get_template("default")
-        .and_then(|t| t.render(&string_msg))
-        .unwrap_or_default();
+    let out_array = render_default_probe(
+        env,
+        json!([{"role": "user", "content": [{"type": "text", "text": "template_test"}]}]),
+    );
+    let out_string =
+        render_default_probe(env, json!([{"role": "user", "content": "template_test"}]));
 
     // If array works but string doesn't, template requires arrays
     out_array.contains("template_test") && !out_string.contains("template_test")
@@ -66,7 +66,55 @@ fn detect_image_placeholder_template(env: &Environment) -> Option<&'static str> 
     if src.contains("USER:") && src.contains("ASSISTANT:") {
         return Some("<image>");
     }
+    // Pure pass-through templates (e.g. NVIDIA-Nemotron-Parse's
+    // `{% for message in messages %}{{ message['content'] }}{% endfor %}`)
+    // emit `message.content` verbatim with no role markers or special tokens.
+    // These are typically encoder-decoder document models where the image is
+    // consumed by the vision encoder out-of-band and contributes NO token to
+    // the decoder prompt (the prompt is just the control tokens, e.g.
+    // `</s><s><predict_bbox>...`). A mixed text+image content array would
+    // otherwise be JSON-serialized into the prompt by `{{ message.content }}`,
+    // producing garbage. The empty placeholder makes the flatten path drop the
+    // image part from the text while preserving the text parts — exactly what
+    // these models expect.
+    if detect_passthrough_template(env) {
+        return Some("");
+    }
     None
+}
+
+/// Detects a pure pass-through chat template: one that emits `message.content`
+/// verbatim with no role markers, BOS/EOS, or other decoration, AND does not
+/// render content arrays natively. Callers use this to pick an empty image
+/// placeholder (drop images from the rendered text; the vision encoder consumes
+/// them out-of-band — see Nemotron-Parse).
+///
+/// Two probes against the `default` template (`add_generation_prompt=false`,
+/// mirroring `detect_content_array_usage`), both with a control-char sentinel
+/// that cannot collide with literal template text:
+///  1. string content must round-trip verbatim (the pass-through property), and
+///  2. a mixed text+image array must NOT be rendered natively. A pure
+///     pass-through stringifies `{{ content }}` on the array (retaining the
+///     serialized dict structure); a template with a native array branch emits
+///     the text value plus its own image marker. The latter handles images
+///     itself, so it must keep the array (return `false` here) rather than get
+///     the empty placeholder that would drop the image before its branch runs.
+fn detect_passthrough_template(env: &Environment) -> bool {
+    const PROBE: &str = "\u{1}dynamo_passthrough_probe\u{1}";
+    // (1) String content must pass through verbatim. `.trim()` tolerates a
+    // trailing newline some pass-through templates emit.
+    let out_string = render_default_probe(env, json!([{"role": "user", "content": PROBE}]));
+    if out_string.trim() != PROBE {
+        return false;
+    }
+    // (2) A mixed text+image array must not be rendered natively: a pure
+    // pass-through stringifies it (output keeps the `[ ... "type" ...` structure),
+    // whereas a native array branch emits the text value + its own image marker.
+    let out_mixed = render_default_probe(
+        env,
+        json!([{"role": "user", "content": [{"type": "text", "text": PROBE}, {"type": "image"}]}]),
+    );
+    out_mixed.contains('[') && out_mixed.contains("type")
 }
 
 /// Remove known non-standard Jinja2 tags from chat templates
@@ -386,6 +434,14 @@ impl HfTokenizerConfigJsonFormatter {
 mod tests {
     use super::*;
 
+    /// Builds the same `default`-template env the production renderer uses
+    /// (`JinjaEnvironment::default()`), with `src` registered as `default`.
+    fn env_with_default(src: &str) -> Environment<'static> {
+        let mut env = JinjaEnvironment::default().env();
+        env.add_template_owned("default", src.to_string()).unwrap();
+        env
+    }
+
     #[test]
     fn test_remove_known_non_jinja2_tags() {
         let template =
@@ -406,6 +462,68 @@ mod tests {
         let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
         let result = remove_known_non_jinja2_tags(template);
         assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+
+    /// NVIDIA-Nemotron-Parse ships a pure pass-through chat template
+    /// (`{% for message in messages %}{{ message['content'] }}{% endfor %}`).
+    /// It must be detected as: (a) not requiring content arrays, and
+    /// (b) using an empty image placeholder, so a mixed text+image request
+    /// flattens to the text-only control-token prompt instead of being
+    /// JSON-serialized into the prompt.
+    #[test]
+    fn test_detect_nemotron_parse_passthrough_template() {
+        let env =
+            env_with_default("{% for message in messages %}{{ message['content'] }}{% endfor %}");
+
+        assert!(
+            detect_passthrough_template(&env),
+            "pure pass-through template should be detected"
+        );
+        assert!(
+            !detect_content_array_usage(&env),
+            "pass-through template renders string content fine, so does not require arrays"
+        );
+        assert_eq!(
+            detect_image_placeholder_template(&env),
+            Some(""),
+            "pass-through template should flatten images to an empty placeholder"
+        );
+    }
+
+    /// A decorated template (role markers / special tokens added around
+    /// content) is NOT a pass-through and must not get the empty placeholder.
+    #[test]
+    fn test_decorated_template_is_not_passthrough() {
+        let env = env_with_default(
+            "{% for message in messages %}<|{{ message['role'] }}|>{{ message['content'] }}<|end|>{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}",
+        );
+
+        assert!(
+            !detect_passthrough_template(&env),
+            "template that wraps content in role markers is not pass-through"
+        );
+    }
+
+    /// A template that passes *string* content through verbatim but also has a
+    /// native *array* branch emitting an image marker must NOT be treated as
+    /// pass-through: its array branch renders images itself, so flattening to an
+    /// empty placeholder would drop the image before that branch runs. The
+    /// mixed-array probe distinguishes it from a pure pass-through.
+    #[test]
+    fn test_string_passthrough_with_native_array_branch_is_not_passthrough() {
+        let env = env_with_default(
+            "{% for message in messages %}{% if message['content'] is string %}{{ message['content'] }}{% else %}{% for part in message['content'] %}{% if part['type'] == 'image' %}<image>{% else %}{{ part['text'] }}{% endif %}{% endfor %}{% endif %}{% endfor %}",
+        );
+
+        assert!(
+            !detect_passthrough_template(&env),
+            "template with a native content-array branch is not pass-through"
+        );
+        assert_eq!(
+            detect_image_placeholder_template(&env),
+            None,
+            "template that natively renders image markers must keep the content array"
+        );
     }
 
     #[test]

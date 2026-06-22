@@ -18,6 +18,12 @@ use pyo3::types::PyModule;
 // Base exception for all Dynamo errors.
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
 
+// Raised by the in-process `SelectionService` bindings for selector failures
+// that are not malformed input. Instances carry `kind` (a stable,
+// machine-readable category) and `status_code` (an HTTP-style status) so
+// callers can branch without matching on the message string.
+pyo3::create_exception!(dynamo._core, SelectionServiceError, DynamoException);
+
 /// Defines Python exception classes for each Dynamo error type.
 ///
 /// For each `(RustExceptionName, BackendError)` pair, the macro:
@@ -73,6 +79,10 @@ macro_rules! define_dynamo_exceptions {
         /// Register all Dynamo exception classes on the `_core` module.
         pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("DynamoException", m.py().get_type::<DynamoException>())?;
+            m.add(
+                "SelectionServiceError",
+                m.py().get_type::<SelectionServiceError>(),
+            )?;
             $(
                 m.add(stringify!($name), m.py().get_type::<$name>())?;
             )*

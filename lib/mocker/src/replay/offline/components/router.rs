@@ -17,8 +17,8 @@ use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::SchedulingContext;
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, PrefillTokenDeltas, RadixTree,
-    RouterSchedulingPolicy, SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RouterSchedulingPolicy,
+    SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerLoadProjection, WorkerSelector,
     scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
@@ -133,6 +133,8 @@ struct PendingRequest {
     overlaps: OverlapScores,
     track_prefill_tokens: bool,
     expected_output_tokens: Option<u32>,
+    priority_jump: f64,
+    strict_priority: u32,
 }
 
 impl PendingRequest {
@@ -143,8 +145,7 @@ impl PendingRequest {
     fn scheduling_request(
         &self,
         block_size: usize,
-        decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
-        prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
+        worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     ) -> SchedulingRequest {
         let effective_overlap_blocks = self
             .overlaps
@@ -165,13 +166,13 @@ impl PendingRequest {
             tier_overlap_blocks: TierOverlapBlocks::default(),
             effective_overlap_blocks,
             effective_cached_tokens,
-            decode_blocks,
-            prefill_tokens,
+            worker_loads,
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
             update_states: true,
             lora_name: None,
-            priority_jump: 0.0,
+            priority_jump: self.priority_jump,
+            strict_priority: self.strict_priority,
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -446,11 +447,8 @@ impl OfflineReplayRouter {
 
     fn enqueue_key(&self, now_ms: f64, request: &PendingRequest) -> ReplayQueueKey {
         let arrival_offset = Duration::from_secs_f64((now_ms.max(0.0)) / 1000.0);
-        let scheduling_request = request.scheduling_request(
-            self.block_size as usize,
-            FxHashMap::default(),
-            FxHashMap::default(),
-        );
+        let scheduling_request =
+            request.scheduling_request(self.block_size as usize, FxHashMap::default());
         self.policy.enqueue_key(
             arrival_offset,
             SchedulingContext::new(&scheduling_request, &self.workers_with_configs),
@@ -469,6 +467,7 @@ impl OfflineReplayRouter {
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
+        let (priority_jump, strict_priority) = request.router_priorities();
         let (overlaps, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
                 let overlaps = self
@@ -512,6 +511,8 @@ impl OfflineReplayRouter {
                 u32::try_from(request.max_output_tokens)
                     .context("max_output_tokens does not fit into u32")?,
             ),
+            priority_jump,
+            strict_priority,
         })
     }
 
@@ -520,36 +521,10 @@ impl OfflineReplayRouter {
         request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
-        let prefill_token_deltas =
-            if request.track_prefill_tokens {
-                let by_worker = request
-                .overlaps
-                .scores
-                .iter()
-                .map(|(worker, overlap)| {
-                    let cached_tokens = *overlap as usize * self.block_size as usize;
-                    let delta = request.isl_tokens.checked_sub(cached_tokens).unwrap_or_else(|| {
-                        tracing::error!(
-                            "prefill_tokens < 0 with ISL {} < cached_tokens {}, returning 0",
-                            request.isl_tokens,
-                            cached_tokens,
-                        );
-                        0
-                    });
-                    (*worker, delta)
-                })
-                .collect::<FxHashMap<_, _>>();
-                PrefillTokenDeltas::new(request.isl_tokens, by_worker)
-            } else {
-                PrefillTokenDeltas::none()
-            };
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
-            request.token_seq.as_deref(),
-            &prefill_token_deltas,
-            decay_now,
-        );
-        let scheduling_request =
-            request.scheduling_request(self.block_size as usize, decode_blocks, prefill_tokens);
+        let worker_loads = self
+            .slots
+            .project_worker_loads(request.token_seq.as_deref(), decay_now);
+        let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
         let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
@@ -677,7 +652,7 @@ mod tests {
     use std::time::Duration;
 
     use dynamo_kv_router::PrefillLoadEstimator;
-    use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+    use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
@@ -728,8 +703,13 @@ mod tests {
     }
 
     fn queueing_router_config() -> KvRouterConfig {
+        queueing_router_config_with_policy(RouterQueuePolicy::Fcfs)
+    }
+
+    fn queueing_router_config_with_policy(policy: RouterQueuePolicy) -> KvRouterConfig {
         KvRouterConfig {
             router_queue_threshold: Some(0.5),
+            router_queue_policy: policy,
             ..KvRouterConfig::default()
         }
     }
@@ -739,12 +719,24 @@ mod tests {
     }
 
     fn request(uuid: u128, token: u32) -> DirectRequest {
+        request_with_priorities(uuid, token, 64, 0, 0)
+    }
+
+    fn request_with_priorities(
+        uuid: u128,
+        token: u32,
+        input_tokens: usize,
+        priority: i32,
+        strict_priority: u32,
+    ) -> DirectRequest {
         DirectRequest {
-            tokens: vec![token; 64],
+            tokens: vec![token; input_tokens],
             max_output_tokens: 2,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
+            priority,
+            strict_priority,
         }
     }
 
@@ -841,6 +833,100 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Uuid::from_u128(2)]
         );
+    }
+
+    #[test]
+    fn strict_priority_precedes_each_offline_queue_policy() {
+        for policy in [
+            RouterQueuePolicy::Fcfs,
+            RouterQueuePolicy::Lcfs,
+            RouterQueuePolicy::Wspt,
+        ] {
+            let mut router = OfflineReplayRouter::new(
+                &queueing_args(),
+                Some(queueing_router_config_with_policy(policy)),
+                None,
+                1,
+            )
+            .unwrap();
+            router
+                .on_request_arrival(&request(1, 1), None, 0.0)
+                .unwrap();
+            router
+                .on_request_arrival(&request_with_priorities(2, 2, 1, 1_000_000, 0), None, 0.0)
+                .unwrap();
+            router
+                .on_request_arrival(&request_with_priorities(3, 3, 64, 0, 1), None, 1_000.0)
+                .unwrap();
+
+            let pending = router
+                .debug_snapshot(1_000.0)
+                .pending
+                .into_iter()
+                .map(|request| request.uuid)
+                .collect::<Vec<_>>();
+            assert_eq!(pending, vec![Uuid::from_u128(3), Uuid::from_u128(2)]);
+        }
+    }
+
+    #[test]
+    fn equal_strict_tiers_retain_offline_queue_policy_ordering() {
+        let cases = [
+            (RouterQueuePolicy::Fcfs, vec![2, 3]),
+            (RouterQueuePolicy::Lcfs, vec![3, 2]),
+            (RouterQueuePolicy::Wspt, vec![3, 2]),
+        ];
+
+        for (policy, expected) in cases {
+            let mut router = OfflineReplayRouter::new(
+                &queueing_args(),
+                Some(queueing_router_config_with_policy(policy)),
+                None,
+                1,
+            )
+            .unwrap();
+            router
+                .on_request_arrival(&request(1, 1), None, 0.0)
+                .unwrap();
+            router
+                .on_request_arrival(&request_with_priorities(2, 2, 64, 0, 4), None, 0.0)
+                .unwrap();
+            router
+                .on_request_arrival(&request_with_priorities(3, 3, 1, 0, 4), None, 100.0)
+                .unwrap();
+
+            let pending = router
+                .debug_snapshot(100.0)
+                .pending
+                .into_iter()
+                .map(|request| request.uuid.as_u128())
+                .collect::<Vec<_>>();
+            assert_eq!(pending, expected);
+        }
+    }
+
+    #[test]
+    fn soft_priority_orders_within_an_offline_strict_tier() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        router
+            .on_request_arrival(&request(1, 1), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request_with_priorities(2, 2, 64, 0, 2), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request_with_priorities(3, 3, 64, 1_000, 2), None, 100.0)
+            .unwrap();
+
+        let pending = router
+            .debug_snapshot(100.0)
+            .pending
+            .into_iter()
+            .map(|request| request.uuid)
+            .collect::<Vec<_>>();
+        assert_eq!(pending, vec![Uuid::from_u128(3), Uuid::from_u128(2)]);
     }
 
     #[test]
