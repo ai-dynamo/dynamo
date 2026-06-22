@@ -11,7 +11,17 @@ behind a Gateway-API gateway with the Inference Extension (GAIE).
 
 If you already run GAIE + vLLM, you **replace only your EndpointPicker (EPP)**
 with the Dynamo EPP and you are done — no Dynamo operator, no Dynamo runtime,
-no Dynamo worker. For disaggreaged serving you also need to build the disag sidecar.
+no Dynamo worker.
+
+The Dynamo EPP image is named "frontend" and provided to you with each release.
+For disaggreaged serving you also need to use the "sidecar" image provided with the release or build it with commands below.
+```bash
+# export env vars
+export DOCKER_SERVER=ghcr.io/nvidia/dynamo	# Container registry
+export IMAGE_TAG=YOUR-TAG # Or auto from git tag
+cd deploy/inference-gateway/ext-proc/examples/onramp
+make all # Do everything in one command
+
 
 | | This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
 |---|---|---|
