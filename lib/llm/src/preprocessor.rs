@@ -722,24 +722,17 @@ impl OpenAIPreprocessor {
         // preserve omission so backend adapters can compute the dynamic cap from their
         // effective prompt length/tokenization.
         //
-        // For multimodal requests the worker-bound `token_ids` still carry the
-        // UNEXPANDED image placeholders (one id per image), so their length
-        // understates the backend's real prompt length and would overshoot the
-        // cap into a context-length overflow. Prefer the MM-expanded prompt
-        // length (placeholders expanded to per-image token counts, matching the
-        // backend's processor) when the routing view is available; for pure
-        // text this equals `token_ids.len()`. If images are present but no
-        // expanded length is available, preserve omission and let the backend
-        // compute the cap from its own tokenization.
+        // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
+        // the MM-expanded length when available, else defer to the backend.
         let has_images = preprocessed
             .multi_modal_data
             .as_ref()
             .and_then(|m| m.get("image_url"))
             .is_some_and(|v| !v.is_empty());
         let effective_prompt_len = match preprocessed.mm_routing_info.as_ref() {
-            Some(mm) => Some(mm.expanded_prompt_len),
-            None if has_images => None,
-            None => Some(preprocessed.token_ids.len()),
+            Some(mm) if mm.expanded_prompt_len > 0 => Some(mm.expanded_prompt_len),
+            _ if has_images => None,
+            _ => Some(preprocessed.token_ids.len()),
         };
         if preprocessed.stop_conditions.max_tokens.is_none()
             && let Some(prompt_len) = effective_prompt_len
@@ -1431,10 +1424,7 @@ impl OpenAIPreprocessor {
             }
         }
 
-        // Effective prompt length BEFORE block-padding: the real expanded token
-        // count the backend sees (image placeholders expanded to per-image
-        // counts). Captured here so consumers (e.g. the omitted-max_tokens cap)
-        // aren't inflated by the routing padding added below.
+        // Unpadded expanded length, before the block-padding added below.
         let expanded_prompt_len = expanded.len();
 
         // Pad to a whole multiple of kv_cache_block_size. The router's
