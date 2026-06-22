@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Checkpoint-safe model prefetch helpers."""
+"""Snapshot-safe model prefetch helpers."""
 
 import asyncio
 import logging
@@ -30,7 +30,7 @@ async def fetch_model_in_subprocess(
     remote_name: str,
     ignore_weights: bool = False,
 ) -> None:
-    """Fetch a model in a short-lived process before checkpointing."""
+    """Fetch a model in a short-lived process before snapshotting."""
     logger.info("Fetching model %s in a subprocess", remote_name)
     ctx = multiprocessing.get_context("spawn")
     proc = ctx.Process(

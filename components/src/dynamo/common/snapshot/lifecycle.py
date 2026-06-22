@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Checkpoint lifecycle helpers for Dynamo Snapshot."""
+"""Snapshot lifecycle helpers for Dynamo Snapshot."""
 
 import asyncio
 import logging
@@ -20,29 +20,29 @@ from dynamo.common.snapshot.constants import (
 logger = logging.getLogger(__name__)
 EngineT = TypeVar("EngineT")
 
-# Poll interval for the snapshot-control directory. Checkpoint and restore
+# Poll interval for the snapshot-control directory. Snapshot and restore
 # latencies are seconds, so 100ms is negligible overhead.
 SENTINEL_POLL_INTERVAL_SEC = 0.1
 
 
-def is_checkpoint_enabled() -> bool:
+def is_snapshot_enabled() -> bool:
     return bool(os.environ.get(SNAPSHOT_CONTROL_DIR_ENV))
 
 
-class CheckpointConfig:
-    """Parsed checkpoint configuration plus the sentinel-driven lifecycle."""
+class SnapshotConfig:
+    """Parsed snapshot configuration plus the sentinel-driven lifecycle."""
 
     def __init__(self, control_dir: str):
         self.control_dir = control_dir
         self.ready_file = os.path.join(control_dir, READY_FOR_SNAPSHOT_FILE)
 
     @classmethod
-    def from_env(cls) -> "CheckpointConfig | None":
+    def from_env(cls) -> "SnapshotConfig | None":
         control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV)
         if not control_dir:
             return None
 
-        configure_checkpoint_transport_env()
+        configure_snapshot_transport_env()
         return cls(control_dir=control_dir)
 
     async def run_lifecycle(
@@ -58,7 +58,7 @@ class CheckpointConfig:
                 ready_file.write("ready")
 
             logger.info(
-                "Ready for checkpoint. Polling for sentinel in %s "
+                "Ready for snapshot. Polling for sentinel in %s "
                 "(snapshot-complete or restore-complete)",
                 self.control_dir,
             )
@@ -82,7 +82,7 @@ class CheckpointConfig:
         restore_path = Path(self.control_dir) / RESTORE_COMPLETE_FILE
         while True:
             if snapshot_path.exists():
-                return "checkpoint"
+                return "snapshot"
             if restore_path.exists():
                 return "restore"
             await asyncio.sleep(SENTINEL_POLL_INTERVAL_SEC)
@@ -102,12 +102,12 @@ class CheckpointConfig:
                 logger.exception("Failed to clean up %s at %s", name, path)
 
 
-def configure_checkpoint_transport_env() -> None:
+def configure_snapshot_transport_env() -> None:
     hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
     if hf_hub_offline and hf_hub_offline != "1":
         logger.warning(
-            "Overriding HF_HUB_OFFLINE=%r with '1' for checkpoint mode "
-            "to avoid external Hugging Face sockets in checkpointed processes",
+            "Overriding HF_HUB_OFFLINE=%r with '1' for snapshot mode "
+            "to avoid external Hugging Face sockets in snapshotted processes",
             hf_hub_offline,
         )
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -115,7 +115,7 @@ def configure_checkpoint_transport_env() -> None:
     nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
     if nccl_cumem_enable and nccl_cumem_enable != "0":
         logger.warning(
-            "Overriding NCCL_CUMEM_ENABLE=%r with '0' for checkpoint mode "
+            "Overriding NCCL_CUMEM_ENABLE=%r with '0' for snapshot mode "
             "because cuda-checkpoint does not support cuMem-backed NCCL allocations",
             nccl_cumem_enable,
         )
@@ -124,7 +124,7 @@ def configure_checkpoint_transport_env() -> None:
     nccl_p2p_disable = os.environ.get("NCCL_P2P_DISABLE")
     if nccl_p2p_disable and nccl_p2p_disable != "0":
         logger.warning(
-            "Overriding NCCL_P2P_DISABLE=%r with '0' for checkpoint mode "
+            "Overriding NCCL_P2P_DISABLE=%r with '0' for snapshot mode "
             "to keep NCCL on GPU P2P transport when topology allows it",
             nccl_p2p_disable,
         )
@@ -133,7 +133,7 @@ def configure_checkpoint_transport_env() -> None:
     nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
     if nccl_nvls_enable and nccl_nvls_enable != "0":
         logger.warning(
-            "Overriding NCCL_NVLS_ENABLE=%r with '0' for checkpoint mode "
+            "Overriding NCCL_NVLS_ENABLE=%r with '0' for snapshot mode "
             "to avoid NVLS and keep NCCL on the legacy P2P path",
             nccl_nvls_enable,
         )
@@ -142,7 +142,7 @@ def configure_checkpoint_transport_env() -> None:
     nccl_ib_disable = os.environ.get("NCCL_IB_DISABLE")
     if nccl_ib_disable and nccl_ib_disable != "1":
         logger.warning(
-            "Overriding NCCL_IB_DISABLE=%r with '1' for checkpoint mode "
+            "Overriding NCCL_IB_DISABLE=%r with '1' for snapshot mode "
             "because CRIU and cuda-checkpoint cannot restore InfiniBand state",
             nccl_ib_disable,
         )
@@ -151,8 +151,8 @@ def configure_checkpoint_transport_env() -> None:
     nccl_ras_enable = os.environ.get("NCCL_RAS_ENABLE")
     if nccl_ras_enable and nccl_ras_enable != "0":
         logger.warning(
-            "Overriding NCCL_RAS_ENABLE=%r with '0' for checkpoint mode "
-            "because NCCL RAS background state is not part of the checkpoint contract",
+            "Overriding NCCL_RAS_ENABLE=%r with '0' for snapshot mode "
+            "because NCCL RAS background state is not part of the snapshot contract",
             nccl_ras_enable,
         )
     os.environ["NCCL_RAS_ENABLE"] = "0"
@@ -161,7 +161,7 @@ def configure_checkpoint_transport_env() -> None:
     if torch_nccl_monitoring and torch_nccl_monitoring != "0":
         logger.warning(
             "Overriding TORCH_NCCL_ENABLE_MONITORING=%r with '0' for "
-            "checkpoint mode because ProcessGroupNCCL monitoring can "
+            "snapshot mode because ProcessGroupNCCL monitoring can "
             "terminate restored processes",
             torch_nccl_monitoring,
         )
@@ -173,11 +173,11 @@ def configure_checkpoint_transport_env() -> None:
 class EngineSnapshotController(Generic[EngineT]):
     engine: EngineT
     pause_controller: Any
-    checkpoint_config: CheckpointConfig
+    snapshot_config: SnapshotConfig
     pause_args: tuple[object, ...] = ()
 
     async def wait_for_restore(self) -> bool:
-        return await self.checkpoint_config.run_lifecycle(
+        return await self.snapshot_config.run_lifecycle(
             self.pause_controller,
             *self.pause_args,
         )
