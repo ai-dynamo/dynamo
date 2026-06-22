@@ -1,7 +1,12 @@
 # Backend Module
 
-Two-class abstraction: `Worker` (runtime integration) and
-`LLMEngine` (ABC for engine-specific logic). See `README.md` for full docs.
+`Worker` (runtime integration) drives a `BaseEngine` (ABC for
+engine-specific logic). `BaseEngine` owns the modality-agnostic lifecycle
+(`from_args`/`start`/`abort`/`drain`/`cleanup` + metrics/health hooks);
+the two modality subclasses add only their `generate` contract:
+`LLMEngine` (token pipeline: `token_ids` in/out, plus `kv_event_sources`)
+and `RawEngine` (raw media pipeline: OpenAI request dict in, response dict
+out; `DiffusionEngine` is a domain subclass). See `README.md` for full docs.
 
 ## Engine Lifecycle
 
@@ -72,8 +77,13 @@ Python engine authors keep the split API.)
   When adding new features, always ask: "is this engine-specific or common?"
   If two or more engines would need the same code, it is common.
 
-- **Exactly two classes.** `Worker` owns runtime lifecycle.
-  `LLMEngine` owns inference. Do not add intermediate base classes or mixins.
+- **One `Worker`, one lifecycle base, one subclass per modality.** `Worker`
+  owns runtime lifecycle. `BaseEngine` owns the modality-agnostic lifecycle;
+  `LLMEngine` and `RawEngine` subclass it and differ *only* in the `generate`
+  contract (token vs. raw media). Do not add per-engine mixins or intermediate
+  bases between a modality ABC and its concrete backend (e.g. `VllmLLMEngine`).
+  A new media modality is a new `RawEngine` implementation, not a new
+  engine trait or lifecycle.
 
 - **`from_args()` returns `(engine, WorkerConfig)`.**  The tuple return
   makes the contract statically checkable -- a subclass that forgets to
@@ -87,9 +97,9 @@ Python engine authors keep the split API.)
   exception → `BackendError` mapping are handled by the bridge.
 
 - **`start()` returns `EngineConfig`.** The model class needs registration
-  metadata (`context_length`, `block_size`, `total_kv_blocks`) but must not
-  reach into engine internals. `start()` returns this metadata so the boundary
-  stays clean.
+  metadata (token-pipeline KV/DP fields live in the `llm=LlmRegistration(...)`
+  sub-record; `RawEngine`s leave `llm=None`) but must not reach into engine
+  internals. `start()` returns this metadata so the boundary stays clean.
 
 - **No hooks.** If behavior needs to be shared across engines, put it in
   `Worker` or a shared utility, not in a hook system.
@@ -266,7 +276,7 @@ spans should be.
 
 | File | What it does |
 |------|-------------|
-| `engine.py` | `LLMEngine` ABC -- the only interface engines must implement (includes `component_metrics_dp_ranks` + `attach_snapshot_publisher`). |
+| `engine.py` | `BaseEngine` lifecycle ABC + `LLMEngine` / `RawEngine` modality subclasses (`DiffusionEngine` is a `RawEngine` subclass) -- the interface engines implement. |
 | `publisher.py` | `ComponentSnapshot` dataclass (the push payload). The `SnapshotPublisher` itself is a Rust-owned object exposed as `dynamo._core.backend.SnapshotPublisher`. |
 | `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |

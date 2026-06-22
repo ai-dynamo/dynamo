@@ -30,9 +30,9 @@ from dynamo.planner.plugins.transport.in_process import InProcessTransport
 # ``__getattr__`` so ``from ... transport import GrpcTransport`` still
 # works for consumers that want it.  Eager import would pull in
 # ``_grpc_base`` → ``_proto_bridge`` → ``plugin_pb2``, which is generated
-# at install time and not on disk in PSM-only source-tree deployments
-# (``scheduling.use_orchestrator=False``).  See ``planner_config.py``
-# lazy-import refactor for the matching change at the registry layer.
+# at install time and not on disk in source-tree deployments before proto
+# generation. See ``planner_config.py`` lazy-import refactor for the matching
+# change at the registry layer.
 if TYPE_CHECKING:
     from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
 

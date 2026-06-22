@@ -135,16 +135,16 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
 
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
-        "release_memory_occupation",
+        "control/release_memory_occupation",
         handler.release_memory_occupation,
     )
     runtime.register_engine_route(
-        "resume_memory_occupation",
+        "control/resume_memory_occupation",
         handler.resume_memory_occupation,
     )
     logging.info(
         "Registered engine routes: "
-        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
+        "/engine/control/release_memory_occupation, /engine/control/resume_memory_occupation"
     )
 
 

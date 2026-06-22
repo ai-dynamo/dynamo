@@ -262,3 +262,32 @@ impl OfflineWorkerState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::DisaggRequestState;
+    use crate::common::protocols::DirectRequest;
+
+    #[test]
+    fn disagg_prefill_request_preserves_router_priorities() {
+        let state = DisaggRequestState::new(
+            DirectRequest {
+                tokens: vec![1; 8],
+                max_output_tokens: 12,
+                uuid: Some(Uuid::from_u128(1)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+                priority: -3,
+                strict_priority: 9,
+            },
+            0.0,
+        );
+
+        let request = state.build_prefill_request().unwrap();
+        assert_eq!(request.max_output_tokens, 1);
+        assert_eq!(request.priority, -3);
+        assert_eq!(request.strict_priority, 9);
+    }
+}

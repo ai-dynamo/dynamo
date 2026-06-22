@@ -63,8 +63,12 @@ pub(super) fn cache_materialized_prefix(
     });
 
     let sequence = req.sequence_prefix(aligned_tokens);
-    let new_last =
-        kv_manager.cache_unfinished_req(&sequence, &req.kv_indices[..aligned_tokens], last_node);
+    let new_last = kv_manager.cache_unfinished_req(
+        &sequence,
+        &req.kv_indices[..aligned_tokens],
+        last_node,
+        req.cached_tokens,
+    );
     req.last_node = Some(new_last);
     req.cached_tokens = aligned_tokens;
     req.debug_assert_invariants(config.block_size);
@@ -286,6 +290,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                             &sequence[..tokens_to_cache],
                             &req.kv_indices[..tokens_to_cache],
                             last_node,
+                            req.cached_tokens,
                         );
                     } else {
                         kv_manager.free_request(last_node);
