@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.trtllm.constants import DisaggregationMode, Modality
-from dynamo.trtllm.main import (
+from dynamo.trtllm.snapshot import (
     _SnapshotRuntimeProxy,
     _validate_supported_snapshot_config,
 )
@@ -85,7 +85,7 @@ def test_snapshot_config_rejects_paths_that_can_create_pre_restore_state(
 
 @pytest.mark.asyncio
 async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeypatch):
-    import dynamo.trtllm.main as main_mod
+    import dynamo.trtllm.snapshot as snapshot_mod
 
     created_runtime = _Runtime()
     lifecycle_calls = []
@@ -115,8 +115,12 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
         assert event_plane is None
         return created_runtime, object()
 
-    monkeypatch.setattr(main_mod, "EngineSnapshotController", FakeSnapshotController)
-    monkeypatch.setattr(main_mod, "create_runtime", fake_create_runtime)
+    monkeypatch.setattr(
+        snapshot_mod,
+        "_create_engine_snapshot_controller",
+        FakeSnapshotController,
+    )
+    monkeypatch.setattr(snapshot_mod, "_create_runtime", fake_create_runtime)
 
     proxy = _SnapshotRuntimeProxy(checkpoint_config=object())
     config = _runtime_config()
@@ -137,7 +141,7 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
 
 @pytest.mark.asyncio
 async def test_snapshot_runtime_proxy_exits_without_runtime_after_capture(monkeypatch):
-    import dynamo.trtllm.main as main_mod
+    import dynamo.trtllm.snapshot as snapshot_mod
 
     class SnapshotCaptured(Exception):
         pass
@@ -156,9 +160,13 @@ async def test_snapshot_runtime_proxy_exits_without_runtime_after_capture(monkey
         assert code == 0
         raise SnapshotCaptured
 
-    monkeypatch.setattr(main_mod, "EngineSnapshotController", FakeSnapshotController)
-    monkeypatch.setattr(main_mod, "create_runtime", unexpected_create_runtime)
-    monkeypatch.setattr(main_mod.os, "_exit", fake_exit)
+    monkeypatch.setattr(
+        snapshot_mod,
+        "_create_engine_snapshot_controller",
+        FakeSnapshotController,
+    )
+    monkeypatch.setattr(snapshot_mod, "_create_runtime", unexpected_create_runtime)
+    monkeypatch.setattr(snapshot_mod.os, "_exit", fake_exit)
 
     proxy = _SnapshotRuntimeProxy(checkpoint_config=object())
 
