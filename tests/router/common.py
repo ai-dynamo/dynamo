@@ -1140,6 +1140,15 @@ def _probe_overload_503_and_assert(
 
     async def exhaust_resources_and_verify_503():
         stop_event = asyncio.Event()
+        # Set once any request has been accepted (200). A 503 only ends the probe
+        # after this is set. Some configs (notably decode-blocks, where a single
+        # request's own footprint can momentarily exceed the block threshold) can
+        # emit a transient 503 for the very first request before any request is
+        # accepted; stopping on that 503 would leave num_succeeded == 0 and fail
+        # the "at least one success" assertion. Continuing past it lets a later
+        # request land on the (now drained) worker and be accepted, which is the
+        # 200-then-503 behavior the test is meant to verify.
+        accepted_event = asyncio.Event()
 
         async with aiohttp.ClientSession() as session:
             tasks = []
@@ -1149,13 +1158,20 @@ def _probe_overload_503_and_assert(
                     async with session.post(url, json=payload) as response:
                         if response.status == 200:
                             logger.info(f"Request {req_id} accepted")
+                            accepted_event.set()
                             await stop_event.wait()
                             return response.status
 
                         if response.status == 503:
                             body = await response.text()
                             logger.info(f"Request {req_id} got expected 503: {body}")
-                            stop_event.set()
+                            if accepted_event.is_set():
+                                stop_event.set()
+                            else:
+                                logger.info(
+                                    f"Request {req_id} got a transient 503 before any "
+                                    "request was accepted; continuing to probe"
+                                )
                             return response.status
 
                         body = await response.text()
