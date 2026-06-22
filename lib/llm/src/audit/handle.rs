@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use axum::http::HeaderMap;
 
@@ -49,6 +50,14 @@ pub struct AuditRecord {
     pub request_id: String,
     pub requested_streaming: bool,
     pub model: String,
+    /// When the audited event actually occurred — request received (before
+    /// worker dispatch) or response completed (after stream aggregation) —
+    /// captured on the producing thread. Used as the OTLP `LogRecord` Timestamp
+    /// so the logged time reflects the event itself, not when the sink task
+    /// drained it off the audit bus. `#[serde(skip)]`: it is metadata about the
+    /// record, not part of the audited payload, and `OtelSink` reads it directly.
+    #[serde(skip, default = "std::time::SystemTime::now")]
+    pub event_time: SystemTime,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<Arc<NvCreateChatCompletionRequest>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,13 +87,18 @@ impl AuditHandle {
     /// request is captured. The preprocessor schedules this before worker
     /// dispatch so downstream observers can see hung / canceled requests that
     /// never produce a response record.
-    pub fn emit_request(&self, request: Arc<NvCreateChatCompletionRequest>) {
+    pub fn emit_request(
+        &self,
+        request: Arc<NvCreateChatCompletionRequest>,
+        event_time: SystemTime,
+    ) {
         let rec = AuditRecord {
             schema_version: 1,
             event_type: AuditEventType::Request,
             request_id: self.request_id.clone(),
             requested_streaming: self.requested_streaming,
             model: self.model.clone(),
+            event_time,
             request: Some(request),
             response: None,
             otel_http_headers: self.otel_http_headers.clone(),
@@ -95,13 +109,18 @@ impl AuditHandle {
     /// Publish a `Response` event record on the audit bus. Consumes the handle to
     /// enforce one-response-per-request at the type level. The response record does
     /// not duplicate the request payload — downstream JOINs on `request_id`.
-    pub fn emit_response(self, response: Arc<NvCreateChatCompletionResponse>) {
+    pub fn emit_response(
+        self,
+        response: Arc<NvCreateChatCompletionResponse>,
+        event_time: SystemTime,
+    ) {
         let rec = AuditRecord {
             schema_version: 1,
             event_type: AuditEventType::Response,
             request_id: self.request_id,
             requested_streaming: self.requested_streaming,
             model: self.model,
+            event_time,
             request: None,
             response: Some(response),
             otel_http_headers: None,
@@ -244,6 +263,7 @@ mod tests {
             request_id: "req-123".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
+            event_time: SystemTime::now(),
             request: Some(Arc::new(create_test_request_with_agent_context())),
             response: None,
             otel_http_headers: None,
@@ -268,6 +288,7 @@ mod tests {
             request_id: "req-123".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
+            event_time: SystemTime::now(),
             request: None,
             response: Some(Arc::new(create_test_response("final answer"))),
             otel_http_headers: None,
@@ -311,8 +332,8 @@ mod tests {
         let response = create_test_response("hello");
 
         let handle = AuditHandle::for_test("req-test-emit", "test-model", true);
-        handle.emit_request(Arc::new(request));
-        handle.emit_response(Arc::new(response));
+        handle.emit_request(Arc::new(request), SystemTime::now());
+        handle.emit_response(Arc::new(response), SystemTime::now());
 
         let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await

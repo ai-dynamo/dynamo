@@ -420,7 +420,12 @@ impl AuditSink for OtelSink {
     }
 
     async fn emit(&self, rec: &AuditRecord) {
-        let event_timestamp = SystemTime::now();
+        // OTLP Timestamp = when the event actually occurred (captured on the
+        // producing thread at request-receive / response-completion); set below
+        // from `rec.event_time`. ObservedTimestamp = now, when this sink drained
+        // the record off the audit bus. The gap between them is bus + sink-task
+        // latency, which is exactly what we no longer want folded into Timestamp.
+        let observed_timestamp = SystemTime::now();
 
         // Keep the full payload JSON walk off Tokio worker threads. The OTEL
         // SDK emit below remains on this sink task; it only enqueues to the
@@ -462,7 +467,8 @@ impl AuditSink for OtelSink {
         };
 
         let mut record = self.logger.create_log_record();
-        record.set_timestamp(event_timestamp);
+        record.set_timestamp(rec.event_time);
+        record.set_observed_timestamp(observed_timestamp);
         record.set_severity_number(Severity::Info);
         record.set_severity_text("INFO");
         record.set_body(AnyValue::String(
@@ -523,6 +529,7 @@ mod tests {
             request_id: "req-otel-1".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
+            event_time: SystemTime::now(),
             request: None,
             response: None,
             otel_http_headers: None,
@@ -581,6 +588,7 @@ mod tests {
             request_id: "req-otel-with-floats".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
+            event_time: SystemTime::now(),
             request: Some(Arc::new(request)),
             response: None,
             otel_http_headers: None,
@@ -624,6 +632,7 @@ mod tests {
             request_id: "req-otel-response-fields".to_string(),
             requested_streaming,
             model: "test-model".to_string(),
+            event_time: SystemTime::now(),
             request: None,
             response: Some(Arc::new(response)),
             otel_http_headers: None,

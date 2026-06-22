@@ -282,6 +282,7 @@ mod tests {
             request_id: "req-abc".to_string(),
             requested_streaming: false,
             model: "test-model".to_string(),
+            event_time: std::time::SystemTime::now(),
             request: None,
             response: None,
             otel_http_headers: None,

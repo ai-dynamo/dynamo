@@ -166,8 +166,11 @@ mod tests {
                 let request = create_test_request("nemotron", true);
                 let handle = handle::create_handle(&request, "test-req-1", None)
                     .expect("Failed to create audit handle");
-                handle.emit_request(Arc::new(request.clone()));
-                handle.emit_response(Arc::new(create_test_response("nemotron", "test response")));
+                handle.emit_request(Arc::new(request.clone()), std::time::SystemTime::now());
+                handle.emit_response(
+                    Arc::new(create_test_response("nemotron", "test response")),
+                    std::time::SystemTime::now(),
+                );
 
                 time::sleep(Duration::from_millis(200)).await;
 
@@ -240,7 +243,8 @@ mod tests {
                 // Request with store=true (should be audited)
                 let request_true = create_test_request("nemotron", true);
                 if let Some(handle) = handle::create_handle(&request_true, "store-true", None) {
-                    handle.emit_request(Arc::new(request_true.clone()));
+                    handle
+                        .emit_request(Arc::new(request_true.clone()), std::time::SystemTime::now());
                 }
 
                 // Request with store=false (should NOT be audited)

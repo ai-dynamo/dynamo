@@ -2925,8 +2925,11 @@ impl
         // fan-out and sink wakeups do not delay worker dispatch.
         if let Some(h) = audit_handle.clone() {
             let audit_request = std::sync::Arc::new(request.clone());
+            // Stamp the request event time here (before the detached spawn) so it
+            // reflects request arrival, not when the spawned task happens to run.
+            let audit_event_time = std::time::SystemTime::now();
             tokio::spawn(async move {
-                h.emit_request(audit_request);
+                h.emit_request(audit_request, audit_event_time);
             });
         }
 
@@ -3031,7 +3034,11 @@ impl
             // emit.
             tokio::spawn(async move {
                 match agg_fut.await {
-                    Some(final_resp) => audit.emit_response(Arc::new(final_resp)),
+                    // Stamp response event time at aggregation completion (the
+                    // moment the response is fully formed), not at sink drain.
+                    Some(final_resp) => {
+                        audit.emit_response(Arc::new(final_resp), std::time::SystemTime::now())
+                    }
                     None => tracing::debug!(
                         request_id = %audit.request_id(),
                         "audit: response record skipped (client cancel or aggregation error)"
