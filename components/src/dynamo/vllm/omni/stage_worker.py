@@ -557,7 +557,7 @@ async def init_omni_stage(
         raise
 
 
-def _connector_key(from_stage: int, to_stage: int) -> tuple[str, str]:
+def _connector_key(from_stage: int | str, to_stage: int | str) -> tuple[str, str]:
     """Build the connector dict key used by initialize_orchestrator_connectors."""
     return (str(from_stage), str(to_stage))
 
