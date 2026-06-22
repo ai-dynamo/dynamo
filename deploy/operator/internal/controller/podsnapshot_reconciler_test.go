@@ -271,8 +271,13 @@ func TestSnapshotContentToSnapshot_UnwrapsTombstone(t *testing.T) {
 	assert.Equal(t, "podsnapshot-abc123", direct[0].Name)
 
 	tombstone := cache.DeletedFinalStateUnknown{Key: "podsnapshotcontent-abc123", Obj: content}
-	ref, ok := podSnapshotRefFromContentObj(tombstone)
-	require.True(t, ok)
+	ref, err := podSnapshotRefFromContentObj(tombstone)
+	require.NoError(t, err)
 	assert.Equal(t, "podsnapshot-abc123", ref.Name)
 	assert.Equal(t, "inference", ref.Namespace)
+
+	// A non-PodSnapshotContent object is a malformed watch event, surfaced as an error.
+	_, err = podSnapshotRefFromContentObj(&corev1.Pod{})
+	require.Error(t, err)
+	assert.Empty(t, podSnapshotContentToPodSnapshot(context.Background(), &corev1.Pod{}))
 }

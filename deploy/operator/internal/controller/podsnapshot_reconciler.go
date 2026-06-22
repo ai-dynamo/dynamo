@@ -306,9 +306,13 @@ func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // podSnapshotContentToPodSnapshot maps a PodSnapshotContent (including a delete-event tombstone) back
 // to its bound PodSnapshot. It MUST unwrap cache.DeletedFinalStateUnknown so that the final
 // PodSnapshotContent delete still re-enqueues the PodSnapshot and the cascade can complete.
-func podSnapshotContentToPodSnapshot(_ context.Context, obj client.Object) []reconcile.Request {
-	ref, ok := podSnapshotRefFromContentObj(obj)
-	if !ok || ref.Name == "" {
+func podSnapshotContentToPodSnapshot(ctx context.Context, obj client.Object) []reconcile.Request {
+	ref, err := podSnapshotRefFromContentObj(obj)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "Failed to map PodSnapshotContent to PodSnapshot")
+		return nil
+	}
+	if ref.Name == "" {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}}}
@@ -316,16 +320,17 @@ func podSnapshotContentToPodSnapshot(_ context.Context, obj client.Object) []rec
 
 // podSnapshotRefFromContentObj extracts the bound PodSnapshot reference from a PodSnapshotContent,
 // unwrapping a cache.DeletedFinalStateUnknown tombstone first so the final delete event
-// still re-enqueues the PodSnapshot and the cascade can complete (F-2.2).
-func podSnapshotRefFromContentObj(obj any) (nvidiacomv1alpha1.PodSnapshotReference, bool) {
+// still re-enqueues the PodSnapshot and the cascade can complete (F-2.2). It errors when the
+// object is not a PodSnapshotContent (a malformed watch event, not a control-flow skip).
+func podSnapshotRefFromContentObj(obj any) (nvidiacomv1alpha1.PodSnapshotReference, error) {
 	if tombstone, isTombstone := obj.(cache.DeletedFinalStateUnknown); isTombstone {
 		obj = tombstone.Obj
 	}
 	content, ok := obj.(*nvidiacomv1alpha1.PodSnapshotContent)
 	if !ok {
-		return nvidiacomv1alpha1.PodSnapshotReference{}, false
+		return nvidiacomv1alpha1.PodSnapshotReference{}, fmt.Errorf("expected *PodSnapshotContent, got %T", obj)
 	}
-	return content.Spec.PodSnapshotRef, true
+	return content.Spec.PodSnapshotRef, nil
 }
 
 // podSnapshotContentName composes the deterministic cluster-scoped PodSnapshotContent name from
