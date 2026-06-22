@@ -204,6 +204,23 @@ def wait_for_log_count(
     )
 
 
+def wait_for_any_log_count(
+    log_dir: Path,
+    filename: str,
+    expectations: tuple[tuple[str, int], ...],
+    timeout: float = 30,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        text = log_text(log_dir, filename)
+        if any(text.count(needle) >= minimum for needle, minimum in expectations):
+            return
+        time.sleep(0.25)
+    raise AssertionError(
+        f"Did not find any expected log count in {filename}: {expectations!r}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:18000")
@@ -241,9 +258,9 @@ def main() -> None:
     if not short["choices"][0]["text"]:
         raise AssertionError("Short finish-race request returned no output")
     frontend_after = log_text(args.log_dir, "frontend.log")
-    if frontend_after.count("decode migration trigger reached") != frontend_before.count(
+    if frontend_after.count(
         "decode migration trigger reached"
-    ):
+    ) != frontend_before.count("decode migration trigger reached"):
         raise AssertionError("Request finishing before the trigger attempted migration")
 
     baseline = completion(args.base_url, args.model, 64, source_nvext())
@@ -367,11 +384,15 @@ def main() -> None:
     fast_abort_before = log_text(args.log_dir, "fast.log").count(
         "Calling SGLang abort_request for Request ID"
     )
+    fast_commit_before = log_text(args.log_dir, "fast.log").count(
+        "action=commit status=transferred"
+    )
     slow_before = log_text(args.log_dir, "slow.log")
     slow_reservations_before = slow_before.count(
         "Reserved decode migration destination"
     )
-    slow_aborts_before = slow_before.count(
+    slow_aborts_before = slow_before.count("action=abort status=aborted")
+    slow_monitor_aborts_before = slow_before.count(
         "Calling SGLang abort_request for Request ID"
     )
     cancel_stream(
@@ -386,11 +407,13 @@ def main() -> None:
         "Stream closed unexpectedly; issuing cancellation",
         frontend_cancel_before + 1,
     )
-    wait_for_log_count(
+    wait_for_any_log_count(
         args.log_dir,
         "fast.log",
-        "Calling SGLang abort_request for Request ID",
-        fast_abort_before + 1,
+        (
+            ("Calling SGLang abort_request for Request ID", fast_abort_before + 1),
+            ("action=commit status=transferred", fast_commit_before + 1),
+        ),
     )
     # Allow an in-flight prepare RPC to either create and abort its reservation
     # or observe cancellation before reaching the destination.
@@ -399,11 +422,16 @@ def main() -> None:
     if slow_after_cancel.count("Reserved decode migration destination") > (
         slow_reservations_before
     ):
-        wait_for_log_count(
+        wait_for_any_log_count(
             args.log_dir,
             "slow.log",
-            "Calling SGLang abort_request for Request ID",
-            slow_aborts_before + 1,
+            (
+                ("action=abort status=aborted", slow_aborts_before + 1),
+                (
+                    "Calling SGLang abort_request for Request ID",
+                    slow_monitor_aborts_before + 1,
+                ),
+            ),
         )
     recovery_commits_before = log_text(args.log_dir, "frontend.log").count(
         "decode migration committed"
@@ -420,9 +448,8 @@ def main() -> None:
         recovery_commits_before + 1,
     )
 
-    # Two requests can cross the trigger together. The coarse source barrier may
-    # serialize or reject one migration, but neither client stream may corrupt or
-    # hang and at least one handoff must commit.
+    # Two requests can cross the trigger together. Both handoffs must remain
+    # independent and neither client stream may corrupt or hang.
     commits_before = log_text(args.log_dir, "frontend.log").count(
         "decode migration committed"
     )
@@ -441,11 +468,7 @@ def main() -> None:
     if args.parity_mode == "source":
         concurrent_expected_ids = (baseline_ids,)
     elif args.parity_mode == "migration-repeat":
-        # The coarse source barrier allows one request to migrate and lets a
-        # simultaneous contender continue on the source. Different TP sizes
-        # can have different deterministic continuations, so both established
-        # oracles are valid outcomes for the concurrent pair.
-        concurrent_expected_ids = (baseline_ids, migrated_ids)
+        concurrent_expected_ids = (migrated_ids,)
     else:
         concurrent_expected_ids = (migrated_ids,)
     for result in concurrent_results:
@@ -457,7 +480,7 @@ def main() -> None:
         args.log_dir,
         "frontend.log",
         "decode migration committed",
-        commits_before + 1,
+        commits_before + 2,
     )
 
     for worker_log in ("fast.log", "slow.log"):
@@ -465,7 +488,9 @@ def main() -> None:
         if "Scheduler hit an exception" in worker_text:
             raise AssertionError(f"Scheduler crashed during scenarios: {worker_log}")
         if "pool memory leak detected" in worker_text:
-            raise AssertionError(f"KV pool leak detected during scenarios: {worker_log}")
+            raise AssertionError(
+                f"KV pool leak detected during scenarios: {worker_log}"
+            )
 
     print(
         json.dumps(

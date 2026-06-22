@@ -29,10 +29,11 @@ model.
 6. Reconcile source tail and destination replay by token position.
 7. After valid destination output, activate it and commit the source.
 
-The source stays authoritative until commit. Destination selection, reserve,
-arm, transfer, or first-output failures resume the retained source. Client
-cancellation aborts both sides as needed. Same-rank handoffs are serialized so
-SGLang's current coarse pause returns no `busy` fail-open requests.
+Destination discovery and reservation fail open while the source is still
+decoding. Once quiescence starts, the transaction owns the detached request:
+post-quiesce failures abort the destination, cancel the source, and return an
+error. Client cancellation uses the same cleanup path. Concurrent requests may
+migrate independently from the same source worker.
 
 The control endpoints are `migration_prepare`, `migration_sync`, and
 `migration_finalize`. Rooms are opaque; rank is explicit request state.
@@ -62,12 +63,6 @@ Move advisory reservation state into SGLang and expose granted KV capacity,
 expiry, destination rank, and capability fingerprint. Make reserve, grow, arm,
 activate, abort, and expiry idempotent.
 
-### Per-request source parking
-
-Replace SGLang's scheduler-wide pause with a parked request so unrelated decode
-and independent migrations continue. Dynamo's transaction ownership should not
-need to change.
-
 ### Incremental KV sync
 
 Reuse one lease and migration ID to copy monotonically increasing stable ranges
@@ -82,10 +77,10 @@ timeouts, lost responses, and lease expiry.
 
 ## Validation
 
-The branch passes 19 focused Rust migration tests and 9 Python SGLang-handler
-tests, including stream coalescing, finish races, cancellation, rollback, and
-dropped streams. Live coverage includes Qwen3-0.6B TP1-to-TP1 and Qwen3-8B
-TP4-to-TP1 with NIXL staging.
+The branch passes 19 focused Rust migration tests and 14 Python SGLang-handler
+tests, including stream coalescing, finish races, cancellation, one-way failure
+cleanup, and dropped streams. Live coverage includes Qwen3-0.6B TP1-to-TP1 in
+normal and overlap scheduling and Qwen3-8B TP4-to-TP1 with NIXL staging.
 
 In a 200-sample Qwen3-8B GSM8K run at temperature 1.0 and 32K context, all 200
 requests reached `</think>` and committed migration. There were no busy

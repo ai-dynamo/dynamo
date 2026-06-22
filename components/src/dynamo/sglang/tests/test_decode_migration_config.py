@@ -2,7 +2,16 @@
 
 import argparse
 
+import pytest
+
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 
 def test_worker_taints_are_repeatable():

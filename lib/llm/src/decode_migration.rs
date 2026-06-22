@@ -3,15 +3,12 @@
 
 //! Transactional decode-to-decode request migration.
 //!
-//! The source remains authoritative until a prepared destination has produced a
-//! valid stream item and the source has acknowledged commit. Before that point,
-//! every failure resumes the original source stream.
+//! Destination discovery and reservation are fail-open while the source is still
+//! decoding. Once source quiescence starts, the first-pass protocol is deliberately
+//! one-way: failures abort the destination, cancel the detached source request, and
+//! terminate the client stream with an error rather than attempting rollback.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex as StdMutex},
-    time::Duration,
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank};
@@ -30,7 +27,6 @@ use dynamo_runtime::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::{
     kv_router::{FindBestMatchOutcome, KvRouter},
@@ -223,6 +219,147 @@ struct SourceState<'a> {
     logical_len: usize,
 }
 
+struct PreparedDestination {
+    worker: WorkerWithDpRank,
+    source_host: String,
+    source_port: u16,
+    source_dp_rank: u32,
+    bootstrap_room: u64,
+    cleanup: MigrationCleanup,
+}
+
+async fn prepare_destination(
+    selector: Arc<dyn MigrationSelector>,
+    control: Arc<dyn MigrationControl>,
+    request: PreprocessedRequest,
+    constraints: DecodeMigrationConstraints,
+    source_worker: WorkerWithDpRank,
+    rid: String,
+    migration_id: String,
+    source_target_sequence_length: Option<u32>,
+) -> Result<PreparedDestination> {
+    let destination_worker = selector
+        .select_destination(&request, &request.token_ids, &constraints, source_worker)
+        .await?;
+    tracing::info!(
+        request_id = %rid,
+        %migration_id,
+        source_worker = source_worker.worker_id,
+        destination_worker = destination_worker.worker_id,
+        destination_dp_rank = destination_worker.dp_rank,
+        "decode migration destination selected"
+    );
+
+    let source_description = control
+        .call(
+            ControlEndpoint::Sync,
+            source_worker.worker_id,
+            json!({
+                "rid": rid,
+                "migration_id": migration_id,
+                "phase": "describe",
+                "source_dp_rank": source_worker.dp_rank,
+            }),
+        )
+        .await
+        .context("source describe failed")?;
+    if !source_description.success {
+        bail!(
+            "source describe declined with status {}: {}",
+            source_description.status,
+            source_description
+                .error
+                .as_deref()
+                .unwrap_or("unknown error")
+        );
+    }
+    let source_host = source_description
+        .bootstrap_host
+        .context("source describe omitted bootstrap_host")?;
+    let source_port = source_description
+        .bootstrap_port
+        .context("source describe omitted bootstrap_port")?;
+    let source_dp_rank = source_description
+        .source_dp_rank
+        .unwrap_or(source_worker.dp_rank);
+    let mut cleanup = MigrationCleanup::new(
+        control.clone(),
+        rid.clone(),
+        migration_id.clone(),
+        source_worker.worker_id,
+        destination_worker.worker_id,
+    );
+    let reserve_tokens =
+        request.token_ids.len() + request.stop_conditions.max_tokens.unwrap_or_default() as usize;
+    let reserve = control
+        .call(
+            ControlEndpoint::Prepare,
+            destination_worker.worker_id,
+            json!({
+                "rid": rid,
+                "migration_id": migration_id,
+                "source": {
+                    "bootstrap_host": source_host,
+                    "bootstrap_port": source_port,
+                    "dp_rank": source_dp_rank,
+                },
+                "reserve_tokens": reserve_tokens,
+            }),
+        )
+        .await
+        .context("destination reservation failed")?;
+    if !reserve.success {
+        bail!(
+            "destination reservation declined with status {}: {}",
+            reserve.status,
+            reserve.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    let bootstrap_room = reserve
+        .bootstrap_room
+        .context("destination reservation omitted bootstrap_room")?;
+
+    if let Some(target_sequence_length) = source_target_sequence_length {
+        let output_tokens_seen =
+            (target_sequence_length as usize).saturating_sub(request.token_ids.len());
+        let armed = control
+            .call(
+                ControlEndpoint::Sync,
+                source_worker.worker_id,
+                json!({
+                    "rid": rid,
+                    "migration_id": migration_id,
+                    "phase": "arm",
+                    "bootstrap_room": bootstrap_room,
+                    "target_sequence_length": target_sequence_length,
+                    "output_tokens_seen": output_tokens_seen,
+                }),
+            )
+            .await
+            .context("source migration arm failed")?;
+        if !armed.success || !matches!(armed.status.as_str(), "armed" | "prepared") {
+            bail!(
+                "source migration arm declined with status {}: {}",
+                armed.status,
+                armed.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+        // The source may park itself at any point after a successful arm.
+        // Cleanup must therefore disarm or cancel it even before the frontend
+        // observes the trigger token.
+        cleanup.mark_source_quiesce_started();
+    }
+
+    Ok(PreparedDestination {
+        worker: destination_worker,
+        source_host,
+        source_port,
+        source_dp_rank,
+        bootstrap_room,
+        cleanup,
+    })
+}
+
 struct KvMigrationSelector {
     chooser: Arc<KvRouter>,
     generate_client: Client,
@@ -326,7 +463,6 @@ pub struct DecodeMigration {
     selector: Option<Arc<dyn MigrationSelector>>,
     control: Option<Arc<dyn MigrationControl>>,
     destination_backend: Arc<dyn MigrationBackend>,
-    source_gates: StdMutex<HashMap<(u64, u32), Arc<AsyncMutex<()>>>>,
 }
 
 impl DecodeMigration {
@@ -360,7 +496,6 @@ impl DecodeMigration {
             selector,
             control,
             destination_backend,
-            source_gates: StdMutex::new(HashMap::new()),
         }))
     }
 
@@ -377,20 +512,7 @@ impl DecodeMigration {
             destination_backend: Arc::new(EngineMigrationBackend {
                 engine: backend_engine,
             }),
-            source_gates: StdMutex::new(HashMap::new()),
         })
-    }
-
-    fn source_gate(&self, worker: WorkerWithDpRank) -> Arc<AsyncMutex<()>> {
-        let mut gates = self
-            .source_gates
-            .lock()
-            .expect("decode migration source gate lock poisoned");
-        Arc::clone(
-            gates
-                .entry((worker.worker_id, worker.dp_rank))
-                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-        )
     }
 
     pub(crate) fn into_operator(
@@ -441,7 +563,9 @@ impl
         let engine_rid = get_distributed_tracing_context()
             .map(|context| context.trace_id)
             .unwrap_or_else(|| rid.clone());
-        let migration_id = uuid::Uuid::new_v4().to_string();
+        let migration_uuid = uuid::Uuid::new_v4();
+        let migration_id = migration_uuid.to_string();
+        ensure_migration_sampling_seed(&mut source_request, migration_uuid);
 
         let selector = self
             .selector
@@ -457,7 +581,6 @@ impl
             "decode migration source selected"
         );
         pin_request(&mut source_request, source_worker);
-        let source_gate = self.source_gate(source_worker);
         source_request.decode_migration = None;
         let original_request = source_request.clone();
         source_request.decode_migration_state = Some(DecodeMigrationRequestState {
@@ -475,41 +598,64 @@ impl
         let destination_backend = self.destination_backend.clone();
         let policy_for_stream = policy.clone();
         let parent_context = stream_context.clone();
+        let setup_selector = selector.clone();
+        let setup_control = control.clone();
+        let setup_request = original_request.clone();
+        let setup_constraints = policy.destination.clone();
+        let setup_rid = engine_rid.clone();
+        let setup_migration_id = migration_id.clone();
+        let source_target_sequence_length = match policy.trigger {
+            DecodeMigrationTrigger::SequenceLength { tokens } => Some(tokens),
+            DecodeMigrationTrigger::TokenId { .. } => None,
+        };
         let output = async_stream::stream! {
+            let mut setup = Box::pin(prepare_destination(
+                setup_selector,
+                setup_control,
+                setup_request,
+                setup_constraints,
+                source_worker,
+                setup_rid,
+                setup_migration_id,
+                source_target_sequence_length,
+            ));
+            let mut setup_result = None;
             let mut forwarded_tokens = 0usize;
-            let mut generated_ids = Vec::new();
             let mut attempted = false;
-            let mut source_skip_tokens = 0usize;
+            let mut token_trigger_armed = false;
 
-            while let Some(mut source_item) = source_stream.next().await {
+            'request_stream: loop {
+                let source_item = if setup_result.is_none() && !attempted {
+                    tokio::select! {
+                        result = &mut setup => {
+                            setup_result = Some(result);
+                            continue;
+                        }
+                        item = source_stream.next() => item,
+                    }
+                } else {
+                    source_stream.next().await
+                };
+                let Some(source_item) = source_item else {
+                    break;
+                };
                 if parent_context.is_stopped() || parent_context.is_killed() {
                     break;
-                }
-
-                if source_skip_tokens > 0 {
-                    match trim_annotated_prefix(source_item, source_skip_tokens) {
-                        Ok((trimmed, dropped)) => {
-                            source_item = trimmed;
-                            source_skip_tokens -= dropped;
-                        }
-                        Err(error) => {
-                            yield Annotated::from_error(error.to_string());
-                            return;
-                        }
-                    }
                 }
 
                 let mut trigger_now = false;
                 if let Some(data) = source_item.data.as_ref() {
                     forwarded_tokens += data.token_ids.len();
-                    generated_ids.extend_from_slice(&data.token_ids);
                     let source_finished = data.finish_reason.is_some();
-                    trigger_now = !attempted && !source_finished && trigger_matches(
-                        &policy_for_stream.trigger,
-                        original_request.token_ids.len(),
-                        forwarded_tokens,
-                        &data.token_ids,
-                    );
+                    trigger_now = !attempted
+                        && !source_finished
+                        && trigger_ready_after_emission(
+                            &policy_for_stream.trigger,
+                            original_request.token_ids.len(),
+                            forwarded_tokens,
+                            &data.token_ids,
+                            &mut token_trigger_armed,
+                        );
                 }
 
                 let should_emit = source_item.data.as_ref().is_none_or(|data| {
@@ -529,209 +675,94 @@ impl
                     "decode migration trigger reached"
                 );
 
-                let mut approximate_tokens = original_request.token_ids.clone();
-                approximate_tokens.extend_from_slice(&generated_ids);
-                let destination_worker = match selector
-                    .select_destination(
-                        &original_request,
-                        &approximate_tokens,
-                        &policy_for_stream.destination,
-                        source_worker,
-                    )
-                    .await
-                {
-                    Ok(worker) => worker,
+                let prepared = match setup_result.take() {
+                    Some(result) => result,
+                    None => setup.as_mut().await,
+                };
+                let PreparedDestination {
+                    worker: destination_worker,
+                    source_host,
+                    source_port,
+                    source_dp_rank,
+                    bootstrap_room,
+                    mut cleanup,
+                } = match prepared {
+                    Ok(prepared) => prepared,
                     Err(error) => {
-                        tracing::warn!(request_id = %rid, "destination selection failed: {error:#}");
+                        tracing::warn!(request_id = %rid, "destination setup failed: {error:#}");
                         continue;
                     }
                 };
-                tracing::info!(
-                    request_id = %rid,
-                    %migration_id,
-                    source_worker = source_worker.worker_id,
-                    destination_worker = destination_worker.worker_id,
-                    destination_dp_rank = destination_worker.dp_rank,
-                    "decode migration destination selected"
-                );
 
-                // SGLang's initial exact-quiescence implementation pauses the
-                // whole source scheduler. Serialize only the short transfer
-                // transaction per source rank so concurrent trigger hits wait
-                // instead of failing open with a worker "busy" response.
-                let source_gate_guard = source_gate.clone().lock_owned().await;
                 if parent_context.is_stopped() || parent_context.is_killed() {
                     return;
                 }
 
-                let source_description = match control.call(
-                    ControlEndpoint::Sync,
-                    source_worker.worker_id,
-                    json!({
-                        "rid": engine_rid,
-                        "migration_id": migration_id,
-                        "phase": "describe",
-                        "source_dp_rank": source_worker.dp_rank,
-                    }),
-                ).await {
-                    Ok(response) if response.success => response,
-                    Ok(response) => {
-                        tracing::warn!(request_id = %rid, status = %response.status, error = ?response.error, "source describe declined");
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(request_id = %rid, "source describe failed: {error:#}");
-                        continue;
-                    }
-                };
-                let Some(source_host) = source_description.bootstrap_host.clone() else {
-                    tracing::warn!(request_id = %rid, "source describe omitted bootstrap_host");
-                    continue;
-                };
-                let Some(source_port) = source_description.bootstrap_port else {
-                    tracing::warn!(request_id = %rid, "source describe omitted bootstrap_port");
-                    continue;
-                };
-                let source_dp_rank = source_description.source_dp_rank.unwrap_or(source_worker.dp_rank);
-                let mut cleanup = MigrationCleanup::new(
-                    control.clone(),
-                    engine_rid.clone(),
-                    migration_id.clone(),
-                    source_worker.worker_id,
-                    destination_worker.worker_id,
-                    source_gate_guard,
-                );
-                let reserve_tokens = original_request.token_ids.len()
-                    + original_request.stop_conditions.max_tokens.unwrap_or_default() as usize;
-                let reserve = match control.call(
-                    ControlEndpoint::Prepare,
-                    destination_worker.worker_id,
-                    json!({
-                        "rid": engine_rid,
-                        "migration_id": migration_id,
-                        "source": {
-                            "bootstrap_host": source_host,
-                            "bootstrap_port": source_port,
-                            "dp_rank": source_dp_rank,
-                        },
-                        "reserve_tokens": reserve_tokens,
-                    }),
-                ).await {
-                    Ok(response) if response.success => response,
-                    Ok(response) => {
-                        let _ = control.call(
-                            ControlEndpoint::Finalize,
-                            destination_worker.worker_id,
-                            json!({
-                                "rid": engine_rid,
-                                "migration_id": migration_id,
-                                "side": "destination",
-                                "action": "abort",
-                            }),
-                        ).await;
-                        cleanup.disarm();
-                        tracing::warn!(request_id = %rid, status = %response.status, error = ?response.error, "destination reservation declined");
-                        continue;
-                    }
-                    Err(error) => {
-                        // The destination may have created the reservation before
-                        // its reply was lost. Abort by migration ID to avoid a
-                        // stale reservation on this fail-open source path.
-                        let _ = control.call(
-                            ControlEndpoint::Finalize,
-                            destination_worker.worker_id,
-                            json!({
-                                "rid": engine_rid,
-                                "migration_id": migration_id,
-                                "side": "destination",
-                                "action": "abort",
-                            }),
-                        ).await;
-                        cleanup.disarm();
-                        tracing::warn!(request_id = %rid, "destination reservation failed: {error:#}");
-                        continue;
-                    }
-                };
-                let Some(bootstrap_room) = reserve.bootstrap_room else {
-                    tracing::warn!(request_id = %rid, "destination reservation omitted bootstrap_room");
-                    let _ = control.call(
-                        ControlEndpoint::Finalize,
-                        destination_worker.worker_id,
-                        json!({"rid": engine_rid, "migration_id": migration_id, "side": "destination", "action": "abort"}),
-                    ).await;
-                    cleanup.disarm();
-                    continue;
-                };
-
-                // A cancelled or lost quiesce RPC may already have paused the
-                // source. From this point, drop cleanup must terminate it.
+                // Sequence triggers are normally parked locally by the early arm.
+                // This call fetches the exact frontier and remains the token-trigger
+                // fallback. A cancelled or lost call may already have detached the
+                // source request, so cleanup must terminate it from this point.
                 cleanup.mark_source_quiesce_started();
-                let quiesced = match control.call(
-                    ControlEndpoint::Sync,
-                    source_worker.worker_id,
-                    json!({
-                        "rid": engine_rid,
-                        "migration_id": migration_id,
-                        "phase": "quiesce",
-                        "bootstrap_room": bootstrap_room,
-                        "output_tokens_seen": forwarded_tokens,
-                    }),
-                ).await {
-                    Ok(response) if response.status == "finished" => {
-                        let _ = control.call(
-                            ControlEndpoint::Finalize,
-                            destination_worker.worker_id,
-                            json!({
-                                "rid": engine_rid,
-                                "migration_id": migration_id,
-                                "side": "destination",
-                                "action": "abort",
-                            }),
-                        ).await;
-                        cleanup.disarm();
-                        continue;
-                    }
-                    Ok(response) if response.success => response,
-                    Ok(response) => {
-                        let _ = control.call(
-                            ControlEndpoint::Finalize,
-                            destination_worker.worker_id,
-                            json!({
-                                "rid": engine_rid,
-                                "migration_id": migration_id,
-                                "side": "destination",
-                                "action": "abort",
-                            }),
-                        ).await;
-                        tracing::warn!(request_id = %rid, status = %response.status, error = ?response.error, "source quiesce declined");
-                        cleanup.disarm();
-                        continue;
-                    }
-                    Err(error) => {
-                        let _ = control.call(
-                            ControlEndpoint::Finalize,
-                            destination_worker.worker_id,
-                            json!({
-                                "rid": engine_rid,
-                                "migration_id": migration_id,
-                                "side": "destination",
-                                "action": "abort",
-                            }),
-                        ).await;
-                        // The source may have quiesced even if its response was lost.
-                        let _ = control.call(
-                            ControlEndpoint::Finalize,
-                            source_worker.worker_id,
-                            json!({"rid": engine_rid, "migration_id": migration_id, "action": "resume"}),
-                        ).await;
-                        cleanup.disarm();
-                        tracing::warn!(request_id = %rid, "source quiesce failed: {error:#}");
-                        continue;
+                let quiesce_deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
+                let quiesced = loop {
+                    let response = control.call(
+                        ControlEndpoint::Sync,
+                        source_worker.worker_id,
+                        json!({
+                            "rid": engine_rid,
+                            "migration_id": migration_id,
+                            "phase": "quiesce",
+                            "bootstrap_room": bootstrap_room,
+                            "output_tokens_seen": forwarded_tokens,
+                        }),
+                    ).await;
+                    match response {
+                        Ok(response) if response.success && response.status == "armed" => {
+                            if tokio::time::Instant::now() >= quiesce_deadline {
+                                cleanup.terminate().await;
+                                yield Annotated::from_error(
+                                    "source did not reach the armed migration boundary",
+                                );
+                                return;
+                            }
+                            tokio::time::sleep(COMMIT_POLL_INTERVAL).await;
+                        }
+                        Ok(response) if matches!(response.status.as_str(), "finished" | "not_found") => {
+                            let _ = control.call(
+                                ControlEndpoint::Finalize,
+                                destination_worker.worker_id,
+                                json!({
+                                    "rid": engine_rid,
+                                    "migration_id": migration_id,
+                                    "side": "destination",
+                                    "action": "abort",
+                                }),
+                            ).await;
+                            cleanup.disarm();
+                            continue 'request_stream;
+                        }
+                        Ok(response) if response.success => break response,
+                        Ok(response) => {
+                            tracing::warn!(request_id = %rid, status = %response.status, error = ?response.error, "source quiesce declined; terminating request");
+                            cleanup.terminate().await;
+                            yield Annotated::from_error(format!(
+                                "source quiesce declined with status {}",
+                                response.status
+                            ));
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::warn!(request_id = %rid, "source quiesce failed; terminating request: {error:#}");
+                            cleanup.terminate().await;
+                            yield Annotated::from_error(format!("source quiesce failed: {error:#}"));
+                            return;
+                        }
                     }
                 };
                 let committed_input_ids = match quiesced.committed_input_ids.clone() {
                     Some(ids) => ids,
                     None => {
+                        cleanup.terminate().await;
                         yield Annotated::from_error("source quiesce omitted committed_input_ids");
                         return;
                     }
@@ -778,6 +809,7 @@ impl
                 let destination_json = match serde_json::to_value(&destination_request) {
                     Ok(value) => value,
                     Err(error) => {
+                        cleanup.terminate().await;
                         yield Annotated::from_error(format!("failed to serialize destination request: {error}"));
                         return;
                     }
@@ -800,28 +832,13 @@ impl
                 ).await;
                 let arm_ready = matches!(&arm, Ok(response) if response.success && response.status == "ready");
                 if !arm_ready {
-                    tracing::warn!(request_id = %rid, response = ?arm, "destination arm failed; resuming source");
-                    let _ = control.call(
-                        ControlEndpoint::Finalize,
-                        destination_worker.worker_id,
-                        json!({"rid": engine_rid, "migration_id": migration_id, "side": "destination", "action": "abort"}),
-                    ).await;
-                    let resumed = control.call(
-                        ControlEndpoint::Finalize,
-                        source_worker.worker_id,
-                        json!({"rid": engine_rid, "migration_id": migration_id, "action": "resume"}),
-                    ).await;
-                    if !matches!(resumed, Ok(response) if response.success) {
-                        yield Annotated::from_error("failed to resume source after destination arm failure");
-                        return;
-                    }
-                    cleanup.disarm();
-                    continue;
+                    tracing::warn!(request_id = %rid, response = ?arm, "destination arm failed; terminating request");
+                    cleanup.terminate().await;
+                    yield Annotated::from_error("destination arm failed after source quiesced");
+                    return;
                 }
 
                 if !unforwarded.is_empty() {
-                    forwarded_tokens += unforwarded.len();
-                    generated_ids.extend_from_slice(&unforwarded);
                     yield Annotated::from_data(LLMEngineOutput {
                         token_ids: unforwarded.clone(),
                         index: Some(0),
@@ -841,24 +858,10 @@ impl
                 {
                     Ok(stream) => stream,
                     Err(error) => {
-                        tracing::warn!(request_id = %rid, "destination dispatch failed: {error:#}");
-                        let _ = control.call(
-                            ControlEndpoint::Finalize,
-                            destination_worker.worker_id,
-                            json!({"rid": engine_rid, "migration_id": migration_id, "side": "destination", "action": "abort"}),
-                        ).await;
-                        let resumed = control.call(
-                            ControlEndpoint::Finalize,
-                            source_worker.worker_id,
-                            json!({"rid": engine_rid, "migration_id": migration_id, "action": "resume"}),
-                        ).await;
-                        if !matches!(resumed, Ok(response) if response.success) {
-                            yield Annotated::from_error("failed to resume source after destination dispatch failure");
-                            return;
-                        }
-                        source_skip_tokens += unforwarded.len();
-                        cleanup.disarm();
-                        continue;
+                        tracing::warn!(request_id = %rid, "destination dispatch failed; terminating request: {error:#}");
+                        cleanup.terminate().await;
+                        yield Annotated::from_error(format!("destination dispatch failed: {error:#}"));
+                        return;
                     }
                 };
 
@@ -944,33 +947,18 @@ impl
                     return;
                 }
                 if destination_ready {
+                    let _ = control.call(
+                        ControlEndpoint::Finalize,
+                        destination_worker.worker_id,
+                        json!({"rid": engine_rid, "migration_id": migration_id, "side": "destination", "action": "abort"}),
+                    ).await;
                     yield Annotated::from_error("destination stream failed after source migration committed");
                     return;
                 }
 
-                let _ = control.call(
-                    ControlEndpoint::Finalize,
-                    destination_worker.worker_id,
-                    json!({"rid": engine_rid, "migration_id": migration_id, "side": "destination", "action": "abort"}),
-                ).await;
-                let resumed = control.call(
-                    ControlEndpoint::Finalize,
-                    source_worker.worker_id,
-                    json!({"rid": engine_rid, "migration_id": migration_id, "action": "resume"}),
-                ).await;
-                if !matches!(resumed, Ok(response) if response.success) {
-                    yield Annotated::from_error("failed to resume source after destination stream failure");
-                    return;
-                }
-                source_skip_tokens += unforwarded.len();
-                cleanup.disarm();
-                tracing::info!(
-                    request_id = %rid,
-                    %migration_id,
-                    source_worker = source_worker.worker_id,
-                    destination_worker = destination_worker.worker_id,
-                    "decode migration rolled back to source"
-                );
+                cleanup.terminate().await;
+                yield Annotated::from_error("destination migration failed before commit");
+                return;
             }
         };
 
@@ -995,6 +983,12 @@ fn validate_request(request: &PreprocessedRequest, policy: &DecodeMigrationPolic
         bail!("decode migration does not yet support guided decoding state transfer");
     }
     Ok(())
+}
+
+fn ensure_migration_sampling_seed(request: &mut PreprocessedRequest, migration_id: uuid::Uuid) {
+    if request.sampling_options.seed.is_none() {
+        request.sampling_options.seed = Some((migration_id.as_u128() & i64::MAX as u128) as i64);
+    }
 }
 
 fn merge_constraints(target: &mut RoutingConstraints, extra: &DecodeMigrationConstraints) {
@@ -1027,6 +1021,39 @@ fn trigger_matches(
         DecodeMigrationTrigger::TokenId { token_id } => chunk_tokens.contains(token_id),
         DecodeMigrationTrigger::SequenceLength { tokens } => {
             prompt_tokens.saturating_add(forwarded_tokens) >= *tokens as usize
+        }
+    }
+}
+
+fn trigger_ready_after_emission(
+    trigger: &DecodeMigrationTrigger,
+    prompt_tokens: usize,
+    forwarded_tokens: usize,
+    chunk_tokens: &[TokenIdType],
+    token_trigger_armed: &mut bool,
+) -> bool {
+    match trigger {
+        DecodeMigrationTrigger::TokenId { token_id } => {
+            if *token_trigger_armed {
+                if chunk_tokens.is_empty() {
+                    return false;
+                }
+                *token_trigger_armed = false;
+                return true;
+            }
+
+            let Some(position) = chunk_tokens.iter().position(|token| token == token_id) else {
+                return false;
+            };
+            if position + 1 < chunk_tokens.len() {
+                true
+            } else {
+                *token_trigger_armed = true;
+                false
+            }
+        }
+        DecodeMigrationTrigger::SequenceLength { .. } => {
+            trigger_matches(trigger, prompt_tokens, forwarded_tokens, chunk_tokens)
         }
     }
 }
@@ -1101,7 +1128,6 @@ struct MigrationCleanup {
     active: bool,
     source_may_be_quiesced: bool,
     committed: bool,
-    source_gate_guard: Option<OwnedMutexGuard<()>>,
 }
 
 impl MigrationCleanup {
@@ -1111,7 +1137,6 @@ impl MigrationCleanup {
         migration_id: String,
         source_worker: u64,
         destination_worker: u64,
-        source_gate_guard: OwnedMutexGuard<()>,
     ) -> Self {
         Self {
             control,
@@ -1122,13 +1147,11 @@ impl MigrationCleanup {
             active: true,
             source_may_be_quiesced: false,
             committed: false,
-            source_gate_guard: Some(source_gate_guard),
         }
     }
 
     fn disarm(&mut self) {
         self.active = false;
-        self.source_gate_guard.take();
     }
 
     fn mark_source_quiesce_started(&mut self) {
@@ -1138,14 +1161,46 @@ impl MigrationCleanup {
     fn mark_committed(&mut self) {
         self.committed = true;
         self.active = false;
-        self.source_gate_guard.take();
+    }
+
+    async fn terminate(&mut self) {
+        if !self.active || self.committed {
+            return;
+        }
+        let _ = self
+            .control
+            .call(
+                ControlEndpoint::Finalize,
+                self.destination_worker,
+                json!({
+                    "rid": &self.rid,
+                    "migration_id": &self.migration_id,
+                    "side": "destination",
+                    "action": "abort",
+                }),
+            )
+            .await;
+        if self.source_may_be_quiesced {
+            let _ = self
+                .control
+                .call(
+                    ControlEndpoint::Finalize,
+                    self.source_worker,
+                    json!({
+                        "rid": &self.rid,
+                        "migration_id": &self.migration_id,
+                        "action": "cancel",
+                    }),
+                )
+                .await;
+        }
+        self.disarm();
     }
 }
 
 impl Drop for MigrationCleanup {
     fn drop(&mut self) {
         if !self.active || self.committed {
-            self.source_gate_guard.take();
             return;
         }
         let control = self.control.clone();
@@ -1154,7 +1209,6 @@ impl Drop for MigrationCleanup {
         let source_worker = self.source_worker;
         let destination_worker = self.destination_worker;
         let source_may_be_quiesced = self.source_may_be_quiesced;
-        let source_gate_guard = self.source_gate_guard.take();
         tokio::spawn(async move {
             let _ = control
                 .call(
@@ -1181,7 +1235,6 @@ impl Drop for MigrationCleanup {
                     )
                     .await;
             }
-            drop(source_gate_guard);
         });
     }
 }
@@ -1227,23 +1280,86 @@ mod tests {
         assert!(trigger_matches(&trigger, 10, 4, &[4, 7, 9, 10]));
     }
 
+    #[test]
+    fn token_trigger_waits_for_first_post_boundary_token() {
+        let trigger = DecodeMigrationTrigger::TokenId { token_id: 7 };
+        let mut armed = false;
+
+        assert!(!trigger_ready_after_emission(
+            &trigger,
+            10,
+            1,
+            &[7],
+            &mut armed,
+        ));
+        assert!(armed);
+        assert!(!trigger_ready_after_emission(
+            &trigger,
+            10,
+            1,
+            &[],
+            &mut armed,
+        ));
+        assert!(armed);
+        assert!(trigger_ready_after_emission(
+            &trigger,
+            10,
+            2,
+            &[8],
+            &mut armed,
+        ));
+        assert!(!armed);
+    }
+
+    #[test]
+    fn token_trigger_fires_after_coalesced_post_boundary_token() {
+        let trigger = DecodeMigrationTrigger::TokenId { token_id: 7 };
+        let mut armed = false;
+
+        assert!(trigger_ready_after_emission(
+            &trigger,
+            10,
+            4,
+            &[4, 7, 9, 10],
+            &mut armed,
+        ));
+        assert!(!armed);
+    }
+
+    #[test]
+    fn sequence_trigger_timing_is_unchanged() {
+        let trigger = DecodeMigrationTrigger::SequenceLength { tokens: 8 };
+        let mut armed = false;
+
+        assert!(trigger_ready_after_emission(
+            &trigger,
+            3,
+            5,
+            &[14],
+            &mut armed,
+        ));
+        assert!(!armed);
+    }
+
     #[tokio::test]
-    async fn source_gate_serializes_only_the_same_worker_rank() {
+    async fn concurrent_requests_can_migrate_from_the_same_source() {
         let harness = integration_harness(Scenario::SuccessCoalesced);
-        let worker = WorkerWithDpRank::new(1, 0);
-        let first_gate = harness.operator.source_gate(worker);
-        let first_guard = first_gate.clone().lock_owned().await;
+        let (first, second) =
+            tokio::join!(collect_tokens(&harness, 6), collect_tokens(&harness, 6),);
 
-        let same_gate = harness.operator.source_gate(worker);
-        assert!(same_gate.clone().try_lock_owned().is_err());
-
-        let other_gate = harness.operator.source_gate(WorkerWithDpRank::new(1, 1));
-        assert!(other_gate.try_lock_owned().is_ok());
-
-        drop(first_guard);
-        tokio::time::timeout(Duration::from_secs(1), same_gate.lock_owned())
-            .await
-            .expect("same-rank migration gate did not unblock");
+        for (tokens, errors) in [first, second] {
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(tokens, vec![10, 11, 12, 13, 14]);
+        }
+        assert_eq!(
+            harness
+                .state
+                .events()
+                .iter()
+                .filter(|event| event.as_str() == "source:quiesce")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -1305,6 +1421,19 @@ mod tests {
         fn events(&self) -> Vec<String> {
             self.events.lock().unwrap().clone()
         }
+    }
+
+    async fn wait_for_event(state: &ScenarioState, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.events().iter().any(|event| event == expected) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     struct MockGenerateEngine {
@@ -1526,6 +1655,12 @@ mod tests {
                         "unforwarded_committed_output_ids": [11],
                     })
                 }
+            } else if phase == Some("arm") {
+                assert!(matches!(endpoint, ControlEndpoint::Sync));
+                assert_eq!(instance_id, 1);
+                assert!(request["target_sequence_length"].as_u64().unwrap() > 0);
+                self.state.record("source:arm");
+                json!({"success": true, "status": "armed"})
             } else if request.get("source_state").is_some() {
                 assert!(matches!(endpoint, ControlEndpoint::Prepare));
                 assert_eq!(instance_id, 2);
@@ -1765,14 +1900,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_destination_failure_resumes_source_and_skips_synthetic_tail() {
+    async fn integration_destination_failure_terminates_quiesced_request() {
         let harness = integration_harness(Scenario::RollbackSyntheticTail);
         let (tokens, errors) = collect_tokens(&harness, 4).await;
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(tokens, vec![10, 11, 12, 13]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(tokens, vec![10, 11]);
         let events = harness.state.events();
         assert!(events.contains(&"destination:abort".to_string()));
-        assert!(events.contains(&"source:resume".to_string()));
+        assert!(events.contains(&"source:cancel".to_string()));
     }
 
     async fn drop_stream_while_control_is_pending(scenario: Scenario) -> Vec<String> {
@@ -1835,6 +1970,7 @@ mod tests {
         let (tokens, errors) = collect_tokens(&harness, 4).await;
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(tokens, vec![10, 11, 12, 13]);
+        wait_for_event(&harness.state, "destination:abort").await;
         let events = harness.state.events();
         assert!(events.contains(&"destination:reserve".to_string()));
         assert!(events.contains(&"destination:abort".to_string()));
@@ -1849,14 +1985,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_quiesce_transport_failure_resumes_source() {
+    async fn integration_quiesce_transport_failure_terminates_request() {
         let harness = integration_harness(Scenario::QuiesceTransportFailure);
         let (tokens, errors) = collect_tokens(&harness, 4).await;
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(tokens, vec![10, 11, 12, 13]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(tokens, vec![10]);
         let events = harness.state.events();
         assert!(events.contains(&"destination:abort".to_string()));
-        assert!(events.contains(&"source:resume".to_string()));
+        assert!(events.contains(&"source:cancel".to_string()));
         assert_eq!(
             harness
                 .state
@@ -1867,14 +2003,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_destination_arm_failure_resumes_source() {
+    async fn integration_destination_arm_failure_terminates_request() {
         let harness = integration_harness(Scenario::DestinationArmFailure);
         let (tokens, errors) = collect_tokens(&harness, 4).await;
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(tokens, vec![10, 11, 12, 13]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(tokens, vec![10]);
         let events = harness.state.events();
         assert!(events.contains(&"destination:abort".to_string()));
-        assert!(events.contains(&"source:resume".to_string()));
+        assert!(events.contains(&"source:cancel".to_string()));
         assert_eq!(
             harness
                 .state
@@ -1885,14 +2021,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_destination_dispatch_failure_resumes_source() {
+    async fn integration_destination_dispatch_failure_terminates_request() {
         let harness = integration_harness(Scenario::DestinationDispatchFailure);
         let (tokens, errors) = collect_tokens(&harness, 4).await;
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(tokens, vec![10, 11, 12, 13]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(tokens, vec![10, 11]);
         let events = harness.state.events();
         assert!(events.contains(&"destination:abort".to_string()));
-        assert!(events.contains(&"source:resume".to_string()));
+        assert!(events.contains(&"source:cancel".to_string()));
         assert_eq!(
             harness
                 .state
@@ -1903,15 +2039,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_source_commit_failure_resumes_source() {
+    async fn integration_source_commit_failure_terminates_request() {
         let harness = integration_harness(Scenario::CommitFailure);
         let (tokens, errors) = collect_tokens(&harness, 4).await;
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(tokens, vec![10, 11, 12, 13]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(tokens, vec![10, 11]);
         let events = harness.state.events();
         assert!(events.contains(&"destination:activate".to_string()));
         assert!(events.contains(&"destination:abort".to_string()));
-        assert!(events.contains(&"source:resume".to_string()));
+        assert!(events.contains(&"source:cancel".to_string()));
         assert_eq!(
             harness
                 .state
@@ -1927,7 +2063,22 @@ mod tests {
         let (tokens, errors) = collect_tokens(&harness, 5).await;
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(tokens, vec![10, 11]);
-        assert_eq!(harness.state.events(), vec!["source:generate"]);
+        let mut events = harness.state.events();
+        if events.contains(&"destination:reserve".to_string()) {
+            wait_for_event(&harness.state, "destination:abort").await;
+            events = harness.state.events();
+            assert!(events.contains(&"destination:abort".to_string()));
+        }
+        assert!(events.contains(&"source:generate".to_string()));
+        assert!(!events.contains(&"source:quiesce".to_string()));
+        assert!(!events.contains(&"destination:activate".to_string()));
+        assert_eq!(
+            harness
+                .state
+                .destination_generate_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]
@@ -2018,5 +2169,44 @@ mod tests {
         assert_eq!(migrated.stop_conditions.max_tokens, Some(7));
         assert_eq!(migrated.stop_conditions.min_tokens, Some(1));
         assert_eq!(migrated.routing.unwrap().backend_instance_id, Some(8));
+    }
+
+    #[test]
+    fn migration_assigns_a_stable_sampling_seed_when_missing() {
+        let mut request = PreprocessedRequest::builder()
+            .model("model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        let migration_id = uuid::Uuid::from_u128(123456789);
+
+        ensure_migration_sampling_seed(&mut request, migration_id);
+        let assigned = request.sampling_options.seed;
+        ensure_migration_sampling_seed(&mut request, uuid::Uuid::from_u128(987654321));
+
+        assert_eq!(assigned, Some(123456789));
+        assert_eq!(request.sampling_options.seed, assigned);
+    }
+
+    #[test]
+    fn migration_preserves_an_explicit_sampling_seed() {
+        let mut request = PreprocessedRequest::builder()
+            .model("model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(crate::protocols::common::SamplingOptions {
+                seed: Some(42),
+                ..Default::default()
+            })
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+
+        ensure_migration_sampling_seed(&mut request, uuid::Uuid::new_v4());
+
+        assert_eq!(request.sampling_options.seed, Some(42));
     }
 }

@@ -182,9 +182,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Engine.async_generate does not declare it (notably the deepseek_v4
         # branch). Doing this at init keeps the per-request hot path free of
         # signature inspection.
-        self._routed_experts_kwargs: Dict[str, Any] = (
-            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
-        )
+        self._routed_experts_kwargs: Dict[
+            str, Any
+        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
         self._enable_frontend_decoding = enable_frontend_decoding
         self._image_loader: Optional[ImageLoader] = None
         if self._enable_frontend_decoding:
@@ -617,9 +617,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             bootstrap_host=bootstrap_info["bootstrap_host"],
                             bootstrap_port=bootstrap_info["bootstrap_port"],
                             bootstrap_room=bootstrap_info["bootstrap_room"],
-                            disagg_prefill_dp_rank=migration_state.get(
-                                "source_dp_rank"
-                            )
+                            disagg_prefill_dp_rank=migration_state.get("source_dp_rank")
                             if migration_state
                             else destination_request.get(
                                 "_decode_migration_source_dp_rank"
@@ -711,6 +709,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             bootstrap_port=bootstrap_port,
             bootstrap_room=int(request["bootstrap_room"]),
             output_tokens_seen=int(request.get("output_tokens_seen", 0)),
+            target_sequence_length=(
+                int(request["target_sequence_length"])
+                if request.get("target_sequence_length") is not None
+                else None
+            ),
         )
         result = await self.engine.tokenizer_manager.prepare_decode_migration(obj)
         yield dataclasses.asdict(result)
@@ -751,9 +754,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if action == "abort":
                 tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
                 if tokenizer_manager is not None:
-                    tokenizer_manager.abort_request(
-                        rid=record["rid"], abort_all=False
-                    )
+                    tokenizer_manager.abort_request(rid=record["rid"], abort_all=False)
             logging.info(
                 "Finalized decode migration destination rid=%s migration_id=%s "
                 "action=%s status=%s",

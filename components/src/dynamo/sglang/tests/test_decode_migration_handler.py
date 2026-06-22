@@ -5,7 +5,16 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 
 async def collect(generator):
@@ -56,7 +65,6 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         self.assertEqual(responses[0]["status"], "ready")
         self.assertEqual(responses[0]["bootstrap_room"], 17)
         handler.engine.async_generate.assert_not_called()
-
 
     async def test_source_generate_uses_framework_migration_rid(self):
         handler = self.handler()
@@ -224,7 +232,6 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         self.assertTrue(responses[0]["success"])
         self.assertEqual(responses[0]["status"], "unknown")
         handler.engine.tokenizer_manager.abort_request.assert_not_called()
-
 
     def configure_destination_handler(self, handler):
         handler.use_sglang_tokenizer = False

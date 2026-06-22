@@ -3,9 +3,9 @@
 
 set -euo pipefail
 
-IMAGE=${IMAGE:-dynamo-sglang-decode-migration:dev}
-DYNAMO_ROOT=${DYNAMO_ROOT:-/root/.codex/worktrees/decode-migration/dynamo}
 HERE=$(cd "$(dirname "$0")" && pwd)
+IMAGE=${IMAGE:-dynamo-sglang-decode-migration:dev}
+DYNAMO_ROOT=${DYNAMO_ROOT:-$(cd "$HERE/../../../.." && pwd)}
 BUILD_DIR=$(mktemp -d)
 
 cleanup() {

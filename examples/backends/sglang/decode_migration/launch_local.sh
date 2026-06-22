@@ -7,10 +7,32 @@ MODEL_PATH=${MODEL_PATH:-/models/qwen3-0.6b}
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-Qwen/Qwen3-0.6B}
 SOURCE_TP=${SOURCE_TP:-1}
 DESTINATION_TP=${DESTINATION_TP:-1}
+SOURCE_DP=${SOURCE_DP:-1}
+DESTINATION_DP=${DESTINATION_DP:-1}
+SOURCE_EP=${SOURCE_EP:-1}
+DESTINATION_EP=${DESTINATION_EP:-1}
 SOURCE_GPUS=${SOURCE_GPUS:-0}
 DESTINATION_GPUS=${DESTINATION_GPUS:-1}
+SOURCE_ENABLE_DP_ATTENTION=${SOURCE_ENABLE_DP_ATTENTION:-0}
+DESTINATION_ENABLE_DP_ATTENTION=${DESTINATION_ENABLE_DP_ATTENTION:-0}
+SOURCE_MOE_A2A_BACKEND=${SOURCE_MOE_A2A_BACKEND:-none}
+DESTINATION_MOE_A2A_BACKEND=${DESTINATION_MOE_A2A_BACKEND:-none}
+SOURCE_MOE_RUNNER_BACKEND=${SOURCE_MOE_RUNNER_BACKEND:-}
+DESTINATION_MOE_RUNNER_BACKEND=${DESTINATION_MOE_RUNNER_BACKEND:-}
+SOURCE_DEEPEP_MODE=${SOURCE_DEEPEP_MODE:-}
+DESTINATION_DEEPEP_MODE=${DESTINATION_DEEPEP_MODE:-}
+SOURCE_CUDA_GRAPH_BS=${SOURCE_CUDA_GRAPH_BS:-}
+DESTINATION_CUDA_GRAPH_BS=${DESTINATION_CUDA_GRAPH_BS:-}
+SOURCE_MAX_RUNNING_REQUESTS=${SOURCE_MAX_RUNNING_REQUESTS:-2048}
+DESTINATION_MAX_RUNNING_REQUESTS=${DESTINATION_MAX_RUNNING_REQUESTS:-2048}
+SOURCE_MEM_FRACTION_STATIC=${SOURCE_MEM_FRACTION_STATIC:-0.5}
+DESTINATION_MEM_FRACTION_STATIC=${DESTINATION_MEM_FRACTION_STATIC:-0.5}
+SOURCE_ENABLE_JIT_DEEPGEMM=${SOURCE_ENABLE_JIT_DEEPGEMM:-0}
+DESTINATION_ENABLE_JIT_DEEPGEMM=${DESTINATION_ENABLE_JIT_DEEPGEMM:-0}
+DEEPEP_MAX_DISPATCH_TOKENS=${DEEPEP_MAX_DISPATCH_TOKENS:-1024}
 ATTENTION_BACKEND=${ATTENTION_BACKEND:-}
 ENABLE_DETERMINISTIC_INFERENCE=${ENABLE_DETERMINISTIC_INFERENCE:-1}
+DISABLE_CUDA_GRAPH=${DISABLE_CUDA_GRAPH:-1}
 HTTP_PORT=${HTTP_PORT:-18000}
 SOURCE_SYSTEM_PORT=${SOURCE_SYSTEM_PORT:-18081}
 DESTINATION_SYSTEM_PORT=${DESTINATION_SYSTEM_PORT:-18082}
@@ -24,6 +46,7 @@ WORKER_LOG_LEVEL=${WORKER_LOG_LEVEL:-info}
 MIGRATE_AFTER_TOKENS=${MIGRATE_AFTER_TOKENS:-8}
 TEST_MODE=${TEST_MODE:-correctness}
 GSM8K_NUM_QUESTIONS=${GSM8K_NUM_QUESTIONS:-20}
+GSM8K_INDICES=${GSM8K_INDICES:-}
 GSM8K_MAX_ATTEMPTS=${GSM8K_MAX_ATTEMPTS:-}
 GSM8K_NUM_SHOTS=${GSM8K_NUM_SHOTS:-5}
 GSM8K_MAX_TOKENS=${GSM8K_MAX_TOKENS:-1024}
@@ -69,6 +92,53 @@ deterministic_args=()
 if [[ "$ENABLE_DETERMINISTIC_INFERENCE" == "1" ]]; then
     deterministic_args+=(--enable-deterministic-inference)
 fi
+cuda_graph_args=()
+if [[ "$DISABLE_CUDA_GRAPH" == "1" ]]; then
+    cuda_graph_args+=(--disable-cuda-graph)
+fi
+
+source_topology_args=(
+    --tensor-parallel-size "$SOURCE_TP"
+    --data-parallel-size "$SOURCE_DP"
+    --expert-parallel-size "$SOURCE_EP"
+    --moe-a2a-backend "$SOURCE_MOE_A2A_BACKEND"
+    --max-running-requests "$SOURCE_MAX_RUNNING_REQUESTS"
+    --mem-fraction-static "$SOURCE_MEM_FRACTION_STATIC"
+)
+destination_topology_args=(
+    --tensor-parallel-size "$DESTINATION_TP"
+    --data-parallel-size "$DESTINATION_DP"
+    --expert-parallel-size "$DESTINATION_EP"
+    --moe-a2a-backend "$DESTINATION_MOE_A2A_BACKEND"
+    --max-running-requests "$DESTINATION_MAX_RUNNING_REQUESTS"
+    --mem-fraction-static "$DESTINATION_MEM_FRACTION_STATIC"
+)
+if [[ "$SOURCE_ENABLE_DP_ATTENTION" == "1" ]]; then
+    source_topology_args+=(--enable-dp-attention)
+fi
+if [[ "$DESTINATION_ENABLE_DP_ATTENTION" == "1" ]]; then
+    destination_topology_args+=(--enable-dp-attention)
+fi
+if [[ -n "$SOURCE_MOE_RUNNER_BACKEND" ]]; then
+    source_topology_args+=(--moe-runner-backend "$SOURCE_MOE_RUNNER_BACKEND")
+fi
+if [[ -n "$DESTINATION_MOE_RUNNER_BACKEND" ]]; then
+    destination_topology_args+=(--moe-runner-backend "$DESTINATION_MOE_RUNNER_BACKEND")
+fi
+if [[ -n "$SOURCE_DEEPEP_MODE" ]]; then
+    source_topology_args+=(--deepep-mode "$SOURCE_DEEPEP_MODE")
+fi
+if [[ -n "$DESTINATION_DEEPEP_MODE" ]]; then
+    destination_topology_args+=(--deepep-mode "$DESTINATION_DEEPEP_MODE")
+fi
+if [[ -n "$SOURCE_CUDA_GRAPH_BS" ]]; then
+    read -r -a source_cuda_graph_bs <<<"$SOURCE_CUDA_GRAPH_BS"
+    source_topology_args+=(--cuda-graph-bs-decode "${source_cuda_graph_bs[@]}")
+fi
+if [[ -n "$DESTINATION_CUDA_GRAPH_BS" ]]; then
+    read -r -a destination_cuda_graph_bs <<<"$DESTINATION_CUDA_GRAPH_BS"
+    destination_topology_args+=(--cuda-graph-bs-decode "${destination_cuda_graph_bs[@]}")
+fi
 cleanup() {
     local rc=$?
     trap - EXIT INT TERM
@@ -93,6 +163,25 @@ check_started() {
         tail -80 "$log_file" >&2 || true
         return 1
     fi
+}
+
+wait_for_log_count() {
+    local log_file=$1
+    local text=$2
+    local minimum=$3
+    local timeout=${4:-180}
+    local deadline=$((SECONDS + timeout))
+
+    while (( SECONDS < deadline )); do
+        if (( $(grep -F -c "$text" "$log_file" 2>/dev/null || true) >= minimum )); then
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Timed out waiting for $minimum occurrence(s) of '$text' in $log_file" >&2
+    tail -80 "$log_file" >&2 || true
+    return 1
 }
 
 # File discovery uses a short TTL. Keep local registrations fresh during model warmup.
@@ -122,17 +211,19 @@ common_worker_args=(
     --host 0.0.0.0
     --disaggregation-transfer-backend nixl
     --enable-decode-migration
-    --disable-overlap-schedule
     --stream-interval "$STREAM_INTERVAL"
     --log-level "$WORKER_LOG_LEVEL"
-    --mem-fraction-static 0.5
-    --disable-cuda-graph
+    "${cuda_graph_args[@]}"
 )
 
-CUDA_VISIBLE_DEVICES="$SOURCE_GPUS" DYN_SYSTEM_PORT="$SOURCE_SYSTEM_PORT" python3 -m dynamo.sglang \
+CUDA_VISIBLE_DEVICES="$SOURCE_GPUS" \
+SGLANG_ENABLE_JIT_DEEPGEMM="$SOURCE_ENABLE_JIT_DEEPGEMM" \
+SGLANG_JIT_DEEPGEMM_PRECOMPILE=0 \
+SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK="$DEEPEP_MAX_DISPATCH_TOKENS" \
+DYN_SYSTEM_PORT="$SOURCE_SYSTEM_PORT" python3 -m dynamo.sglang \
     "${common_worker_args[@]}" \
     --worker-taint decode/fast \
-    --tp "$SOURCE_TP" \
+    "${source_topology_args[@]}" \
     --port "$SOURCE_PORT" \
     --disaggregation-bootstrap-port "$SOURCE_BOOTSTRAP_PORT" \
     "${attention_args[@]}" \
@@ -141,10 +232,14 @@ CUDA_VISIBLE_DEVICES="$SOURCE_GPUS" DYN_SYSTEM_PORT="$SOURCE_SYSTEM_PORT" python
 source_pid=$!
 pids+=("$source_pid")
 
-CUDA_VISIBLE_DEVICES="$DESTINATION_GPUS" DYN_SYSTEM_PORT="$DESTINATION_SYSTEM_PORT" python3 -m dynamo.sglang \
+CUDA_VISIBLE_DEVICES="$DESTINATION_GPUS" \
+SGLANG_ENABLE_JIT_DEEPGEMM="$DESTINATION_ENABLE_JIT_DEEPGEMM" \
+SGLANG_JIT_DEEPGEMM_PRECOMPILE=0 \
+SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK="$DEEPEP_MAX_DISPATCH_TOKENS" \
+DYN_SYSTEM_PORT="$DESTINATION_SYSTEM_PORT" python3 -m dynamo.sglang \
     "${common_worker_args[@]}" \
     --worker-taint decode/slow \
-    --tp "$DESTINATION_TP" \
+    "${destination_topology_args[@]}" \
     --port "$DESTINATION_PORT" \
     --disaggregation-bootstrap-port "$DESTINATION_BOOTSTRAP_PORT" \
     "${attention_args[@]}" \
@@ -157,6 +252,9 @@ sleep 2
 check_started "$frontend_pid" frontend "$LOG_DIR/frontend.log"
 check_started "$source_pid" source-worker "$LOG_DIR/fast.log"
 check_started "$destination_pid" destination-worker "$LOG_DIR/slow.log"
+wait_for_log_count "$LOG_DIR/fast.log" "Model registration succeeded" 1
+wait_for_log_count "$LOG_DIR/slow.log" "Model registration succeeded" 1
+wait_for_log_count "$LOG_DIR/frontend.log" "Adding worker WorkerWithDpRank" 2
 
 case "$TEST_MODE" in
     correctness)
@@ -183,13 +281,21 @@ case "$TEST_MODE" in
         if [[ -n "$GSM8K_MAX_ATTEMPTS" ]]; then
             gsm8k_args+=(--max-attempts "$GSM8K_MAX_ATTEMPTS")
         fi
+        if [[ -n "$GSM8K_INDICES" ]]; then
+            gsm8k_args+=(--indices "$GSM8K_INDICES")
+        fi
         if [[ -n "$GSM8K_DATA_PATH" ]]; then
             gsm8k_args+=(--data-path "$GSM8K_DATA_PATH")
         fi
         python3 "$(dirname "$0")/qwen3_gsm8k_accuracy.py" "${gsm8k_args[@]}"
         ;;
+    serve)
+        echo "Dynamo frontend and migration workers are ready on port $HTTP_PORT"
+        echo "Press Ctrl-C to stop the deployment"
+        wait "$frontend_pid"
+        ;;
     *)
-        echo "Unknown TEST_MODE=$TEST_MODE; expected correctness or gsm8k" >&2
+        echo "Unknown TEST_MODE=$TEST_MODE; expected correctness, gsm8k, or serve" >&2
         exit 2
         ;;
 esac

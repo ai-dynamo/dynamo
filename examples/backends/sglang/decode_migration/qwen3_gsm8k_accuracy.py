@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 
 """Paired GSM8K accuracy check for Qwen3 decode migration."""
@@ -94,6 +93,13 @@ def source_nvext() -> dict:
     }
 
 
+def destination_nvext() -> dict:
+    return {
+        "routing_constraints": {"required_taints": ["decode/slow"]},
+        "extra_fields": ["completion_token_ids"],
+    }
+
+
 def migration_nvext(think_end_token_id: int) -> dict:
     return {
         "decode_migration": {
@@ -127,11 +133,29 @@ def chat_completion(
     )
 
 
-def response_fields(response: dict) -> tuple[str, str, list[int], str | None]:
-    choice = response["choices"][0]
-    message = choice["message"]
-    content = message.get("content") or ""
-    reasoning = message.get("reasoning_content") or ""
+def completion(
+    base_url: str,
+    model: str,
+    prompt: list[int],
+    max_tokens: int,
+    nvext: dict,
+) -> dict:
+    return request_json(
+        f"{base_url}/v1/completions",
+        {
+            "model": model,
+            "prompt": prompt,
+            "temperature": 0,
+            "seed": 1234,
+            "n": 1,
+            "best_of": 1,
+            "max_tokens": max_tokens,
+            "nvext": nvext,
+        },
+    )
+
+
+def response_token_ids(response: dict) -> list[int]:
     token_ids = (response.get("nvext") or {}).get("completion_token_ids")
     if not isinstance(token_ids, list) or not all(
         isinstance(token_id, int) for token_id in token_ids
@@ -139,7 +163,15 @@ def response_fields(response: dict) -> tuple[str, str, list[int], str | None]:
         raise AssertionError(
             f"Response omitted nvext.completion_token_ids: {response!r}"
         )
-    return content, reasoning, token_ids, choice.get("finish_reason")
+    return token_ids
+
+
+def response_fields(response: dict) -> tuple[str, str, list[int], str | None]:
+    choice = response["choices"][0]
+    message = choice["message"]
+    content = message.get("content") or ""
+    reasoning = message.get("reasoning_content") or ""
+    return content, reasoning, response_token_ids(response), choice.get("finish_reason")
 
 
 def common_prefix_length(left: list[int], right: list[int]) -> int:
@@ -147,6 +179,59 @@ def common_prefix_length(left: list[int], right: list[int]) -> int:
         if left_token != right_token:
             return index
     return min(len(left), len(right))
+
+
+def token_window(tokenizer, token_ids: list[int], center: int, radius: int = 8) -> dict:
+    start = max(0, center - radius)
+    end = min(len(token_ids), center + radius)
+    window = token_ids[start:end]
+    return {
+        "range": [start, end],
+        "token_ids": window,
+        "text": tokenizer.decode(window, skip_special_tokens=False),
+    }
+
+
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def latest_handoff_frontier(log_dir: Path, minimum_count: int) -> tuple[int, int]:
+    text = strip_ansi((log_dir / "frontend.log").read_text(errors="replace"))
+    matches = re.findall(
+        r"decode migration source quiesced.*?"
+        r"committed_len=(\d+).*?logical_len=(\d+)",
+        text,
+    )
+    if len(matches) < minimum_count:
+        raise AssertionError(
+            f"Expected at least {minimum_count} handoff frontier logs, got "
+            f"{len(matches)}"
+        )
+    committed_len, logical_len = matches[minimum_count - 1]
+    return int(committed_len), int(logical_len)
+
+
+def destination_replay(
+    base_url: str,
+    model: str,
+    prompt_ids: list[int],
+    migrated_ids: list[int],
+    handoff_output_tokens: int,
+    max_tokens: int,
+) -> list[int]:
+    prefix = migrated_ids[:handoff_output_tokens]
+    remaining = max_tokens - len(prefix)
+    if remaining <= 0:
+        return prefix
+    response = completion(
+        base_url,
+        model,
+        prompt_ids + prefix,
+        remaining,
+        destination_nvext(),
+    )
+    return prefix + response_token_ids(response)
 
 
 def log_count(log_dir: Path, text: str) -> int:
@@ -173,6 +258,10 @@ def main() -> None:
     parser.add_argument("--data-path", type=Path)
     parser.add_argument("--num-questions", type=int, default=20)
     parser.add_argument(
+        "--indices",
+        help="Comma-separated zero-based candidate indices after the few-shot rows",
+    )
+    parser.add_argument(
         "--max-attempts",
         type=int,
         help="Maximum dataset rows to try while collecting migrated samples",
@@ -191,6 +280,12 @@ def main() -> None:
 
     data_path = args.data_path or (args.log_dir / "gsm8k-test.jsonl")
     lines = load_dataset(data_path)
+    selected_indices = None
+    if args.indices:
+        selected_indices = [int(value) for value in args.indices.split(",")]
+        if not selected_indices or any(index < 0 for index in selected_indices):
+            raise ValueError("--indices must contain non-negative integers")
+        args.num_questions = len(selected_indices)
     max_attempts = args.max_attempts or args.num_questions * 3
     if max_attempts < args.num_questions:
         raise ValueError("--max-attempts must be at least --num-questions")
@@ -209,12 +304,28 @@ def main() -> None:
     skipped = []
     started = time.perf_counter()
 
-    for index in range(max_attempts):
+    candidate_indices = (
+        selected_indices if selected_indices is not None else range(max_attempts)
+    )
+    for index in candidate_indices:
+        if index >= available_attempts:
+            raise ValueError(
+                f"Candidate index {index} exceeds available rows "
+                f"({available_attempts})"
+            )
         item = lines[args.num_shots + index]
         label = answer_value(item["answer"])
         if label is INVALID:
             raise AssertionError(f"Invalid GSM8K label at item {index}")
         prompt = build_prompt(lines, index, args.num_shots)
+        prompt_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+        if not isinstance(prompt_ids, list):
+            prompt_ids = prompt_ids["input_ids"]
 
         baseline = chat_completion(
             args.base_url,
@@ -232,6 +343,7 @@ def main() -> None:
         baseline_answer = answer_value(baseline_text)
 
         commits_before = log_count(args.log_dir, "decode migration committed")
+        frontiers_before = log_count(args.log_dir, "decode migration source quiesced")
         migrated = chat_completion(
             args.base_url,
             args.model,
@@ -265,6 +377,26 @@ def main() -> None:
             "decode migration committed",
             commits_before + 1,
         )
+        committed_len, logical_len = latest_handoff_frontier(
+            args.log_dir, frontiers_before + 1
+        )
+        prompt_len = len(prompt_ids)
+        committed_output_tokens = committed_len - prompt_len
+        handoff_output_tokens = logical_len - prompt_len
+        if committed_output_tokens < 0 or handoff_output_tokens < 0:
+            raise AssertionError(
+                "Logged migration frontier precedes the reconstructed prompt: "
+                f"prompt={prompt_len}, committed={committed_len}, "
+                f"logical={logical_len}"
+            )
+        replay_ids = destination_replay(
+            args.base_url,
+            args.model,
+            prompt_ids,
+            migrated_ids,
+            handoff_output_tokens,
+            args.max_tokens,
+        )
         migrated_answer = answer_value(migrated_text)
 
         baseline_is_correct = baseline_answer == label
@@ -273,6 +405,7 @@ def main() -> None:
         migrated_correct += int(migrated_is_correct)
         answer_agreement += int(baseline_answer == migrated_answer)
         shared_prefix = common_prefix_length(baseline_ids, migrated_ids)
+        replay_shared_prefix = common_prefix_length(migrated_ids, replay_ids)
         baseline_think_end_position = (
             baseline_ids.index(think_end_token_id)
             if think_end_token_id in baseline_ids
@@ -293,6 +426,19 @@ def main() -> None:
             "common_prefix_tokens": shared_prefix,
             "baseline_think_end_position": baseline_think_end_position,
             "think_end_position": migrated_think_end_position,
+            "prompt_tokens": prompt_len,
+            "handoff_committed_tokens": committed_output_tokens,
+            "handoff_logical_tokens": handoff_output_tokens,
+            "migration_replay_common_prefix_tokens": replay_shared_prefix,
+            "migration_replay_exact": replay_ids == migrated_ids,
+            "baseline_divergence": {
+                "baseline": token_window(tokenizer, baseline_ids, shared_prefix),
+                "migrated": token_window(tokenizer, migrated_ids, shared_prefix),
+            },
+            "replay_divergence": {
+                "migrated": token_window(tokenizer, migrated_ids, replay_shared_prefix),
+                "replay": token_window(tokenizer, replay_ids, replay_shared_prefix),
+            },
             "thinking_prefix_preserved": (
                 baseline_think_end_position == migrated_think_end_position
                 and shared_prefix > migrated_think_end_position
