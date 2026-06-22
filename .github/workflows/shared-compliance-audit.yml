@@ -134,11 +134,19 @@ jobs:
           set -euo pipefail
           # Scan the container's OWN filesystem: this job runs inside the shipped
           # image, so the image is already on disk as our rootfs — no registry
-          # re-pull, no docker daemon, no ECR / aws creds. Exclude virtual fs +
-          # the GHA mounts so syft catalogs only the image's packages (dpkg + the
-          # venv), not the checkout (/__w), the runner's injected toolcache/node
-          # (/__e), or /proc.
+          # re-pull, no docker daemon, no ECR / aws creds.
+          #
+          # Restrict to INSTALLED-package catalogers so syft reports what's
+          # actually shipped, not deps merely *declared* in source manifests that
+          # framework images bundle (lmsysorg/sglang ships its repo: .github
+          # workflows, go.mod, requirements.txt, pre-commit configs). rust-cargo-lock
+          # is added back because our Rust deps are only visible via Cargo.lock
+          # (the wheels aren't cargo-auditable) and they're the audit's main signal
+          # (e.g. vllm's aws-sdk crates). go-module-binary stays (installed), so
+          # the etcd/nats binaries are still attributed; only source go.mod drops.
+          # Excludes still skip virtual fs + GHA mounts (cheap; guards /proc etc.).
           syft dir:/ \
+            --select-catalogers 'installed,+rust-cargo-lock-cataloger' \
             --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
             --exclude './__w/**' --exclude './__e/**' --exclude './github/**' \
             --exclude './tmp/**' --exclude './run/**' --exclude './home/runner/**' \
