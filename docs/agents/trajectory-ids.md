@@ -5,7 +5,7 @@ title: Trajectory IDs
 subtitle: Identify agent trajectories from supported coding agents and custom clients
 ---
 
-A trajectory ID is the stable identifier Dynamo uses for one agent reasoning/tool chain. A root agent, planner, researcher subagent, or OpenCode subtask can each have its own trajectory. Every LLM request in that chain should carry the same `trajectory_id`; child trajectories can also carry a `parent_trajectory_id` so traces and replay tools can rebuild the tree.
+A trajectory ID is the stable identifier Dynamo uses for one agent reasoning/tool chain. A root agent, planner, researcher subagent, or OpenCode subtask can each have its own trajectory. Every LLM request in that chain should carry the same `trajectory_id`; child trajectories can also carry a `parent_trajectory_id` so traces and replay tools can rebuild the tree. Some academic papers also call this a `program_id`.
 
 ## Trajectory ID inputs
 
