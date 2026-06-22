@@ -30,7 +30,7 @@ The EPP can be served in 2 modes. The two modes are selected at startup by **`DY
 |---|---|
 Duplicate store/remove (vLLM "retries") | parity
 In-stream ordering |  parity
-Transient disconnects | parity-ish
+Transient disconnects | parity-ish. If the EPP's connection to a worker drops for a moment (a brief network blip or a quick pod restart), it reconnects on its own and keeps routing; the only catch is that any KV-cache updates the worker sent during that short gap are missed (ZMQ doesn't replay them), so the router's view is briefly a little out of date until normal traffic refreshes it — almost the same as the full stack, which can replay those missed updates.
 Dropped events / gaps | Not handled. (NATS/JetStream is durable + replayable; the standalone indexer does seq-watermark gap detection + replay.)
 Initial cache state | Not handled. (The Dynamo path does an initial worker dump).
 Backpressure / EPP restart | PUB drops to slow subscribers (HWM) → silent loss; on restart the index is empty and only re-warms from new traffic.
