@@ -21,7 +21,7 @@ For tool timing fidelity, publish explicit tool events over the optional ZMQ ing
 
 ## Convert to Agentic Mooncake
 
-**Experimental.** Convert a collected request trace into an agentic Mooncake trace. The converter uses Dynamo `request_end` rows for request timing, token lengths, worker placement, and replay hashes. It also uses terminal harness tool rows (`tool_end` / `tool_error`) to preserve tool-wait time between dependent LLM requests.
+**Experimental.** The converter uses Dynamo `request_end` rows for request timing, token lengths, worker placement, and replay hashes. It also uses terminal harness tool rows (`tool_end` / `tool_error`) to preserve tool-wait time between dependent LLM requests.
 
 Replay ignores non-replay request fields such as `finish_reason_metadata`; use the Perfetto view in [Agent Tracing](agent-tracing.md#view-traces-in-perfetto) when you want to inspect final finish reasons, backend stop signals, or complete tool-call metadata inside the trace.
 
@@ -65,14 +65,3 @@ Agentic Mooncake rows preserve:
 - `hash_ids`, `input_length`, and `output_length`: prompt-prefix and length data for mocker replay.
 
 Rows with no `wait_for` use their `timestamp` as the replay start time. Rows with dependencies wait for all listed requests to complete, then wait `delay + tool_wait_ms` before dispatch. For more flags and engine settings, see [DynoSim Runs](../dynosim/runs.md).
-
-## ATIF Alignment
-
-Dynamo emits `dynamo.request.trace.v1`, not full ATIF logs, but identifiers match [ATIF][atif-rfc] and [Harbor](https://github.com/harbor-framework/harbor) so you can join harness trajectories to Dynamo rows on `trajectory_id`. Dynamo omits conversational payload by design.
-
-| Dynamo | Role |
-|--------|------|
-| `trajectory_id` | Branch within run |
-| `parent_trajectory_id` | Subagent link |
-
-[atif-rfc]: https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md
