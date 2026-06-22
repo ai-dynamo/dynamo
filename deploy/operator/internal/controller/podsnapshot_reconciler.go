@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -114,12 +115,12 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
 	}
 
-	// The checkpoint ID is carried as a label (set by the DynamoCheckpoint controller),
-	// not a spec field; the agent independently reads it from the source pod.
-	id := snap.Labels[snapshotprotocol.CheckpointIDLabel]
+	// The checkpoint ID is read from the source pod's label (set there by the DynamoCheckpoint
+	// controller); the PodSnapshot does not duplicate it. The pod is the single source of truth.
+	id := pod.Labels[snapshotprotocol.CheckpointIDLabel]
 	if id == "" {
 		return sr.failPodSnapshot(ctx, snap, "MissingCheckpointID",
-			fmt.Errorf("snapshot %q missing %s label", snap.Name, snapshotprotocol.CheckpointIDLabel))
+			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotprotocol.CheckpointIDLabel))
 	}
 	contentName := podSnapshotContentName(id)
 
@@ -208,9 +209,8 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *nvidiacomv1alpha1
 // receives the content resolved earlier in the reconcile, so it never re-Gets it.
 func (sr *PodSnapshotReconciler) propagateStatus(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, content *nvidiacomv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
 	changed := false
-	if snap.Status.BoundPodSnapshotContentName == nil || *snap.Status.BoundPodSnapshotContentName != content.Name {
-		name := content.Name
-		snap.Status.BoundPodSnapshotContentName = &name
+	if ptr.Deref(snap.Status.BoundPodSnapshotContentName, "") != content.Name {
+		snap.Status.BoundPodSnapshotContentName = ptr.To(content.Name)
 		changed = true
 	}
 
@@ -262,10 +262,11 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiac
 		return ctrl.Result{}, nil
 	}
 
-	// Without a checkpoint-id label no PodSnapshotContent could have been bound; drop the
-	// finalizer rather than misroute a delete to a wrongly-named object.
-	id := snap.Labels[snapshotprotocol.CheckpointIDLabel]
-	if id == "" {
+	// status.BoundPodSnapshotContentName is the authoritative record of the content we created.
+	// If it is unset, nothing was bound, so drop the finalizer. (Accepted orphan risk: a content
+	// created via SSA but whose status write did not land before the process crashed AND the
+	// PodSnapshot was deleted during that downtime would leak; deemed acceptable, not guarded.)
+	if snap.Status.BoundPodSnapshotContentName == nil {
 		controllerutil.RemoveFinalizer(snap, podSnapshotFinalizer)
 		if err := sr.Update(ctx, snap); err != nil {
 			return ctrl.Result{}, fmt.Errorf("remove snapshot finalizer: %w", err)
@@ -273,7 +274,7 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiac
 		return ctrl.Result{}, nil
 	}
 
-	contentName := podSnapshotContentName(id)
+	contentName := *snap.Status.BoundPodSnapshotContentName
 	content := &nvidiacomv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}}
 	if err := sr.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("delete PodSnapshotContent %q: %w", contentName, err)

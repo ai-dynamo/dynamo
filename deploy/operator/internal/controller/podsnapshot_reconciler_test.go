@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -62,7 +63,6 @@ func makeSnapshotForReconcile(checkpointID, podName string) *nvidiacomv1alpha1.P
 			Namespace:  "inference",
 			UID:        types.UID("snap-uid"),
 			Finalizers: []string{podSnapshotFinalizer},
-			Labels:     map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
 		},
 		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
 			Source: nvidiacomv1alpha1.PodSnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: podName}},
@@ -70,11 +70,17 @@ func makeSnapshotForReconcile(checkpointID, podName string) *nvidiacomv1alpha1.P
 	}
 }
 
-func scheduledPod(name, node string) *corev1.Pod {
-	return &corev1.Pod{
+// scheduledPod builds a scheduled source pod. The checkpoint ID lives on the pod label (the
+// reconciler reads it from there); pass "" to omit the label and exercise the missing-id path.
+func scheduledPod(name, node, checkpointID string) *corev1.Pod {
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "inference", UID: types.UID("pod-uid-9")},
 		Spec:       corev1.PodSpec{NodeName: node},
 	}
+	if checkpointID != "" {
+		pod.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID}
+	}
+	return pod
 }
 
 func reconcileSnapshot(t *testing.T, r *PodSnapshotReconciler, name string) ctrl.Result {
@@ -102,7 +108,7 @@ func TestSnapshotReconciler_PodUnscheduledBacksOff(t *testing.T) {
 func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile("abc123", "worker-0")
-	r := makeSnapshotReconciler(s, snap, scheduledPod("worker-0", "node-a"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod("worker-0", "node-a", "abc123"))
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -148,7 +154,7 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 					Conditions: []metav1.Condition{{Type: tc.condType, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}},
 				},
 			}
-			r := makeSnapshotReconciler(s, snap, content, scheduledPod("worker-0", "node-a"))
+			r := makeSnapshotReconciler(s, snap, content, scheduledPod("worker-0", "node-a", "abc123"))
 
 			reconcileSnapshot(t, r, snap.Name)
 
@@ -172,7 +178,7 @@ func TestSnapshotReconciler_RescheduleFailsSnapshot(t *testing.T) {
 		},
 	}
 	// Pod now runs on a different node than the bound content.
-	r := makeSnapshotReconciler(s, snap, content, scheduledPod("worker-0", "node-b"))
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod("worker-0", "node-b", "abc123"))
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -187,8 +193,8 @@ func TestSnapshotReconciler_RescheduleFailsSnapshot(t *testing.T) {
 func TestSnapshotReconciler_MissingCheckpointIDLabelFails(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile("abc123", "worker-0")
-	delete(snap.Labels, snapshotprotocol.CheckpointIDLabel)
-	r := makeSnapshotReconciler(s, snap, scheduledPod("worker-0", "node-a"))
+	// The source pod carries no checkpoint-id label.
+	r := makeSnapshotReconciler(s, snap, scheduledPod("worker-0", "node-a", ""))
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -199,12 +205,12 @@ func TestSnapshotReconciler_MissingCheckpointIDLabelFails(t *testing.T) {
 	assert.Equal(t, "MissingCheckpointID", cond.Reason)
 }
 
-func TestSnapshotReconciler_DeleteWithoutLabelDropsFinalizer(t *testing.T) {
+func TestSnapshotReconciler_DeleteWithNilBoundDropsFinalizer(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	now := metav1.Now()
 	snap := makeSnapshotForReconcile("abc123", "worker-0")
 	snap.DeletionTimestamp = &now
-	delete(snap.Labels, snapshotprotocol.CheckpointIDLabel)
+	// status.BoundPodSnapshotContentName is unset → nothing was bound → finalizer is dropped.
 	r := makeSnapshotReconciler(s, snap)
 
 	reconcileSnapshot(t, r, snap.Name)
@@ -223,6 +229,7 @@ func TestSnapshotReconciler_CascadeDelete(t *testing.T) {
 	now := metav1.Now()
 	snap := makeSnapshotForReconcile("abc123", "worker-0")
 	snap.DeletionTimestamp = &now
+	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-abc123")
 	content := &nvidiacomv1alpha1.PodSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-abc123"},
 		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
