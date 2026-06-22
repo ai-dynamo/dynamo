@@ -173,6 +173,11 @@ spec:
                   fieldPath: metadata.namespace
             - name: RUST_LOG
               value: "info,dynamo_llm::kv_router=debug"
+            # The EPP runs as non-root; point HuggingFace's cache at a writable
+            # dir (the hf-cache emptyDir mounted below) so the startup tokenizer
+            # download can create its cache instead of failing on /home/nonroot.
+            - name: HF_HOME
+              value: /tmp/hf
             # HF token: the EPP downloads the tokenizer for the model to tokenize
             # prompts for routing (no GPU needed; the worker re-tokenizes).
             - name: HF_TOKEN
@@ -200,6 +205,13 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/hf
+      volumes:
+        # Writable HuggingFace cache for the non-root EPP (tokenizer download).
+        - name: hf-cache
+          emptyDir: {}
 
 ---
 apiVersion: v1

@@ -286,6 +286,10 @@ spec:
                   fieldPath: metadata.namespace
             - name: RUST_LOG
               value: "info,dynamo_llm::kv_router=debug"
+            # Non-root EPP: writable HuggingFace cache for the startup tokenizer
+            # download (the hf-cache emptyDir mounted below).
+            - name: HF_HOME
+              value: /tmp/hf
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -311,6 +315,13 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/hf
+      volumes:
+        # Writable HuggingFace cache for the non-root EPP (tokenizer download).
+        - name: hf-cache
+          emptyDir: {}
 
 ---
 apiVersion: v1
