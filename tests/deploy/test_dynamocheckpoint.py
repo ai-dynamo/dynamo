@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,18 +33,14 @@ TRANSIENT_K8S_EXCEPTIONS = (
 DGD_PLURAL = "dynamographdeployments"
 CHECKPOINT_PLURAL = "dynamocheckpoints"
 
-DECODE_COMPONENT = "VllmDecodeWorker"
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
-VLLM_MODEL = "Qwen/Qwen3-0.6B"
-VLLM_MAX_MODEL_LEN = "2048"
-VLLM_GPU_MEMORY_UTILIZATION = "0.30"
+CHECKPOINT_MODEL = "Qwen/Qwen3-0.6B"
 
 CHECKPOINT_ID_LABEL = "nvidia.com/snapshot-checkpoint-id"
 CHECKPOINT_SOURCE_LABEL = "nvidia.com/snapshot-is-checkpoint-source"
 RESTORE_TARGET_LABEL = "nvidia.com/snapshot-is-restore-target"
 TARGET_CONTAINERS_ANNOTATION = "nvidia.com/snapshot-target-containers"
-RESTORE_STATUS_ANNOTATION = f"nvidia.com/snapshot-restore-status.{TARGET_CONTAINER}"
 
 # CUDA checkpointing can OOM on 10GB MIG slices; run this test on full GPUs.
 GPU_NODE_SELECTOR = {
@@ -66,6 +63,74 @@ DGD_READY_TIMEOUT = 300
 TEST_TIMEOUT = 1200
 
 
+@dataclass(frozen=True)
+class CheckpointBackendConfig:
+    name: str
+    manifest: tuple[str, ...]
+    decode_component: str
+    frontend_component: str
+    target_container: str
+    model: str
+    args: tuple[str, ...]
+
+
+CHECKPOINT_BACKENDS = {
+    "vllm": CheckpointBackendConfig(
+        name="vllm",
+        manifest=("examples", "backends", "vllm", "deploy", "v1beta1", "agg.yaml"),
+        decode_component="VllmDecodeWorker",
+        frontend_component=FRONTEND_COMPONENT,
+        target_container=TARGET_CONTAINER,
+        model=CHECKPOINT_MODEL,
+        args=(
+            "--model",
+            CHECKPOINT_MODEL,
+            "--max-model-len",
+            "2048",
+            "--gpu-memory-utilization",
+            "0.30",
+        ),
+    ),
+    "sglang": CheckpointBackendConfig(
+        name="sglang",
+        manifest=(
+            "examples",
+            "backends",
+            "sglang",
+            "deploy",
+            "v1beta1",
+            "agg.yaml",
+        ),
+        decode_component="decode",
+        frontend_component=FRONTEND_COMPONENT,
+        target_container=TARGET_CONTAINER,
+        model=CHECKPOINT_MODEL,
+        args=(
+            "--model-path",
+            CHECKPOINT_MODEL,
+            "--served-model-name",
+            CHECKPOINT_MODEL,
+            "--page-size",
+            "16",
+            "--tp",
+            "1",
+            "--trust-remote-code",
+            "--skip-tokenizer-init",
+        ),
+    ),
+}
+
+
+def _checkpoint_backend(request: pytest.FixtureRequest) -> CheckpointBackendConfig:
+    backend_name = request.config.getoption("--checkpoint-backend")
+    try:
+        return CHECKPOINT_BACKENDS[backend_name]
+    except KeyError as exc:
+        raise AssertionError(
+            f"unsupported checkpoint backend {backend_name!r}"
+        ) from exc
+
+
 def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     for component in spec["spec"].get("components", []):
         if component.get("name") == name:
@@ -73,45 +138,36 @@ def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(f"component {name!r} not found in DGD spec")
 
 
-def _new_vllm_checkpoint_spec(
-    name: str, namespace: str, image: str, frontend_image: str
+def _new_checkpoint_spec(
+    backend: CheckpointBackendConfig,
+    name: str,
+    namespace: str,
+    image: str,
+    frontend_image: str,
 ) -> DeploymentSpec:
-    spec_path = (
-        Path(_get_workspace_dir())
-        / "examples"
-        / "backends"
-        / "vllm"
-        / "deploy"
-        / "v1beta1"
-        / "agg.yaml"
-    )
+    spec_path = Path(_get_workspace_dir()).joinpath(*backend.manifest)
     deployment_spec = DeploymentSpec(str(spec_path))
     deployment_spec.name = name
     deployment_spec.namespace = namespace
-    deployment_spec.set_image(frontend_image, FRONTEND_COMPONENT)
-    deployment_spec.set_image(image, DECODE_COMPONENT)
-    deployment_spec.set_model(VLLM_MODEL, DECODE_COMPONENT)
+    deployment_spec.set_image(frontend_image, backend.frontend_component)
+    deployment_spec.set_image(image, backend.decode_component)
+    deployment_spec.set_model(backend.model, backend.decode_component)
 
     raw_spec = deployment_spec.spec()
-    decode = _component(raw_spec, DECODE_COMPONENT)
+    decode = _component(raw_spec, backend.decode_component)
     pod_spec = decode.setdefault("podTemplate", {}).setdefault("spec", {})
     pod_spec["nodeSelector"] = dict(GPU_NODE_SELECTOR)
     pod_spec["tolerations"] = list(GPU_TOLERATIONS)
     containers = pod_spec.setdefault("containers", [])
     if not containers:
-        raise AssertionError(f"component {DECODE_COMPONENT!r} has no containers")
-    containers[0]["args"] = [
-        "--model",
-        VLLM_MODEL,
-        "--max-model-len",
-        VLLM_MAX_MODEL_LEN,
-        "--gpu-memory-utilization",
-        VLLM_GPU_MEMORY_UTILIZATION,
-    ]
+        raise AssertionError(
+            f"component {backend.decode_component!r} has no containers"
+        )
+    containers[0]["args"] = list(backend.args)
 
     decode.setdefault("experimental", {})["checkpoint"] = {
         "enabled": True,
-        "targetContainerName": TARGET_CONTAINER,
+        "targetContainerName": backend.target_container,
     }
     return deployment_spec
 
@@ -173,10 +229,15 @@ async def _get_checkpoint(
 
 async def _wait_for_checkpoint_ready(
     deployment: ManagedDeployment,
+    backend: CheckpointBackendConfig,
 ) -> tuple[str, str]:
     async def fetch_status() -> dict[str, Any]:
         dgd = await _get_dgd(deployment)
-        status = dgd.get("status", {}).get("checkpoints", {}).get(DECODE_COMPONENT, {})
+        status = (
+            dgd.get("status", {})
+            .get("checkpoints", {})
+            .get(backend.decode_component, {})
+        )
         checkpoint_name = status.get("checkpointName")
         checkpoint = None
         if checkpoint_name:
@@ -184,7 +245,7 @@ async def _wait_for_checkpoint_ready(
         return {"dgd_status": status, "checkpoint": checkpoint}
 
     value = await _wait_for(
-        "DGD auto checkpoint to become Ready",
+        f"{backend.name} DGD auto checkpoint to become Ready",
         fetch_status,
         _checkpoint_is_ready,
         timeout_s=CHECKPOINT_READY_TIMEOUT,
@@ -213,8 +274,12 @@ def _checkpoint_is_ready(result: dict[str, Any]) -> bool:
     return phase == "Ready" and bool(status.get("identityHash"))
 
 
-def _runtime_decode_pods(deployment: ManagedDeployment) -> list[Any]:
-    pods = deployment.get_pods([DECODE_COMPONENT]).get(DECODE_COMPONENT, [])
+def _runtime_decode_pods(
+    deployment: ManagedDeployment, backend: CheckpointBackendConfig
+) -> list[Any]:
+    pods = deployment.get_pods([backend.decode_component]).get(
+        backend.decode_component, []
+    )
     return [
         pod
         for pod in pods
@@ -223,17 +288,19 @@ def _runtime_decode_pods(deployment: ManagedDeployment) -> list[Any]:
     ]
 
 
-async def _scale_decode_component(deployment: ManagedDeployment, replicas: int) -> None:
+async def _scale_decode_component(
+    deployment: ManagedDeployment, backend: CheckpointBackendConfig, replicas: int
+) -> None:
     if deployment._custom_api is None:
         raise RuntimeError("Kubernetes API not initialized")
     dgd = await _get_dgd(deployment)
     components = dgd["spec"]["components"]
     for component in components:
-        if component.get("name") == DECODE_COMPONENT:
+        if component.get("name") == backend.decode_component:
             component["replicas"] = replicas
             break
     else:
-        raise AssertionError(f"component {DECODE_COMPONENT!r} not found")
+        raise AssertionError(f"component {backend.decode_component!r} not found")
 
     await deployment._custom_api.patch_namespaced_custom_object(
         group="nvidia.com",
@@ -247,11 +314,14 @@ async def _scale_decode_component(deployment: ManagedDeployment, replicas: int) 
 
 
 async def _wait_for_decode_runtime_pod_count(
-    deployment: ManagedDeployment, expected: int, timeout_s: int
+    deployment: ManagedDeployment,
+    backend: CheckpointBackendConfig,
+    expected: int,
+    timeout_s: int,
 ) -> list[Any]:
     return await _wait_for(
-        f"{expected} decode runtime pod(s)",
-        lambda: _runtime_decode_pods(deployment),
+        f"{expected} {backend.name} decode runtime pod(s)",
+        lambda: _runtime_decode_pods(deployment, backend),
         lambda pods: len(pods) == expected,
         timeout_s=timeout_s,
         interval_s=2,
@@ -260,11 +330,16 @@ async def _wait_for_decode_runtime_pod_count(
 
 async def _wait_for_restored_decode_pod(
     deployment: ManagedDeployment,
+    backend: CheckpointBackendConfig,
     old_pod_names: set[str],
     checkpoint_hash: str,
 ) -> Any:
+    restore_status_annotation = (
+        f"nvidia.com/snapshot-restore-status.{backend.target_container}"
+    )
+
     def find_restored() -> Any:
-        pods = _runtime_decode_pods(deployment)
+        pods = _runtime_decode_pods(deployment, backend)
         last_seen: list[dict[str, Any]] = []
         for pod in pods:
             metadata = pod.raw.get("metadata", {})
@@ -275,7 +350,7 @@ async def _wait_for_restored_decode_pod(
                 {
                     "name": name,
                     "checkpoint": labels.get(CHECKPOINT_ID_LABEL),
-                    "restore": annotations.get(RESTORE_STATUS_ANNOTATION),
+                    "restore": annotations.get(restore_status_annotation),
                     "phase": pod.raw.get("status", {}).get("phase"),
                     "node": pod.raw.get("spec", {}).get("nodeName"),
                 }
@@ -286,19 +361,22 @@ async def _wait_for_restored_decode_pod(
                 continue
             if labels.get(RESTORE_TARGET_LABEL) != "true":
                 continue
-            if annotations.get(TARGET_CONTAINERS_ANNOTATION) != TARGET_CONTAINER:
+            if (
+                annotations.get(TARGET_CONTAINERS_ANNOTATION)
+                != backend.target_container
+            ):
                 continue
-            if annotations.get(RESTORE_STATUS_ANNOTATION) == "failed":
+            if annotations.get(restore_status_annotation) == "failed":
                 raise AssertionError(
                     f"restore failed for decode pod {name}: {last_seen[-1]}"
                 )
-            if annotations.get(RESTORE_STATUS_ANNOTATION) != "completed":
+            if annotations.get(restore_status_annotation) != "completed":
                 continue
             return pod
         return last_seen
 
     restored = await _wait_for(
-        "replacement decode pod to restore from checkpoint",
+        f"replacement {backend.name} decode pod to restore from checkpoint",
         find_restored,
         lambda result: not isinstance(result, list),
         timeout_s=RESTORE_READY_TIMEOUT,
@@ -381,10 +459,11 @@ async def test_dgd_checkpoint_restore_deploy(
     request: pytest.FixtureRequest,
 ) -> None:
     """Verify a DGD worker can be checkpointed, restored, and still serve."""
+    backend = _checkpoint_backend(request)
     if not image:
         pytest.fail(
             "--image is required for the checkpoint deploy test "
-            "(expected the CI-built vLLM checkpoint placeholder image)",
+            f"(expected the CI-built {backend.name} checkpoint placeholder image)",
             pytrace=False,
         )
     frontend_image = request.config.getoption("--frontend-image")
@@ -396,8 +475,9 @@ async def test_dgd_checkpoint_restore_deploy(
         )
 
     suffix = str(int(time.time() * 1000))
-    deployment_name = f"vllm-checkpoint-{suffix}"
-    deployment_spec = _new_vllm_checkpoint_spec(
+    deployment_name = f"{backend.name}-checkpoint-{suffix}"
+    deployment_spec = _new_checkpoint_spec(
+        backend=backend,
         name=deployment_name,
         namespace=namespace,
         image=image,
@@ -410,8 +490,8 @@ async def test_dgd_checkpoint_restore_deploy(
         namespace=namespace,
         skip_service_restart=skip_service_restart,
     ) as deployment:
-        frontend_pods = deployment.get_pods([FRONTEND_COMPONENT]).get(
-            FRONTEND_COMPONENT, []
+        frontend_pods = deployment.get_pods([backend.frontend_component]).get(
+            backend.frontend_component, []
         )
         if not frontend_pods:
             pytest.fail(f"No frontend pods found for {deployment_name}", pytrace=False)
@@ -421,28 +501,35 @@ async def test_dgd_checkpoint_restore_deploy(
         base_url = f"http://localhost:{port_forward.local_port}"
 
         logger.info("Validating inference before restore")
-        _assert_inference(base_url, deployment_spec.endpoint, VLLM_MODEL)
+        _assert_inference(base_url, deployment_spec.endpoint, backend.model)
 
-        _, checkpoint_hash = await _wait_for_checkpoint_ready(deployment)
+        _, checkpoint_hash = await _wait_for_checkpoint_ready(deployment, backend)
 
         old_decode_pods = await _wait_for_decode_runtime_pod_count(
-            deployment, expected=1, timeout_s=DECODE_SCALE_TIMEOUT
+            deployment,
+            backend=backend,
+            expected=1,
+            timeout_s=DECODE_SCALE_TIMEOUT,
         )
         old_pod_names = {pod.name for pod in old_decode_pods}
         logger.info("Scaling decode down from pods: %s", sorted(old_pod_names))
-        await _scale_decode_component(deployment, replicas=0)
+        await _scale_decode_component(deployment, backend, replicas=0)
         await _wait_for_decode_runtime_pod_count(
-            deployment, expected=0, timeout_s=DECODE_SCALE_TIMEOUT
+            deployment,
+            backend=backend,
+            expected=0,
+            timeout_s=DECODE_SCALE_TIMEOUT,
         )
 
         logger.info("Scaling decode back up to trigger restore")
-        await _scale_decode_component(deployment, replicas=1)
+        await _scale_decode_component(deployment, backend, replicas=1)
         await _wait_for_restored_decode_pod(
             deployment,
+            backend=backend,
             old_pod_names=old_pod_names,
             checkpoint_hash=checkpoint_hash,
         )
         await deployment._wait_for_ready(timeout=DGD_READY_TIMEOUT)
 
         logger.info("Validating inference after restore")
-        _assert_inference(base_url, deployment_spec.endpoint, VLLM_MODEL)
+        _assert_inference(base_url, deployment_spec.endpoint, backend.model)
