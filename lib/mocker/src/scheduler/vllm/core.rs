@@ -18,8 +18,8 @@ use crate::common::handoff::HandoffId;
 #[cfg(feature = "kvbm-offload")]
 use crate::common::protocols::G1;
 use crate::common::protocols::{
-    DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
-    PrefillCost, WorkerType,
+    DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal,
+    PreemptionMode, PrefillCost, WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
@@ -546,6 +546,9 @@ impl VllmCore {
                 handoff_id,
                 mut request,
             } => {
+                if self.args.engine_type == EngineType::Trtllm {
+                    anyhow::bail!("destination reservation is not supported for TRT-LLM");
+                }
                 let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
                 request.uuid = Some(uuid);
                 if self.state.requests.contains_key(&uuid) {

@@ -746,6 +746,17 @@ impl KvManager {
         Some(blocks)
     }
 
+    fn acquire_existing_full(
+        &mut self,
+        seq_hash: SequenceHash,
+        plh: PositionalLineageHash,
+    ) -> Option<ImmutableBlock<G1>> {
+        if let Some(active) = self.active_full.get(&seq_hash) {
+            return Some(active[0].clone());
+        }
+        self.block_manager.match_blocks(&[plh]).into_iter().next()
+    }
+
     pub(crate) fn reserve_destination(
         &mut self,
         sequence: &ActiveSequence,
@@ -765,11 +776,7 @@ impl KvManager {
                 break;
             };
             let plh = plhs[plh_idx];
-            if let Some(active) = self.active_full.get(seq_hash) {
-                cached_prefix.push((*seq_hash, active[0].clone()));
-                continue;
-            }
-            let Some(handle) = self.block_manager.match_blocks(&[plh]).into_iter().next() else {
+            let Some(handle) = self.acquire_existing_full(*seq_hash, plh) else {
                 break;
             };
             cached_prefix.push((*seq_hash, handle));
@@ -784,6 +791,11 @@ impl KvManager {
         })
     }
 
+    /// Publish transferred destination blocks while reconciling any cache entry
+    /// that appeared after reservation. Unlike upstream vLLM, a collision may
+    /// replace the reserved block ID and reduce occupancy during activation;
+    /// the mocker acquires the canonical handle instead of strictly moving the
+    /// originally reserved handle.
     pub(crate) fn activate_destination(&mut self, reservation: VllmDestinationReservation) {
         let VllmDestinationReservation {
             cached_prefix,
@@ -829,6 +841,12 @@ impl KvManager {
                     let mutable = unpublished_blocks
                         .next()
                         .expect("reserved destination block must exist");
+                    if let Some(handle) = self.acquire_existing_full(seq_hash, plh) {
+                        drop(mutable);
+                        self.active_full.entry(seq_hash).or_default().push(handle);
+                        metadata_parent_hash = Some(seq_hash);
+                        continue;
+                    }
                     let complete = mutable
                         .stage(plh, self.block_size)
                         .expect("destination stage failed");
@@ -1398,16 +1416,9 @@ impl KvManager {
             .expect("Promote: partial block not found");
 
         // Detect collision: seq_hash already has registered handles (active or inactive).
-        let is_new = if let Some(vec) = self.active_full.get_mut(&seq_hash) {
-            // Collision on active pool — drop MutableBlock, clone existing handle.
+        let is_new = if let Some(existing) = self.acquire_existing_full(seq_hash, plh) {
             drop(mutable);
-            let existing = vec[0].clone();
-            vec.push(existing);
-            false
-        } else if let Some(immutable) = self.block_manager.match_blocks(&[plh]).into_iter().next() {
-            // Collision on inactive pool — reactivate existing handle.
-            drop(mutable);
-            self.active_full.insert(seq_hash, vec![immutable]);
+            self.active_full.entry(seq_hash).or_default().push(existing);
             false
         } else {
             // Fresh registration.
@@ -2165,6 +2176,56 @@ mod tests {
             .count();
         assert_eq!(stored_count, 1, "reactivation must not re-emit Stored");
         assert_eq!(removed_count, 0, "Deref must not emit Removed");
+    }
+
+    #[test]
+    fn destination_activation_collision_reuses_canonical_block_and_offload_metadata() {
+        let (mut mgr, sink) = make_mgr_capturing(2, 4);
+        let sequence = ActiveSequence::new(vec![1, 2, 3, 4], 1, Some(4), true, true);
+        let reservation = mgr
+            .reserve_destination(&sequence)
+            .expect("destination reservation should fit");
+        let reserved_block_id = reservation.block_ids()[0];
+        assert_eq!(mgr.num_active_blocks(), 1);
+
+        let signal = sequence
+            .prepare_allocation(sequence.num_input_tokens())
+            .expect("full prompt should require allocation");
+        let MoveBlock::Use(blocks, local_hashes, plhs, token_ids, _) = &signal else {
+            panic!("expected full prompt allocation");
+        };
+        let UniqueBlock::FullBlock(seq_hash) = blocks[0] else {
+            panic!("expected a full prompt block");
+        };
+        let plh = plhs[0];
+        let local_hash = local_hashes[0];
+        let token_ids = token_ids.as_ref().expect("token metadata enabled")[0].clone();
+
+        assert_eq!(mgr.process(&signal), 1);
+        let canonical_block_id = mgr.active_block_ids(&sequence)[0];
+        assert_ne!(reserved_block_id, canonical_block_id);
+        assert_eq!(mgr.num_active_blocks(), 2);
+        sink.events.lock().unwrap().clear();
+
+        mgr.activate_destination(reservation);
+
+        assert_eq!(mgr.num_active_blocks(), 1);
+        assert_eq!(mgr.active_block_ids(&sequence), vec![canonical_block_id]);
+        assert!(
+            sink.events.lock().unwrap().is_empty(),
+            "collision must not emit another Stored"
+        );
+
+        // handle_evictions consumes this entry when it later creates offload metadata.
+        let metadata = mgr
+            .registered_blocks
+            .get(&plh)
+            .expect("canonical registry metadata must remain available for offload");
+        assert_eq!(metadata.seq_hash, seq_hash);
+        assert_eq!(metadata.block_id, canonical_block_id);
+        assert_eq!(metadata.parent_hash, None);
+        assert_eq!(metadata.local_hash, Some(local_hash));
+        assert_eq!(metadata.token_ids.as_deref(), Some(token_ids.as_slice()));
     }
 
     /// After reusing a prefix [A, B] and storing a new suffix [C], the

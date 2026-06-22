@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
-    DirectRequest, FpmPublisher, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
-    PreemptionMode, RawKvEvent, RawKvEventSink,
+    DirectRequest, EngineType, FpmPublisher, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
+    OutputSignal, PreemptionMode, RawKvEvent, RawKvEventSink,
 };
 use crate::common::sequence::ActiveSequence;
 use crate::scheduler::SchedulerHandle;
@@ -378,6 +378,39 @@ mod destination_lifecycle {
         assert!(destination.is_drained());
         assert!(!destination.destination_is_held(handoff_id));
         assert_eq!(destination.kv_manager.num_active_blocks(), 0);
+    }
+
+    #[test]
+    fn trtllm_destination_reservation_fails_without_acquiring_kv() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Trtllm)
+            .block_size(4)
+            .num_gpu_blocks(12)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .worker_type(WorkerType::Decode)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut destination = VllmCore::new(args);
+        let handoff_id = HandoffId::from(Uuid::from_u128(10_005));
+
+        let error = destination
+            .apply_command(SchedulerCommand::ReserveDestination {
+                handoff_id,
+                request: request(Uuid::from_u128(10_006), (0..8).collect(), 2),
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "destination reservation is not supported for TRT-LLM"
+        );
+        assert!(!destination.destination_is_held(handoff_id));
+        assert_eq!(destination.kv_manager.num_active_blocks(), 0);
+        assert!(destination.is_drained());
     }
 }
 
