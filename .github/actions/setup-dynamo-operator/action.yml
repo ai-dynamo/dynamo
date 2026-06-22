@@ -10,10 +10,6 @@ inputs:
     description: 'Name for the vCluster instance (auto-generated from github.run_id if empty)'
     required: false
     default: ''
-  vcluster_namespace:
-    description: 'Ignored. Namespace is always dynamo-deploy-test.'
-    required: false
-    default: ''
   registry:
     description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
     required: false

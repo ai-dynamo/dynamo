@@ -57,7 +57,6 @@ jobs:
         uses: ./.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
-          vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ inputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
