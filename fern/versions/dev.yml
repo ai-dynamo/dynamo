@@ -291,14 +291,18 @@ navigation:
             slug: agents
             path: ../pages-dev/agents/README.md
             contents:
+              - page: Trajectory IDs
+                path: ../pages-dev/agents/trajectory-ids.md
               - page: Agent Tracing
                 path: ../pages-dev/agents/agent-tracing.md
+              - page: Agent Simulation
+                path: ../pages-dev/agents/agent-replay.md
               - page: Agent Hints
                 path: ../pages-dev/agents/agent-hints.md
               - page: Priority Scheduling
                 path: ../pages-dev/agents/priority-scheduling.md
-              - page: Use Pi-Mono with Dynamo
-                path: ../pages-dev/agents/pi-mono.md
+              - page: Agent Harnesses
+                path: ../pages-dev/agents/agent-harnesses.md
               - page: ThunderAgent Program Scheduler
                 path: ../pages-dev/agents/thunderagent-router.md
           - page: LoRA Adapters
