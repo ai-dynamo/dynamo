@@ -15,33 +15,16 @@ NVIDIA Dynamo optimizes agent workloads with lightweight headers and request ext
 
 The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. Dynamo maps supported coding-agent headers to `trajectory_id`, and custom harnesses can send `x-dynamo-trajectory-id` directly. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for the exact contract.
 
-## Core Model
-
-| Concept | Role |
-|---------|------|
-| Trajectory | One reasoning/tool chain. Every LLM request in the chain should carry the same `trajectory_id`. |
-| Parent trajectory | The trajectory that spawned a child agent or subtask. Dynamo records this as `parent_trajectory_id` when the client provides or implies it. |
-| Request | One model call inside a trajectory. Dynamo records request timing, token counts, and finish metadata when tracing is enabled. |
-| Tool event | Optional harness-emitted timing for tool execution. Dynamo can join tool events with requests by trajectory and tool-call ID. |
-
-## Agent Guides
+## Documentation 
 
 | Concept | Purpose |
 |---------|---------|
-| [Trajectory IDs](trajectory-ids.md) | Stable agent identity from coding-agent headers or Dynamo trajectory headers. |
+| [Use Coding Agents with Dynamo](coding-agents.md) | Quickstart for running popular agent harnesses through Dynamo |
+| [Trajectory IDs](trajectory-ids.md) | Stable agent identity for scheduling, tracing, and more |
 | [Agent Tracing](agent-tracing.md) | Request traces, inferred tool calls, optional harness tool spans, Perfetto conversion, and replay. |
 | [Agent Hints](agent-hints.md) | Per-request hints such as priority, expected output length, and speculative prefill. |
 | [Priority Scheduling](priority-scheduling.md) | Priority behavior across the router queue, backend engines, and cache policy. |
-| [Use Pi-Mono with Dynamo](pi-mono.md) | Quickstart for running the Pi coding agent through Dynamo with trajectory identity and tool tracing. |
 | [ThunderAgent Program Scheduler](thunderagent-router.md) | Experimental tool-boundary pause/resume scheduler on top of KV-aware routing. |
-
-## Backend-Specific Guides
-
-Agent features are exposed through common request metadata, but backend support varies by runtime.
-
-| Backend Guide | Contents |
-|---------------|----------|
-| [SGLang for Agentic Workloads](../backends/sglang/agents.md) | Priority scheduling, priority-based radix eviction, speculative prefill, and streaming session control for subagent KV isolation. |
 
 ## Request Surface
 
@@ -52,7 +35,6 @@ curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer sk-dummy' \
   -H 'x-dynamo-trajectory-id: research-run-42:researcher' \
-  -H 'x-dynamo-parent-trajectory-id: research-run-42:planner' \
   -d '{
     "model": "my-model",
     "messages": [{"role": "user", "content": "..."}],
