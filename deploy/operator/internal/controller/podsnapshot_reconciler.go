@@ -103,43 +103,21 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// The content is named deterministically from the PodSnapshot UID (immutable, already populated
-	// after the finalizer Update above). An existing PodSnapshotContent is the authoritative source
-	// of status, so look it up first and fast-path its status WITHOUT resolving the live source pod:
-	// a PodSnapshot whose pod is deleted after the content is created must still reach a terminal
-	// state instead of looping on a missing pod.
-	contentName := podSnapshotContentName(snap)
-	content := &nvidiacomv1alpha1.PodSnapshotContent{}
-	contentErr := sr.Get(ctx, client.ObjectKey{Name: contentName}, content)
-	switch {
-	case contentErr == nil:
-		// Validate the backlink (defense in depth: the UID-derived name makes a collision
-		// improbable, but never mirror a content bound to a different PodSnapshot).
-		if ref := content.Spec.PodSnapshotRef; ref.UID != "" && ref.UID != snap.UID {
-			return sr.failPodSnapshot(ctx, snap, "ContentBacklinkMismatch",
-				fmt.Errorf("PodSnapshotContent %q is bound to PodSnapshot UID %q, not %q", contentName, ref.UID, snap.UID))
-		}
-		// A terminal content is final: mirror it and stop. No source pod required.
-		if isPodSnapshotContentTerminal(content) {
-			return sr.propagateStatus(ctx, snap, content)
-		}
-	case !apierrors.IsNotFound(contentErr):
-		return ctrl.Result{}, contentErr
+	// Idempotency: a Ready or Failed PodSnapshot is terminal and sticky — never re-evaluate or flip
+	// it. A Ready capture is a durable artifact and a Failed snapshot never becomes Ready; this also
+	// stops a PodSnapshotContent-watch event from re-running the live path and storming status.
+	if meta.IsStatusConditionTrue(snap.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) ||
+		meta.IsStatusConditionTrue(snap.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed) {
+		return ctrl.Result{}, nil
 	}
 
-	// The content is missing (must be created) or still capturing (guard against a node
-	// reschedule). Both require the live source pod.
+	// A PodSnapshot always applies to its live source pod. Resolve it; if it no longer exists, fail
+	// the snapshot terminally rather than looping on NotFound.
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			if contentErr == nil {
-				// Content exists but is not yet terminal and the pod is gone: the node agent will
-				// write a terminal failure, re-enqueuing this PodSnapshot via the content watch.
-				// Mirror the current (pending) status and wait rather than looping on the pod.
-				return sr.propagateStatus(ctx, snap, content)
-			}
-			logger.V(1).Info("Source pod not found, backing off", "snapshot", snap.Name)
-			return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
+			return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
+				fmt.Errorf("source pod %q no longer exists", snap.Spec.Source.PodRef.Name))
 		}
 		return ctrl.Result{}, err
 	}
@@ -149,21 +127,30 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Provenance guard: when the PodSnapshot pins a source pod UID, refuse to capture a same-named
-	// recreation as the wrong workload. This is creation-time guarding (the spec UID, if set, does
-	// not change); a content already bound from an earlier UID-less reconcile is out of scope.
+	// recreation as the wrong workload.
 	if wantUID := snap.Spec.Source.PodRef.UID; wantUID != "" && pod.UID != wantUID {
 		return sr.failPodSnapshot(ctx, snap, "StalePodReference",
 			fmt.Errorf("source pod %q UID %q does not match PodSnapshot source UID %q", pod.Name, pod.UID, wantUID))
 	}
 
-	if apierrors.IsNotFound(contentErr) {
-		content, err = sr.ensurePodSnapshotContent(ctx, snap, contentName, pod)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+	// The content is named deterministically from the PodSnapshot UID (immutable, already populated
+	// by the finalizer Update above).
+	contentName := podSnapshotContentName(snap)
+	content, err := sr.ensurePodSnapshotContent(ctx, snap, contentName, pod)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	// A freshly-created content always matches; only a pre-existing content whose
-	// source pod was rescheduled to another node mismatches (spec is immutable).
+
+	// Backlink verification (CSI claimRef model): an existing PodSnapshotContent must point back at
+	// THIS PodSnapshot and the live pod before we adopt/mirror it, so a pre-created/foreign
+	// cluster-scoped object is never treated as this snapshot's artifact. A freshly-created content
+	// always passes (its backlink was just built from this snap + pod).
+	if err := verifyContentBacklink(snap, content, pod); err != nil {
+		return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
+	}
+
+	// Reschedule guard: a pre-existing content whose source pod moved nodes can't be captured
+	// (spec is immutable; CRIU checkpoints can't survive migration).
 	if content.Spec.Source.NodeName != pod.Spec.NodeName {
 		return sr.failPodSnapshot(ctx, snap, "PodRescheduled",
 			fmt.Errorf("source pod moved from node %q to %q; CRIU checkpoint cannot survive migration",
@@ -173,10 +160,20 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return sr.propagateStatus(ctx, snap, content)
 }
 
-// isPodSnapshotContentTerminal reports whether the content has reached a terminal condition.
-func isPodSnapshotContentTerminal(content *nvidiacomv1alpha1.PodSnapshotContent) bool {
-	return nvidiacomv1alpha1.IsPodSnapshotContentSucceeded(content) ||
-		nvidiacomv1alpha1.IsPodSnapshotContentFailed(content)
+// verifyContentBacklink reports an error when an existing PodSnapshotContent does not belong to
+// this PodSnapshot: its snapshotRef must match (namespace/name, and uid when recorded) and its
+// recorded source pod UID must match the live pod. A freshly-created content always passes.
+func verifyContentBacklink(snap *nvidiacomv1alpha1.PodSnapshot, content *nvidiacomv1alpha1.PodSnapshotContent, pod *corev1.Pod) error {
+	if ref := content.Spec.PodSnapshotRef; ref.Namespace != snap.Namespace || ref.Name != snap.Name ||
+		(ref.UID != "" && ref.UID != snap.UID) {
+		return fmt.Errorf("PodSnapshotContent %q is bound to %s/%s (uid %q), not %s/%s (uid %q)",
+			content.Name, ref.Namespace, ref.Name, ref.UID, snap.Namespace, snap.Name, snap.UID)
+	}
+	if content.Spec.Source.PodRef.UID != pod.UID {
+		return fmt.Errorf("PodSnapshotContent %q source pod UID %q does not match live pod %q UID %q",
+			content.Name, content.Spec.Source.PodRef.UID, pod.Name, pod.UID)
+	}
+	return nil
 }
 
 // getSourcePod loads the source pod referenced by the PodSnapshot.
@@ -257,12 +254,12 @@ func (sr *PodSnapshotReconciler) propagateStatus(ctx context.Context, snap *nvid
 	switch {
 	case nvidiacomv1alpha1.IsPodSnapshotContentSucceeded(content):
 		cond := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
-		changed = sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionReady, metav1.ConditionTrue, cond.Reason, cond.Message) || changed
+		changed = sr.markReady(snap, cond.Reason, cond.Message) || changed
 	case nvidiacomv1alpha1.IsPodSnapshotContentFailed(content):
 		cond := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
-		changed = sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionFailed, metav1.ConditionTrue, cond.Reason, cond.Message) || changed
+		changed = sr.markFailed(snap, cond.Reason, cond.Message) || changed
 	default:
-		changed = sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, "Pending", "Waiting for node agent to capture the checkpoint") || changed
+		changed = sr.markPending(snap, "Pending", "Waiting for node agent to capture the checkpoint") || changed
 	}
 
 	if !changed {
@@ -284,10 +281,34 @@ func (sr *PodSnapshotReconciler) setCondition(snap *nvidiacomv1alpha1.PodSnapsho
 	})
 }
 
-// failPodSnapshot marks the PodSnapshot Failed terminally and records an event.
+// Ready and Failed are kept as a coherent, mutually-exclusive pair: at most one is True. Both
+// False is the in-progress (Pending) state. markReady/markFailed set both ends so the snapshot can
+// never report Ready=True and Failed=True simultaneously.
+
+// markReady records terminal success: Ready=True, Failed=False.
+func (sr *PodSnapshotReconciler) markReady(snap *nvidiacomv1alpha1.PodSnapshot, reason, message string) bool {
+	changed := sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionReady, metav1.ConditionTrue, reason, message)
+	return sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionFailed, metav1.ConditionFalse, reason, message) || changed
+}
+
+// markFailed records terminal failure: Failed=True, Ready=False. Failed is sticky (the reconcile
+// short-circuits on a terminal snapshot, so it never transitions back to Ready).
+func (sr *PodSnapshotReconciler) markFailed(snap *nvidiacomv1alpha1.PodSnapshot, reason, message string) bool {
+	changed := sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionFailed, metav1.ConditionTrue, reason, message)
+	return sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message) || changed
+}
+
+// markPending records the in-progress state: Ready=False, Failed left absent (both-False). Safe
+// because the reconcile short-circuits before reaching here once the snapshot is terminal.
+func (sr *PodSnapshotReconciler) markPending(snap *nvidiacomv1alpha1.PodSnapshot, reason, message string) bool {
+	return sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message)
+}
+
+// failPodSnapshot marks the PodSnapshot Failed terminally (Failed=True, Ready=False) and records
+// an event.
 func (sr *PodSnapshotReconciler) failPodSnapshot(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, reason string, cause error) (ctrl.Result, error) {
 	sr.Recorder.Event(snap, corev1.EventTypeWarning, reason, cause.Error())
-	sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionFailed, metav1.ConditionTrue, reason, cause.Error())
+	sr.markFailed(snap, reason, cause.Error())
 	if err := sr.Status().Update(ctx, snap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("mark snapshot failed: %w", err)
 	}
