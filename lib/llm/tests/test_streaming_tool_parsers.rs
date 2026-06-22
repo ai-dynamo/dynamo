@@ -1537,6 +1537,116 @@ mod tests {
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
 
+    /// `TOOLCALLING.stream.4.b` (hermes) — stream truncated mid-arguments before
+    /// the call body or end marker is complete. The jail opens on `<tool_call>`,
+    /// stays jailed, and at finalize the parser recovers nothing. The jail must
+    /// NOT leak the raw `<tool_call>` markup into user-visible content.
+    #[tokio::test]
+    async fn test_hermes_streaming_truncated_mid_body_no_leak() {
+        let chunks = vec![
+            make_chunk("<tool_call>{\"name\": \"get_w", None),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("hermes".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            !aggregated.normal_content.contains("<tool_call>")
+                && !aggregated.normal_content.contains("</tool_call>"),
+            "hermes truncated-mid-body stream must not leak tool_call markup into content; got: {:?}",
+            aggregated.normal_content
+        );
+    }
+
+    /// `TOOLCALLING.stream.4.c` (hermes) — a complete inner body WITHOUT the
+    /// opening wrapper, followed by repeated orphan close markers (length cutoff).
+    /// There is no `<tool_call>` opener, so the jail never engages — content flows
+    /// straight through. The orphan `</tool_call>` markers must NOT reach
+    /// user-visible content.
+    #[tokio::test]
+    async fn test_hermes_streaming_orphan_close_markers_no_leak() {
+        let chunks = vec![make_chunk(
+            "{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}</tool_call></tool_call></tool_call>",
+            Some(FinishReason::Length),
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("hermes".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            !aggregated.normal_content.contains("</tool_call>"),
+            "hermes orphan-close stream must not leak </tool_call> markup into content; got: {:?}",
+            aggregated.normal_content
+        );
+    }
+
+    /// Hardening regression: an orphan `</tool_call>` marker that lands in the
+    /// MIDDLE of a jailed bare-JSON buffer (model keeps emitting after a stray
+    /// close, then hits a length cutoff) must still be stripped — not just the
+    /// trailing ones. Guards the "remove every occurrence" orphan-strip path.
+    #[tokio::test]
+    async fn test_hermes_streaming_mid_string_orphan_close_no_leak() {
+        let chunks = vec![make_chunk(
+            "{\"name\": \"get_weather\"}</tool_call> and then more text",
+            Some(FinishReason::Length),
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("hermes".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            !aggregated.normal_content.contains("</tool_call>"),
+            "hermes must strip a mid-buffer orphan </tool_call>, not just trailing ones; got: {:?}",
+            aggregated.normal_content
+        );
+        assert!(
+            aggregated.normal_content.contains("more text"),
+            "surrounding text around a stripped orphan marker should be preserved; got: {:?}",
+            aggregated.normal_content
+        );
+    }
+
+    /// Documents the intended (batch-consistent) hermes contract: when the model
+    /// emits the `<tool_call>` marker but no valid call follows, the marker and
+    /// everything after it are dropped rather than leaked — even if that text
+    /// reads like prose. This mirrors the batch `discard_unparseable_wrapper` /
+    /// unterminated-suppression behavior; preserving the post-marker text would
+    /// break batch/stream parity.
+    #[tokio::test]
+    async fn test_hermes_streaming_marker_in_prose_is_suppressed() {
+        let chunks = vec![make_chunk(
+            "Wrap your call in <tool_call> like so.",
+            Some(FinishReason::Stop),
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("hermes".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            !aggregated.normal_content.contains("<tool_call>"),
+            "hermes must never surface the <tool_call> marker as content; got: {:?}",
+            aggregated.normal_content
+        );
+    }
+
     /// `TOOLCALLING.stream.4.b` — Kimi K2 truncated mid-argument (no
     /// `<|tool_call_end|>`), customer regression. Also validates
     /// finish_reason=stop passthrough.

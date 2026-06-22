@@ -914,6 +914,26 @@ impl JailedStream {
         None
     }
 
+    /// Families whose contract is "never surface tool-call markup to the user"
+    /// (they opt into `discard_unparseable_wrapper` in the parser config). For
+    /// these, the finalize path strips/suppresses any residual markup instead of
+    /// releasing the raw buffer; every other parser and generic manual-sequence
+    /// jail keeps its release-verbatim path.
+    ///
+    /// This is a hardcoded allowlist, not a read of the parser config flag: the
+    /// pinned `dynamo-parsers` version predates the exported
+    /// `discard_unparseable_wrapper` field, so it can't be queried here yet.
+    /// Mirrors the existing qwen25/hermes name-keying in
+    /// `detect_and_parse_tool_call_with_recovery`. When a new family opts into
+    /// the never-leak contract, add it here (and switch to reading the config
+    /// flag once the dependency is new enough to expose it).
+    fn suppresses_tool_call_markup(&self) -> bool {
+        matches!(
+            self.tool_call_parser.as_deref(),
+            Some("hermes") | Some("qwen25")
+        )
+    }
+
     fn should_start_jail(&self, content: &str) -> bool {
         // Path 1: Check configured start sequences
         let sequence_match = !self.jail_start_sequences.is_empty()
@@ -1137,7 +1157,7 @@ impl JailedStream {
                         // stripping Harmony envelopes when no reasoning parser is configured.
                         // In zero-call Harmony marker cases, emit the stripped normal_text rather
                         // than accumulated_content, which still contains raw protocol markers.
-                        let content = if is_finalize
+                        let content: String = if is_finalize
                             && self.tool_call_parser.as_deref() == Some("minimax_m2")
                             && self
                                 .prefix_before_first_tool_call_marker(accumulated_content)
@@ -1148,19 +1168,58 @@ impl JailedStream {
                             // still protocol markup, so keep only pre-call prose at stream end.
                             self.prefix_before_first_tool_call_marker(accumulated_content)
                                 .unwrap_or("")
+                                .to_string()
                         } else if normal_text.as_deref() == Some("") {
-                            ""
+                            String::new()
                         } else if is_harmony_parser(self.tool_call_parser.as_deref())
                             && contains_harmony_protocol(accumulated_content)
                         {
-                            normal_text.as_deref().unwrap_or("")
+                            normal_text.as_deref().unwrap_or("").to_string()
+                        } else if self.suppresses_tool_call_markup() {
+                            // hermes / qwen25 must never surface tool-call markup to the user.
+                            // The jail opened on a (real or bare-JSON-detected) start marker but
+                            // the parser recovered no call, so the buffer holds an incomplete or
+                            // garbage tool-call attempt. Strip / suppress the markers rather than
+                            // emitting the raw buffer — done here in the jail so it holds
+                            // regardless of the installed parser version. Scoped to these
+                            // families so every other parser and generic manual-sequence jail
+                            // keeps its existing release-verbatim contract.
+                            if let Some(prefix) =
+                                self.prefix_before_first_tool_call_marker(accumulated_content)
+                            {
+                                // Start marker present (truncated body / unparseable wrapper):
+                                // keep only the prose before it, drop the rest. Mirrors the batch
+                                // unterminated-suppression / discard-unparseable-wrapper.
+                                prefix.trim_end().to_string()
+                            } else if self.jail_end_sequences.iter().any(|seq| {
+                                !seq.is_empty() && accumulated_content.contains(seq.as_str())
+                            }) {
+                                // Orphan end marker(s) with no opener (e.g. `{..}</tool_call>`
+                                // runs at a length cutoff): remove every occurrence of each end
+                                // marker, keep the surrounding text the model produced. Removing
+                                // all occurrences (not just trailing ones) ensures a stray marker
+                                // in the middle of the buffer can't leak when the stream is cut
+                                // off after it.
+                                let mut cleaned = accumulated_content.to_string();
+                                for seq in self.jail_end_sequences.iter().filter(|s| !s.is_empty())
+                                {
+                                    cleaned = cleaned.replace(seq.as_str(), "");
+                                }
+                                cleaned.trim().to_string()
+                            } else {
+                                // No markers in the buffer (false-positive jail entry on prose):
+                                // pass through verbatim.
+                                accumulated_content.to_string()
+                            }
                         } else {
-                            accumulated_content
+                            // Other parsers / generic manual-sequence jails: preserve the
+                            // existing contract and release the accumulated buffer verbatim.
+                            accumulated_content.to_string()
                         };
                         create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
-                            content,
+                            &content,
                             None,
                             base_choice.finish_reason,
                             base_choice.logprobs.clone(),
