@@ -103,6 +103,15 @@ class CheckpointConfig:
 
 
 def configure_checkpoint_transport_env() -> None:
+    hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
+    if hf_hub_offline and hf_hub_offline != "1":
+        logger.warning(
+            "Overriding HF_HUB_OFFLINE=%r with '1' for checkpoint mode "
+            "to avoid external Hugging Face sockets in checkpointed processes",
+            hf_hub_offline,
+        )
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
     nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
     if nccl_cumem_enable and nccl_cumem_enable != "0":
         logger.warning(
