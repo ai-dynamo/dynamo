@@ -1,26 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
 from types import SimpleNamespace
 
 import pytest
 
 from dynamo.trtllm.constants import DisaggregationMode, Modality
-from dynamo.trtllm.main import (  # noqa: E402
+from dynamo.trtllm.main import (
     _SnapshotRuntimeProxy,
     _validate_supported_snapshot_config,
 )
-
-pytest.importorskip(
-    "dynamo._core",
-    reason="dynamo Rust Python bindings are required for dynamo.trtllm.main",
-)
-pytest.importorskip(
-    "dynamo.nixl_connect",
-    reason="NIXL bindings are required to import TRTLLM workers",
-)
-pytest.importorskip("tensorrt_llm")
 
 pytestmark = [
     pytest.mark.unit,
