@@ -40,6 +40,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash};
+use kvbm_logical::blocks::BlockDuplicationPolicy;
 use kvbm_logical::registry::BlockRegistry;
 use kvbm_logical::tinylfu::TinyLFUTracker;
 use kvbm_logical::{BlockManager, ImmutableBlock, MutableBlock};
@@ -171,6 +172,20 @@ struct RegisteredBlockInfo {
     token_ids: Option<Vec<u32>>,
 }
 
+struct FullBlockMetadata {
+    seq_hash: SequenceHash,
+    plh: PositionalLineageHash,
+    parent_hash: Option<SequenceHash>,
+    local_hash: Option<BlockHash>,
+    token_ids: Option<Vec<u32>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FullBlockCommit {
+    Reused,
+    Stored,
+}
+
 /// Synchronous G1 KV block manager backed by `kvbm-logical::BlockManager<G1>`.
 pub struct KvManager {
     block_manager: BlockManager<G1>,
@@ -248,7 +263,17 @@ impl KvManager {
         let mut mgr_builder = BlockManager::builder()
             .block_count(max_capacity)
             .block_size(block_size)
-            .registry(registry);
+            .registry(registry)
+            .duplication_policy(BlockDuplicationPolicy::Reject);
+
+        // Intentional vLLM drift: upstream permits duplicate physical blocks
+        // for append-only request block tables. The mocker has one canonical
+        // registered_blocks entry per PLH and no request-owned physical block
+        // tables or duplicate-reset events, so Allow would make offload metadata
+        // and KV-event cleanup unsafe. Reject may discard a reserved block,
+        // adopt an existing block ID, reduce occupancy, and omit duplicate Stored.
+        // Revisit Allow only with per-request physical ownership, duplicate-aware
+        // offload metadata, and balanced duplicate Stored/Removed lifecycle events.
         mgr_builder = match eviction_backend {
             MockerEvictionBackend::Lineage => mgr_builder.with_lineage_backend(),
             MockerEvictionBackend::Lru => mgr_builder.with_lru_backend(),
@@ -757,6 +782,57 @@ impl KvManager {
         self.block_manager.match_blocks(&[plh]).into_iter().next()
     }
 
+    fn commit_active_full(
+        &mut self,
+        candidate: MutableBlock<G1>,
+        metadata: FullBlockMetadata,
+    ) -> FullBlockCommit {
+        let FullBlockMetadata {
+            seq_hash,
+            plh,
+            parent_hash,
+            local_hash,
+            token_ids,
+        } = metadata;
+
+        if let Some(canonical) = self.acquire_existing_full(seq_hash, plh) {
+            drop(candidate);
+            self.active_full
+                .entry(seq_hash)
+                .or_default()
+                .push(canonical);
+            return FullBlockCommit::Reused;
+        }
+
+        let candidate_block_id = candidate.block_id();
+        let complete = candidate
+            .stage(plh, self.block_size)
+            .expect("full block stage failed");
+        let canonical = self.block_manager.register_block(complete);
+        let canonical_block_id = canonical.block_id();
+        self.active_full
+            .entry(seq_hash)
+            .or_default()
+            .push(canonical);
+
+        if canonical_block_id != candidate_block_id {
+            return FullBlockCommit::Reused;
+        }
+
+        let previous = self.registered_blocks.insert(
+            plh,
+            RegisteredBlockInfo {
+                seq_hash,
+                block_id: canonical_block_id,
+                parent_hash,
+                local_hash,
+                token_ids,
+            },
+        );
+        debug_assert!(previous.is_none());
+        FullBlockCommit::Stored
+    }
+
     pub(crate) fn reserve_destination(
         &mut self,
         sequence: &ActiveSequence,
@@ -809,6 +885,44 @@ impl KvManager {
         };
 
         let prefix_len = cached_prefix.len();
+        let full_blocks = blocks
+            .iter()
+            .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
+            .count();
+        assert_eq!(
+            plhs.len(),
+            full_blocks,
+            "destination PLH count must match full block count"
+        );
+        assert!(
+            local_hashes.is_empty() || local_hashes.len() == full_blocks,
+            "destination local hash count must be empty or match full block count"
+        );
+        assert!(
+            token_ids
+                .as_ref()
+                .is_none_or(|all_ids| all_ids.len() == full_blocks),
+            "destination token metadata count must match full block count"
+        );
+        assert!(
+            prefix_len <= blocks.len(),
+            "destination cached prefix exceeds block layout"
+        );
+        assert_eq!(
+            unpublished_blocks.len(),
+            blocks.len() - prefix_len,
+            "destination unpublished block count must cover the uncached layout"
+        );
+        for (block, (reserved_hash, _)) in blocks.iter().zip(&cached_prefix) {
+            let UniqueBlock::FullBlock(layout_hash) = block else {
+                panic!("destination cached prefix cannot contain a partial block");
+            };
+            assert_eq!(
+                layout_hash, reserved_hash,
+                "destination cached prefix hash must match block layout"
+            );
+        }
+
         let mut cached_prefix = cached_prefix.into_iter();
         let mut unpublished_blocks = unpublished_blocks.into_iter();
         let mut stored_seq_hashes = Vec::new();
@@ -829,10 +943,9 @@ impl KvManager {
                     let plh = plhs[plh_idx];
                     plh_idx += 1;
                     if block_idx < prefix_len {
-                        let (reserved_hash, handle) = cached_prefix
+                        let (_, handle) = cached_prefix
                             .next()
                             .expect("reserved prefix handle must exist");
-                        debug_assert_eq!(reserved_hash, seq_hash);
                         self.active_full.entry(seq_hash).or_default().push(handle);
                         metadata_parent_hash = Some(seq_hash);
                         continue;
@@ -841,38 +954,27 @@ impl KvManager {
                     let mutable = unpublished_blocks
                         .next()
                         .expect("reserved destination block must exist");
-                    if let Some(handle) = self.acquire_existing_full(seq_hash, plh) {
-                        drop(mutable);
-                        self.active_full.entry(seq_hash).or_default().push(handle);
-                        metadata_parent_hash = Some(seq_hash);
-                        continue;
-                    }
-                    let complete = mutable
-                        .stage(plh, self.block_size)
-                        .expect("destination stage failed");
-                    let immutable = self.block_manager.register_block(complete);
-                    let block_id = immutable.block_id();
-                    self.active_full
-                        .entry(seq_hash)
-                        .or_default()
-                        .push(immutable);
-                    if stored_seq_hashes.is_empty() {
-                        first_store_parent = metadata_parent_hash;
-                    }
                     let local_hash = local_hashes.get(full_idx).copied();
                     let block_token_ids = token_ids
                         .as_ref()
                         .and_then(|all_ids| all_ids.get(full_idx).cloned());
-                    self.registered_blocks.insert(
-                        plh,
-                        RegisteredBlockInfo {
+                    let commit = self.commit_active_full(
+                        mutable,
+                        FullBlockMetadata {
                             seq_hash,
-                            block_id,
+                            plh,
                             parent_hash: metadata_parent_hash,
                             local_hash,
                             token_ids: block_token_ids.clone(),
                         },
                     );
+                    if commit == FullBlockCommit::Reused {
+                        metadata_parent_hash = Some(seq_hash);
+                        continue;
+                    }
+                    if stored_seq_hashes.is_empty() {
+                        first_store_parent = metadata_parent_hash;
+                    }
                     stored_seq_hashes.push(seq_hash);
                     if let Some(local_hash) = local_hash {
                         stored_local_hashes.push(local_hash);
@@ -894,8 +996,6 @@ impl KvManager {
             }
         }
 
-        debug_assert!(cached_prefix.next().is_none());
-        debug_assert!(unpublished_blocks.next().is_none());
         self.publish_kv_event(
             stored_seq_hashes,
             &stored_local_hashes,
@@ -1415,33 +1515,18 @@ impl KvManager {
             .remove(&uuid)
             .expect("Promote: partial block not found");
 
-        // Detect collision: seq_hash already has registered handles (active or inactive).
-        let is_new = if let Some(existing) = self.acquire_existing_full(seq_hash, plh) {
-            drop(mutable);
-            self.active_full.entry(seq_hash).or_default().push(existing);
-            false
-        } else {
-            // Fresh registration.
-            let complete = mutable
-                .stage(plh, self.block_size)
-                .expect("stage failed during promote");
-            let immutable = self.block_manager.register_block(complete);
-            let block_id = immutable.block_id();
-            self.active_full.insert(seq_hash, vec![immutable]);
-            self.registered_blocks.insert(
+        let commit = self.commit_active_full(
+            mutable,
+            FullBlockMetadata {
+                seq_hash,
                 plh,
-                RegisteredBlockInfo {
-                    seq_hash,
-                    block_id,
-                    parent_hash,
-                    local_hash,
-                    token_ids: token_ids.clone(),
-                },
-            );
-            true
-        };
+                parent_hash,
+                local_hash,
+                token_ids: token_ids.clone(),
+            },
+        );
 
-        if is_new {
+        if commit == FullBlockCommit::Stored {
             let local_hashes = local_hash.into_iter().collect::<Vec<_>>();
             self.publish_kv_event(
                 vec![seq_hash],
@@ -2181,6 +2266,10 @@ mod tests {
     #[test]
     fn destination_activation_collision_reuses_canonical_block_and_offload_metadata() {
         let (mut mgr, sink) = make_mgr_capturing(2, 4);
+        assert_eq!(
+            mgr.block_manager.duplication_policy(),
+            &BlockDuplicationPolicy::Reject
+        );
         let sequence = ActiveSequence::new(vec![1, 2, 3, 4], 1, Some(4), true, true);
         let reservation = mgr
             .reserve_destination(&sequence)
@@ -2226,6 +2315,34 @@ mod tests {
         assert_eq!(metadata.parent_hash, None);
         assert_eq!(metadata.local_hash, Some(local_hash));
         assert_eq!(metadata.token_ids.as_deref(), Some(token_ids.as_slice()));
+    }
+
+    #[test]
+    fn destination_activation_validates_layout_before_committing_blocks() {
+        let mut mgr = make_mgr(4, 4);
+        let unpublished_blocks = mgr
+            .allocate_unpublished_blocks(2)
+            .expect("destination capacity should be available");
+        let reservation = VllmDestinationReservation {
+            cached_prefix: Vec::new(),
+            unpublished_blocks,
+            layout: Some(MoveBlock::Use(
+                vec![UniqueBlock::FullBlock(1), UniqueBlock::FullBlock(2)],
+                Vec::new(),
+                vec![plh(1)],
+                None,
+                None,
+            )),
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mgr.activate_destination(reservation);
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(mgr.num_active_blocks(), 0);
+        assert!(mgr.active_full.is_empty());
+        assert!(mgr.registered_blocks.is_empty());
     }
 
     /// After reusing a prefix [A, B] and storing a new suffix [C], the

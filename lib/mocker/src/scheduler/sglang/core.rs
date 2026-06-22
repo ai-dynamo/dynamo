@@ -54,10 +54,8 @@ impl ReservedSglangDecode {
     fn activate(self, kv_manager: &mut SglangKvManager, block_size: usize) -> SglangRequest {
         let Self { mut request, kv } = self;
         let allocated_tokens = kv.allocated_tokens;
-        let prefix_len = kv.prefix_len;
         let prompt_tokens = request.prompt_tokens.clone();
         let alloc = kv_manager.activate_destination(kv, &prompt_tokens);
-        debug_assert_eq!(alloc.prefix_len, prefix_len);
         request.last_node = Some(alloc.last_node);
         request.kv_indices = alloc.kv_indices;
         request.materialized_tokens = request.prompt_len();
@@ -164,8 +162,7 @@ impl SglangCore {
                 request.uuid = Some(uuid);
                 self.source_holds.register(uuid, handoff_id)?;
                 let submitted = self.submit(request);
-                debug_assert_eq!(submitted, uuid);
-                Ok(SchedulerCommandResult::Submitted(uuid))
+                Ok(SchedulerCommandResult::Submitted(submitted))
             }
             SchedulerCommand::ReleaseSource { handoff_id }
             | SchedulerCommand::CancelSource { handoff_id } => {

@@ -531,8 +531,7 @@ impl VllmCore {
                 request.uuid = Some(uuid);
                 self.source_holds.register(uuid, handoff_id)?;
                 let submitted = self.submit(request);
-                debug_assert_eq!(submitted, uuid);
-                Ok(SchedulerCommandResult::Submitted(uuid))
+                Ok(SchedulerCommandResult::Submitted(submitted))
             }
             SchedulerCommand::ReleaseSource { handoff_id }
             | SchedulerCommand::CancelSource { handoff_id } => {
