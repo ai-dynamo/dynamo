@@ -248,7 +248,7 @@ impl DeltaAggregator {
 
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
-                        let choice_role = choice.delta.role.clone();
+                        let choice_role = choice.delta.role;
                         let state_choice =
                             aggregator
                                 .choices
@@ -256,7 +256,7 @@ impl DeltaAggregator {
                                 .or_insert(DeltaChoice {
                                     index: choice.index,
                                     text: "".to_string(),
-                                    role: choice_role.clone(),
+                                    role: choice_role,
                                     finish_reason: None,
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
@@ -1021,7 +1021,10 @@ mod tests {
 
         assert_eq!(response.inner.choices.len(), 1);
         let choice = &response.inner.choices[0];
-        assert_eq!(choice.message.role, dynamo_protocols::types::Role::Assistant);
+        assert_eq!(
+            choice.message.role,
+            dynamo_protocols::types::Role::Assistant
+        );
         assert_eq!(
             choice.message.content.as_ref().unwrap(),
             &ChatCompletionMessageContent::Text("Hello, world!".to_string())
