@@ -109,6 +109,17 @@ fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType)
     })
 }
 
+/// Whether a worker uses the generic prefill router.
+///
+/// The router speaks the normal preprocessed-request protocol, so a
+/// topology-only worker with `worker_type=Prefill` must not activate it. Such
+/// workers (for example, multimodal SGLang prefill) are reached directly by
+/// their decode peer with a backend-specific request schema.
+fn uses_generic_prefill_router(worker_type: Option<WorkerType>, model_type: ModelType) -> bool {
+    model_type.supports_prefill()
+        && effective_worker_type(worker_type, model_type) == WorkerType::Prefill
+}
+
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
     Added(ModelDeploymentCard),
@@ -781,16 +792,16 @@ impl ModelWatcher {
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
         worker_set.set_instance_watcher(instance_watcher);
 
-        // worker_type-driven short circuit for Prefill.
+        // Generic prefill-router short circuit.
         //
-        // A prefill worker carries no OpenAI-style engine — it is reached only
-        // through the dedicated prefill router, never by the frontend — so we
-        // dispatch it off `worker_type` here, *before* the model_type-based
-        // branches below. Everything else is routed by its OpenAI surface: a
-        // card that declares a surface builds the matching pipeline (so an
-        // sglang multimodal encode worker, which fronts the model, serves like
-        // any other worker), while a surface-less (`ModelType::empty()`) card
-        // is registered for serving-readiness only (see the `is_empty()` arm at
+        // A generic prefill worker carries no OpenAI-style engine — it is
+        // reached only through the dedicated prefill router, never by the
+        // frontend — so we dispatch it before the model_type-based branches
+        // below. Everything else is routed by its OpenAI surface: a card that
+        // declares a surface builds the matching pipeline (so an sglang
+        // multimodal encode worker, which fronts the model, serves like any
+        // other worker), while a surface-less (`ModelType::empty()`) card is
+        // registered for serving-readiness only (see the `is_empty()` arm at
         // the end of the chain). The role is carried by `worker_type`; serving
         // is driven by `model_type`.
         //
@@ -798,7 +809,7 @@ impl ModelWatcher {
         // `ModelType::Prefill` marker bit with no `worker_type`, from an old
         // worker registering against a new frontend) to `Prefill` here, so it
         // activates the prefill router just like a new prefill worker.
-        if effective_worker_type(card.worker_type, card.model_type) == WorkerType::Prefill {
+        if uses_generic_prefill_router(card.worker_type, card.model_type) {
             // Guardrail: prefill workers still expect Tokens input downstream.
             if card.model_input != ModelInput::Tokens {
                 anyhow::bail!(
@@ -1218,8 +1229,9 @@ impl ModelWatcher {
             // encode helper, or an internal disaggregated worker fronted by
             // another worker (reached over RPC, never by the frontend). Build
             // no pipeline; the shared tail below registers the engine-less
-            // WorkerSet so the readiness gate counts it. (Prefill is handled by
-            // its own branch above.)
+            // WorkerSet so the readiness gate counts it. Generic prefill is
+            // handled by its own branch above; topology-only prefill reaches
+            // this branch.
             tracing::info!(
                 model_name = card.name(),
                 "Topology-only worker (empty model_type), registering for serving readiness only"
@@ -1227,7 +1239,7 @@ impl ModelWatcher {
         } else {
             // A worker that declares an OpenAI surface but with an incompatible
             // model_input. (Surface-less workers hit the `is_empty()` arm above;
-            // prefill is routed off `worker_type`.)
+            // generic prefill is routed by its model-type marker.)
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
                 Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Realtime), \
@@ -1417,6 +1429,23 @@ mod tests {
             effective_worker_type(None, ModelType::empty()),
             WorkerType::Aggregated
         );
+    }
+
+    #[test]
+    fn generic_prefill_router_requires_prefill_model_type() {
+        // New and legacy generic prefill workers advertise the marker bit.
+        assert!(uses_generic_prefill_router(
+            Some(WorkerType::Prefill),
+            ModelType::Prefill
+        ));
+        assert!(uses_generic_prefill_router(None, ModelType::Prefill));
+
+        // Multimodal prefill is topology-only and receives a backend-specific
+        // request from its decode peer, not a generic preprocessed request.
+        assert!(!uses_generic_prefill_router(
+            Some(WorkerType::Prefill),
+            ModelType::empty()
+        ));
     }
 
     #[test]
