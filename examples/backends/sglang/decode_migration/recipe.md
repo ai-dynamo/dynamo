@@ -23,6 +23,51 @@ Use these branches together:
 The runtime image must contain the Dynamo revision and import the SGLang
 revision above. Record both full SHAs and the image digest with every result.
 
+## Container Image
+
+Build one immutable image after both worktrees are clean. The build archives
+the committed Dynamo `components/src` and SGLang `python` trees, installs the
+matching Dynamo runtime wheel, and records both full SHAs as OCI labels. It
+does not require source mounts at runtime.
+
+```bash
+export DYNAMO_ROOT=/root/proj/decode-migration/dynamo
+export SGLANG_ROOT=/root/proj/decode-migration/sglang
+export DYNAMO_SHA=$(git -C "$DYNAMO_ROOT" rev-parse HEAD)
+export SGLANG_SHA=$(git -C "$SGLANG_ROOT" rev-parse HEAD)
+export IMAGE=aphoh/not-sglang-dynamo:${DYNAMO_SHA:0:12}-${SGLANG_SHA:0:12}
+
+DYNAMO_ROOT=$DYNAMO_ROOT \
+SGLANG_ROOT=$SGLANG_ROOT \
+IMAGE=$IMAGE \
+  $DYNAMO_ROOT/examples/backends/sglang/decode_migration/build_image.sh
+```
+
+Verify that the image resolves both feature trees without bind mounts:
+
+```bash
+docker run --rm --entrypoint python3 "$IMAGE" -c '
+import dynamo.sglang.request_handlers.llm.decode_handler as dh
+import sglang.srt.disaggregation.decode_migration as dm
+print(dh.__file__)
+print(dm.__file__)
+'
+docker inspect "$IMAGE" --format '{{json .Config.Labels}}'
+```
+
+Authenticate without placing the registry token in shell history, then push:
+
+```bash
+read -rsp "Docker PAT: " DOCKER_PAT; echo
+printf "%s" "$DOCKER_PAT" | docker login -u aphoh --password-stdin
+unset DOCKER_PAT
+docker push "$IMAGE"
+docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}'
+```
+
+Use the resulting digest, rather than the mutable tag, in the Kubernetes
+deployment.
+
 ## Deployment Shape
 
 The minimum migration deployment is distributed across two worker pods:
