@@ -46,9 +46,13 @@ impl NodeState {
             || matches!(self.worker_cutoffs.get(&worker), Some(&cutoff) if pos < cutoff)
     }
 
-    fn uncovered_suffix_hashes(&self, cutoff: usize) -> Vec<ExternalSequenceBlockHash> {
-        debug_assert!(cutoff <= self.edge.len());
-        self.edge[cutoff..].iter().map(|&(_, hash)| hash).collect()
+    fn uncovered_suffix_hashes(&self, start: usize, end: usize) -> Vec<ExternalSequenceBlockHash> {
+        debug_assert!(start <= end);
+        debug_assert!(end <= self.edge.len());
+        self.edge[start..end]
+            .iter()
+            .map(|&(_, hash)| hash)
+            .collect()
     }
 
     #[inline]
@@ -183,7 +187,7 @@ impl NodeState {
         }
 
         let new_cutoff = pos;
-        let stale_hashes = self.uncovered_suffix_hashes(new_cutoff);
+        let stale_hashes = self.uncovered_suffix_hashes(new_cutoff, current_cutoff);
 
         if new_cutoff == 0 {
             self.drop_worker(worker);
@@ -197,5 +201,63 @@ impl NodeState {
 
     pub(super) fn has_any_workers(&self) -> bool {
         !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worker() -> WorkerWithDpRank {
+        WorkerWithDpRank::new(1, 0)
+    }
+
+    fn ext(hash: u64) -> ExternalSequenceBlockHash {
+        ExternalSequenceBlockHash(hash)
+    }
+
+    fn state_with_full_worker() -> NodeState {
+        let edge = vec![
+            (LocalBlockHash(1), ext(10)),
+            (LocalBlockHash(2), ext(20)),
+            (LocalBlockHash(3), ext(30)),
+            (LocalBlockHash(4), ext(40)),
+        ];
+        let mut full_edge_workers = FxHashSet::default();
+        full_edge_workers.insert(worker());
+        NodeState {
+            edge_index: NodeState::edge_index_for(&edge),
+            edge,
+            worker_cutoffs: FxHashMap::default(),
+            full_edge_workers,
+        }
+    }
+
+    #[test]
+    fn reverse_order_removes_only_report_newly_uncovered_hashes() {
+        let mut state = state_with_full_worker();
+        let worker = worker();
+
+        let outcome = state.remove_worker_at_pos(worker, 3, ext(40));
+        assert_eq!(outcome.stale_hashes, vec![ext(40)]);
+        assert_eq!(state.current_cutoff(worker), 3);
+
+        let outcome = state.remove_worker_at_pos(worker, 2, ext(30));
+        assert_eq!(outcome.stale_hashes, vec![ext(30)]);
+        assert_eq!(state.current_cutoff(worker), 2);
+
+        let outcome = state.remove_worker_at_pos(worker, 1, ext(20));
+        assert_eq!(outcome.stale_hashes, vec![ext(20)]);
+        assert_eq!(state.current_cutoff(worker), 1);
+    }
+
+    #[test]
+    fn head_remove_still_reports_full_newly_uncovered_suffix() {
+        let mut state = state_with_full_worker();
+        let worker = worker();
+
+        let outcome = state.remove_worker_at_pos(worker, 1, ext(20));
+        assert_eq!(outcome.stale_hashes, vec![ext(20), ext(30), ext(40)]);
+        assert_eq!(state.current_cutoff(worker), 1);
     }
 }
