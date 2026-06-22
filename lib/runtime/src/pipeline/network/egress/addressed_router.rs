@@ -517,8 +517,21 @@ impl AddressedPushRouter {
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
         let tx_start = Instant::now();
-        self.dispatch_buffer(address, buffer, context.id()).await?;
+        let request_plane_response = self.dispatch_buffer(address, buffer, context.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+
+        // A worker load-shed surfaces on the request-plane ACK, not the response
+        // stream. Short-circuit with ResourceExhausted before waiting on a
+        // response-plane connection the worker will never open; returning early
+        // drops `recv_registered` and `inflight_guard` (their Drop cleans up).
+        if let Some(err) = detect_worker_overload_response(&request_plane_response) {
+            tracing::warn!(
+                request_id = context.id(),
+                worker_response = %err.to_string(),
+                "Request rejected by worker (at capacity) — returning HTTP 503"
+            );
+            return Err(err.into());
+        }
 
         // Spawn the forwarder before awaiting the response prologue so request
         // frames pre-load into the worker's input buffer while the engine
@@ -629,12 +642,16 @@ impl AddressedPushRouter {
     /// Build standard request-plane headers (trace propagation, request-id,
     /// frontend send-timestamp) and write the encoded buffer through the
     /// request-plane client.
+    ///
+    /// Returns the request-plane ACK bytes (empty `TcpResponseMessage` on the
+    /// success path; an overload-marker payload when the worker load-shed the
+    /// request — see [`detect_worker_overload_response`]).
     async fn dispatch_buffer(
         &self,
         address: String,
         buffer: bytes::Bytes,
         request_id: &str,
-    ) -> Result<(), Error> {
+    ) -> Result<bytes::Bytes, Error> {
         let mut headers = std::collections::HashMap::new();
         inject_trace_headers_into_map(&mut headers);
         headers.insert("request-id".to_string(), request_id.to_string());
@@ -645,11 +662,64 @@ impl AddressedPushRouter {
         headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
 
         let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
-        self.req_client
+        let ack = self
+            .req_client
             .send_request(address, buffer, headers)
             .await?;
         drop(_nvtx_send);
-        Ok(())
+        Ok(ack)
+    }
+}
+
+/// Map a worker load-shed ACK (prefixed by a known overload marker, see
+/// `shared_tcp_endpoint.rs`) to `ResourceExhausted` so the HTTP layer returns
+/// 503. `None` for normal responses, including the empty "queued" ACK.
+fn detect_worker_overload_response(res_bytes: &[u8]) -> Option<DynamoError> {
+    const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
+    const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
+
+    if res_bytes.starts_with(OVERLOAD_PREFIX) || res_bytes.starts_with(UNAVAILABLE_PREFIX) {
+        let msg = String::from_utf8_lossy(res_bytes).into_owned();
+        Some(
+            DynamoError::builder()
+                .error_type(ErrorType::ResourceExhausted)
+                .message(msg)
+                .build(),
+        )
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod overload_detection_tests {
+    use super::*;
+
+    #[test]
+    fn overload_payload_maps_to_resource_exhausted() {
+        let err = detect_worker_overload_response(b"Server overloaded: worker at capacity")
+            .expect("should detect overload");
+        assert_eq!(err.error_type(), ErrorType::ResourceExhausted);
+    }
+
+    #[test]
+    fn empty_ack_is_not_overload() {
+        // The success-path ACK is empty; misreading it as overload breaks every request.
+        assert!(detect_worker_overload_response(b"").is_none());
+        assert!(detect_worker_overload_response(br#"{"data":"chunk"}"#).is_none());
+    }
+
+    #[test]
+    fn detected_error_satisfies_http_503_gate() {
+        // request_was_rejected (http/service/metrics.rs) → 503 keys on ResourceExhausted.
+        let err =
+            detect_worker_overload_response(b"Server overloaded: test").expect("should detect");
+        let any_err: anyhow::Error = err.into();
+        assert!(crate::error::match_error_chain(
+            any_err.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[]
+        ));
     }
 }
 

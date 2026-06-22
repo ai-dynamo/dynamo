@@ -18,7 +18,8 @@ use super::offline::agg::AggRuntime;
 use super::offline::components::{ReplayMode, TrafficStats};
 use super::offline::disagg::DisaggRuntime;
 use super::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport,
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds,
+    TraceSimulationReport,
 };
 use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
 use crate::loadgen::Trace;
@@ -74,6 +75,7 @@ impl PlannerReplayHandle {
         num_workers: usize,
         arrival_speedup_ratio: f64,
         router_mode: ReplayRouterMode,
+        sla: SlaThresholds,
     ) -> Result<Self> {
         let args = args.normalized()?;
         let trace = Trace::from_mooncake(trace_path, trace_block_size)?
@@ -87,7 +89,8 @@ impl PlannerReplayHandle {
             num_workers,
             ReplayMode::Trace,
             router_mode,
-        )?;
+        )?
+        .with_sla_thresholds(sla);
         Ok(Self {
             runtime: RuntimeKind::Agg(runtime),
             started_at: Instant::now(),
@@ -95,6 +98,7 @@ impl PlannerReplayHandle {
     }
 
     /// Create a handle for a disaggregated trace-file replay.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_trace_file_disagg(
         config: OfflineDisaggReplayConfig,
         router_config: Option<KvRouterConfig>,
@@ -103,6 +107,7 @@ impl PlannerReplayHandle {
         trace_block_size: usize,
         arrival_speedup_ratio: f64,
         router_mode: ReplayRouterMode,
+        sla: SlaThresholds,
     ) -> Result<Self> {
         let config = config.normalized()?;
         let trace = Trace::from_mooncake(trace_path, trace_block_size)?
@@ -115,7 +120,8 @@ impl PlannerReplayHandle {
             trace.into_trace_driver_with_block_size(config.decode_args.block_size)?,
             ReplayMode::Trace,
             router_mode,
-        )?;
+        )?
+        .with_sla_thresholds(sla);
         Ok(Self {
             runtime: RuntimeKind::Disagg(runtime),
             started_at: Instant::now(),

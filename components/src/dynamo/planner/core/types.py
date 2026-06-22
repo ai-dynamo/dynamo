@@ -35,6 +35,10 @@ class ScheduledTick:
 
     # What data the adapter should collect before calling on_tick
     need_traffic_metrics: bool = False
+    # True requests the full throughput traffic snapshot; False with
+    # need_traffic_metrics=True requests the cheaper load-only
+    # kv-hit-rate observation.
+    use_full_traffic_metrics: bool = False
     traffic_metrics_duration_s: float = 0.0
     need_worker_states: bool = False
     need_worker_fpm: bool = False
@@ -98,7 +102,7 @@ class ScalingDecision:
 
 @dataclass
 class TickDiagnostics:
-    """Intermediate decision data populated by the state machine for
+    """Intermediate decision data populated by the planner core for
     observability.  The adapter layer reads these to set Prometheus
     metrics and feed the diagnostics recorder.
     """
@@ -133,11 +137,9 @@ class TickDiagnostics:
     throughput_decision_reason_prefill: Optional[str] = None
     throughput_decision_reason_decode: Optional[str] = None
 
-    # Plugin-era fields below. Orchestrator path populates these; PSM
-    # path leaves them empty. Numeric fields above are the opposite —
-    # PSM populates them, orchestrator emits the same data as plugin-
-    # owned Prometheus metrics instead. Downstream readers must treat
-    # "empty" as "not available on this path".
+    # Plugin-pipeline fields below. Legacy callers that bypass the pipeline
+    # may leave them empty. Downstream readers must treat "empty" as
+    # "not available for this tick".
 
     # PROPOSE/RECONCILE/CONSTRAIN overrides contributed this tick.
     # Tuple: (plugin_id, stage, override_type, component_key, value).
@@ -161,8 +163,8 @@ class TickDiagnostics:
     # Pipeline execute_action — one of ``"apply"``,
     # ``"skip_short_circuit"``, ``"skip_no_targets"``,
     # ``"skip_tick_timeout"``.  Mirrors
-    # ``PipelineOutcome.execute_action``.  ``None`` on the PSM path
-    # (no pipeline).  Same information is also emitted as Prometheus
+    # ``PipelineOutcome.execute_action``. ``None`` means no pipeline action
+    # was recorded. Same information is also emitted as Prometheus
     # ``tick_skip_reasons_total`` etc., but exposing it on
     # ``PlannerEffects.diagnostics`` lets in-process consumers (replay
     # adapter, diagnostics recorder) see the action without scraping
@@ -176,7 +178,7 @@ class TickDiagnostics:
 
     # Audit-quality breadcrumbs emitted by the pipeline (chain-augment
     # warnings, CONSTRAIN SET drops, etc.).  Mirrors
-    # ``PipelineOutcome.audit_events``.  Empty list on the PSM path.
+    # ``PipelineOutcome.audit_events``.
     audit_events: list[str] = field(default_factory=list)
 
 

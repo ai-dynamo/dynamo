@@ -490,7 +490,7 @@ async fn test_multi_turn_with_continuation() {
 pub mod openai_preprocessor_tests {
     // re-export all the tests from the parent module
     pub use super::*;
-    use dynamo_llm::protocols::openai::nvext::{AgentContext, NvExt};
+    use dynamo_llm::protocols::common::extensions::{AgentContext, NvExt};
     use std::collections::HashSet;
 
     #[tokio::test]
@@ -574,8 +574,11 @@ pub mod openai_preprocessor_tests {
         let agent_context = preprocessed_request
             .agent_context
             .expect("agent_context should propagate");
-        assert_eq!(agent_context.session_type_id, "deep_research:v1");
-        assert_eq!(agent_context.session_id, "run-123");
+        assert_eq!(
+            agent_context.session_type_id.as_deref(),
+            Some("deep_research:v1")
+        );
+        assert_eq!(agent_context.session_id.as_deref(), Some("run-123"));
         assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
         assert_eq!(
             agent_context.parent_trajectory_id.as_deref(),

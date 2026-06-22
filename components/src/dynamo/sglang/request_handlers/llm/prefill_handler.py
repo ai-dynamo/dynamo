@@ -13,6 +13,7 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import build_disagg_mm_kwargs
 
 # Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
 # This remains as a compatibility fallback for older callers that still encode
@@ -129,6 +130,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+
+        # Prefill encodes the media so the KV it transfers carries the vision
+        # context; decode extracts the same URLs to match the token layout.
+        mm_kwargs = build_disagg_mm_kwargs(inner_request)
+
         routing = inner_request.get("routing") or {}
         priority = routing.get("priority")
         dp_rank = routing.get("dp_rank")
@@ -146,6 +152,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         results = await self.engine.async_generate(
             **input_param,
+            **mm_kwargs,
             sampling_params=sampling_params,
             stream=True,
             bootstrap_host=bootstrap_host,

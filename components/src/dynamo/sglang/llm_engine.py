@@ -42,6 +42,7 @@ from dynamo.common.backend.engine import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     LogitsProcessorSpec,
     is_generation_stage,
     logits_processors_for_request,
@@ -225,18 +226,20 @@ class SglangLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
-            context_length=self.server_args.context_length,
-            kv_cache_block_size=page_size,
-            total_kv_blocks=capacity.total_kv_blocks,
-            max_num_seqs=capacity.max_num_seqs,
-            max_num_batched_tokens=capacity.max_num_batched_tokens,
-            # Router needs the rank range to enumerate per-rank load.
-            data_parallel_size=self._dp_size,
-            data_parallel_start_rank=self._dp_start,
-            # Prefill-only — drives PrefillRouter's Bootstrap path.
-            bootstrap_host=self._bootstrap_host,
-            bootstrap_port=self._bootstrap_port,
             runtime_data=_get_runtime_data(self.server_args),
+            llm=LlmRegistration(
+                context_length=self.server_args.context_length,
+                kv_cache_block_size=page_size,
+                total_kv_blocks=capacity.total_kv_blocks,
+                max_num_seqs=capacity.max_num_seqs,
+                max_num_batched_tokens=capacity.max_num_batched_tokens,
+                # Router needs the rank range to enumerate per-rank load.
+                data_parallel_size=self._dp_size,
+                data_parallel_start_rank=self._dp_start,
+                # Prefill-only — drives PrefillRouter's Bootstrap path.
+                bootstrap_host=self._bootstrap_host,
+                bootstrap_port=self._bootstrap_port,
+            ),
         )
 
     def _logits_tokenizer(self) -> Any:
