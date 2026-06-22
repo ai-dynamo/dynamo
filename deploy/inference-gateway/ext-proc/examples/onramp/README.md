@@ -29,6 +29,10 @@ binary serves both.
 
 - `agg.yaml` — aggregated: one vLLM pool, KV-aware load balancing.
 - `disagg.yaml` — disaggregated: prefill + decode pools, KV-aware P/D selection.
+  The decode pod bundles the `pd-router-sidecar` (Dynamo,
+  `deploy/inference-gateway/pd-sidecar`), which fronts the pool target port,
+  reads `x-prefiller-host-port` from the EPP, and runs vLLM's NIXL
+  `kv_transfer_params` handshake (decode vLLM listens in-pod on `:8001`).
 
 ## Prerequisites (install once)
 

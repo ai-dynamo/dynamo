@@ -29,6 +29,7 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
+    "deploy/inference-gateway/pd-sidecar",
 ]
 resolver = "3"
 
