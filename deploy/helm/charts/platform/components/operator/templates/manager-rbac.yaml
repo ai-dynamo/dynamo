@@ -107,6 +107,7 @@ rules:
   - nvidia.com
   resources:
   - dynamoworkermetadatas
+  - podsnapshots
   verbs:
   - create
   - delete
@@ -115,6 +116,31 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamocheckpoints/finalizers
+  - dynamocomponentdeployments/finalizers
+  - dynamographdeploymentrequests/finalizers
+  - dynamographdeployments/finalizers
+  - dynamomodels/finalizers
+  - podsnapshots/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamocheckpoints/status
+  - dynamocomponentdeployments/status
+  - dynamographdeploymentrequests/status
+  - dynamographdeployments/status
+  - dynamographdeploymentscalingadapters/status
+  - dynamomodels/status
+  - podsnapshots/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - nvidia.com
   resources:
