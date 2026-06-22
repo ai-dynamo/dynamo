@@ -21,7 +21,29 @@ export DOCKER_SERVER=ghcr.io/nvidia/dynamo	# Container registry
 export IMAGE_TAG=YOUR-TAG # Or auto from git tag
 cd deploy/inference-gateway/ext-proc/examples/onramp
 make all # Do everything in one command
+```
 
+### Build the P/D routing sidecar image (disaggregated only)
+
+The sidecar is a standalone Rust crate at `deploy/inference-gateway/pd-sidecar/`.
+It is a workspace member, so build it with the **repo root as the `dynamo` build
+context** (the 2-stage Dockerfile copies the workspace, then compiles only
+`dynamo-pd-sidecar`):
+
+```bash
+cd deploy/inference-gateway/pd-sidecar
+docker buildx build \
+  --build-context dynamo=../../.. \
+  -t dynamo/pd-sidecar:dev \
+  -f Dockerfile --load .
+
+# make it reachable by your cluster, e.g. for kind:
+kind load docker-image dynamo/pd-sidecar:dev --name <cluster>
+```
+
+Then set the `pd-router-sidecar` container's `image:` in `disagg.yaml` to the tag
+you built. The sidecar reads the `x-prefiller-host-port` header the EPP emits and
+runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
 
 | | This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
 |---|---|---|
@@ -37,8 +59,8 @@ binary serves both.
 
 LIMITATIONS:
 
-| | This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
-|---|---|---|
+| This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
+|---|---|
 Duplicate store/remove (vLLM "retries") | parity
 In-stream ordering |  parity
 Transient disconnects | parity-ish
