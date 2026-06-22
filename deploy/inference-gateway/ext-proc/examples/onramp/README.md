@@ -13,38 +13,6 @@ If you already run GAIE + vLLM, you **replace only your EndpointPicker (EPP)**
 with the Dynamo EPP and you are done — no Dynamo operator, no Dynamo runtime,
 no Dynamo worker.
 
-The Dynamo EPP image is named "frontend" and provided to you with each release.
-For disaggreaged serving you also need to use the "sidecar" image provided with the release or build it with commands below.
-```bash
-# export env vars
-export DOCKER_SERVER=ghcr.io/nvidia/dynamo	# Container registry
-export IMAGE_TAG=YOUR-TAG # Or auto from git tag
-cd deploy/inference-gateway/ext-proc/examples/onramp
-make all # Do everything in one command
-```
-
-### Build the P/D routing sidecar image (disaggregated only)
-
-The sidecar is a standalone Rust crate at `deploy/inference-gateway/pd-sidecar/`.
-It is a workspace member, so build it with the **repo root as the `dynamo` build
-context** (the 2-stage Dockerfile copies the workspace, then compiles only
-`dynamo-pd-sidecar`):
-
-```bash
-cd deploy/inference-gateway/pd-sidecar
-docker buildx build \
-  --build-context dynamo=../../.. \
-  -t dynamo/pd-sidecar:dev \
-  -f Dockerfile --load .
-
-# make it reachable by your cluster, e.g. for kind:
-kind load docker-image dynamo/pd-sidecar:dev --name <cluster>
-```
-
-Then set the `pd-router-sidecar` container's `image:` in `disagg.yaml` to the tag
-you built. The sidecar reads the `x-prefiller-host-port` header the EPP emits and
-runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
-
 | | This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
 |---|---|---|
 | Workers | stock `vllm serve` | Dynamo workers (vLLM/SGLang/TRT-LLM) |
@@ -83,6 +51,31 @@ deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
 # HF token secret (the EPP downloads the tokenizer to tokenize for routing)
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-token>
 ```
+The Dynamo EPP image is named "frontend" and provided to you with each release.
+For disaggreaged serving you also need to use the "sidecar" image provided with the release or build it with commands below.
+
+### Build the P/D routing sidecar image (disaggregated only)
+
+The sidecar is a standalone Rust crate at `deploy/inference-gateway/pd-sidecar/`.
+It is a workspace member, so build it with the **repo root as the `dynamo` build
+context** (the 2-stage Dockerfile copies the workspace, then compiles only
+`dynamo-pd-sidecar`):
+
+```bash
+cd deploy/inference-gateway/pd-sidecar
+docker buildx build \
+  --build-context dynamo=../../.. \
+  -t dynamo/pd-sidecar:dev \
+  -f Dockerfile --load .
+
+# make it reachable by your cluster, e.g. for kind:
+kind load docker-image dynamo/pd-sidecar:dev --name <cluster>
+```
+
+Then set the `pd-router-sidecar` container's `image:` in `disagg.yaml` to the tag
+you built. The sidecar reads the `x-prefiller-host-port` header the EPP emits and
+runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
+
 
 ## Run
 
