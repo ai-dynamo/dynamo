@@ -5,6 +5,9 @@
 
 mod agent;
 mod config;
+mod diagnostics;
+
+pub use diagnostics::ucx_backend_failure_hint;
 
 use super::{MemoryDescriptor, StorageKind};
 use std::any::Any;

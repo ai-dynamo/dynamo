@@ -15,6 +15,26 @@ use anyhow::Result;
 use nixl_sys::Agent as RawNixlAgent;
 use std::collections::HashSet;
 
+/// Returns the UCX_NET_DEVICES diagnostic hint when `backend` is UCX, otherwise
+/// an empty string. Used to enrich UCX backend failure messages.
+fn ucx_hint(backend: &str) -> String {
+    if backend.eq_ignore_ascii_case("UCX") {
+        dynamo_memory::nixl::ucx_backend_failure_hint()
+    } else {
+        String::new()
+    }
+}
+
+/// Returns the UCX_NET_DEVICES diagnostic hint when UCX was among the requested
+/// backends, otherwise an empty string.
+fn ucx_hint_for(backends: &[&str]) -> String {
+    if backends.iter().any(|b| b.eq_ignore_ascii_case("UCX")) {
+        dynamo_memory::nixl::ucx_backend_failure_hint()
+    } else {
+        String::new()
+    }
+}
+
 /// A NIXL agent wrapper that tracks which backends were successfully initialized.
 ///
 /// This wrapper provides:
@@ -63,15 +83,17 @@ impl NixlAgent {
                         available_backends.insert(backend_upper);
                     }
                     Err(e) => {
-                        eprintln!(
-                            "✗ Failed to create {} backend: {}. Operations requiring this backend will fail.",
-                            backend_upper, e
+                        tracing::error!(
+                            "Failed to create {} backend: {}. Operations requiring this backend will fail.{}",
+                            backend_upper,
+                            e,
+                            ucx_hint(&backend_upper)
                         );
                     }
                 },
                 Err(_) => {
-                    eprintln!(
-                        "✗ No {} plugin found. Operations requiring this backend will fail.",
+                    tracing::error!(
+                        "No {} plugin found. Operations requiring this backend will fail.",
                         backend_upper
                     );
                 }
@@ -79,7 +101,11 @@ impl NixlAgent {
         }
 
         if available_backends.is_empty() {
-            anyhow::bail!("Failed to initialize any NIXL backends from {:?}", backends);
+            anyhow::bail!(
+                "Failed to initialize any NIXL backends from {:?}{}",
+                backends,
+                ucx_hint_for(backends)
+            );
         }
 
         Ok(Self {
@@ -124,13 +150,18 @@ impl NixlAgent {
                         available_backends.insert(backend_upper);
                     }
                     Err(e) => {
-                        eprintln!("✗ Failed to create {} backend: {}", backend_upper, e);
+                        tracing::error!(
+                            "Failed to create {} backend: {}{}",
+                            backend_upper,
+                            e,
+                            ucx_hint(&backend_upper)
+                        );
                         failed_backends
                             .push((backend_upper.clone(), format!("create failed: {}", e)));
                     }
                 },
                 Err(e) => {
-                    eprintln!("✗ No {} plugin found", backend_upper);
+                    tracing::error!("No {} plugin found", backend_upper);
                     failed_backends
                         .push((backend_upper.clone(), format!("plugin not found: {}", e)));
                 }
@@ -143,8 +174,9 @@ impl NixlAgent {
                 .map(|(name, reason)| format!("{}: {}", name, reason))
                 .collect();
             anyhow::bail!(
-                "Failed to initialize required backends: [{}]",
-                error_details.join(", ")
+                "Failed to initialize required backends: [{}]{}",
+                error_details.join(", "),
+                ucx_hint_for(backends)
             );
         }
 
