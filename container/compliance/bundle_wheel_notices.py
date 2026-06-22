@@ -101,15 +101,23 @@ def inject(wheel: Path, arcname: str, content: bytes) -> None:
 
     # RECORD: keep every original line (hashes unchanged — those files are
     # untouched), add a line for the new file, keep the RECORD self-line last.
+    # Idempotent: drop any prior RECORD entry for the file we're (re)adding so a
+    # re-run replaces it instead of appending a duplicate line.
     self_line = f"{record_name},,"
-    body = [ln for ln in record_lines if ln != self_line]
+    body = [
+        ln
+        for ln in record_lines
+        if ln != self_line and not ln.startswith(f"{full_arcname},")
+    ]
     body.append(f"{full_arcname},{_record_hash(content)},{len(content)}")
     new_record = ("\n".join(body) + "\n" + self_line + "\n").encode("utf-8")
 
     tmp = wheel.with_suffix(wheel.suffix + ".tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        # Skip the prior copy of the injected file too, so re-running doesn't
+        # leave two zip members with the same name.
         for n, data in members.items():
-            if n == record_name:
+            if n in (record_name, full_arcname):
                 continue
             zout.writestr(n, data)
         zout.writestr(full_arcname, content)

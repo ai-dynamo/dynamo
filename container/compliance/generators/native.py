@@ -37,6 +37,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import yaml
+
+from . import common
 from .common import UNKNOWN, Component, spdx_license_text
 
 logger = logging.getLogger(__name__)
@@ -54,12 +57,6 @@ def collect_components(
     """
     if not yaml_path.is_file():
         logger.warning("native_packages.yaml not found at %s", yaml_path)
-        return []
-
-    try:
-        import yaml
-    except ImportError:
-        logger.warning("PyYAML not installed; skipping native generator")
         return []
 
     data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
@@ -138,8 +135,6 @@ def generate(
     """Write NOTICES-Native.txt + native-deps.csv. `subtract` is a no-op."""
     del subtract  # native components are first-party from-source builds —
     # never present in upstream baselines, so subtraction is meaningless.
-    from . import common
-
     components = collect_components(yaml_path, image_filter)
     common.write_notices(ECOSYSTEM, components, output_dir)
     common.write_deps_csv(ECOSYSTEM, components, output_dir)

@@ -23,6 +23,8 @@ import functools
 import logging
 from pathlib import Path
 
+import yaml
+
 logger = logging.getLogger(__name__)
 
 Ecosystem = str  # "rust" | "go" | "python" | "dpkg" | "native"
@@ -33,17 +35,11 @@ _DEFAULT_OVERRIDES_PATH = Path(__file__).resolve().parent / "license_overrides.y
 def _load_overrides(path: Path) -> dict[tuple[Ecosystem, str], str]:
     """Load license_overrides.yaml.
 
-    Returns {} if the file is absent or PyYAML is missing — overrides are
-    structurally optional, but in practice a generator stage without
-    PyYAML will misclassify NVIDIA dpkgs etc., so the install of
-    python3-yaml is part of every licenses stage's contract.
+    Returns {} if the file is absent. PyYAML is a hard dependency of every
+    licenses stage (without it a generator would misclassify NVIDIA dpkgs
+    etc.), so it's imported at module scope rather than guarded here.
     """
     if not path.is_file():
-        return {}
-    try:
-        import yaml
-    except ImportError:
-        logger.warning("PyYAML not installed; skipping license_overrides.yaml")
         return {}
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     out: dict[tuple[Ecosystem, str], str] = {}

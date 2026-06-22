@@ -241,8 +241,15 @@ def slim_cyclonedx(doc: dict) -> dict:
 # ---- delta computation + policy validation -----------------------------------
 
 
-def _component_key(c: dict) -> tuple[str, str]:
-    return (c.get("name") or "", c.get("version") or "")
+def _component_key(c: dict) -> tuple[str, str, str]:
+    # Include ecosystem (from the purl type): a pypi and a cargo package can
+    # share a name+version, and keying on (name, version) alone would wrongly
+    # subtract one ecosystem's component against the other's in the delta.
+    return (
+        _ecosystem_from_purl(c.get("purl") or ""),
+        c.get("name") or "",
+        c.get("version") or "",
+    )
 
 
 # Canonicalization map for the prose-form license names syft emits in the
@@ -451,7 +458,7 @@ def _ecosystem_from_purl(purl: str) -> str:
 
 
 def compute_delta(from_sbom: dict, baseline_sbom: dict) -> list[dict]:
-    """Components in from_sbom but not baseline_sbom, keyed by (name, version)."""
+    """Components in from_sbom but not baseline_sbom, keyed by (ecosystem, name, version)."""
     baseline_keys = {_component_key(c) for c in baseline_sbom.get("components", [])}
     return [
         c
@@ -577,7 +584,11 @@ def capture(
     # or they'd collide. The runtime licenses stage selects the matching file
     # via ${BASELINE_SBOM_STEM}-${TARGETARCH}.cdx.json.
     arch = platform.rsplit("/", 1)[-1]
-    sbom_filename = f"{short}@{baseline_digest_hex[:8]}-{arch}.cdx.json"
+    # baseline_stem is what context.yaml's `baseline_sbom:` holds; the licenses
+    # stage / audit append -${TARGETARCH}.cdx.json. Surface it explicitly below
+    # so a re-capture doesn't leave the engineer to hand-strip the arch suffix.
+    baseline_stem = f"{short}@{baseline_digest_hex[:8]}"
+    sbom_filename = f"{baseline_stem}-{arch}.cdx.json"
     sbom_path = corpus_dir / sbom_filename
     from_digest_hex = from_digest.removeprefix("sha256:")
     from_cache_filename = f"{from_digest_hex}-{platform.replace('/', '_')}.cdx.json"
@@ -764,6 +775,10 @@ def capture(
     upsert_entry(manifest, entry)
     save_manifest(manifest, manifest_path)
     logger.info("Wrote %s and updated %s", sbom_path, manifest_path)
+    logger.info(
+        "Set this framework's baseline_sbom in container/context.yaml to: %s",
+        baseline_stem,
+    )
     return 0
 
 

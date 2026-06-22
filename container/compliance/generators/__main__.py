@@ -30,6 +30,8 @@ import logging
 import sys
 from pathlib import Path
 
+from . import common
+
 logger = logging.getLogger("compliance.generators")
 
 _ALL_ECOSYSTEMS = ("rust", "python", "dpkg", "go", "native")
@@ -170,8 +172,6 @@ def main(argv: list[str] | None = None) -> int:
     # Load the baseline subtraction set once, share across ecosystems.
     subtract: set[tuple[str, str]] | None = None
     if args.subtract_sbom is not None:
-        from . import common
-
         subtract = common.load_subtract_keys(args.subtract_sbom)
 
     # Each generator writes its NOTICES-<Eco>.txt FLAT at --output-dir (no
@@ -250,12 +250,17 @@ def main(argv: list[str] | None = None) -> int:
             if comps:
                 all_components.extend(comps)
 
+    # Fail fast on any generator failure BEFORE writing merged outputs, so a
+    # partial osrb-deps.csv / osrb.cdx.json is never produced from an incomplete
+    # component set (the full traceback was already logged above).
+    if failures:
+        logger.error("Generator failures: %s", failures)
+        return 1
+
     # Unified OSRB outputs (delta-only — the accumulated components are already
     # baseline-subtracted): one merged CSV with a Notes column + one CycloneDX
     # SBOM. The merged CSV supersedes the per-ecosystem <eco>-deps.csv the
     # generators wrote flat, so drop those (validation runs on the merged CSV).
-    from . import common
-
     for eco in _ALL_ECOSYSTEMS:
         (args.output_dir / f"{eco}-deps.csv").unlink(missing_ok=True)
 
@@ -284,9 +289,6 @@ def main(argv: list[str] | None = None) -> int:
         args.output_dir,
     )
 
-    if failures:
-        logger.error("Generator failures: %s", failures)
-        return 1
     return 0
 
 

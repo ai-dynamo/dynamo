@@ -82,11 +82,34 @@ def normalize_video_frames(images: list) -> list:
     return list(frames)
 
 
+def _frame_to_rgb_uint8(frame) -> np.ndarray:
+    """Coerce one video frame to an ``(H, W, 3)`` uint8 RGB array.
+
+    Frames reach here as PIL Images, numpy arrays, or torch tensors depending on
+    the diffusion pipeline (e.g. WanVideo/CogVideoX emit tensor/ndarray batches,
+    not PIL). Mirrors ``diffusers.export_to_video`` — the path this replaced — so
+    behavior is unchanged vs. the old export: PIL is array-ized, and float frames
+    are treated as ``[0, 1]`` and scaled to ``[0, 255]``. Torch tensors are
+    detected by duck-typing so this module keeps no hard torch dependency.
+    """
+    if hasattr(frame, "convert"):  # PIL.Image.Image
+        return np.array(frame.convert("RGB"))
+    if hasattr(frame, "detach") and hasattr(frame, "cpu"):  # torch.Tensor
+        frame = frame.detach().cpu().numpy()
+    arr = np.asarray(frame)
+    if np.issubdtype(arr.dtype, np.floating):
+        arr = np.clip(arr * 255.0, 0.0, 255.0).astype(np.uint8)
+    elif arr.dtype != np.uint8:
+        arr = arr.astype(np.uint8)
+    return arr
+
+
 def frames_to_numpy(images: list) -> np.ndarray:
-    """Convert a list of PIL Images to a numpy array suitable for video encoding.
+    """Convert a list of video frames to a numpy array suitable for encoding.
 
     Args:
-        images: List of PIL Image objects (video frames).
+        images: List of frames as PIL Images, numpy arrays, or torch tensors
+            (whatever the diffusion pipeline produced).
 
     Returns:
         Numpy array of shape ``(num_frames, height, width, 3)`` with dtype
@@ -98,10 +121,7 @@ def frames_to_numpy(images: list) -> np.ndarray:
     if not images:
         raise ValueError("No images provided for video encoding")
 
-    frames = []
-    for img in images:
-        arr = np.array(img.convert("RGB"))
-        frames.append(arr)
+    frames = [_frame_to_rgb_uint8(img) for img in images]
 
     # Validate consistent sizes
     shapes = {f.shape for f in frames}

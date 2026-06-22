@@ -76,6 +76,11 @@ allow = [
   # LGPL is permissive for our use because we link against these libraries
   # dynamically (LGPL's linking exception). Listed for every version we may
   # encounter in a Debian/Ubuntu base image.
+  # NOTE: LGPL-2.x is ALSO in the deny list below, which the validator checks
+  # first — so deny currently wins and an LGPL package passes only via a
+  # per-package [[exceptions]] entry. This overlap is intentional defense-in-
+  # depth (force explicit per-package copyleft review) but is a known
+  # contradiction; reconcile (drop from one list) pending OSRB sign-off.
   "LGPL-2.0-only",
   "LGPL-2.0-or-later",
   "LGPL-2.1-only",
@@ -250,6 +255,10 @@ deny = [
   "GPL-3.0",
   "GPL-3.0-only",
   "GPL-3.0-or-later",
+  # NOTE: LGPL-2.x is also in the allow list above. deny is checked before
+  # allow, so these win by default — an LGPL package passes only via a
+  # per-package [[exceptions]] entry (see the dpkg LGPL exceptions below). Kept
+  # as intentional defense-in-depth; reconcile with the allow list pending OSRB.
   "LGPL-2.0-only",
   "LGPL-2.0-or-later",
   "LGPL-2.1-only",

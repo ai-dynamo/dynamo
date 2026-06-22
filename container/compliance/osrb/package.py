@@ -48,8 +48,11 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +63,6 @@ logger = logging.getLogger(__name__)
 def load_yaml(path: Path) -> dict:
     if not path.is_file():
         return {}
-    import yaml  # PyYAML
-
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
@@ -270,8 +271,6 @@ def write_attribution_base(
     that the right baseline was used (e.g., a Python-heavy framework
     image should show most inherited packages on the Python row).
     """
-    from collections import Counter
-
     eco_counts = Counter(eco for (eco, _name, _ver) in base_keys)
 
     # Render ecosystems in a stable, predictable order; surface any

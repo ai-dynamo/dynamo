@@ -62,8 +62,12 @@ def parse_target_csvs(sboms_dir: Path) -> set[PkgKey]:
     seen: set[PkgKey] = set()
     csv_files = sorted(sboms_dir.rglob("*-deps.csv"))
     if not csv_files:
-        logger.warning("No *-deps.csv found under %s", sboms_dir)
-        return seen
+        # Fail hard: an empty target set makes the diff pass vacuously, hiding a
+        # generator/extraction failure as a clean result.
+        raise FileNotFoundError(
+            f"no *-deps.csv found under {sboms_dir} — the compliance generators "
+            "produced no attribution CSVs; refusing to verify a vacuous diff"
+        )
     for csv_path in csv_files:
         with csv_path.open(encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)

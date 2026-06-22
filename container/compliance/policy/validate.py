@@ -49,14 +49,27 @@ class Policy:
     exceptions: tuple[dict, ...]
 
 
+_VALID_ACTIONS = frozenset({"allow", "deny", "warn"})
+
+
 def load_policy(policy_path: Path) -> Policy:
     raw = tomllib.loads(policy_path.read_text(encoding="utf-8"))
     section = raw.get("licenses", {})
+    unknown_action = section.get("unknown", "deny")
+    copyleft_action = section.get("copyleft", "deny")
+    # Fail closed on a typo'd action ("warning", "den", …): an unrecognized
+    # value would otherwise fall through the action checks and silently allow.
+    for field, value in (("unknown", unknown_action), ("copyleft", copyleft_action)):
+        if value not in _VALID_ACTIONS:
+            raise ValueError(
+                f"invalid licenses.{field} action {value!r} in {policy_path}; "
+                f"must be one of {sorted(_VALID_ACTIONS)}"
+            )
     return Policy(
         allow=frozenset(section.get("allow", [])),
         deny=frozenset(section.get("deny", [])),
-        unknown_action=section.get("unknown", "deny"),
-        copyleft_action=section.get("copyleft", "deny"),
+        unknown_action=unknown_action,
+        copyleft_action=copyleft_action,
         exceptions=tuple(raw.get("exceptions", [])),
     )
 
@@ -116,6 +129,8 @@ class _Parser:
         return self.tokens[self.pos] if self.pos < len(self.tokens) else None
 
     def _consume(self) -> tuple[str, str]:
+        if self.pos >= len(self.tokens):
+            raise ValueError("unexpected end of SPDX expression")
         tok = self.tokens[self.pos]
         self.pos += 1
         return tok

@@ -664,6 +664,16 @@ def main(argv: list[str] | None = None) -> int:
 
     ecosystems = args.ecosystem or ["dpkg", "native"]
 
+    # Reject typo'd ecosystem names rather than silently collecting nothing for
+    # them and shipping an incomplete source archive (e.g. "rdust").
+    valid_ecosystems = {"dpkg", "rust", "go", "native"}
+    unknown = [e for e in ecosystems if e not in valid_ecosystems]
+    if unknown:
+        parser.error(
+            f"unknown --ecosystem value(s): {', '.join(sorted(unknown))}; "
+            f"valid: {', '.join(sorted(valid_ecosystems))}"
+        )
+
     args.sources_root.mkdir(parents=True, exist_ok=True)
     base_sbom: Path | None = args.baseline_sbom
     if "dpkg" in ecosystems:

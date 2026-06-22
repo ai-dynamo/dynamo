@@ -21,6 +21,9 @@ from __future__ import annotations
 import shutil
 import sys
 
+import torch
+import torch._dynamo as dynamo
+
 REQUIRED_TOOLS = ("cc", "gcc", "g++", "make")
 
 
@@ -35,17 +38,17 @@ def _check_tools() -> None:
 
 
 def _check_torch_compile() -> None:
-    import torch
-    import torch._dynamo as dynamo
-
     dynamo.config.suppress_errors = False
 
     @torch.compile(backend="inductor", fullgraph=True)
-    def f(x: "torch.Tensor") -> "torch.Tensor":
+    def f(x: torch.Tensor) -> torch.Tensor:
         return (x * 2 + 1).relu()
 
     out = f(torch.randn(64))
-    assert out.shape == (64,), out.shape
+    if out.shape != (64,):
+        raise RuntimeError(
+            f"torch.compile smoke test failed: expected shape (64,), got {out.shape}"
+        )
 
 
 def main() -> int:
