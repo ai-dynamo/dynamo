@@ -5,21 +5,21 @@ title: Agent Harnesses
 subtitle: Point coding-agent CLIs at a Dynamo deployment
 ---
 
-Use this page to point common coding-agent harnesses at a running NVIDIA Dynamo frontend. Dynamo reads each harness's existing session headers and normalizes them into `trajectory_id`; see [Trajectory IDs](trajectory-ids.md) for the exact mapping.
+Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages` so **any agent** that uses these APIs can talk to a Dynamo endpoint. This guide specifically focuses on popular agent harnesses that send stable trajectory ID that Dynamo use for optimized routing and scheduling. 
 
-## Local Dynamo
+## Local Setup
 
-For a local SGLang-backed smoke test, use the in-repo agent launcher. It starts a Dynamo frontend on port `8000`, enables JSONL request tracing with a per-run `/tmp/dynamo-request-trace-*.jsonl` path, and starts an SGLang worker for `zai-org/GLM-4.7-Flash`.
+To locally test this out, we have a small script tha runs an SGLang-backed GLM 4.7 Flash endpoint. This script starts a TP2 instance on port 8000 and enables request tracing for replay and visualization. By default traces are saved in `/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)`
+
+To start it, run: 
 
 ```bash
 bash examples/backends/sglang/launch/agg_agent.sh
 ```
 
-Set `DYN_HTTP_PORT` or `DYN_REQUEST_TRACE_OUTPUT_PATH` before launching if your deployment should listen on a different port or write traces to a specific file.
-
 ## Codex
 
-Codex should use Dynamo's OpenAI-compatible Responses API. Add a local provider in `~/.codex/config.toml`:
+Codex uses the Responses API. Add a local provider in `~/.codex/config.toml`:
 
 ```toml
 [model_providers.dynamo]
@@ -32,14 +32,12 @@ env_key = "DYNAMO_API_KEY"
 Then set one API-key env var and run Codex against the Dynamo model name:
 
 ```bash
-export DYNAMO_API_KEY=dummy
-
 codex -m zai-org/GLM-4.7-Flash \
   -c model_provider=dynamo \
   exec "Say ok"
 ```
 
-Dynamo maps Codex's `session-id` header to `trajectory_id`.
+Codex sends a `session-id` header that is internally mapped to our `trajectory_id`
 
 ## Claude Code
 
