@@ -6,6 +6,7 @@
 mod kv_event_sink;
 #[path = "sglang/mod.rs"]
 pub mod sglang;
+mod source_holds;
 pub mod vllm;
 
 pub use crate::common::protocols::ForwardPassSnapshot;
@@ -15,6 +16,7 @@ pub(crate) use kv_event_sink::{
     CapturedRouterEventBuffer, DeferredFpmBuffer, capture_deferred_kv_publish_sink,
     capture_router_event_sink, publish_deferred_fpm, publish_deferred_kv_events,
 };
+pub(crate) use source_holds::{RemovedSource, SchedulerCommand, SourceCompletion, SourceHolds};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;

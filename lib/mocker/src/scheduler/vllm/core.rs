@@ -14,6 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::common::handoff::HandoffId;
 #[cfg(feature = "kvbm-offload")]
 use crate::common::protocols::G1;
 use crate::common::protocols::{
@@ -30,8 +31,8 @@ use crate::replay::TraceCollector;
 use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
-    MockerMetrics, RouterEventVisibility, accept_length_sample, build_fpm_snapshot,
-    capture_router_event_sink,
+    MockerMetrics, RemovedSource, RouterEventVisibility, SchedulerCommand, SourceCompletion,
+    SourceHolds, accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,9 +203,13 @@ impl SchedulerState {
     }
 
     pub(crate) fn complete(&mut self, uuid: &Uuid) {
+        self.take_completed(uuid);
+    }
+
+    pub(crate) fn take_completed(&mut self, uuid: &Uuid) -> Option<VllmRequestState> {
         self.waiting_members.remove(uuid);
         self.running_members.remove(uuid);
-        self.requests.remove(uuid);
+        self.requests.remove(uuid)
     }
 
     pub(crate) fn running_sequence_mut(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
@@ -359,6 +364,7 @@ pub(crate) struct VllmCore {
     pub(super) kv_manager: KvManager,
     speculative_sampler: Option<SpeculativeDecodeSampler>,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
+    source_holds: SourceHolds<HeldVllmPrefill>,
 
     /// Requests parked on pending G2→G1 swap-ins. Populated by the
     /// admission path when a request's remaining prefix matches G2 only
@@ -370,6 +376,16 @@ pub(crate) struct VllmCore {
     /// uuid↔handle mapping.
     #[cfg(feature = "kvbm-offload")]
     pub(super) requests_awaiting_swap_in: Vec<AwaitingSwapIn>,
+}
+
+struct HeldVllmPrefill {
+    request: VllmRequestState,
+    deferred_deref: Vec<MoveBlock>,
+}
+
+struct VllmTerminalEffects {
+    immediate: Vec<MoveBlock>,
+    cleanup: Vec<MoveBlock>,
 }
 
 impl VllmCore {
@@ -431,6 +447,7 @@ impl VllmCore {
             state: SchedulerState::default(),
             speculative_sampler,
             kv_event_buffer,
+            source_holds: SourceHolds::default(),
             #[cfg(feature = "kvbm-offload")]
             requests_awaiting_swap_in: Vec::new(),
         }
@@ -456,6 +473,37 @@ impl VllmCore {
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
+        self.apply_command(SchedulerCommand::Submit(request))
+            .expect("ordinary request submission is infallible")
+            .expect("submit command must return a request ID")
+    }
+
+    pub(crate) fn apply_command(
+        &mut self,
+        command: SchedulerCommand,
+    ) -> anyhow::Result<Option<Uuid>> {
+        match command {
+            SchedulerCommand::Submit(request) => Ok(Some(self.submit(request))),
+            SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                mut request,
+            } => {
+                let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+                request.uuid = Some(uuid);
+                self.source_holds.register(uuid, handoff_id)?;
+                let submitted = self.submit(request);
+                debug_assert_eq!(submitted, uuid);
+                Ok(Some(uuid))
+            }
+            SchedulerCommand::ReleaseSource { handoff_id }
+            | SchedulerCommand::CancelSource { handoff_id } => {
+                self.remove_source(handoff_id);
+                Ok(None)
+            }
+        }
+    }
+
+    fn submit(&mut self, request: DirectRequest) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let mut max_output_tokens = request.max_output_tokens;
         if let Some(clamped) = policy::normalize_max_output_tokens(
@@ -495,6 +543,53 @@ impl VllmCore {
             request.debug_assert_progress(uuid);
         }
         uuid
+    }
+
+    fn remove_source(&mut self, handoff_id: HandoffId) -> bool {
+        match self.source_holds.remove(handoff_id) {
+            RemovedSource::Held(payload) => {
+                self.cleanup_completed_prefill(payload);
+                true
+            }
+            RemovedSource::Pending => true,
+            RemovedSource::Missing => false,
+        }
+    }
+
+    fn complete_source(&mut self, uuid: Uuid, deferred_deref: Vec<MoveBlock>) {
+        let request = self
+            .state
+            .take_completed(&uuid)
+            .expect("completed request must remain scheduler-owned");
+        let payload = HeldVllmPrefill {
+            request,
+            deferred_deref,
+        };
+        if let SourceCompletion::Release(payload) = self.source_holds.complete_source(uuid, payload)
+        {
+            self.cleanup_completed_prefill(payload);
+        }
+    }
+
+    fn cleanup_completed_prefill(&mut self, payload: HeldVllmPrefill) {
+        let HeldVllmPrefill {
+            request,
+            deferred_deref,
+        } = payload;
+        for signal in deferred_deref {
+            self.kv_manager.process(&signal);
+        }
+        drop(request);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_is_held(&self, handoff_id: HandoffId) -> bool {
+        self.source_holds.is_held(handoff_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_is_registered(&self, handoff_id: HandoffId) -> bool {
+        self.source_holds.is_registered(handoff_id)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -966,6 +1061,7 @@ impl VllmCore {
         for signal in request.sequence.free_signal() {
             self.kv_manager.process(&signal);
         }
+        self.source_holds.remove_request(uuid);
         self.state.complete(&uuid);
     }
 
@@ -1262,20 +1358,30 @@ impl VllmCore {
         for uuid in ready {
             let mut emitted = false;
             let mut completed = false;
+            let mut deferred_deref = Vec::new();
             loop {
                 self.state.debug_assert_ready_to_decode(uuid);
                 let Some(sequence) = self.state.running_sequence_mut(uuid) else {
                     break;
                 };
                 let signals = sequence.generate();
-                if signals.is_empty() || process_signals(&mut self.kv_manager, &signals) {
-                    if !signals.is_empty()
-                        && sequence.generated_tokens() < sequence.max_output_tokens()
-                    {
+                completed = sequence.generated_tokens() >= sequence.max_output_tokens();
+                let effects = if completed {
+                    split_terminal_effects(signals)
+                } else {
+                    VllmTerminalEffects {
+                        immediate: signals,
+                        cleanup: Vec::new(),
+                    }
+                };
+                if effects.immediate.is_empty()
+                    || process_signals(&mut self.kv_manager, &effects.immediate)
+                {
+                    if !effects.immediate.is_empty() && !completed {
                         sequence.commit_allocation(sequence.len());
                     }
                     emitted = true;
-                    completed = sequence.generated_tokens() >= sequence.max_output_tokens();
+                    deferred_deref = effects.cleanup;
                     break;
                 }
                 sequence.pop();
@@ -1295,9 +1401,6 @@ impl VllmCore {
                 continue;
             }
 
-            if let Some(collector) = collector.as_deref_mut() {
-                collector.on_token(uuid, decode_end_ms);
-            }
             let handoff_delay_ms = self.state.requests.get(&uuid).and_then(|request| {
                 request.debug_assert_progress(uuid);
                 compute_prefill_handoff_delay_ms(
@@ -1308,16 +1411,20 @@ impl VllmCore {
                     self.args.kv_bytes_per_token,
                 )
             });
-            output_signals.push(OutputSignal {
+            let output_signal = OutputSignal {
                 uuid,
                 completed,
                 rejected: false,
                 handoff_delay_ms,
-            });
+            };
             if completed {
-                self.state.complete(&uuid);
+                self.complete_source(uuid, deferred_deref);
                 running_changed = true;
             }
+            if let Some(collector) = collector.as_deref_mut() {
+                collector.on_token(uuid, decode_end_ms);
+            }
+            output_signals.push(output_signal);
         }
 
         if output_signals.is_empty() {
@@ -1453,16 +1560,28 @@ impl VllmCore {
             Vec::with_capacity(sampled_bursts.iter().map(|(_, burst)| *burst).sum());
         for (uuid, burst) in sampled_bursts {
             let mut completed = false;
+            let mut deferred_deref = Vec::new();
             for _ in 0..burst {
-                let signals = {
+                let (signals, is_complete) = {
                     let request = self
                         .state
                         .requests
                         .get_mut(&uuid)
                         .expect("sampled request must remain active");
-                    request.sequence.generate()
+                    let signals = request.sequence.generate();
+                    let is_complete =
+                        request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
+                    (signals, is_complete)
                 };
-                for signal in &signals {
+                let effects = if is_complete {
+                    split_terminal_effects(signals)
+                } else {
+                    VllmTerminalEffects {
+                        immediate: signals,
+                        cleanup: Vec::new(),
+                    }
+                };
+                for signal in &effects.immediate {
                     self.kv_manager
                         .process_decode_signal(signal, &mut reservation);
                 }
@@ -1494,12 +1613,13 @@ impl VllmCore {
                 });
                 if is_complete {
                     completed = true;
+                    deferred_deref = effects.cleanup;
                     break;
                 }
             }
 
             if completed {
-                self.state.complete(&uuid);
+                self.complete_source(uuid, deferred_deref);
                 running_changed = true;
                 continue;
             }
@@ -1560,6 +1680,13 @@ fn scale_decode_time(decode_ms: f64, args: &MockEngineArgs) -> Duration {
         return unscaled;
     }
     Duration::from_secs_f64(unscaled.as_secs_f64() / effective_ratio)
+}
+
+fn split_terminal_effects(signals: Vec<MoveBlock>) -> VllmTerminalEffects {
+    let (cleanup, immediate) = signals
+        .into_iter()
+        .partition(|signal| matches!(signal, MoveBlock::Deref(_)));
+    VllmTerminalEffects { immediate, cleanup }
 }
 
 fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {

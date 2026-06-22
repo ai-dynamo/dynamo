@@ -11,14 +11,15 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 use uuid::Uuid;
 
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
     PreemptionMode, RawKvEvent, RawKvEventSink,
 };
 use crate::common::sequence::ActiveSequence;
-use crate::scheduler::RouterEventVisibility;
 use crate::scheduler::SchedulerHandle;
 use crate::scheduler::test_utils::{RouterIndexerHarness, removed_event_count, stored_hashes};
+use crate::scheduler::{RouterEventVisibility, SchedulerCommand};
 
 use super::core::{RequestStatus, VllmCore, VllmRequestState};
 use super::live::{MockerMetrics, Scheduler};
@@ -67,6 +68,117 @@ fn router_args() -> MockEngineArgs {
         .speedup_ratio(0.0)
         .build()
         .unwrap()
+}
+
+mod source_holds {
+    use super::*;
+
+    fn args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap()
+    }
+
+    fn request(uuid: Uuid) -> DirectRequest {
+        DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    fn execute(core: &mut VllmCore, now_ms: f64) -> crate::scheduler::EnginePassResult {
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, now_ms)
+    }
+
+    #[test]
+    fn terminal_completion_holds_source_without_freeing_kv() {
+        let mut core = VllmCore::new(args());
+        let request_id = Uuid::from_u128(101);
+        let handoff_id = HandoffId::from(Uuid::from_u128(201));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id,
+            request: request(request_id),
+        })
+        .unwrap();
+
+        let first = execute(&mut core, 0.0);
+        assert!(!first.output_signals[0].completed);
+        let active_before_terminal = core.kv_manager.num_active_blocks();
+        assert!(active_before_terminal > 0);
+
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(core.source_is_held(handoff_id));
+        assert!(!core.state.requests.contains_key(&request_id));
+        assert_eq!(core.kv_manager.num_active_blocks(), active_before_terminal);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert!(!core.source_is_held(handoff_id));
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+    }
+
+    #[test]
+    fn cancel_and_early_release_cleanup_exactly_once() {
+        let mut core = VllmCore::new(args());
+        let first_id = HandoffId::from(Uuid::from_u128(202));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: first_id,
+            request: request(Uuid::from_u128(102)),
+        })
+        .unwrap();
+        let first = execute(&mut core, 0.0);
+        execute(&mut core, first.end_ms);
+        let held_blocks = core.kv_manager.num_active_blocks();
+
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        assert!(held_blocks > 0);
+
+        let second_id = first_id;
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: second_id,
+            request: request(Uuid::from_u128(103)),
+        })
+        .unwrap();
+        assert!(core.source_is_registered(second_id));
+        core.apply_command(SchedulerCommand::ReleaseSource {
+            handoff_id: second_id,
+        })
+        .unwrap();
+        assert!(!core.source_is_registered(second_id));
+
+        let first = execute(&mut core, 0.0);
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(!core.source_is_held(second_id));
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+    }
 }
 
 mod core_behavior {

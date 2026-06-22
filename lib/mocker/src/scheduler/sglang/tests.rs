@@ -18,6 +18,7 @@ use super::live::SglangScheduler;
 use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
 use super::request::SglangRequest;
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
     SglangArgs,
@@ -26,7 +27,9 @@ use crate::kv_manager::SglangKvManager;
 use crate::scheduler::test_utils::{
     RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
-use crate::scheduler::{RouterEventVisibility, SchedulerHandle, capture_router_event_sink};
+use crate::scheduler::{
+    RouterEventVisibility, SchedulerCommand, SchedulerHandle, capture_router_event_sink,
+};
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 17;
 
@@ -82,6 +85,134 @@ fn make_decoded_request(
     let result = simulate_decode_step(&mut running, kv_manager, config, 0.0, false);
     assert_eq!(result.output_signals.len(), 1);
     running.pop().unwrap()
+}
+
+mod source_holds {
+    use super::*;
+
+    fn args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(16)
+            .block_size(4)
+            .max_num_seqs(Some(1))
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+    }
+
+    fn request(uuid: Uuid) -> DirectRequest {
+        DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    fn execute(core: &mut SglangCore, now_ms: f64) -> crate::scheduler::EnginePassResult {
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, now_ms)
+    }
+
+    fn occupied_tokens(core: &SglangCore) -> usize {
+        core.kv_manager.cache().total_tokens() - core.kv_manager.cache().available_tokens()
+    }
+
+    #[test]
+    fn terminal_completion_holds_source_without_running_cleanup() {
+        let mut core = SglangCore::new(args());
+        let request_id = Uuid::from_u128(301);
+        let handoff_id = HandoffId::from(Uuid::from_u128(401));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id,
+            request: request(request_id),
+        })
+        .unwrap();
+
+        let first = execute(&mut core, 0.0);
+        assert!(!first.output_signals[0].completed);
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(core.source_is_held(handoff_id));
+        assert!(core.running.is_empty());
+        let held_tokens = occupied_tokens(&core);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert!(!core.source_is_held(handoff_id));
+        let released_tokens = occupied_tokens(&core);
+        assert!(released_tokens < held_tokens);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert_eq!(occupied_tokens(&core), released_tokens);
+    }
+
+    #[test]
+    fn cancel_and_early_release_cleanup_exactly_once() {
+        let mut core = SglangCore::new(args());
+        let first_id = HandoffId::from(Uuid::from_u128(402));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: first_id,
+            request: request(Uuid::from_u128(302)),
+        })
+        .unwrap();
+        let first = execute(&mut core, 0.0);
+        execute(&mut core, first.end_ms);
+        let held_tokens = occupied_tokens(&core);
+
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        let cancelled_tokens = occupied_tokens(&core);
+        assert!(cancelled_tokens < held_tokens);
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        assert_eq!(occupied_tokens(&core), cancelled_tokens);
+
+        core.kv_manager.evict(cancelled_tokens);
+        let second_id = first_id;
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: second_id,
+            request: request(Uuid::from_u128(303)),
+        })
+        .unwrap();
+        assert!(core.source_is_registered(second_id));
+        core.apply_command(SchedulerCommand::ReleaseSource {
+            handoff_id: second_id,
+        })
+        .unwrap();
+        assert!(!core.source_is_registered(second_id));
+
+        let first = execute(&mut core, 0.0);
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(!core.source_is_held(second_id));
+    }
+
+    #[test]
+    fn ordinary_completion_keeps_default_cleanup() {
+        let mut core = SglangCore::new(args());
+        core.receive(request(Uuid::from_u128(306)));
+
+        let first = execute(&mut core, 0.0);
+        let terminal = execute(&mut core, first.end_ms);
+
+        assert!(terminal.output_signals[0].completed);
+        assert_eq!(occupied_tokens(&core), 8);
+    }
 }
 
 mod scheduling {

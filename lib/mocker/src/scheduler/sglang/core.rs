@@ -7,19 +7,23 @@ use std::time::Duration;
 use dynamo_kv_router::protocols::WorkerId;
 use uuid::Uuid;
 
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
 use crate::kv_manager::SglangKvManager;
 use crate::replay::TraceCollector;
 
 use super::config::SglangConfig;
-use super::decode::{cache_materialized_prefix, simulate_decode_step_with_sampler};
+use super::decode::{
+    cache_materialized_prefix, cleanup_completed_request, simulate_decode_step_with_sampler,
+};
 use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
 use super::request::SglangRequest;
 use crate::scheduler::{
-    CapturedRouterEventBuffer, EnginePassResult, MockerMetrics, RouterEventVisibility,
-    accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
+    CapturedRouterEventBuffer, EnginePassResult, MockerMetrics, RemovedSource,
+    RouterEventVisibility, SchedulerCommand, SourceCompletion, SourceHolds, accept_length_sample,
+    build_fpm_snapshot, capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -31,6 +35,11 @@ pub(crate) struct SglangCore {
     pub(super) kv_manager: SglangKvManager,
     speculative_sampler: Option<SpeculativeDecodeSampler>,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
+    source_holds: SourceHolds<HeldSglangPrefill>,
+}
+
+struct HeldSglangPrefill {
+    request: SglangRequest,
 }
 
 impl SglangCore {
@@ -92,15 +101,82 @@ impl SglangCore {
             ),
             speculative_sampler,
             kv_event_buffer,
+            source_holds: SourceHolds::default(),
         }
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
+        self.apply_command(SchedulerCommand::Submit(request))
+            .expect("ordinary request submission is infallible")
+            .expect("submit command must return a request ID")
+    }
+
+    pub(crate) fn apply_command(
+        &mut self,
+        command: SchedulerCommand,
+    ) -> anyhow::Result<Option<Uuid>> {
+        match command {
+            SchedulerCommand::Submit(request) => Ok(Some(self.submit(request))),
+            SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                mut request,
+            } => {
+                let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+                request.uuid = Some(uuid);
+                self.source_holds.register(uuid, handoff_id)?;
+                let submitted = self.submit(request);
+                debug_assert_eq!(submitted, uuid);
+                Ok(Some(uuid))
+            }
+            SchedulerCommand::ReleaseSource { handoff_id }
+            | SchedulerCommand::CancelSource { handoff_id } => {
+                self.remove_source(handoff_id);
+                Ok(None)
+            }
+        }
+    }
+
+    fn submit(&mut self, request: DirectRequest) -> Uuid {
         let request = SglangRequest::from(request);
         request.debug_assert_invariants(self.config.block_size);
         let uuid = request.uuid;
         self.waiting.push_back(request);
         uuid
+    }
+
+    fn complete_source(&mut self, request: SglangRequest) {
+        let uuid = request.uuid;
+        let payload = HeldSglangPrefill { request };
+        if let SourceCompletion::Release(payload) = self.source_holds.complete_source(uuid, payload)
+        {
+            self.cleanup_completed_prefill(payload);
+        }
+    }
+
+    fn remove_source(&mut self, handoff_id: HandoffId) -> bool {
+        match self.source_holds.remove(handoff_id) {
+            RemovedSource::Held(payload) => {
+                self.cleanup_completed_prefill(payload);
+                true
+            }
+            RemovedSource::Pending => true,
+            RemovedSource::Missing => false,
+        }
+    }
+
+    fn cleanup_completed_prefill(&mut self, payload: HeldSglangPrefill) {
+        let mut request = payload.request;
+        cleanup_completed_request(&mut request, &mut self.kv_manager, self.config.block_size);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_is_held(&self, handoff_id: HandoffId) -> bool {
+        self.source_holds.is_held(handoff_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_is_registered(&self, handoff_id: HandoffId) -> bool {
+        self.source_holds.is_registered(handoff_id)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -190,6 +266,10 @@ impl SglangCore {
             decode_start_ms,
             true,
         );
+
+        for request in decode.completed_requests.drain(..) {
+            self.complete_source(request);
+        }
 
         if let Some(collector) = collector {
             for signal in &decode.output_signals {
