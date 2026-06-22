@@ -9,7 +9,9 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Four configurations run Dynamo + TensorRT-LLM on 6x GB200 nodes (24 GPUs, MNNVL), starting from plain aggregated round-robin serving and adding one feature at a time up to the full disaggregated stack. The full stack delivers roughly **3x the per-GPU throughput** of the baseline while also improving per-user token speed.
+<p className="dynamo-recipe-eyebrow">Feature composition · Agentic coding throughput stack</p>
+
+This is the **agentic coding throughput stack**: four configurations run Dynamo + TensorRT-LLM on 6x GB200 nodes (24 GPUs, MNNVL) against a Mooncake-style agentic coding trace (~200K-token context, multi-turn), starting from plain aggregated round-robin serving and adding one feature at a time — KV routing, Eagle3 speculation, disaggregation, and KV offload — up to the full disaggregated stack. The full stack delivers roughly **3x the per-GPU throughput** of the baseline while also improving per-user token speed.
 
 <div className="dynamo-target-picker static">
 <p className="dynamo-target-picker-title">Benchmark setup</p>
