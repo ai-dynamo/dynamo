@@ -22,10 +22,9 @@ no Dynamo worker.
 | Operator | not required | required (DynamoGraphDeployment) |
 | Tokenization | EPP tokenizes for routing; worker re-tokenizes | model-card preprocessor, no double tokenization |
 
-The two modes are selected at startup by **`DYN_EPP_MODE`** (`full-dynamo-stack` | `router-only`). The same EPP
-binary serves both.
+The EPP can be served in 2 modes. The two modes are selected at startup by **`DYN_EPP_MODE`** (`full-dynamo-stack` | `router-only`). The same EPP binary serves both.
 
-LIMITATIONS:
+## Limitations
 
 | This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
 |---|---|
@@ -37,12 +36,12 @@ Initial cache state | Not handled. (The Dynamo path does an initial worker dum
 Backpressure / EPP restart | PUB drops to slow subscribers (HWM) → silent loss; on restart the index is empty and only re-warms from new traffic.
 Data Parallelism | Not supported
 
-## Files
+## Examples
 
 - `agg.yaml` — aggregated: one vLLM pool, KV-aware load balancing.
 - `disagg.yaml` — disaggregated: prefill + decode pools, KV-aware P/D selection. Note that for the disaggregated serving you need to also build the sidecar to orchestrate the pull of the kv cache from the prefill worker.
 
-## Prerequisites (install once)
+## Prerequisites
 
 ```bash
 # Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`
