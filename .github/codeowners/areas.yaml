@@ -576,6 +576,10 @@ shared:
   owners:
   - docs
   - agents
+- glob: tests/frontend/agent_smoke_inputs.py
+  owners:
+  - frontend
+  - agents
 - glob: components/src/dynamo/vllm/multimodal_handlers/
   owners:
   - backend-vllm

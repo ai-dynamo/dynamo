@@ -297,6 +297,7 @@
 /lib/llm/src/protocols/openai/audios/                                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/protocols/openai/images/                                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/protocols/openai/videos/                                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/tests/frontend/agent_smoke_inputs.py                                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/llm/src/kv_router/shared_cache.rs                                                        @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/vllm/handlers.py                                                       @ai-dynamo/dynamo-vllm-codeowners @ai-dynamo/dynamo-rl-codeowners
 /components/src/dynamo/vllm/snapshot.py                                                       @ai-dynamo/dynamo-vllm-codeowners @ai-dynamo/dynamo-gms-codeowners
