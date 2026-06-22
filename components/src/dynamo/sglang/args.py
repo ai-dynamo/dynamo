@@ -21,12 +21,12 @@ from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.lifecycle import (
     configure_snapshot_capture_env,
     is_snapshot_enabled,
 )
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig

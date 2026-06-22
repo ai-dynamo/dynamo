@@ -23,6 +23,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -42,7 +43,6 @@ from dynamo.llm import (
     ModelRuntimeConfig,
     ModelType,
     WorkerType,
-    fetch_model,
     register_model,
 )
 from dynamo.runtime import Endpoint

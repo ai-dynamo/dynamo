@@ -35,7 +35,7 @@ from dynamo._core import RoutingConstraints as RoutingConstraints
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import WorkerType as WorkerType
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq
-from dynamo._core import fetch_model as _fetch_model
+from dynamo._core import fetch_model as fetch_model
 from dynamo._core import lora_name_to_id as lora_name_to_id
 from dynamo._core import make_engine
 from dynamo._core import register_model as register_model
@@ -56,21 +56,6 @@ from .exceptions import HttpError
 class RoutedEngine(Protocol):
     async def generate(self, request: Any, **kwargs: Any) -> AsyncIterator[Any]:
         ...
-
-
-async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
-    try:
-        from dynamo.common.snapshot.lifecycle import is_snapshot_enabled
-    except ImportError:
-        return await _fetch_model(remote_name, ignore_weights)
-
-    if is_snapshot_enabled():
-        # Keep Hugging Face TCP sockets out of the snapshotted process.
-        from dynamo.common.snapshot.model_fetch import fetch_model_in_subprocess
-
-        return await fetch_model_in_subprocess(remote_name, ignore_weights)
-
-    return await _fetch_model(remote_name, ignore_weights)
 
 
 # Backward-compatible aliases

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Snapshot-safe model prefetch helpers."""
+"""Model prefetch helpers."""
 
 import asyncio
 import logging
@@ -10,7 +10,10 @@ import os
 import sys
 from multiprocessing.connection import Connection
 
-from dynamo.common.snapshot.lifecycle import SENTINEL_POLL_INTERVAL_SEC
+from dynamo.common.snapshot.lifecycle import (
+    SENTINEL_POLL_INTERVAL_SEC,
+    is_snapshot_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,3 +82,13 @@ async def fetch_model_in_subprocess(
             f"Model fetch subprocess failed for {remote_name!r}: {payload}"
         )
     return payload
+
+
+async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
+    if is_snapshot_enabled():
+        # Keep Hugging Face TCP sockets out of the snapshotted process.
+        return await fetch_model_in_subprocess(remote_name, ignore_weights)
+
+    from dynamo.llm import fetch_model as llm_fetch_model
+
+    return await llm_fetch_model(remote_name, ignore_weights)

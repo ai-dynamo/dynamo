@@ -71,6 +71,9 @@ class SnapshotConfig:
             logger.info("Resuming model after restore")
             await pause_controller.resume()
             pause_controller.mark_resumed()
+            # The checkpoint is complete; post-restore model registration may
+            # need normal Hugging Face cache/download behavior.
+            os.environ.pop("HF_HUB_OFFLINE", None)
             return True
 
         logger.info("Snapshot completion sentinel detected")
