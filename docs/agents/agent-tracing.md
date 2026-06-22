@@ -79,7 +79,7 @@ Dynamo emits `request_end` after the response stream finishes or is dropped. The
 }
 ```
 
-Current request tracing skips unsupported multi-choice replay shapes such as `n > 1` and `best_of > 1`, so do not assume every trajectory turn is present unless skipped-row warnings are absent. For chat streams, finish metadata is recorded after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason. 
+Current request tracing skips unsupported multi-choice replay shapes such as `n > 1` and `best_of > 1`, so do not assume every trajectory turn is present unless skipped-row warnings are absent. For chat streams, finish metadata is recorded after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
 
 </details>
 

@@ -15,7 +15,7 @@ NVIDIA Dynamo optimizes agent workloads with lightweight headers and request ext
 
 The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. Dynamo maps supported coding-agent headers to `trajectory_id`, and custom harnesses can send `x-dynamo-trajectory-id` directly. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for the exact contract.
 
-## Documentation 
+## Documentation
 
 | Concept | Purpose |
 |---------|---------|

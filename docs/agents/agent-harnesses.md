@@ -11,7 +11,7 @@ Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages` so **any
 
 To locally test these out, we have a small script that runs an SGLang-backed `zai-org/GLM-4.7-Flash` endpoint. This script starts a TP2 instance on port 8000 and enables request tracing for replay and visualization. By default traces are saved in `/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)`
 
-To start it, run: 
+To start it, run:
 
 ```bash
 bash examples/backends/sglang/launch/agg_agent.sh
@@ -114,7 +114,7 @@ hermes plugins enable dynamo_trajectory
 hermes
 ```
 
-The plugin copies the Hermes `session_id` into `x-dynamo-trajectory-id` on each LLM request. 
+The plugin copies the Hermes `session_id` into `x-dynamo-trajectory-id` on each LLM request.
 
 ## See Also
 

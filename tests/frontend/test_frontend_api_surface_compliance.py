@@ -571,9 +571,7 @@ def test_frontend_api_surface_compliance(
         _run_codex_exec_smoke(
             _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
         )
-        _assert_agent_context_in_trace(
-            request_trace_path, "codex", codex_trace_start
-        )
+        _assert_agent_context_in_trace(request_trace_path, "codex", codex_trace_start)
         _wait_for_frontend_healthy(frontend_port)
         claude_trace_start = _request_trace_record_count(request_trace_path)
         _run_claude_exec_smoke(
