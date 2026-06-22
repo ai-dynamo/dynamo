@@ -3,26 +3,20 @@
 
 """Realtime (bidirectional) handler backed by vLLM-Omni's streaming engine.
 
-The Dynamo frontend owns the ``/v1/realtime`` WebSocket and the OpenAI Realtime
-envelope: it synthesizes ``session.created``, picks this engine when a
-``session.update`` names our model, then forwards every client event (including
-that ``session.update``) into ``request_stream`` and streams whatever we yield
-straight back to the client as typed ``RealtimeServerEvent`` frames. So this
-handler is a pure translation layer between the OpenAI Realtime event contract
-and vLLM-Omni's in-process streaming API.
+This handler expects ``request_stream`` to yield ``RealtimeServerEvent`` frames.
+This hander handles bidirectional streaming matching vLLM-Omni's single-active-generation
+contract, where at most one active generation is in flight at a time, an active generation
+is defined by the inference request encapsulated by ``input_audio_buffer.append``
+and ``input_audio_buffer.commit``, and responses generated correspond to the request.
+The handler can still accept events for later requests, but they will be buffered and
+executed in order.
 
-Turn model (matching vLLM-Omni's single-active-generation contract):
+The handler emits the following events:
 
   * ``session.update``            -> ``session.updated`` echoing the session;
     also captures the requested ``output_modalities`` for later turns.
-  * ``input_audio_buffer.append`` -> base64 PCM16 chunk decoded to a float32
-    waveform and queued for the active turn's audio stream.
-  * ``input_audio_buffer.commit`` -> opens a turn on the first event and, when
-    ``final`` is set, closes the audio stream so the engine drains.
-
-Turns are serialized: at most one response is in flight at a time, so a later
-commit's turn buffers its audio and waits until the previous response completes
--- responses never interleave, and each is identified by its ``response_id``.
+  * ``input_audio_buffer.append`` -> base64 PCM16 chunk decoded to a float32 waveform and queued for the active turn's audio stream.
+  * ``input_audio_buffer.commit`` -> opens a turn on the first event and, when ``final`` is set, closes the audio stream so the engine drains.
 
 Each turn emits ``response.created`` -> ``response.output_audio.delta``* (+
 optional ``response.output_audio_transcript.delta`` for the thinker text) ->
@@ -32,15 +26,10 @@ vLLM-Omni's own ``response.audio.delta`` / ``transcription.delta`` names; the
 PCM16 and cumulative-vs-delta waveform handling below is ported from
 vLLM-Omni's ``realtime_connection.py`` and only the event tags change.
 
-Engine drive (the real-model path, see ``StreamingInput`` in
-``vllm.engine.protocol``): audio is not handed to the engine as raw chunks.
-Instead a ``streaming_input_factory`` (``OpenAIServingRealtime.transcribe_realtime``
-in production) turns the float32 ``audio_stream`` into an async generator of
-``StreamingInput`` prompts via the model's ``buffer_realtime_audio`` cumulative
-buffering; ``engine.generate(prompt=streaming_input_gen, ...)`` consumes it, and
-the thinker's per-step token ids are fed back into ``input_stream`` for the
-talker (autoregressive multi-turn). The factory and engine are injected so the
-worker passes the real serving/AsyncOmni while tests pass lightweight fakes.
+Engine takes a generator of audio chunks, so a ``streaming_input_factory`` is introduced
+to turn the float32 ``audio_stream`` into an async generator of
+``StreamingInput`` prompts for ``engine.generate(prompt=streaming_input_gen, ...)``.
+The factory and engine are injected for mocking in tests.
 """
 
 from __future__ import annotations
