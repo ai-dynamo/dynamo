@@ -33,32 +33,6 @@
 #                      added when framework runtimes wire native in)
 
 packages:
-  - name: CRIU
-    version: criu-dev
-    license: GPL-2.0-only
-    source: https://github.com/checkpoint-restore/criu
-    license_text_path: /legal/CRIU/COPYING
-    images:
-      - snapshot-agent
-
-  - name: cuda-checkpoint
-    version: main
-    license: LicenseRef-NVIDIA-Proprietary
-    source: https://github.com/NVIDIA/cuda-checkpoint
-    license_text_path: /legal/cuda-checkpoint/LICENSE
-    images:
-      - snapshot-agent
-
-  - name: cuda-checkpoint-helper
-    # First-party: small C wrapper that calls cuLink/cuMemcpyAsync etc.
-    # to assist with cuda-checkpoint coordination. Source lives in
-    # deploy/snapshot/cmd/cuda-checkpoint-helper/main.c.
-    version: 1.0
-    license: Apache-2.0
-    source: https://github.com/ai-dynamo/dynamo
-    images:
-      - snapshot-agent
-
   # --- EFA (Elastic Fabric Adapter) components ---
   # Installed by container/templates/aws.Dockerfile via the AWS-published
   # `efa_installer.sh` (efa_version 1.47.0). The installer drops binaries

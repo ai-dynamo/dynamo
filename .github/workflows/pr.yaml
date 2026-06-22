@@ -357,8 +357,6 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -377,8 +375,6 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      inline_compliance: true
-      artifact_retention_days: '7'
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -602,34 +598,32 @@ jobs:
       baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
     secrets: inherit
 
-  planner-compliance-audit:
-    name: planner # grouped in the UI with other planner jobs
+  # planner / frontend stay on the legacy shared-compliance scan until they
+  # migrate to the inline system that vllm/sglang/trtllm use above.
+  planner-compliance:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
       target: planner
-      cuda_version: ''
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.planner-build.outputs.baseline_sbom_file }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
-  frontend-compliance-audit:
-    name: frontend # grouped in the UI with other frontend jobs
+  frontend-compliance:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
     needs: [changed-files, frontend-build]
-    if: |
-      needs.changed-files.outputs.frontend == 'true' ||
-      needs.changed-files.outputs.operator == 'true' ||
-      needs.changed-files.outputs.snapshot == 'true' ||
-      needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    if: needs.changed-files.outputs.frontend == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
       target: frontend
-      cuda_version: ''
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   # ============================================================================

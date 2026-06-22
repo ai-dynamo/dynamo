@@ -23,13 +23,15 @@ own filesystem; CI extracts `/legal` and `/sboms` from that stage with a warm ca
 
 ## How it works
 
-For each shipped image, `templates/compliance.Dockerfile` adds a `licenses` stage that
-`FROM`s the image's pre-compliance stage (`pre_runtime` / `pre_frontend` / `pre_planner`)
+The vllm/sglang/trtllm runtime images use the inline system below;
+frontend/planner stay on the legacy `shared-compliance.yml` scan until they
+migrate. For each runtime image, `templates/compliance.Dockerfile` adds a
+`licenses` stage that `FROM`s the image's pre-compliance stage (`pre_runtime`)
 and runs:
 
 ```bash
 python3 -m compliance.generators \
-    --ecosystem python,rust,dpkg[,go][,native] \
+    --ecosystem python,rust,dpkg[,native] \
     --venv ${VIRTUAL_ENV} \
     --output-dir /legal \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}}

@@ -15,21 +15,18 @@ dynamo:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     # No baseline_sbom: dynamo-runtime is an unpublished wheel-builder image that
     # skips compliance (see dynamo_runtime.Dockerfile). The published framework
-    # images + the wheels carry the attribution. snapshot-agent reuses the
-    # cuda-dl-base@8315e245 baseline directly via build-deploy-component.
+    # images + the wheels carry the attribution.
     #
-    # Per-arch baseline convention (vllm/sglang/trtllm/frontend/planner): the
-    # baseline_sbom value is a STEM; the licenses stage appends
-    # -${TARGETARCH}.cdx.json so each arch of a multi-arch build subtracts its
-    # own-arch floor (the @<digest8> is the shared multi-arch index digest).
+    # Per-arch baseline convention (vllm/sglang/trtllm): the baseline_sbom value
+    # is a STEM; the licenses stage appends -${TARGETARCH}.cdx.json so each arch
+    # of a multi-arch build subtracts its own-arch floor (the @<digest8> is the
+    # shared multi-arch index digest).
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
-  frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
   planner_build_image_tag: 3.12-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
   planner_runtime_image_tag: 3.12-v4.0.3
-  planner_baseline_sbom: python@043085f9
   python_version: "3.12"
 
   nats_version: v2.10.28

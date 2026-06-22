@@ -2,46 +2,6 @@
   "description": "Maps (from_image:tag, baseline_image:tag) pairs to slim CycloneDX SBOMs of the baseline. Each entry records the engineer-specified compliance boundary: NGC (or other upstream) owns everything in the baseline; we own everything from_image adds on top. The captured SBOM is the BASELINE -- runtime licenses stages subtract its components from final-image NOTICES to filter out NGC-owned content. CI runs container/compliance/base_sboms/check_drift.py on every PR/post-merge; if either digest moved or the from_image's layer prefix no longer matches the recorded baseline, CI fails and a refresh PR is required.",
   "entries": [
     {
-      "baseline_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
-      "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@043085f9-amd64.cdx.json",
-      "baseline_tag": "3.12-v4.0.3",
-      "from_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
-      "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.12-v4.0.3",
-      "platform": "linux/amd64"
-    },
-    {
-      "baseline_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
-      "baseline_image": "nvcr.io/nvidia/distroless/go",
-      "baseline_sbom": "go@e86c88d0-amd64.cdx.json",
-      "baseline_tag": "v4.0.3",
-      "from_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
-      "from_image": "nvcr.io/nvidia/distroless/go",
-      "from_tag": "v4.0.3",
-      "platform": "linux/amd64"
-    },
-    {
-      "baseline_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
-      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
-      "baseline_sbom": "ubuntu@7291df36-amd64.cdx.json",
-      "baseline_tag": "noble-20250619",
-      "from_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
-      "from_image": "nvcr.io/nvidia/base/ubuntu",
-      "from_tag": "noble-20250619",
-      "platform": "linux/amd64"
-    },
-    {
-      "baseline_digest": "sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1",
-      "baseline_image": "nvcr.io/nvidia/cuda-dl-base",
-      "baseline_sbom": "cuda-dl-base@8315e245-amd64.cdx.json",
-      "baseline_tag": "25.11-cuda13.0-devel-ubuntu24.04",
-      "from_digest": "sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1",
-      "from_image": "nvcr.io/nvidia/cuda-dl-base",
-      "from_tag": "25.11-cuda13.0-devel-ubuntu24.04",
-      "platform": "linux/amd64"
-    },
-    {
       "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
       "baseline_image": "nvidia/cuda",
       "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
@@ -74,36 +34,6 @@
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
       "from_tag": "1.3.0rc17",
       "platform": "linux/amd64"
-    },
-    {
-      "baseline_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
-      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
-      "baseline_sbom": "ubuntu@7291df36-arm64.cdx.json",
-      "baseline_tag": "noble-20250619",
-      "from_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
-      "from_image": "nvcr.io/nvidia/base/ubuntu",
-      "from_tag": "noble-20250619",
-      "platform": "linux/arm64"
-    },
-    {
-      "baseline_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
-      "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@043085f9-arm64.cdx.json",
-      "baseline_tag": "3.12-v4.0.3",
-      "from_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
-      "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.12-v4.0.3",
-      "platform": "linux/arm64"
-    },
-    {
-      "baseline_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
-      "baseline_image": "nvcr.io/nvidia/distroless/go",
-      "baseline_sbom": "go@e86c88d0-arm64.cdx.json",
-      "baseline_tag": "v4.0.3",
-      "from_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
-      "from_image": "nvcr.io/nvidia/distroless/go",
-      "from_tag": "v4.0.3",
-      "platform": "linux/arm64"
     },
     {
       "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",

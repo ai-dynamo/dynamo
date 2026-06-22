@@ -204,7 +204,6 @@ frontend:
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
-  - 'container/templates/compliance.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 

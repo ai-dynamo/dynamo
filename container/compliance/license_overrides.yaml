@@ -410,11 +410,6 @@ overrides:
   - { ecosystem: python, name: torchcodec,                      license: "BSD-3-Clause", source: "PyTorch torchcodec — https://github.com/pytorch/torchcodec/blob/main/LICENSE" }
   - { ecosystem: python, name: xatlas,                          license: "MIT",          source: "xatlas (jpcy/xatlas wrapper) — https://github.com/mworchel/xatlas-python (MIT)" }
 
-  # --- planner image: plotly/kaleido chart-export sub-deps ---
-  - { ecosystem: python, name: choreographer,                   license: "MIT",          source: "plotly/choreographer — PyPI metadata declares MIT" }
-  - { ecosystem: python, name: kaleido,                         license: "MIT",          source: "plotly/Kaleido — https://github.com/plotly/Kaleido (MIT)" }
-  - { ecosystem: python, name: logistro,                        license: "MIT",          source: "PyPI logistro — MIT" }
-
   # --- Additional Python deps surfaced by vllm-dev / trtllm-dev / sglang-dev builds ---
   - { ecosystem: python, name: deep_gemm,                       license: "MIT",          source: "DeepSeek DeepGEMM — https://github.com/deepseek-ai/DeepGEMM (MIT)" }
   - { ecosystem: python, name: nvidia-cudnn-frontend,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuDNN Frontend — bundled under NVIDIA cuDNN SLA" }

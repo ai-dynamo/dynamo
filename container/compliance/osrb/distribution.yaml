@@ -12,10 +12,6 @@
 #   customer-specific shipped to specific customer(s) under contract
 
 dynamo-runtime:        public
-dynamo-frontend:       public
 vllm-runtime:          public
 sglang-runtime:        public
 trtllm-runtime:        public
-planner:               public
-kubernetes-operator:   public
-snapshot-agent:        public
