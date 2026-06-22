@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Realtime (bidirectional) handler backed by vLLM-Omni's streaming engine.
@@ -11,13 +11,18 @@ straight back to the client as typed ``RealtimeServerEvent`` frames. So this
 handler is a pure translation layer between the OpenAI Realtime event contract
 and vLLM-Omni's in-process streaming API.
 
-Turn model (matching vLLM-Omni's own realtime client contract):
+Turn model (matching vLLM-Omni's single-active-generation contract):
 
-  * ``session.update``            -> ``session.updated`` echoing the session.
+  * ``session.update``            -> ``session.updated`` echoing the session;
+    also captures the requested ``output_modalities`` for later turns.
   * ``input_audio_buffer.append`` -> base64 PCM16 chunk decoded to a float32
     waveform and queued for the active turn's audio stream.
   * ``input_audio_buffer.commit`` -> opens a turn on the first event and, when
     ``final`` is set, closes the audio stream so the engine drains.
+
+Turns are serialized: at most one response is in flight at a time, so a later
+commit's turn buffers its audio and waits until the previous response completes
+-- responses never interleave, and each is identified by its ``response_id``.
 
 Each turn emits ``response.created`` -> ``response.output_audio.delta``* (+
 optional ``response.output_audio_transcript.delta`` for the thinker text) ->
