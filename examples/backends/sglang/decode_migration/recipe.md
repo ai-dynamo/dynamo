@@ -18,12 +18,23 @@ Use these branches together:
 | Repository | Remote | Branch | Minimum revision |
 |---|---|---|---|
 | SGLang | `git@github.com:Aphoh/sglang.git` | `req-migration-2.0` | `df1f4d7632` |
-| Dynamo | `git@github.com:ai-dynamo/dynamo.git` | `warnold/sglang-dd-2.0` | `e36500de6d` |
+| Dynamo | `git@github.com:ai-dynamo/dynamo.git` | `warnold/sglang-dd-2.0` | `fb1d8d5e0b` |
 
 The runtime image must contain the Dynamo revision and import the SGLang
 revision above. Record both full SHAs and the image digest with every result.
 
 ## Container Image
+
+A self-contained test image is published at:
+
+```text
+tag:    aphoh/not-sglang-dynamo:fb1d8d5e0b3e-df1f4d763224
+digest: aphoh/not-sglang-dynamo@sha256:95e96fb661de0af86423899c2b444e0f985114b326aa4d531857ad2a26f117a3
+```
+
+It contains Dynamo `fb1d8d5e0b3ea9b1c0e5a3175b8e351379e774f3` and
+SGLang `df1f4d76322457eddd0fea97276b153fe00115bd`. Pin the digest in
+Kubernetes manifests.
 
 Build one immutable image after both worktrees are clean. The build archives
 the committed Dynamo `components/src` and SGLang `python` trees, installs the
