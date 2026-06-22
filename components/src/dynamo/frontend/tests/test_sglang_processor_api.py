@@ -12,12 +12,13 @@ import pickle
 
 import pytest
 
-# Total runtime ~0.08s — no need for parallel marker.
+# Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 # ---------------------------------------------------------------------------

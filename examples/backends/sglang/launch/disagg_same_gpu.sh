@@ -21,6 +21,36 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 
 MODEL="Qwen/Qwen3-0.6B"
 
+# --model overrides the default (e.g. a VLM for the multimodal P/D test).
+# --single-gpu is a no-op kept for parity with the other launch scripts.
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --model)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                echo "Missing value for --model"
+                echo "Use --help for usage information"
+                exit 1
+            fi
+            MODEL="$2"
+            shift 2
+            ;;
+        --single-gpu)
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--model <name>] [--single-gpu]"
+            echo "  --model <name>  Model to serve (default: $MODEL)"
+            echo "  --single-gpu    Accepted no-op; both workers already share GPU 0"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 # ---- Tunable (override via env vars) ----
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-4096}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-2}"
@@ -42,7 +72,15 @@ print_launch_banner "Launching Disaggregated (same GPU)" "$MODEL" "$HTTP_PORT" \
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python3 -m dynamo.frontend &
+# Set DYN_CHAT_PROCESSOR=sglang to exercise the Python pre/post processor instead of Rust.
+FRONTEND_ARGS=()
+if [[ -n "${DYN_CHAT_PROCESSOR:-}" ]]; then
+    FRONTEND_ARGS+=(--dyn-chat-processor "$DYN_CHAT_PROCESSOR")
+fi
+if [[ -n "${DYN_ROUTER_MODE:-}" ]]; then
+    FRONTEND_ARGS+=(--router-mode "$DYN_ROUTER_MODE")
+fi
+python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 
 # NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
 # This has a TOCTOU race — the port can be grabbed before init_process_group binds it,

@@ -19,7 +19,8 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
         "extra_fields": ["worker_id", "timing"],
         "agent_hints": {
             "osl": 1024,
-            "priority": 5
+            "priority": 5,
+            "strict_priority": 1
         }
     }
 }
@@ -38,7 +39,9 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
-| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for agent traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
+| `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
+| `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
+| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for request traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
@@ -61,20 +64,28 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 |--------|-----------|
 | `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
 | `x-prefill-instance-id` | `prefill_worker_id` |
+| `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
+| `x-prefill-dp-rank` | `prefill_dp_rank` |
 
 ## Agent Context
 
 The `agent_context` sub-object carries passive session and trajectory identity for
-agentic requests. Dynamo uses this metadata to emit request traces when the
-agent trace sink is enabled. It does not change routing, scheduling, or cache
+agentic requests. Dynamo uses this metadata to emit enriched request traces when
+request tracing is enabled. It does not change routing, scheduling, or cache
 behavior.
+
+Generic HTTP clients can send `x-dynamo-trajectory-id` instead of a body
+`agent_context`; Dynamo synthesizes the passive identity at the HTTP boundary.
+For the full header precedence and tracing contract, see
+[Agent Tracing](../../agents/agent-tracing.md).
 
 | Field | Type | Required | Description |
 |-------|------|:--------:|-------------|
-| `session_type_id` | `string` | Yes | Reusable profile or agent class label. |
-| `session_id` | `string` | Yes | Top-level agent run/session identifier. |
 | `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
+| `session_type_id` | `string` | No | Reusable profile or agent class label. |
+| `session_id` | `string` | No | Top-level agent run/session identifier. |
 | `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
+| `trajectory_final` | `bool` | No | Terminal marker for lifecycle-aware consumers; ignored by consumers that do not track trajectory lifecycle. |
 
 ```json
 {
@@ -98,21 +109,47 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `priority` | `i32` | `None` | Unified request priority. Higher values mean higher priority at the Dynamo API level. Used for router queue ordering and backend scheduling/eviction. |
+| `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values. Unset is equivalent to `0`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
 ### `priority`
 
-`priority` is the single user-facing scheduling hint. Higher values mean "more important" across Dynamo.
+`priority` is the cross-layer scheduling hint. Higher values mean "more
+important" across Dynamo.
 
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
+
+For layer-by-layer behavior and backend requirements, see
+[Priority Scheduling](../../agents/priority-scheduling.md).
 
 ```json
 {
     "nvext": {
         "agent_hints": {
             "priority": 5
+        }
+    }
+}
+```
+
+### `strict_priority`
+
+`strict_priority` is an unsigned router-only tier for requests waiting in a
+router scheduler queue. The queue orders requests by
+`(strict_priority, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
+requests within the same tier.
+
+This field does not change backend engine priority, preempt running work, or
+provide ordering across router replicas. It also does not prevent an eligible
+new arrival from being admitted directly while other requests are parked.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "strict_priority": 2
         }
     }
 }
@@ -158,8 +195,8 @@ How it works:
 
 Backend details:
 
-- **SGLang**: Requires `--enable-priority-scheduling` for queue ordering and `--radix-eviction-policy priority` for priority-based eviction.
-- **vLLM**: Requires `--scheduling-policy priority`.
+- **SGLang**: Requires [`--enable-priority-scheduling`](../../backends/sglang/agents.md#priority-scheduling) for queue ordering and [`--radix-eviction-policy priority`](../../backends/sglang/agents.md#priority-based-kv-cache-eviction) for priority-based eviction.
+- **vLLM**: Requires [`--scheduling-policy priority`](../../backends/vllm/vllm-reference-guide.md#priority-scheduling).
 - **TensorRT-LLM**: Does not currently support per-request priority.
 
 ```json
@@ -174,13 +211,13 @@ Backend details:
 
 ## Session Control
 
-`session_control` enables subagent KV isolation with sticky routing. The router uses `session_id` to keep a session on the same worker and can issue `open` / `close` lifecycle RPCs around streaming sessions.
+`session_control` enables sticky routing by `session_id`. Use `action: "bind"` for router-only sticky affinity without backend engine RPCs. Use `action: "open"` / `"close"` for backend streaming-session lifecycle when the engine supports it.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
-| `session_control.action` | `string` | omitted | Optional lifecycle action: `"open"` or `"close"`. |
-| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Only used with `action: "open"`. |
+| `session_control.action` | `string` | omitted | Optional action: `"bind"`, `"open"`, or `"close"`. Omit on intermediate turns. |
+| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Used with `action: "bind"` and `action: "open"`. |
 
 ```json
 {
@@ -194,7 +231,7 @@ Backend details:
 }
 ```
 
-Requires `--router-mode=kv` on the frontend. Session control activates automatically when requests carry `nvext.session_control`. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for backend setup details.
+Requires `--router-mode=kv` on the frontend. Router-only sticky routing uses `action: "bind"` and does not require backend session support. Engine-backed session lifecycle requires backend support; see [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for SGLang streaming-session setup details.
 
 
 ## Response Extensions

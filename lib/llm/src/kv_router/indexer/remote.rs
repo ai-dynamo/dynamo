@@ -564,9 +564,8 @@ mod tests {
         let worker = WorkerWithDpRank::new(7, 0);
         let block_hashes = vec![LocalBlockHash(11), LocalBlockHash(12)];
         let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
-        let side = KvIndexer::new_with_frequency(
+        let side = KvIndexer::new_with_pruning(
             CancellationToken::new(),
-            None,
             4,
             Arc::new(KvIndexerMetrics::new_unregistered()),
             Some(PruneConfig {
@@ -586,6 +585,7 @@ mod tests {
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: Some(SideIndexer::KvIndexer(side)),
+            primary_records_routing_decisions: false,
         };
 
         assert_eq!(
@@ -637,6 +637,7 @@ mod tests {
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
+            primary_records_routing_decisions: false,
         };
 
         // Worker owns [11, 12] on device and [11, 12, 13] on host-pinned.
@@ -735,6 +736,7 @@ mod tests {
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
+            primary_records_routing_decisions: false,
         };
 
         indexer

@@ -70,6 +70,10 @@ pub mod runtime {
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
 
+    /// Maximum time to wait for graceful endpoint drain during runtime shutdown.
+    pub const DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
+        "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
+
     /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
     /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
     pub const DYN_ENABLE_POLL_HISTOGRAM: &str = "DYN_ENABLE_POLL_HISTOGRAM";
@@ -154,6 +158,9 @@ pub mod nats {
 pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
+
+    /// ETCD lease TTL in seconds (default: 10)
+    pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
     /// ETCD authentication environment variables
     pub mod auth {
@@ -281,6 +288,21 @@ pub mod llm {
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
+    /// Master switch for the `nvext` extension protocol on the frontend.
+    /// Default `true`. Falsy values (`0` / `false` / `no` / `off`,
+    /// case-insensitive) cause the frontend to drop `request.nvext` at
+    /// handler entry, ignore the routing-override headers
+    /// (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
+    /// `x-prefill-dp-rank`), and silently ignore the response-side
+    /// `extra_fields` opt-in.
+    pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
+
+    /// Master switch for the frontend's HTTP admin API surface.
+    /// Default `true`. Falsy values prevent registration of `GET` /
+    /// `POST /busy_threshold`. Inference, metrics, models, health, and
+    /// liveness routes are unaffected.
+    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
@@ -375,43 +397,46 @@ pub mod llm {
         pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
     }
 
-    /// Agent trace configuration
-    pub mod agent_trace {
-        /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
-        pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
+    /// Per-request replay trace configuration
+    pub mod request_trace {
+        /// Master switch. Truthy enables per-request replay tracing.
+        pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
-        /// Local output path for normalized agent trace records.
+        /// Request trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
+        pub const DYN_REQUEST_TRACE_SINKS: &str = "DYN_REQUEST_TRACE_SINKS";
+
+        /// Local output path for request trace records.
         ///
         /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
         /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
-        pub const DYN_AGENT_TRACE_OUTPUT_PATH: &str = "DYN_AGENT_TRACE_OUTPUT_PATH";
+        pub const DYN_REQUEST_TRACE_OUTPUT_PATH: &str = "DYN_REQUEST_TRACE_OUTPUT_PATH";
 
         /// In-process trace bus capacity.
-        pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
+        pub const DYN_REQUEST_TRACE_CAPACITY: &str = "DYN_REQUEST_TRACE_CAPACITY";
 
         /// JSONL sink buffer size in bytes.
-        pub const DYN_AGENT_TRACE_JSONL_BUFFER_BYTES: &str = "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES";
+        pub const DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES: &str =
+            "DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES";
 
         /// JSONL sink periodic flush interval in milliseconds.
-        pub const DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
-            "DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS";
+        pub const DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
+            "DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS";
 
         /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
-        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES";
+        pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES: &str =
+            "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES";
 
         /// Rotating gzip JSONL sink roll threshold in record lines.
-        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
-
-        /// Enable replay-oriented prompt block hashes in agent request trace records.
-        pub const DYN_AGENT_TRACE_REPLAY_HASHES: &str = "DYN_AGENT_TRACE_REPLAY_HASHES";
+        pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES: &str =
+            "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES";
 
         /// Local ZMQ PULL endpoint Dynamo binds for harness tool events.
-        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
-            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
+        pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
+            "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
 
-        /// Optional first-frame ZMQ topic filter for harness tool events.
-        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
-            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
+        /// First-frame ZMQ topic filter override for harness tool events.
+        pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
+            "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
 }
 
@@ -424,6 +449,13 @@ pub mod model {
 
         /// Model Express cache path
         pub const MODEL_EXPRESS_CACHE_PATH: &str = "MODEL_EXPRESS_CACHE_PATH";
+
+        /// Disable shared-storage mode for the Model Express client. When set,
+        /// the client streams model files from the server over gRPC instead of
+        /// relying on a shared filesystem path. Required when the Model Express
+        /// server and worker pods do not share a filesystem (e.g. RWO PVCs,
+        /// cross-namespace deployments). Set to "1" or "true" to enable.
+        pub const MODEL_EXPRESS_NO_SHARED_STORAGE: &str = "MODEL_EXPRESS_NO_SHARED_STORAGE";
     }
 
     /// Hugging Face configuration
@@ -480,6 +512,18 @@ pub mod event_plane {
 
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+
+    /// Bounded capacity of the direct ZMQ event-subscriber's merged event channel.
+    ///
+    /// Many peer publishers (e.g. every other frontend under replica-sync) feed
+    /// this single-consumer channel; an unbounded channel grows RSS without limit
+    /// when the consumer can't keep up. When the channel is full, new events are
+    /// dropped — the event plane is already best-effort/lossy (ZMQ RCVHWM), so a
+    /// dropped event costs routing-estimate freshness, not correctness.
+    /// Default: 100_000 (matches ZMQ_RCVHWM). Applies only to the direct ZMQ
+    /// subscriber path.
+    pub const DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY: &str =
+        "DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY";
 }
 
 /// ZMQ Broker environment variables
@@ -578,6 +622,7 @@ mod tests {
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
+            runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
             runtime::system::DYN_SYSTEM_PORT,
@@ -598,6 +643,7 @@ mod tests {
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
+            etcd::ETCD_LEASE_TTL,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -643,19 +689,20 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
-            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
-            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
-            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
-            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
-            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
-            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::request_trace::DYN_REQUEST_TRACE,
+            llm::request_trace::DYN_REQUEST_TRACE_SINKS,
+            llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
+            llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
+            llm::request_trace::DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
+            model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
@@ -670,6 +717,7 @@ mod tests {
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,
             zmq_broker::DYN_ZMQ_BROKER_ENABLED,
@@ -703,6 +751,7 @@ mod tests {
     fn test_naming_conventions() {
         // Dynamo-specific vars should start with DYN_
         assert!(runtime::DYN_RUNTIME_NUM_WORKER_THREADS.starts_with("DYN_"));
+        assert!(runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS.starts_with("DYN_"));
         assert!(runtime::system::DYN_SYSTEM_ENABLED.starts_with("DYN_"));
         assert!(kvbm::DYN_KVBM_METRICS.starts_with("DYN_"));
         assert!(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("DYN_"));
@@ -713,6 +762,7 @@ mod tests {
 
         // ETCD vars should start with ETCD_
         assert!(etcd::ETCD_ENDPOINTS.starts_with("ETCD_"));
+        assert!(etcd::ETCD_LEASE_TTL.starts_with("ETCD_"));
         assert!(etcd::auth::ETCD_AUTH_USERNAME.starts_with("ETCD_AUTH_"));
 
         // OpenTelemetry vars should start with OTEL_

@@ -306,7 +306,7 @@ func getDeviceClassName(gmsSpec *v1beta1.GPUMemoryServiceSpec) string {
 
 // gmsRCTName returns a deterministic ResourceClaimTemplate name for a given rank.
 func gmsRCTName(serviceName string, rank int32) string {
-	return fmt.Sprintf("%s-gpu-rank-%d", serviceName, rank)
+	return fmt.Sprintf("%s-gpu-rank-%d", NormalizeKubeResourceName(serviceName), rank)
 }
 
 // gmsResourceClaimTemplateConfigs builds one PCS-level ResourceClaimTemplateConfig

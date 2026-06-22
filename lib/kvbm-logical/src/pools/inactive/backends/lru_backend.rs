@@ -9,16 +9,19 @@ use lru::LruCache;
 
 use crate::BlockId;
 use crate::blocks::SequenceHash;
+use crate::pools::IdBuildHasher;
 use crate::pools::store::InactiveIndex;
 
 pub(crate) struct LruBackend {
-    cache: LruCache<SequenceHash, BlockId>,
+    /// Identity-hashed: `SequenceHash` is already a content hash, so
+    /// SipHash over it would be wasted work on the lookup hot path.
+    cache: LruCache<SequenceHash, BlockId, IdBuildHasher>,
 }
 
 impl LruBackend {
     pub(crate) fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            cache: LruCache::new(capacity),
+            cache: LruCache::with_hasher(capacity, IdBuildHasher),
         }
     }
 }

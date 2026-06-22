@@ -53,10 +53,9 @@ enum IndexerArgs {
         num_event_workers: usize,
     },
 
-    /// Branch-sharded CRTC: N independent CRTC shards assigned via an explicit routing
-    /// table keyed on the first K block hashes. New branches are assigned to the
-    /// least-loaded shard. find_matches touches exactly ONE shard (no scatter-gather).
-    /// Unknown branch keys return empty scores immediately without any dispatch.
+    /// Branch-sharded CRTC: N independent CRTC shards routed by a bounded
+    /// prefix trie with structural anchors for depth-boundary suffixes.
+    /// find_matches touches at most one shard (no scatter-gather).
     BranchShardedCrtc {
         /// Number of independent CRTC shards.
         #[clap(long, default_value = "2")]
@@ -66,26 +65,9 @@ enum IndexerArgs {
         #[clap(long, default_value = "4")]
         num_event_workers_per_shard: usize,
 
-        /// Number of prefix blocks hashed to identify a branch. K=2 is the
-        /// recommended default: depth=1 often produces too few distinct branch
-        /// keys, while depth=2 gives a much larger set of distinguishable branches.
-        #[clap(long, default_value = "2")]
-        prefix_depth: usize,
-    },
-
-    /// Anchor-aware branch-sharded CRTC: bounded routing trie with structural
-    /// anchors for depth-boundary suffixes. Exact KV-event replay only;
-    /// approximate pruning is unsupported.
-    AnchorAwareBranchShardedCrtc {
-        /// Number of independent CRTC shards.
-        #[clap(long, default_value = "2")]
-        num_shards: usize,
-
-        /// Number of OS event-worker threads per shard.
-        #[clap(long, default_value = "4")]
-        num_event_workers_per_shard: usize,
-
-        /// Maximum routing-trie depth before dispatching to one shard.
+        /// Maximum routing-trie depth before dispatching suffixes to one shard.
+        /// K=2 is the recommended default: depth=1 often produces too few
+        /// distinct branches, while depth=2 exposes more branch diversity.
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
     },
@@ -114,15 +96,6 @@ impl IndexerArgs {
                 *num_event_workers_per_shard,
                 *prefix_depth,
             ),
-            IndexerArgs::AnchorAwareBranchShardedCrtc {
-                num_shards,
-                num_event_workers_per_shard,
-                prefix_depth,
-            } => MooncakeIndexerConfig::anchor_aware_branch_sharded_crtc(
-                *num_shards,
-                *num_event_workers_per_shard,
-                *prefix_depth,
-            ),
         }
     }
 }
@@ -140,15 +113,13 @@ struct Args {
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
     /// radix-tree, nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed, branch-sharded-crtc,
-    /// anchor-aware-branch-sharded-crtc.
+    /// concurrent-radix-tree-compressed, branch-sharded-crtc.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
     /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed, branch-sharded-crtc,
-    /// anchor-aware-branch-sharded-crtc).
+    /// concurrent-radix-tree-compressed, branch-sharded-crtc).
     /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,

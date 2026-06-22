@@ -49,6 +49,69 @@ class PriorityPoolOverride:
     target_pool: int  # pool index to route to when priority matches
 
 
+def _default_pool_priorities(num_pools: int) -> List[int]:
+    """Default pool priorities follow pool order: pool 0 is fastest."""
+    return list(range(num_pools))
+
+
+def _validate_pool_priorities(
+    configured_priorities: Optional[List[int]],
+    num_pools: int,
+    field_name: str,
+) -> List[int]:
+    """Validate configured pool priorities or fill defaults from pool order."""
+    if configured_priorities is None:
+        return _default_pool_priorities(num_pools)
+
+    if len(configured_priorities) != num_pools:
+        raise ValueError(
+            f"{field_name} length ({len(configured_priorities)}) does not match "
+            f"number of pools ({num_pools})"
+        )
+
+    for idx, priority in enumerate(configured_priorities):
+        if not isinstance(priority, int) or isinstance(priority, bool):
+            raise ValueError(f"{field_name}[{idx}] must be an integer")
+
+    return list(configured_priorities)
+
+
+def get_priority_retry_order(
+    selected_pool: int,
+    pool_priorities: List[int],
+    enable_priority_retry: bool,
+) -> List[int]:
+    """
+    Return the initial pool followed by faster pools from slowest to fastest.
+
+    Lower priority numbers are faster. For example, with priorities [0, 1, 2],
+    a request selected for pool 2 retries pool 1 and then pool 0.
+    """
+    if not enable_priority_retry:
+        return [selected_pool]
+
+    if selected_pool < 0 or selected_pool >= len(pool_priorities):
+        raise ValueError(
+            f"selected_pool {selected_pool} is out of range for "
+            f"{len(pool_priorities)} pool priorities"
+        )
+
+    selected_priority = pool_priorities[selected_pool]
+    faster_priorities = sorted(
+        {priority for priority in pool_priorities if priority < selected_priority},
+        reverse=True,
+    )
+
+    retry_order = [selected_pool]
+    for priority in faster_priorities:
+        retry_order.extend(
+            pool_idx
+            for pool_idx, pool_priority in enumerate(pool_priorities)
+            if pool_priority == priority
+        )
+    return retry_order
+
+
 def _apply_priority_overrides(
     base_pool: int,
     priority: Optional[int],
@@ -294,22 +357,29 @@ class GlobalRouterConfig:
     """
 
     mode: str = "disagg"  # "disagg" or "agg"
+    enable_priority_retry: bool = False
 
     # --- disagg-only fields (required when mode="disagg") ---
     num_prefill_pools: Optional[int] = None
     num_decode_pools: Optional[int] = None
     prefill_pool_dynamo_namespaces: Optional[List[str]] = None
     decode_pool_dynamo_namespaces: Optional[List[str]] = None
+    prefill_pool_priorities: Optional[List[int]] = None
+    decode_pool_priorities: Optional[List[int]] = None
     prefill_pool_selection_strategy: Optional[PrefillPoolSelectionStrategy] = None
     decode_pool_selection_strategy: Optional[DecodePoolSelectionStrategy] = None
 
     # --- agg-only fields (required when mode="agg") ---
     num_agg_pools: Optional[int] = None
     agg_pool_dynamo_namespaces: Optional[List[str]] = None
+    agg_pool_priorities: Optional[List[int]] = None
     agg_pool_selection_strategy: Optional[AggPoolSelectionStrategy] = None
 
     def validate(self) -> None:
         """Validate configuration consistency."""
+        if not isinstance(self.enable_priority_retry, bool):
+            raise ValueError("enable_priority_retry must be a boolean")
+
         if self.mode == "disagg":
             self._validate_disagg()
         elif self.mode == "agg":
@@ -343,6 +413,17 @@ class GlobalRouterConfig:
                 f"num_decode_pools ({self.num_decode_pools}) does not match "
                 f"decode_pool_dynamo_namespaces length ({len(self.decode_pool_dynamo_namespaces)})"
             )
+
+        self.prefill_pool_priorities = _validate_pool_priorities(
+            self.prefill_pool_priorities,
+            self.num_prefill_pools,
+            "prefill_pool_priorities",
+        )
+        self.decode_pool_priorities = _validate_pool_priorities(
+            self.decode_pool_priorities,
+            self.num_decode_pools,
+            "decode_pool_priorities",
+        )
 
         # Validate prefill strategy
         prefill_strategy = self.prefill_pool_selection_strategy
@@ -478,6 +559,12 @@ class GlobalRouterConfig:
                 f"agg_pool_dynamo_namespaces length ({len(self.agg_pool_dynamo_namespaces)})"
             )
 
+        self.agg_pool_priorities = _validate_pool_priorities(
+            self.agg_pool_priorities,
+            self.num_agg_pools,
+            "agg_pool_priorities",
+        )
+
         agg_strategy = self.agg_pool_selection_strategy
         if agg_strategy.ttft_resolution <= 0:
             raise ValueError(
@@ -606,10 +693,13 @@ def _load_disagg_config(data: dict, mode: str) -> GlobalRouterConfig:
 
     config = GlobalRouterConfig(
         mode=mode,
+        enable_priority_retry=data.get("enable_priority_retry", False),
         num_prefill_pools=data["num_prefill_pools"],
         num_decode_pools=data["num_decode_pools"],
         prefill_pool_dynamo_namespaces=data["prefill_pool_dynamo_namespaces"],
         decode_pool_dynamo_namespaces=data["decode_pool_dynamo_namespaces"],
+        prefill_pool_priorities=data.get("prefill_pool_priorities"),
+        decode_pool_priorities=data.get("decode_pool_priorities"),
         prefill_pool_selection_strategy=prefill_strategy,
         decode_pool_selection_strategy=decode_strategy,
     )
@@ -641,8 +731,10 @@ def _load_agg_config(data: dict, mode: str) -> GlobalRouterConfig:
 
     config = GlobalRouterConfig(
         mode=mode,
+        enable_priority_retry=data.get("enable_priority_retry", False),
         num_agg_pools=data["num_agg_pools"],
         agg_pool_dynamo_namespaces=data["agg_pool_dynamo_namespaces"],
+        agg_pool_priorities=data.get("agg_pool_priorities"),
         agg_pool_selection_strategy=agg_strategy,
     )
 

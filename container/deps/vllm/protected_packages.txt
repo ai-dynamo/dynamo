@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Keep the core vllm-openai runtime solve intact while layering omni extras.
+numpy
+torch
+torchvision
+torchaudio
+triton
+vllm
+transformers
+tokenizers
+# vLLM-Omni (v0.21.0rc1) may require a newer safetensors than the upstream
+# vLLM 0.23.0 image ships, so safetensors is intentionally left unfrozen here.
+# safetensors
+msgspec
+flashinfer-python
+flash-attn
+xformers
+lmcache
+nixl
+nixl-cu12
+nixl-cu13

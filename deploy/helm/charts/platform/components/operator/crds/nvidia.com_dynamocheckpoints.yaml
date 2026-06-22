@@ -33,9 +33,9 @@ spec:
           jsonPath: .status.phase
           name: Phase
           type: string
-        - description: Identity hash of the checkpoint
-          jsonPath: .status.identityHash
-          name: Hash
+        - description: Artifact ID of the checkpoint
+          jsonPath: .status.checkpointID
+          name: CheckpointID
           type: string
         - jsonPath: .metadata.creationTimestamp
           name: Age
@@ -69,9 +69,14 @@ spec:
               properties:
                 gpuMemoryService:
                   description: |-
-                    GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
-                    It is intentionally outside spec.identity, so it does not affect the
-                    checkpoint identity hash or deduplication.
+                    GPUMemoryService records checkpoint-time GPU Memory Service metadata for
+                    a prepared checkpoint Job pod. The DynamoCheckpoint controller does not
+                    inject GMS/DRA resources; auto-created checkpoints from
+                    DynamoGraphDeployment prepare the pod template before creating this object.
+                    Manual GMS-enabled checkpoints must provide the prepared pod template; the
+                    controller fails the checkpoint if the required GMS/DRA wiring is missing.
+                    This field is intentionally outside spec.identity, so it does not affect
+                    the checkpoint identity hash or deduplication.
                   properties:
                     deviceClassName:
                       default: gpu.nvidia.com
@@ -79,9 +84,50 @@ spec:
                       type: string
                     enabled:
                       description: |-
-                        Enabled activates the GMS sidecar. GPU resources on the main container
-                        are replaced with a DRA ResourceClaim for shared GPU access.
+                        Enabled activates GMS wiring. GPU resources on client containers are
+                        replaced with a DRA ResourceClaim for shared GPU access.
                       type: boolean
+                    extraClientContainers:
+                      description: |-
+                        ExtraClientContainers lists additional user-declared containers that should
+                        be wired as GMS clients in pods rendered from the enclosing spec.
+                        DGD/DCD services apply this to service pods. Auto-created checkpoints
+                        apply checkpoint job clients before creating the DynamoCheckpoint; manual
+                        DynamoCheckpoint users must provide an already-prepared pod template.
+                        In each rendered pod, only matching container names are wired; absent
+                        names are ignored.
+                      items:
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    extraClientPods:
+                      description: |-
+                        ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+                        reserved for future use and is rejected until inter-pod client orchestration is wired.
+                      items:
+                        description: GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+                        properties:
+                          name:
+                            description: Name identifies this client pod.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          podTemplate:
+                            description: PodTemplate configures the pod to run as a GMS client.
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                        required:
+                          - name
+                          - podTemplate
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
                     mode:
                       default: intraPod
                       description: Mode selects the GMS deployment topology.
@@ -92,49 +138,70 @@ spec:
                   required:
                     - enabled
                   type: object
+                  x-kubernetes-validations:
+                    - message: extraClientContainers is only supported with mode=intraPod
+                      rule: '!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == ''intraPod'''
+                    - message: extraClientPods is only supported with mode=interPod
+                      rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''interPod'''
+                    - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
+                      rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                 identity:
-                  description: Identity defines the inputs that determine checkpoint equivalence
+                  description: |-
+                    Deprecated: required by v1alpha1 for standalone checkpoints. Auto
+                    checkpoints synthesize it; checkpointRef restores use the referenced CR.
                   properties:
                     backendFramework:
-                      description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                      description: |-
+                        BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                        Deprecated: legacy spec.identity only.
                       enum:
                         - vllm
                         - sglang
                         - trtllm
                       type: string
                     dtype:
-                      description: Dtype is the data type (fp16, bf16, fp8, etc.)
+                      description: |-
+                        Dtype is the data type (fp16, bf16, fp8, etc.).
+                        Deprecated: legacy spec.identity only.
                       type: string
                     dynamoVersion:
                       description: |-
-                        DynamoVersion is the Dynamo platform version (optional)
-                        If not specified, version is not included in identity hash
-                        This ensures checkpoint compatibility across Dynamo releases
+                        DynamoVersion is the Dynamo platform version (optional).
+                        Deprecated: legacy spec.identity only.
                       type: string
                     extraParameters:
                       additionalProperties:
                         type: string
                       description: |-
-                        ExtraParameters are additional parameters that affect the checkpoint hash
-                        Use for any framework-specific or custom parameters not covered above
+                        ExtraParameters are additional parameters that affect the checkpoint hash.
+                        Use for any framework-specific or custom parameters not covered above.
+                        Deprecated: legacy spec.identity only.
                       type: object
                     maxModelLen:
-                      description: MaxModelLen is the maximum sequence length
+                      description: |-
+                        MaxModelLen is the maximum sequence length.
+                        Deprecated: legacy spec.identity only.
                       format: int32
                       minimum: 1
                       type: integer
                     model:
-                      description: Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+                      description: |-
+                        Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+                        Deprecated: legacy spec.identity only.
                       type: string
                     pipelineParallelSize:
                       default: 1
-                      description: PipelineParallelSize is the pipeline parallel configuration
+                      description: |-
+                        PipelineParallelSize is the pipeline parallel configuration.
+                        Deprecated: checkpoint launch uses the pod template instead.
                       format: int32
                       minimum: 1
                       type: integer
                     tensorParallelSize:
                       default: 1
-                      description: TensorParallelSize is the tensor parallel configuration
+                      description: |-
+                        TensorParallelSize is the tensor parallel configuration.
+                        Deprecated: checkpoint launch uses the pod template instead.
                       format: int32
                       minimum: 1
                       type: integer
@@ -160,11 +227,31 @@ spec:
                       description: |-
                         PodTemplateSpec allows customizing the checkpoint Job pod
                         This should include the container that runs the workload to be checkpointed
+                        and any workload/runtime env, service account, GMS, or DRA wiring needed
+                        by that container. Auto-created checkpoints from DynamoGraphDeployment
+                        render Dynamo defaults before creating the DynamoCheckpoint.
                       properties:
                         metadata:
                           description: |-
                             Standard object's metadata.
                             More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+                          properties:
+                            annotations:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            finalizers:
+                              items:
+                                type: string
+                              type: array
+                            labels:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            name:
+                              type: string
+                            namespace:
+                              type: string
                           type: object
                         spec:
                           description: |-
@@ -6837,6 +6924,23 @@ spec:
                                               May contain labels and annotations that will be copied into the PVC
                                               when creating it. No other fields are allowed and will be rejected during
                                               validation.
+                                            properties:
+                                              annotations:
+                                                additionalProperties:
+                                                  type: string
+                                                type: object
+                                              finalizers:
+                                                items:
+                                                  type: string
+                                                type: array
+                                              labels:
+                                                additionalProperties:
+                                                  type: string
+                                                type: object
+                                              name:
+                                                type: string
+                                              namespace:
+                                                type: string
                                             type: object
                                           spec:
                                             description: |-
@@ -8202,6 +8306,13 @@ spec:
                       x-kubernetes-validations:
                         - message: size is required when disabled is false
                           rule: (has(self.disabled) && self.disabled) || (has(self.size) && quantity(self.size).isGreaterThan(quantity('0')))
+                    targetContainerName:
+                      default: main
+                      description: TargetContainerName is the container in PodTemplateSpec to snapshot.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
                     ttlSecondsAfterFinished:
                       description: |-
                         Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
@@ -8219,6 +8330,9 @@ spec:
             status:
               description: DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
               properties:
+                checkpointID:
+                  description: CheckpointID is the artifact ID used by the snapshot protocol.
+                  type: string
                 conditions:
                   description: 'DEPRECATED: Conditions are deprecated. Use status.phase instead.'
                   items:
@@ -8281,8 +8395,9 @@ spec:
                   type: string
                 identityHash:
                   description: |-
-                    IdentityHash is the computed hash of the checkpoint identity
-                    This hash is used to identify equivalent checkpoints
+                    IdentityHash is the computed hash of the checkpoint identity.
+                    Deprecated: use CheckpointID. This field is retained for compatibility
+                    with older status consumers.
                   type: string
                 jobName:
                   description: JobName is the name of the checkpoint creation Job

@@ -115,6 +115,11 @@ pub struct AnthropicCreateMessageRequest {
     /// The conversation messages.
     pub messages: Vec<AnthropicMessage>,
 
+    /// Dynamo protocol extension envelope. Protocol parsing keeps this opaque;
+    /// LLM request handling owns extension validation and normalization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
+
     /// Optional system prompt (string or array of `{"type":"text","text":"..."}` blocks).
     #[serde(
         default,
@@ -214,6 +219,9 @@ pub struct AnthropicMessage {
 pub enum AnthropicRole {
     User,
     Assistant,
+    /// Compatibility for clients that place system instructions in `messages[]`
+    /// instead of the top-level `system` field.
+    System,
 }
 
 /// Message content -- either a plain string or an array of content blocks.
@@ -807,6 +815,7 @@ impl AnthropicCountTokensRequest {
             total_len += match msg.role {
                 AnthropicRole::User => 4,
                 AnthropicRole::Assistant => 9,
+                AnthropicRole::System => 6,
             };
             // Count content
             match &msg.content {
@@ -865,5 +874,28 @@ fn estimate_block_len(block: &AnthropicContentBlock) -> usize {
         AnthropicContentBlock::WebSearchToolResult { content, .. } => content.to_string().len(),
         AnthropicContentBlock::Image { .. } => 256, // rough estimate for image metadata
         AnthropicContentBlock::Other(v) => v.to_string().len(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_request_keeps_nvext_opaque() {
+        let request: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {
+                "unknown_future_extension": {"nested": true},
+                "agent_context": {"trajectory_id": 7}
+            }
+        }))
+        .unwrap();
+
+        let nvext = request.nvext.expect("opaque nvext value");
+        assert_eq!(nvext["unknown_future_extension"]["nested"], true);
+        assert_eq!(nvext["agent_context"]["trajectory_id"], 7);
     }
 }

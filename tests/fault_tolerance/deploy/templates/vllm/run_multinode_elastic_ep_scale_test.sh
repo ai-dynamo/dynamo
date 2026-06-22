@@ -163,7 +163,7 @@ scale() {
   local lpod
   lpod=$(head_pod)
   RESP=$(kubectl exec "$lpod" -n "$NS" -- \
-    curl -s -X POST http://localhost:9090/engine/scale_elastic_ep \
+    curl -s -X POST http://localhost:9090/engine/control/scale_elastic_ep \
     -H "Content-Type: application/json" \
     -d "{\"new_data_parallel_size\": $to_dp}" \
     --max-time "$timeout" \

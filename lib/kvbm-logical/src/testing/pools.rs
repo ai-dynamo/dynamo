@@ -25,6 +25,9 @@ pub(crate) struct TestPoolSetup {
 
     #[builder(default = "4")]
     pub(crate) block_size: usize,
+
+    #[builder(default = "false")]
+    pub(crate) default_reset_on_release: bool,
 }
 
 impl TestPoolSetup {
@@ -33,6 +36,12 @@ impl TestPoolSetup {
         let reuse_policy = Box::new(FifoReusePolicy::new());
         let backend = Box::new(HashMapBackend::new(reuse_policy));
         let metrics = Arc::new(BlockPoolMetrics::new(short_type_name::<T>()));
-        BlockStore::new(self.block_count, self.block_size, backend, metrics)
+        BlockStore::new(
+            self.block_count,
+            self.block_size,
+            backend,
+            metrics,
+            self.default_reset_on_release,
+        )
     }
 }

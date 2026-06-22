@@ -3,6 +3,7 @@
 # Filters that trigger CI jobs:
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
+#   snapshot -> snapshot-agent build and test
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -10,6 +11,7 @@
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
+#   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -32,6 +34,8 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
+  # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
+  - 'skills/**'
 
 examples:
   - 'recipes/**'
@@ -39,6 +43,7 @@ examples:
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
+  - 'dev/observability/**'
   - 'deploy/observability/**'
   - 'deploy/pre-deployment/**'
 
@@ -49,6 +54,7 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
@@ -61,9 +67,13 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
-  - 'container/templates/aws.Dockerfile'
   - 'container/templates/local_dev.Dockerfile'
   - 'container/templates/dev.Dockerfile'
+  # Removed by trtllm upstream-base migration; claim here so changed-files
+  # validation passes on the deletion diff without triggering trtllm CI.
+  - 'container/build_trtllm_wheel.sh'
+  - 'container/deps/trtllm/**'
+  - 'scripts/dco_check.py'
 
 ci: &ci
   - '.github/workflows/**'
@@ -88,7 +98,9 @@ core:
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
@@ -111,9 +123,16 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  # Operator imports the local snapshot module.
+  - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
+
+snapshot:
+  - *ci
+  - 'deploy/snapshot/**'
+  - 'deploy/snapshot/.*'
 
 deploy:
   - *ci
@@ -121,6 +140,7 @@ deploy:
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
+  - 'tests/utils/managed_deployment.py'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -141,17 +161,18 @@ vllm:
   - '!**/*.rst'
 
 sglang:
+  - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'
+  - 'container/deps/sglang/**'
   - '!**/*.md'
   - '!**/*.rst'
 
 trtllm:
-  - 'container/deps/trtllm/**'
+  - 'container/deps/requirements.trtllm.txt'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
-  - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
   - '!**/*.md'
   - '!**/*.rst'
@@ -175,7 +196,9 @@ frontend:
   - 'container/deps/*'
   - 'container/compliance/**'
   - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
@@ -194,3 +217,6 @@ benchmarks:
   - 'benchmarks/**'
   - '!**/*.md'
   - '!**/*.rst'
+
+efa:
+  - 'container/templates/aws.Dockerfile'
