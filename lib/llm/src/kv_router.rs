@@ -1500,4 +1500,173 @@ mod tests {
             assert!((worker.router_credit_blocks - 1.0).abs() < f64::EPSILON);
         }
     }
+
+    /// Build a `KvRouter` on the given (shared) component, used by the DIS-2259
+    /// reproduction tests below. Each call mints its own endpoint/client/worker
+    /// watch — i.e. an independent "WorkerSet"-scoped router — while reusing the
+    /// same long-lived `DistributedRuntime`, exactly like a frontend process that
+    /// hosts many WorkerSets over its lifetime.
+    ///
+    /// The worker-config watch sender is returned and must be kept alive by the
+    /// caller; in production `RuntimeConfigWatch` is fed by a long-lived discovery
+    /// watch that outlives any individual router, so the scheduler's worker-config
+    /// monitor task can only stop via cancellation (not via sender drop).
+    async fn build_router_on_component(
+        component: &dynamo_runtime::component::Component,
+        suffix: &str,
+    ) -> (
+        KvRouter<impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static>,
+        watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>,
+    ) {
+        let endpoint = component.endpoint(format!("backend-{suffix}"));
+        let client = endpoint.client().await.unwrap();
+
+        let mut workers = HashMap::new();
+        workers.insert(0u64, ModelRuntimeConfig::default());
+        workers.insert(1u64, ModelRuntimeConfig::default());
+        let (tx, rx) = watch::channel(workers);
+
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+
+        let router = KvRouter::new(
+            endpoint,
+            client,
+            rx,
+            2,
+            DefaultWorkerSelector::new(None, "decode"),
+            Some(config),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        (router, tx)
+    }
+
+    /// DIS-2259 (root cause): `KvRouter` background work is scoped to the
+    /// *process/runtime* cancellation token, not to the router.
+    ///
+    /// `KvRouter::new` stores `component.drt().primary_token()` — a clone of the
+    /// runtime's **root** `CancellationToken` (`Runtime::new`:
+    /// `cancellation_token = CancellationToken::new()`), and `Drop for KvRouter`
+    /// cancels it. The runtime's `endpoint_shutdown_token` is a *child* of that
+    /// root, and the scheduler/monitor/indexer tasks hang off
+    /// `component.drt().child_token()` (a child of `endpoint_shutdown_token`).
+    ///
+    /// Consequence: dropping a single router cancels the runtime's root token,
+    /// which cascades to **every** background task in the process. This is the
+    /// mis-scoping called out in the ticket — router-owned work is tied to
+    /// process-level cancellation instead of router lifetime. (Symmetrically, if
+    /// the router is *not* dropped — e.g. a lingering Arc under churn — nothing
+    /// router-scoped ever stops its tasks, which is the production leak.)
+    ///
+    /// This test proves the coupling directly and deterministically, with no
+    /// external NATS/etcd dependency.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dis_2259_kv_router_drop_cancels_process_wide_root_token() {
+        let component = make_test_component("dis-2259-root-token").await;
+
+        // The runtime's root/process token must be live before we touch a router.
+        let root_token = component.drt().primary_token();
+        assert!(
+            !root_token.is_cancelled(),
+            "precondition: runtime root token must be live before any router drop"
+        );
+
+        // Create and drop a single WorkerSet-scoped router.
+        let (router, _tx) = build_router_on_component(&component, "solo").await;
+        drop(router);
+        tokio::task::yield_now().await;
+
+        // BUG: dropping one router cancelled the entire runtime's root token.
+        // A correctly-scoped router would cancel only its own token and leave the
+        // process-wide token (and every other router's work) untouched.
+        assert!(
+            root_token.is_cancelled(),
+            "DIS-2259 NOT reproduced: expected dropping a KvRouter to cancel the \
+             runtime's process-wide root token (the mis-scoping bug)"
+        );
+        eprintln!(
+            "DIS-2259 confirmed: dropping a single KvRouter cancelled the runtime's \
+             process-wide root cancellation token (drt().primary_token())"
+        );
+    }
+
+    /// DIS-2259 (observable blast radius): because router background work is tied
+    /// to the shared process-level token, dropping ONE WorkerSet's router tears
+    /// down a *co-resident, unrelated* router's background tasks on the same
+    /// runtime.
+    ///
+    /// Mirrors LoRA/model churn: WorkerSet A is removed while WorkerSet B keeps
+    /// serving. Correct behavior: B's scheduler/monitor tasks survive A's
+    /// teardown. Buggy behavior (main): A's `Drop` cancels the shared root token,
+    /// so B's tasks are cancelled too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dis_2259_dropping_one_router_tears_down_co_resident_router() {
+        let component = make_test_component("dis-2259-blast-radius").await;
+        let alive = || {
+            component
+                .drt()
+                .runtime()
+                .primary()
+                .metrics()
+                .num_alive_tasks()
+        };
+
+        let baseline = alive();
+
+        // WorkerSet A and WorkerSet B, both live on the same frontend runtime.
+        let (router_a, _tx_a) = build_router_on_component(&component, "A").await;
+        tokio::task::yield_now().await;
+        let after_a = alive();
+        let per_router = after_a.saturating_sub(baseline);
+
+        let (router_b, _tx_b) = build_router_on_component(&component, "B").await;
+        tokio::task::yield_now().await;
+        let after_ab = alive();
+
+        assert!(
+            per_router > 0 && after_ab > after_a,
+            "sanity: each router must spawn background tasks (baseline={baseline}, \
+             after_a={after_a}, after_ab={after_ab})"
+        );
+
+        // Remove WorkerSet A only. WorkerSet B is still held alive and serving.
+        drop(router_a);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let after_drop_a = alive();
+
+        eprintln!(
+            "DIS-2259 blast radius: baseline={baseline} after_A={after_a} \
+             after_A+B={after_ab} after_drop_A={after_drop_a} \
+             (router_b still alive; per_router≈{per_router})"
+        );
+
+        // Keep B alive until after the measurement so it cannot be dropped early.
+        drop(router_b);
+
+        // BUG: dropping A took B's tasks down with it. With correct per-router
+        // scoping, B (still held) would retain ~`per_router` live tasks, so
+        // `after_drop_a` would be >= ~one router's worth. Instead it collapses to
+        // ~baseline because A's Drop cancelled the shared root token.
+        assert!(
+            after_drop_a < after_a,
+            "DIS-2259 NOT reproduced: dropping router A should have torn down the \
+             co-resident router B's tasks via the shared process token, but live \
+             tasks did not drop below the one-router level \
+             (after_a={after_a}, after_drop_a={after_drop_a})"
+        );
+    }
 }

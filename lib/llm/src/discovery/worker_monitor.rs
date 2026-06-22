@@ -1449,4 +1449,87 @@ mod tests {
 
         rt.shutdown();
     }
+
+    /// DIS-2259 (pure leak, no over-cancel masking): `KvWorkerMonitor` spawns a
+    /// background monitoring task in `start_monitoring` keyed off
+    /// `component.drt().child_token()`, but the struct has **no `Drop` impl and
+    /// stores no token/handle**. So when every `KvWorkerMonitor` clone is dropped
+    /// (e.g. a WorkerSet is removed during LoRA/model churn) the spawned task is
+    /// never told to stop — it survives until full runtime shutdown, holding its
+    /// clones of `worker_load_states`, the discovery watch, and the client.
+    ///
+    /// Unlike the `KvRouter` Drop path (which over-cancels the shared root token),
+    /// nothing here cancels the monitor's child token, so this is an unmasked
+    /// accumulation: churn N monitors → N orphaned tasks. This is the
+    /// `worker_monitor.rs` defect listed in the ticket's root-cause section.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dis_2259_kv_worker_monitor_task_leaks_after_drop() {
+        use super::KvWorkerMonitor;
+        use dynamo_runtime::pipeline::WorkerLoadMonitor;
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let component = drt
+            .namespace("dis_2259_monitor_leak".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap();
+
+        let alive = || rt.primary().metrics().num_alive_tasks();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let baseline = alive();
+
+        const CHURN: usize = 10;
+        for i in 0..CHURN {
+            let client = component
+                .endpoint(format!("decode-{i}"))
+                .client()
+                .await
+                .unwrap();
+            let monitor = KvWorkerMonitor::new(
+                client,
+                LoadThresholdConfig {
+                    active_decode_blocks_threshold: Some(0.8),
+                    ..Default::default()
+                },
+            );
+            monitor
+                .start_monitoring()
+                .await
+                .expect("start_monitoring should spawn the background task");
+
+            // Drop every handle to the monitor — the WorkerSet is gone. A
+            // correctly-scoped monitor would stop its task here.
+            drop(monitor);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Generous drain window so we cannot be accused of sampling too early.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        let after = alive();
+        let leaked = after.saturating_sub(baseline);
+        eprintln!(
+            "DIS-2259 monitor leak: baseline_alive={baseline} after_alive={after} \
+             leaked={leaked} monitors_churned={CHURN}"
+        );
+
+        assert!(
+            leaked >= CHURN,
+            "DIS-2259 NOT reproduced: expected >= {CHURN} orphaned monitor tasks \
+             (one per dropped KvWorkerMonitor) but only {leaked} survived \
+             (baseline={baseline}, after={after})"
+        );
+
+        rt.shutdown();
+    }
 }
