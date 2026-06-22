@@ -297,6 +297,8 @@ navigation:
             slug: agents
             path: agents/README.md
             contents:
+              - page: Agent Quickstart
+                path: agents/quickstart.md
               - page: Agent Tracing
                 path: agents/agent-tracing.md
               - page: Agent Hints

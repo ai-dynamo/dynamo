@@ -14,6 +14,7 @@ telemetry, routing hints, and backend-specific cache behavior.
 
 | Concept | Purpose |
 |---------|---------|
+| [Agent Quickstart](quickstart.md) | The fastest path: send a normal request, then add `agent_context` and `agent_hints` to it with curl — no harness or SDK required. |
 | [Agent Tracing](agent-tracing.md) | Passive `session_id`/`trajectory_id` metadata plus Dynamo-owned request timing, token, cache, worker-placement, and harness tool-event traces. |
 | [Agent Hints](agent-hints.md) | Optional per-request hints such as priority, expected output length, and speculative prefill. |
 | [Priority Scheduling](priority-scheduling.md) | Request priority semantics across the router queue, backend engines, and cache policy. |

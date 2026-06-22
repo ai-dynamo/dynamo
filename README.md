@@ -102,7 +102,7 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 ### New in 1.0
 
 - **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
-- **Agentic inference:** Per-request hints for priority, expected output length, and speculative prefill, plus session metadata for tracing and SGLang subagent KV isolation. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
+- **Agentic inference:** Per-request hints for priority, expected output length, and speculative prefill, plus session metadata for tracing and SGLang subagent KV isolation. Start with the [Agent Quickstart](docs/agents/quickstart.md); [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
 - **K8s Inference Gateway plugin:** KV-aware routing inside the standard Kubernetes gateway
@@ -122,6 +122,8 @@ In **standalone** mode, request flow is `client → Frontend → Router → work
 See the [Inference Gateway (GAIE) guide](docs/kubernetes/inference-gateway.md) for the full setup, supported features, and configuration of gateway mode.
 
 ## Quick Start
+
+> **Serving an agent or agentic harness?** Add per-request priority, output-length, and tracing metadata to any request — see the [Agent Quickstart](docs/agents/quickstart.md).
 
 ### Option A: Container (fastest)
 
