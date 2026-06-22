@@ -13,7 +13,7 @@ use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
     detect_tool_call_start, find_tool_call_end_position, try_tool_call_parse_aggregate,
-    try_tool_call_parse_aggregate_stream_finalize,
+    try_tool_call_parse_aggregate_finalize,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -1048,7 +1048,7 @@ impl JailedStream {
                 // Traditional marker-based tool call parsing
                 let tools_slice = self.tool_definitions.as_deref();
                 let parse_result = if is_finalize {
-                    try_tool_call_parse_aggregate_stream_finalize(
+                    try_tool_call_parse_aggregate_finalize(
                         accumulated_content,
                         self.tool_call_parser.as_deref(),
                         tools_slice,

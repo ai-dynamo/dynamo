@@ -46,15 +46,17 @@ pub struct SessionTrace {
     pub turns: Vec<TurnTrace>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TurnTrace {
     pub input_length: usize,
     pub max_output_tokens: usize,
     pub hash_ids: Vec<u64>,
     pub delay_after_previous_ms: f64,
+    pub priority: i32,
+    pub strict_priority: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgenticTurnTrace {
     pub request_id: String,
     pub session_id: String,
@@ -63,6 +65,8 @@ pub struct AgenticTurnTrace {
     pub hash_ids: Vec<u64>,
     pub first_ready_timestamp_ms: Option<f64>,
     pub delay_after_dependencies_ms: f64,
+    pub priority: i32,
+    pub strict_priority: u32,
     pub wait_for: Vec<String>,
     pub prefix_reset: bool,
 }

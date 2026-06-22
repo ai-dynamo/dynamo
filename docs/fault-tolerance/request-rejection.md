@@ -292,6 +292,41 @@ If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling:
 --active-decode-blocks-threshold 0.85
 ```
 
+## Worker-Side Request Admission
+
+In addition to the frontend's metric-driven busy detection above, a worker can
+enforce a hard concurrency cap directly at its request-plane ingress. This is
+disabled by default — when neither knob is set, the worker behaves exactly as
+before (a large pool plus a large overflow queue, no rejection).
+
+### Knobs
+
+| Flag | Env var | Meaning |
+| --- | --- | --- |
+| `--engine-request-limit N` | `DYN_ENGINE_REQUEST_LIMIT` | Max requests handled **concurrently by the engine** (the worker-pool semaphore size). Setting this enables worker-side rejection. |
+| _(env-only)_ | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Max requests **waiting in Dynamo** (not yet in the engine) — the overflow queue size. Not a CLI knob; a small fixed burst defaulting to **16** (hard cap `N + 16`). Only takes effect when the engine limit is set. Advanced override only; must be **≥ 2**. |
+
+When `--engine-request-limit` is set, the worker accepts a request directly into
+the engine while a slot is free; once all `N` engine slots are busy, further
+requests go into the small overflow queue of size `Q`; when the engine **and**
+the queue are both full the worker rejects the request with
+`Server overloaded: worker at capacity`. The frontend maps this rejection to
+`ResourceExhausted` → **HTTP 503**, and temporarily marks the worker overloaded
+so it is skipped on the next routing decision (cleared automatically on the next
+metric recompute). The effective hard cap is **N + Q** in-flight requests per
+worker. The overflow channel is sized to `Q-1` because the single dispatcher
+holds one request in transit between the queue and the engine; this makes the
+cap exact for **Q ≥ 2** (at `Q = 1` the channel floors at 1, so the queued
+peak is 2 — hence the `Q ≥ 2` requirement).
+
+### Metrics
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `dynamo_rejection_request_total` | counter | Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full). |
+| `dynamo_engine_request` | gauge | Current requests being handled by the engine. |
+| `dynamo_request_queue` | gauge | Current requests queued in Dynamo, not yet in the engine. |
+
 ## Related Documentation
 
 - [Health Checks](../observability/health-checks.md) - Worker health monitoring

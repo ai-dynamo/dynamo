@@ -22,7 +22,6 @@ export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-2B-Instruct"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-VL-2B-Instruct"}
 export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml"}
-export MODALITY=${MODALITY:-"multimodal"}
 export MODEL_TYPE=${MODEL_TYPE:-"qwen3_vl"}
 export BLOCK_SIZE=${BLOCK_SIZE:-32}
 
@@ -41,7 +40,7 @@ python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "${SERVED_MODEL_NAME}__internal" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
-  --modality "$MODALITY" \
+  --enable-multimodal \
   "${TRTLLM_OVERRIDE_ARGS[@]}" \
   --publish-events-and-metrics \
   --kv-block-size "$BLOCK_SIZE" &

@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-32b-kv-routing
+title: Qwen3-32B KV Routing A/B
+page: benchmarks/qwen3-32b-kv-routing.mdx
+claim: Disaggregated KV-aware routing (6P+2D TP2) reduces TTFT/ITL vs aggregated round-robin (8x TP2) on prefix-reuse conversation
+  traffic
+subtype: ab-test
+features:
+- kv-router
+- disaggregated-serving
+model:
+  name: Qwen3-32B
+  hf_id: Qwen/Qwen3-32B
+hardware:
+  gpu: H200
+  count: 16
+traffic: Mooncake conversation trace, 12,031 reqs/~59 min, 12,035 avg ISL, 343 avg OSL, 36.64% cache efficiency, fixed-schedule
+arms:
+- role: treatment
+  name: Disaggregated KV router
+  deploy: recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml
+  perf: recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml
+- role: baseline
+  name: Aggregated round-robin
+  deploy: recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml
+  perf: recipes/qwen3-32b/vllm/agg-round-robin/perf.yaml
+results:
+  available: false
+  summary: Source has only a results video + directional analysis; no numeric table
+related_recipes:
+- qwen3-32b
+maintainer: null
+gaps:
+- no numeric results in source (video + directional only) — Results omitted
+- maintainer unknown
