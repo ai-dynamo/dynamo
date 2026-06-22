@@ -5,7 +5,13 @@ title: Agents
 subtitle: Agent-aware serving features in Dynamo
 ---
 
-NVIDIA Dynamo optimizes agent workloads through a lightweight set of headers and request extensions that affect the behavior of the router, the inference engine and the the KV cache manager. The harness remains responsible for agent semantics. Dynamo receives lightweight metadata and uses it for observability, replay, routing hints, priority, and cache-aware serving.
+NVIDIA Dynamo optimizes agent workloads with lightweight headers and request extensions for the router, inference engine, and KV cache manager. These headers and extensions are non-invasive and extensible: the harness remains responsible for agent semantics, while Dynamo uses request metadata for observability, replay, routing, priority, and cache-aware serving.
+
+| Layer | Signal | Optimization |
+|-------|--------|--------------|
+| Frontend API | Trajectory headers and `nvext` request extensions | Normalize agent identity and serving intent across OpenAI-compatible APIs. |
+| Router | Trajectory identity, priority, expected output length, and cache-overlap signals | Place requests for KV reuse, order queued work, and support agent-aware routing strategies. |
+| KV cache management | Priority and session metadata forwarded to the backend runtime | Influence engine scheduling, cache eviction, and subagent KV isolation where the backend supports it. |
 
 The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. Supported coding agents can rely on the HTTP headers they already emit, and custom clients can send Dynamo trajectory headers. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for the exact contract.
 
@@ -13,13 +19,13 @@ The common identity concept is `trajectory_id`: one stable ID for one agent reas
 
 | Concept | Purpose |
 |---------|---------|
-| [Dynamo for Agents](introduction.md) | Conceptual model for trajectories, requests, tool events, and the split between passive identity and active serving policy. |
-| [Trajectory IDs](trajectory-ids.md) | Stable agent trajectory identity from first-class coding-agent headers or Dynamo trajectory headers. |
-| [Agent Tracing](agent-tracing.md) | Request trace output, inferred tool-call metadata, optional harness tool spans, Perfetto conversion, and request replay. |
-| [Agent Hints](agent-hints.md) | Optional per-request hints such as priority, expected output length, and speculative prefill. |
-| [Priority Scheduling](priority-scheduling.md) | Request priority semantics across the router queue, backend engines, and cache policy. |
-| [Use Pi-Mono with Dynamo](pi-mono.md) | End-to-end quickstart that drives the Pi coding agent through Dynamo with trajectory identity and tool tracing turned on. |
-| [ThunderAgent Program Scheduler](thunderagent-router.md) | Experimental scheduler keyed by trajectory identity with tool-boundary pause/resume on top of KV-aware routing: the 5s scheduler tick, the utilization-driven control loop and its knobs, and scheduler observability. |
+| [Dynamo for Agents](introduction.md) | Conceptual model for trajectories, requests, tool events, and serving policy. |
+| [Trajectory IDs](trajectory-ids.md) | Stable agent identity from coding-agent headers or Dynamo trajectory headers. |
+| [Agent Tracing](agent-tracing.md) | Request traces, inferred tool calls, optional harness tool spans, Perfetto conversion, and replay. |
+| [Agent Hints](agent-hints.md) | Per-request hints such as priority, expected output length, and speculative prefill. |
+| [Priority Scheduling](priority-scheduling.md) | Priority behavior across the router queue, backend engines, and cache policy. |
+| [Use Pi-Mono with Dynamo](pi-mono.md) | Quickstart for running the Pi coding agent through Dynamo with trajectory identity and tool tracing. |
+| [ThunderAgent Program Scheduler](thunderagent-router.md) | Experimental tool-boundary pause/resume scheduler on top of KV-aware routing. |
 
 ## Backend-Specific Guides
 
