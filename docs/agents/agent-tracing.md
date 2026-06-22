@@ -17,7 +17,7 @@ The fast path is one environment variable:
 export DYN_REQUEST_TRACE=1
 ```
 
-That selects `jsonl_gz` output at `/tmp/dynamo-request-trace.*.jsonl.gz`. Tool-call understanding works immediately from `request_end` finish metadata: no harness tooling and no sockets are required. The optional ZMQ tool-event ingress is opt-in; see [Tool Call Observability](#tool-call-observability).
+That selects `jsonl_gz` output at `/tmp/dynamo-request-trace.*.jsonl.gz`. Tool-call understanding works immediately from `request_end` finish metadata: no harness tooling required. The optional ZMQ tool-event ingress is opt-in; see [Tool Call Observability](#tool-call-observability).
 
 To relocate captures, set an output path:
 
@@ -79,9 +79,7 @@ Dynamo emits `request_end` after the response stream finishes or is dropped. The
 }
 ```
 
-`finish_reason_metadata` is optional. `finish_reason` is the final OpenAI-compatible reason after parser rewrites, such as `tool_calls`. `backend_finish_reason` and `stop_reason` come from the backend stop path. Top-level finish fields summarize the emitted single-choice request row.
-
-Current request tracing skips unsupported multi-choice replay shapes such as `n > 1` and `best_of > 1`, so do not assume every trajectory turn is present unless skipped-row warnings are absent. For chat streams, finish metadata is recorded after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason. See the [request trace schema source](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/request_trace/types.rs) for the preferred Rust schema.
+Current request tracing skips unsupported multi-choice replay shapes such as `n > 1` and `best_of > 1`, so do not assume every trajectory turn is present unless skipped-row warnings are absent. For chat streams, finish metadata is recorded after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason. 
 
 </details>
 
@@ -100,11 +98,9 @@ tool_wait(turn N) ~= next.request_received_ms - this.event_time_unix_ms
 <details>
 <summary>Optional explicit tool events over ZMQ</summary>
 
-Set `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` to bind the ingress, then have the harness publish tool events. Use explicit tool events when you need per-tool attribution: `duration_ms`, `status`, output size, or error type. Nothing emits tool events on its own.
+For precise tool call timing information, you can have your agent harness send tool call events with the relevant `trajectory_id` attached. This allows Dynamo to get an understanding of exactly how long each tool call took. You can set `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` to bind the ingress, then have the harness publish tool events. Use this when you need per-tool attribution: `duration_ms`, `status`, output size, or error type. 
 
-Wire format is `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`; the default topic is `agent-tool-events`. Use a background publisher, bounded queue, monotonic sequence, and PUSH with HWM. Terminal `tool_end` and `tool_error` rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`) even if `tool_start` was dropped.
-
-Use the same trajectory identity as the surrounding LLM calls. `tool_call_id` should be unique per trajectory. Join offline on `trajectory_id` and `tool_call_id`.
+Wire format is `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`; the default topic is `agent-tool-events`. Use a background publisher, bounded queue, monotonic sequence, and PUSH with HWM. Terminal `tool_end` and `tool_error` rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`) even if `tool_start` was dropped. Use the same trajectory identity as the surrounding LLM calls. `tool_call_id` should be unique per trajectory. You can do offline analysis by joining on `trajectory_id` and `tool_call_id`.
 
 Example `tool_end`:
 
