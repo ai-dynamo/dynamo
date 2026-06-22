@@ -10,10 +10,6 @@ inputs:
     description: 'Name for the vCluster instance (auto-generated from github.run_id if empty)'
     required: false
     default: ''
-  vcluster_namespace:
-    description: 'Host namespace where the vCluster will be created (auto-generated if empty)'
-    required: false
-    default: ''
   registry:
     description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
     required: false
@@ -122,23 +118,24 @@ runs:
           --overwrite
         echo "::endgroup::"
 
-    - name: Delete any stale vCluster
+    - name: Delete existing vCluster for this run
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
       run: |
-        echo "::group::Delete stale vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
+        echo "Checking for existing vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
+        # github.run_id is stable across re-runs, so this catches leftovers from
+        # a failed or canceled attempt of the same workflow run.
         if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
-          echo "Deleting stale vCluster: ${VCLUSTER_NAME}"
+          echo "Deleting existing vCluster: ${VCLUSTER_NAME}"
           vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1 || \
             kubectl delete statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" --ignore-not-found 2>&1 || true
           kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
             --for=delete --timeout=120s 2>/dev/null || true
         else
-          echo "No stale vCluster named ${VCLUSTER_NAME} found."
+          echo "No existing vCluster named ${VCLUSTER_NAME} found."
         fi
-        echo "::endgroup::"
 
     - name: Resolve vCluster host priority class
       id: resolve-vcluster-priority
