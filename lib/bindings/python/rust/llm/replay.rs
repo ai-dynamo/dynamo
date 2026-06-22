@@ -801,10 +801,19 @@ pub fn run_mocker_trace_replay(
     }
     // Goodput SLA: when set, the collector classifies SLA-satisfying requests and
     // the report carries goodput_* keys. Offline replay only (the online/live
-    // entrypoints do not take it); with none set, goodput is omitted as before.
+    // entrypoints don't take it) — reject it for non-offline modes rather than
+    // silently dropping it, matching report_jsonl_path / max_sim_time_ms. With none
+    // set, goodput is omitted as before.
     validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
     validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
     validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+    if replay_mode != "offline"
+        && (sla_ttft_ms.is_some() || sla_itl_ms.is_some() || sla_e2e_ms.is_some())
+    {
+        return Err(PyValueError::new_err(
+            "sla_ttft_ms, sla_itl_ms, and sla_e2e_ms only support replay_mode='offline'",
+        ));
+    }
     let sla = dynamo_mocker::replay::SlaThresholds {
         ttft_ms: sla_ttft_ms,
         itl_ms: sla_itl_ms,
