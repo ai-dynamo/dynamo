@@ -15,7 +15,7 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 from dynamo.runtime.logging import configure_dynamo_logging, get_bool_env_var
 from dynamo.trtllm.args import parse_args
-from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.workers import init_worker
 
 configure_dynamo_logging()
@@ -89,11 +89,12 @@ class _SnapshotRuntimeProxy:
             )
             os._exit(0)
 
-        config.namespace, config.discovery_backend = (
-            snapshot_controller.reload_restore_identity(
-                config.namespace,
-                config.discovery_backend,
-            )
+        (
+            config.namespace,
+            config.discovery_backend,
+        ) = snapshot_controller.reload_restore_identity(
+            config.namespace,
+            config.discovery_backend,
         )
         self._runtime, _ = create_runtime(
             discovery_backend=config.discovery_backend,
@@ -124,6 +125,42 @@ class _SnapshotRuntimeProxy:
         # attribute access delegates to it for both existing and newly-added
         # runtime APIs.
         return getattr(self._require_runtime(), name)
+
+
+def _validate_supported_snapshot_config(config: Any) -> None:
+    unsupported = [
+        label
+        for supported, label in (
+            (config.modality == Modality.TEXT, f"modality={config.modality.value}"),
+            (
+                config.disaggregation_mode == DisaggregationMode.AGGREGATED,
+                f"disaggregation_mode={config.disaggregation_mode.value}",
+            ),
+            (not config.encode_endpoint, "--encode-endpoint"),
+            (not config.frontend_decoding, "--frontend-decoding"),
+            (
+                config.tensor_parallel_size == 1,
+                f"tensor_parallel_size={config.tensor_parallel_size}",
+            ),
+            (
+                config.pipeline_parallel_size == 1,
+                f"pipeline_parallel_size={config.pipeline_parallel_size}",
+            ),
+            (
+                config.gpus_per_node in (None, 1),
+                f"gpus_per_node={config.gpus_per_node}",
+            ),
+            (not config.has_connector("kvbm"), "--connector kvbm"),
+        )
+        if not supported
+    ]
+
+    if unsupported:
+        raise ValueError(
+            "TRT-LLM Dynamo Snapshot currently supports only the single-GPU "
+            "aggregated text worker path. Unsupported snapshot setting(s): "
+            + ", ".join(unsupported)
+        )
 
 
 def _make_drain_callback(
@@ -203,6 +240,7 @@ async def worker():
             event_plane=config.event_plane,
         )
     else:
+        _validate_supported_snapshot_config(config)
         # vLLM/SGLang snapshot paths build the engine before creating a runtime.
         # TRT-LLM's engine is built inside init_worker(), so pass a guarded
         # runtime proxy through that shared path and materialize the real runtime
