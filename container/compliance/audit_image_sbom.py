@@ -75,6 +75,23 @@ def _purl_type(purl: str | None) -> str:
     return purl[len("pkg:") :].split("/", 1)[0]
 
 
+# ai-dynamo-owned crates — in-repo (dynamo-/kvbm- + the lib/runtime/examples/*
+# crates) or sibling ai-dynamo org repos published to crates.io (nixl, velo).
+# They're first-party, not third-party, so they're absent from osrb-deps.csv by
+# design — skip them instead of flagging them as attribution gaps. Keep roughly
+# in sync with collect_sources._FIRST_PARTY_* (which feeds source archival).
+_FIRST_PARTY_PREFIXES = ("dynamo-", "kvbm-", "nixl-", "velo-")
+_FIRST_PARTY_GO_PREFIXES = ("github.com/ai-dynamo/",)
+_FIRST_PARTY_NAMES = {"service-metrics", "system-metrics", "hello-world", "velo"}
+
+
+def _is_first_party(name: str) -> bool:
+    norm = _normalize(name)
+    if norm in _FIRST_PARTY_NAMES or norm.startswith(_FIRST_PARTY_PREFIXES):
+        return True
+    return name.startswith(_FIRST_PARTY_GO_PREFIXES)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="compliance.audit_image_sbom")
     p.add_argument("--syft-sbom", type=Path, required=True)
@@ -113,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         if (name, str(version)) in baseline_keys:
             continue
         delta += 1
-        if _normalize(name) not in our_names:
+        if _normalize(name) not in our_names and not _is_first_party(name):
             unattributed.append(c)
 
     # De-dup by normalized name for the report.

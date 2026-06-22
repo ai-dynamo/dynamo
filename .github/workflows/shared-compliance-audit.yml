@@ -135,12 +135,13 @@ jobs:
           # Scan the container's OWN filesystem: this job runs inside the shipped
           # image, so the image is already on disk as our rootfs — no registry
           # re-pull, no docker daemon, no ECR / aws creds. Exclude virtual fs +
-          # the GHA workspace/runner mounts so syft catalogs only the image's
-          # packages (dpkg + the venv), not the checkout or /proc.
+          # the GHA mounts so syft catalogs only the image's packages (dpkg + the
+          # venv), not the checkout (/__w), the runner's injected toolcache/node
+          # (/__e), or /proc.
           syft dir:/ \
             --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
-            --exclude './__w/**' --exclude './tmp/**' --exclude './run/**' \
-            --exclude './home/runner/**' \
+            --exclude './__w/**' --exclude './__e/**' --exclude './github/**' \
+            --exclude './tmp/**' --exclude './run/**' --exclude './home/runner/**' \
             -o cyclonedx-json=/tmp/syft.cdx.json
           OUR_CSV=$(find /tmp/compliance -path '*linux_amd64*' -name 'osrb-*.csv' | head -1)
           [ -z "${OUR_CSV}" ] && OUR_CSV=$(find /tmp/compliance -name 'osrb-*.csv' | head -1)
