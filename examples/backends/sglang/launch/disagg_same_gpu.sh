@@ -62,7 +62,21 @@ if [[ -z "$GPU_MEM_ARGS" ]]; then
     GPU_MEM_ARGS="--max-total-tokens $MAX_TOTAL_TOKENS"
 fi
 
+# torch-memory-saver (--enable-memory-saver/--delete-ckpt-after-loading) packs
+# both workers tightly on one GPU but its preload links libcudart.so.12, which
+# is absent on CUDA 13 images. Allow opting out where the GPU has enough VRAM
+# to hold both workers unpacked.
+MEM_SAVER_ARGS="--enable-memory-saver --delete-ckpt-after-loading"
+if [[ "${DYN_SGLANG_DISABLE_MEMORY_SAVER:-0}" == "1" ]]; then
+    MEM_SAVER_ARGS=""
+fi
+
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+# Select legacy vs unified worker entry point. `--unified` routes workers
+# through dynamo.sglang.unified_main (the Rust backend-common Worker, which
+# owns the prefill drain loop); default stays on the legacy main.
+pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
 
 DISAGG_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-12345}"
 
@@ -88,7 +102,8 @@ python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 # run prefill worker with metrics on port 8081
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-python3 -m dynamo.sglang \
+DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
@@ -102,8 +117,7 @@ python3 -m dynamo.sglang \
   --context-length "$CONTEXT_LENGTH" \
   --chunked-prefill-size "$CONTEXT_LENGTH" \
   --max-prefill-tokens "$CONTEXT_LENGTH" \
-  --enable-memory-saver \
-  --delete-ckpt-after-loading \
+  $MEM_SAVER_ARGS \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
   --enable-metrics &
 
@@ -117,7 +131,7 @@ wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 || true
 # run decode worker with metrics on port 8082
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-python3 -m dynamo.sglang \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
@@ -131,8 +145,7 @@ python3 -m dynamo.sglang \
   --context-length "$CONTEXT_LENGTH" \
   --chunked-prefill-size "$CONTEXT_LENGTH" \
   --max-prefill-tokens "$CONTEXT_LENGTH" \
-  --enable-memory-saver \
-  --delete-ckpt-after-loading \
+  $MEM_SAVER_ARGS \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
   --enable-metrics &
 

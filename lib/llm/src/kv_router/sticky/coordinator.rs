@@ -12,9 +12,8 @@ use dynamo_runtime::component::Component;
 
 use crate::{
     preprocessor::PreprocessedRequest,
-    protocols::{
-        common::{preprocessor::RoutingHints, timing::RequestPhase},
-        openai::nvext::SessionAction,
+    protocols::common::{
+        extensions::SessionAction, preprocessor::RoutingHints, timing::RequestPhase,
     },
 };
 
@@ -239,8 +238,8 @@ fn sticky_session_id_for_phase(request: &PreprocessedRequest, phase: RequestPhas
 #[cfg(test)]
 mod tests {
     use super::sticky_allowed_for_phase;
+    use crate::protocols::common::extensions::SessionControl;
     use crate::protocols::common::{preprocessor::RoutingHints, timing::RequestPhase};
-    use crate::protocols::openai::nvext::SessionControl;
 
     fn session_control() -> SessionControl {
         SessionControl {

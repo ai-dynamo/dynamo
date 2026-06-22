@@ -36,11 +36,11 @@ const (
 	// resume.
 	RestoreCompleteFile = "restore-complete"
 
-	// ReadyForCheckpointFile is written by the workload inside the control
+	// ReadyForSnapshotFile is written by the workload inside the control
 	// volume when the model is loaded and the workload is ready for a
 	// checkpoint. Observed by the checkpoint job's kubelet readiness probe
 	// on the worker container.
-	ReadyForCheckpointFile = "ready-for-checkpoint"
+	ReadyForSnapshotFile = "ready-for-snapshot"
 )
 
 // EnsureControlVolume adds the snapshot-control emptyDir to the pod spec,
