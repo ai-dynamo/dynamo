@@ -716,8 +716,10 @@ func registerControllers(
 	}
 
 	if err = (&controller.PodSnapshotReconciler{
-		Client:   mgr.GetClient(),
-		Recorder: mgr.GetEventRecorderFor("snapshot"),
+		Client:        mgr.GetClient(),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		Recorder:      mgr.GetEventRecorderFor("snapshot"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}

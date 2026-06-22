@@ -39,7 +39,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -68,7 +70,9 @@ var errPodSnapshotPodUnscheduled = errors.New("source pod is not yet scheduled t
 // back to the PodSnapshot, and cascades deletion to the PodSnapshotContent.
 type PodSnapshotReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
+	Config        *configv1alpha1.OperatorConfiguration
+	RuntimeConfig *commonController.RuntimeConfig
+	Recorder      record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -309,6 +313,7 @@ func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&nvidiacomv1alpha1.PodSnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(podSnapshotContentToPodSnapshot),
 		).
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(sr.Config, sr.RuntimeConfig)).
 		Complete(sr)
 }
 
