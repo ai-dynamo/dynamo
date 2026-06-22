@@ -70,6 +70,17 @@ if [ -z "$NUM_NODES" ] || [ -z "$NODE_RANK" ] || [ -z "$GPUS_PER_NODE" ]; then
     exit 1
 fi
 
+# Create the log directory up front (before any `tee` below writes into it).
+# Fall back to a writable temp dir if the chosen location (default ./logs) is
+# not writable, e.g. a read-only working directory in CI. Without this, the
+# failing mkdir would trip `set -e` and fire the EXIT trap's `kill 0`, taking
+# the whole launch down before the workers ever start.
+if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+    FALLBACK_LOG_DIR="$(mktemp -d)"
+    echo "Warning: cannot create log dir '$LOG_DIR'; using '$FALLBACK_LOG_DIR'" >&2
+    LOG_DIR="$FALLBACK_LOG_DIR"
+fi
+
 # Calculate data parallel size
 DATA_PARALLEL_SIZE=$((NUM_NODES * GPUS_PER_NODE))
 
@@ -103,10 +114,8 @@ trap 'echo Cleaning up...; kill 0' EXIT
 # run ingress if it's node 0
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 if [ $NODE_RANK -eq 0 ]; then
-    DYN_LOG=debug python -m dynamo.frontend --router-mode kv 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
+    DYN_LOG=debug python -m dynamo.frontend --router-mode kv 2>&1 | tee "$LOG_DIR/dsr1_dep_ingress.log" &
 fi
-
-mkdir -p $LOG_DIR
 
 # Data Parallel Attention / Expert Parallelism
 # Routing to DP workers managed by Dynamo
@@ -139,7 +148,7 @@ python3 -m dynamo.vllm \
 --data-parallel-rpc-port 13345 \
 $GPU_MEM_ARGS \
 --enforce-eager \
---kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20080\",\"enable_kv_cache_events\":true}" 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_start_rank}.log &
+--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20080\",\"enable_kv_cache_events\":true}" 2>&1 | tee "$LOG_DIR/dsr1_dep_${dp_start_rank}.log" &
 
 echo "All workers starting. (press Ctrl+C to stop)..."
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
