@@ -63,7 +63,10 @@ use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
     TokenIdType,
-    common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
+    common::{
+        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        extensions::{AgentHints, NvExtProvider, routing_constraints_to_kv},
+    },
     openai::{
         DeltaGeneratorExt,
         chat_completions::{
@@ -71,7 +74,6 @@ use crate::protocols::{
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-        nvext::NvExtProvider,
     },
 };
 use crate::tokenizers::traits::Tokenizer;
@@ -84,9 +86,7 @@ pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
-fn routing_priorities(
-    hints: Option<&crate::protocols::openai::nvext::AgentHints>,
-) -> (Option<f64>, Option<u32>, Option<i32>) {
+fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
     let priority_jump = hints.and_then(|h| {
         h.priority
             .map(|priority| priority.max(0) as f64)
@@ -851,7 +851,10 @@ impl OpenAIPreprocessor {
                 lora_name,
                 allowed_worker_ids: None,
                 session_control: nvext.session_control.clone(),
-                routing_constraints: nvext.routing_constraints.clone(),
+                routing_constraints: nvext
+                    .routing_constraints
+                    .clone()
+                    .map(routing_constraints_to_kv),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
@@ -1973,7 +1976,7 @@ impl OpenAIPreprocessor {
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         trace_tokens_enabled: bool,
-        trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
+        trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -1992,7 +1995,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
-            trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
+            trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         }
 
         let state = State {
@@ -2054,7 +2057,7 @@ impl OpenAIPreprocessor {
 
                         let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
 
-                        crate::agents::trace::record_backend_finish_reason_metadata(
+                        crate::request_trace::record_backend_finish_reason_metadata(
                             inner.trace_finish_reason_metadata.as_ref(),
                             backend_output.index,
                             backend_output.finish_reason.as_ref(),
@@ -2115,7 +2118,7 @@ impl OpenAIPreprocessor {
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
                     if inner.trace_tokens_enabled {
-                        crate::agents::trace::record_llm_metric_tokens(
+                        crate::request_trace::record_llm_metric_tokens(
                             tracker.as_deref(),
                             isl,
                             current_osl,
@@ -2198,7 +2201,7 @@ impl OpenAIPreprocessor {
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
                         if inner.trace_tokens_enabled {
-                            crate::agents::trace::record_llm_metric_tokens(
+                            crate::request_trace::record_llm_metric_tokens(
                                 tracker.as_deref(),
                                 Some(usage.prompt_tokens as usize),
                                 usage.completion_tokens as usize,
@@ -3222,7 +3225,7 @@ mod tests {
 
     #[test]
     fn routing_priorities_keep_strict_tier_independent() {
-        let hints = crate::protocols::openai::nvext::AgentHints {
+        let hints = crate::protocols::common::extensions::AgentHints {
             priority: Some(-3),
             strict_priority: Some(7),
             ..Default::default()

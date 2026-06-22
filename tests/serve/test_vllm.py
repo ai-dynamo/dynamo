@@ -105,6 +105,10 @@ vllm_configs = {
         # max_thinking_tokens payload below: vLLM only enables the thinking-
         # budget logits processor when reasoning_config is populated.
         script_args=["--reasoning-parser", "qwen3"],
+        # vLLM #43808 (0.23.0) moved the MRv2 thinking_token_budget check from
+        # startup to request time, removing the auto-fallback to V1. Force V1
+        # runner here until native MRv2 support is added.
+        env={"VLLM_USE_V2_MODEL_RUNNER": "0"},
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,

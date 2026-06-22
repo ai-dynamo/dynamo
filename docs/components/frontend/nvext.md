@@ -39,7 +39,9 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
-| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for agent traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
+| `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
+| `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
+| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for request traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
@@ -62,20 +64,28 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 |--------|-----------|
 | `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
 | `x-prefill-instance-id` | `prefill_worker_id` |
+| `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
+| `x-prefill-dp-rank` | `prefill_dp_rank` |
 
 ## Agent Context
 
 The `agent_context` sub-object carries passive session and trajectory identity for
-agentic requests. Dynamo uses this metadata to emit request traces when the
-agent trace sink is enabled. It does not change routing, scheduling, or cache
+agentic requests. Dynamo uses this metadata to emit enriched request traces when
+request tracing is enabled. It does not change routing, scheduling, or cache
 behavior.
+
+Generic HTTP clients can send `x-dynamo-trajectory-id` instead of a body
+`agent_context`; Dynamo synthesizes the passive identity at the HTTP boundary.
+For the full header precedence and tracing contract, see
+[Agent Tracing](../../agents/agent-tracing.md).
 
 | Field | Type | Required | Description |
 |-------|------|:--------:|-------------|
-| `session_type_id` | `string` | Yes | Reusable profile or agent class label. |
-| `session_id` | `string` | Yes | Top-level agent run/session identifier. |
 | `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
+| `session_type_id` | `string` | No | Reusable profile or agent class label. |
+| `session_id` | `string` | No | Top-level agent run/session identifier. |
 | `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
+| `trajectory_final` | `bool` | No | Terminal marker for lifecycle-aware consumers; ignored by consumers that do not track trajectory lifecycle. |
 
 ```json
 {

@@ -470,12 +470,25 @@ mod tests {
 }
 
 pub fn create_indexer(block_size: u32, num_threads: usize) -> Indexer {
+    create_indexer_with_metrics(
+        block_size,
+        num_threads,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+    )
+}
+
+pub fn create_indexer_with_metrics(
+    block_size: u32,
+    num_threads: usize,
+    metrics: Arc<KvIndexerMetrics>,
+) -> Indexer {
     if num_threads > 1 {
         Indexer::Concurrent {
-            primary: Arc::new(ThreadPoolIndexer::new(
+            primary: Arc::new(ThreadPoolIndexer::new_with_metrics(
                 ConcurrentRadixTreeCompressed::new(),
                 num_threads,
                 block_size,
+                Some(metrics),
             )),
             lower_tier: LowerTierIndexers::new(num_threads, block_size),
         }
@@ -484,7 +497,7 @@ pub fn create_indexer(block_size: u32, num_threads: usize) -> Indexer {
             primary: KvIndexer::new_with_pruning(
                 CancellationToken::new(),
                 block_size,
-                Arc::new(KvIndexerMetrics::new_unregistered()),
+                metrics,
                 None,
             ),
             lower_tier: LowerTierIndexers::new(1, block_size),

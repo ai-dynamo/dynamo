@@ -70,6 +70,10 @@ pub mod runtime {
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
 
+    /// Maximum time to wait for graceful endpoint drain during runtime shutdown.
+    pub const DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
+        "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
+
     /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
     /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
     pub const DYN_ENABLE_POLL_HISTOGRAM: &str = "DYN_ENABLE_POLL_HISTOGRAM";
@@ -393,50 +397,6 @@ pub mod llm {
         pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
     }
 
-    /// Agent trace configuration
-    pub mod agent_trace {
-        /// Master switch. Truthy enables tracing with defaults for sinks,
-        /// output path, and the ZMQ tool-event endpoint; other variables below
-        /// override individual knobs.
-        pub const DYN_AGENT_TRACE: &str = "DYN_AGENT_TRACE";
-
-        /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
-        pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
-
-        /// Local output path for normalized agent trace records.
-        ///
-        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
-        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
-        pub const DYN_AGENT_TRACE_OUTPUT_PATH: &str = "DYN_AGENT_TRACE_OUTPUT_PATH";
-
-        /// In-process trace bus capacity.
-        pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
-
-        /// JSONL sink buffer size in bytes.
-        pub const DYN_AGENT_TRACE_JSONL_BUFFER_BYTES: &str = "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES";
-
-        /// JSONL sink periodic flush interval in milliseconds.
-        pub const DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
-            "DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS";
-
-        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
-        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES";
-
-        /// Rotating gzip JSONL sink roll threshold in record lines.
-        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
-
-        /// Enable replay-oriented prompt block hashes in agent request trace records.
-        pub const DYN_AGENT_TRACE_REPLAY_HASHES: &str = "DYN_AGENT_TRACE_REPLAY_HASHES";
-
-        /// Local ZMQ PULL endpoint Dynamo binds for harness tool events.
-        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
-            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
-
-        /// Optional first-frame ZMQ topic filter for harness tool events.
-        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
-            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
-    }
-
     /// Per-request replay trace configuration
     pub mod request_trace {
         /// Master switch. Truthy enables per-request replay tracing.
@@ -469,6 +429,14 @@ pub mod llm {
         /// Rotating gzip JSONL sink roll threshold in record lines.
         pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES: &str =
             "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES";
+
+        /// Local ZMQ PULL endpoint Dynamo binds for harness tool events.
+        pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
+            "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
+
+        /// First-frame ZMQ topic filter override for harness tool events.
+        pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
+            "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
 }
 
@@ -654,6 +622,7 @@ mod tests {
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
+            runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
             runtime::system::DYN_SYSTEM_PORT,
@@ -720,17 +689,6 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
-            llm::agent_trace::DYN_AGENT_TRACE,
-            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
-            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
-            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
-            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
-            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
-            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             llm::request_trace::DYN_REQUEST_TRACE,
             llm::request_trace::DYN_REQUEST_TRACE_SINKS,
             llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
@@ -739,6 +697,8 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -791,6 +751,7 @@ mod tests {
     fn test_naming_conventions() {
         // Dynamo-specific vars should start with DYN_
         assert!(runtime::DYN_RUNTIME_NUM_WORKER_THREADS.starts_with("DYN_"));
+        assert!(runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS.starts_with("DYN_"));
         assert!(runtime::system::DYN_SYSTEM_ENABLED.starts_with("DYN_"));
         assert!(kvbm::DYN_KVBM_METRICS.starts_with("DYN_"));
         assert!(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("DYN_"));

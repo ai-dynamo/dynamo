@@ -392,6 +392,14 @@ def _render_deepseek_v4_prompt_token_ids(
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
 ) -> list[int]:
+    """Render DeepSeek-V4 prompt token ids via SGLang's ``encoding_dsv4``.
+
+    DeepSeek-V4 ships no HF ``chat_template``; SGLang builds the prompt with
+    ``encode_messages`` instead. Flatten each message's content to plain text,
+    re-serialize tool_call ``arguments`` to the JSON string the V4 encoder
+    expects, attach the tool schemas to the system message, then tokenize the
+    rendered prompt.
+    """
     try:
         from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
     except ImportError as exc:
@@ -408,6 +416,22 @@ def _render_deepseek_v4_prompt_token_ids(
             msg["content"] = ""
         else:
             msg["content"] = _flatten_message_content(content)
+
+        # encoding_dsv4.encode_arguments_to_dsml expects tool_call.arguments as
+        # the OpenAI-wire JSON *string* (it json.loads() internally).
+        # _normalize_assistant_tool_call_arguments parses arguments to a dict for
+        # Jinja chat templates, but a dict reaching this V4 encoder trips its
+        # json.loads() fallback into a single name="arguments" parameter wrapping
+        # the whole object — which the model then imitates, emitting a spurious
+        # nested {"arguments": {...}} on its next call. SGLang native keeps this
+        # path string-typed (serving_chat.py only dict-parses for the Jinja
+        # branch); mirror that by re-serializing here.
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if isinstance(fn, dict) and isinstance(fn.get("arguments"), (dict, list)):
+                fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
 
     if template_tools:
         if not encoding_messages or encoding_messages[0].get("role") != "system":

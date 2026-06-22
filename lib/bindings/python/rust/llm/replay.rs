@@ -1618,6 +1618,19 @@ fn fpm_snapshots_to_json(
 /// calls `advance_to()` to run the simulation forward, collects FPM/traffic
 /// metrics, feeds them to the planner state machine, then calls
 /// `apply_scaling()` to resize worker pools.
+/// Reject a goodput SLA threshold that is not a finite, non-negative value;
+/// `None` (unset) is allowed and means "do not gate on this dimension".
+fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
+    if let Some(v) = value
+        && (!v.is_finite() || v < 0.0)
+    {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be a finite, non-negative value, got {v}"
+        )));
+    }
+    Ok(())
+}
+
 #[pyclass(unsendable)]
 pub struct PlannerReplayBridge {
     handle: Option<dynamo_mocker::replay::PlannerReplayHandle>,
@@ -1627,7 +1640,8 @@ pub struct PlannerReplayBridge {
 impl PlannerReplayBridge {
     /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
     #[new]
-    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512))]
+    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         trace_file: PathBuf,
         extra_engine_args: &MockEngineArgs,
@@ -1636,11 +1650,22 @@ impl PlannerReplayBridge {
         router_config: Option<KvRouterConfig>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
     ) -> PyResult<Self> {
         let args =
             Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
         let router_mode = parse_replay_router_mode(router_mode)?;
         let router_config = load_replay_router_config(router_config);
+        validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+        validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+        validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+        let sla = dynamo_mocker::replay::SlaThresholds {
+            ttft_ms: sla_ttft_ms,
+            itl_ms: sla_itl_ms,
+            e2e_ms: sla_e2e_ms,
+        };
 
         let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file(
             args,
@@ -1651,6 +1676,7 @@ impl PlannerReplayBridge {
             num_workers,
             arrival_speedup_ratio,
             router_mode,
+            sla,
         )
         .map_err(to_pyerr)?;
 
@@ -1661,7 +1687,7 @@ impl PlannerReplayBridge {
 
     /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
     #[staticmethod]
-    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512))]
+    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_disagg(
         trace_file: PathBuf,
@@ -1673,6 +1699,9 @@ impl PlannerReplayBridge {
         router_config: Option<KvRouterConfig>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
     ) -> PyResult<Self> {
         let prefill_args =
             Python::with_gil(|py| materialize_replay_mocker_args(py, prefill_engine_args.clone()))?;
@@ -1686,6 +1715,14 @@ impl PlannerReplayBridge {
         };
         let router_mode = parse_replay_router_mode(router_mode)?;
         let router_config = load_replay_router_config(router_config);
+        validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+        validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+        validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+        let sla = dynamo_mocker::replay::SlaThresholds {
+            ttft_ms: sla_ttft_ms,
+            itl_ms: sla_itl_ms,
+            e2e_ms: sla_e2e_ms,
+        };
 
         let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file_disagg(
             config,
@@ -1695,6 +1732,7 @@ impl PlannerReplayBridge {
             trace_block_size,
             arrival_speedup_ratio,
             router_mode,
+            sla,
         )
         .map_err(to_pyerr)?;
 

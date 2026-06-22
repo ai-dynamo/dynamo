@@ -31,7 +31,7 @@ sequenceDiagram
     participant Pi as Pi-Mono
     participant Provider as pi-dynamo-provider
     participant Dynamo as Dynamo frontend
-    participant Trace as Agent trace sink
+    participant Trace as Request trace sink
 
     Pi->>Provider: streamSimple(model, context)
     Provider->>Dynamo: POST /v1/chat/completions<br/>nvext.agent_context, x-request-id
@@ -57,17 +57,18 @@ pi install /absolute/path/to/pi-dynamo-provider
 
 ### 2. Launch Dynamo with tracing enabled
 
-Use the in-repo SGLang launcher (`examples/backends/sglang/launch/agg_agent.sh`), which starts a frontend with KV routing plus one SGLang worker with streaming sessions, KV events, and reasoning/tool parsers wired up. Export the agent-trace env vars first so the worker records traces to a JSONL file and binds the ZMQ socket Pi will connect to:
+Use the in-repo SGLang launcher (`examples/backends/sglang/launch/agg_agent.sh`), which starts a frontend with KV routing plus one SGLang worker with streaming sessions, KV events, and reasoning/tool parsers wired up. Export the request-trace env vars first so the frontend records traces to a JSONL file and binds the ZMQ socket Pi will connect to:
 
 ```bash
-export DYN_AGENT_TRACE_SINKS=jsonl
-export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace.jsonl
-export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_SINKS=jsonl
+export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-request-trace.jsonl
+export DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
 
 ./examples/backends/sglang/launch/agg_agent.sh
 ```
 
-By default this serves `zai-org/GLM-4.7-Flash` on TP 2. Override with `--model-path` / `--tp` if needed. See [Agent Tracing → Enable output](agent-tracing.md#enable-output) for the full env-var reference. The provider works equally well against any Dynamo backend (vLLM, SGLang, TRT-LLM); the SGLang launcher is just the most batteries-included starting point.
+By default this serves `zai-org/GLM-4.7-Flash` on TP 2. Override with `--model-path` / `--tp` if needed. See [Agent Tracing → Enable output](agent-tracing.md#enable-output) for the tracing reference. The provider works equally well against any Dynamo backend (vLLM, SGLang, TRT-LLM); the SGLang launcher is just the most batteries-included starting point.
 
 ### 3. Point Pi at Dynamo
 
@@ -75,9 +76,10 @@ By default this serves `zai-org/GLM-4.7-Flash` on TP 2. Override with `--model-p
 export DYNAMO_BASE_URL=http://127.0.0.1:8000/v1
 export DYNAMO_API_KEY=dummy
 
+export DYN_REQUEST_TRACE=1
 export DYN_AGENT_SESSION_TYPE_ID=pi_coding_agent
 export DYN_AGENT_SESSION_ID=pi-demo-001
-export DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
+export DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
 
 pi --model dynamo/zai-org/GLM-4.7-Flash \
    -p "Run the tests in this folder, fix the smallest bug, and rerun the tests."
@@ -88,11 +90,11 @@ pi --model dynamo/zai-org/GLM-4.7-Flash \
 ### 4. View the trace in Perfetto
 
 ```bash
-python benchmarks/agent_trace/convert_to_perfetto.py \
-  /tmp/dynamo-agent-trace.jsonl \
+python benchmarks/request_trace/convert_to_perfetto.py \
+  /tmp/dynamo-request-trace.jsonl \
   --include-markers \
   --separate-stage-tracks \
-  --output /tmp/dynamo-agent-trace.perfetto.json
+  --output /tmp/dynamo-request-trace.perfetto.json
 ```
 
 Open the result at [ui.perfetto.dev](https://ui.perfetto.dev). You'll see:
@@ -108,12 +110,13 @@ Open the result at [ui.perfetto.dev](https://ui.perfetto.dev). You'll see:
 | ------------------------------------ | -------------------------- | -------------------------------------------------------------------- |
 | `DYNAMO_BASE_URL`                    | `http://127.0.0.1:8000/v1` | Dynamo OpenAI-compatible endpoint root.                              |
 | `DYNAMO_API_KEY`                     | `dynamo-local`             | Bearer token. Local Dynamo usually accepts any value.                |
+| `DYN_REQUEST_TRACE`                  | unset                      | Provider-side switch for injecting `agent_context` and session control. |
+| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset              | Dynamo-bound ZMQ PULL endpoint Pi connects to for tool events.       |
+| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    | `agent-tool-events` | First ZMQ frame; must match Dynamo when set.                         |
 | `DYN_AGENT_SESSION_TYPE_ID`          | `pi_coding_agent`          | Stable workload class for the trace.                                 |
 | `DYN_AGENT_SESSION_ID`               | unset                      | Session/run id. Falls back to Pi's session id for tool events.       |
 | `DYN_AGENT_TRAJECTORY_ID`            | unset                      | Trajectory id override; defaults to Pi's session id per request.     |
 | `DYN_AGENT_PARENT_TRAJECTORY_ID`     | unset                      | Parent trajectory id for nested or subagent workflows.               |
-| `DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` | unset                      | Dynamo-bound ZMQ PULL endpoint Pi connects to for tool events.       |
-| `DYN_AGENT_TOOL_EVENTS_ZMQ_TOPIC`    | `agent-tool-events`        | First ZMQ frame; must match `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`. |
 
 See the [provider README](https://github.com/ai-dynamo/pi-dynamo-provider) for the full variable list, aliases, and ZMQ wire format.
 
@@ -124,8 +127,8 @@ See the [provider README](https://github.com/ai-dynamo/pi-dynamo-provider) for t
 | Symptom                                   | Likely cause                                            | Fix                                                                                       |
 | ----------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | `pi` reports the model is unknown         | `/v1/models` returned empty during Pi startup           | `curl -s "$DYNAMO_BASE_URL/models"` to confirm; restart Pi after Dynamo is ready.         |
-| LLM spans appear, tool spans do not       | Tool-event endpoint not configured on both sides        | Set `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` on Dynamo and `DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` on Pi to the same value. |
-| Tool spans appear, request spans do not   | Dynamo trace sinks not enabled                          | Set `DYN_AGENT_TRACE_SINKS=jsonl` and `DYN_AGENT_TRACE_OUTPUT_PATH` on Dynamo.             |
+| LLM spans appear, tool spans do not       | Tool-event endpoint not configured on both sides        | Set `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` on Dynamo and Pi to the same value. |
+| Tool spans appear, request spans do not   | Dynamo trace sinks not enabled                          | Set `DYN_REQUEST_TRACE=1`, `DYN_REQUEST_TRACE_SINKS=jsonl`, and `DYN_REQUEST_TRACE_OUTPUT_PATH` on Dynamo. |
 | Authentication fails                      | Dynamo expects a specific token                         | Set `DYNAMO_API_KEY` to match your deployment. Local Dynamo usually accepts `dummy`.      |
 
 ## Further reading
