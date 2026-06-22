@@ -14,9 +14,10 @@ use crate::preprocessor::media::MediaDecoder;
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
     common_ext::{CommonExt, CommonExtProvider},
-    nvext::NvExt,
-    nvext::NvExtProvider,
     validate,
+};
+use crate::protocols::common::extensions::{
+    NvExt, NvExtProvider, validate_completion_token_ids_single_choice, validate_nvext_semantics,
 };
 
 pub mod aggregator;
@@ -92,6 +93,7 @@ pub struct NvCreateChatCompletionRequest {
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
 
     /// Extra args to pass to the chat template rendering context
@@ -464,10 +466,11 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
-        super::nvext::validate_completion_token_ids_single_choice(
+        validate_completion_token_ids_single_choice(
             self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
+        validate_nvext_semantics(self.nvext.as_ref())?;
         // none for modalities
         // none for prediction
         // none for audio

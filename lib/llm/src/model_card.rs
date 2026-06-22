@@ -1743,7 +1743,10 @@ fn resolve_token_id_from_tokenizer_files(model_dir: &Path, token_key: &str) -> O
 }
 
 /// Read `<token_key>` from `tokenizer_config.json` (a string or
-/// `{"content": ...}` object) and look it up in `added_tokens_decoder`.
+/// `{"content": ...}` object) and resolve its id via `added_tokens_decoder`,
+/// falling back to `tokenizer.json:added_tokens`. Some models (e.g.
+/// jina-embeddings-v5-omni) ship the token only as a bare string with no
+/// `added_tokens_decoder`, keeping the id mapping solely in `tokenizer.json`.
 fn resolve_token_id_from_tokenizer_config(
     path: &Path,
     token_key: &str,
@@ -1751,13 +1754,20 @@ fn resolve_token_id_from_tokenizer_config(
     let config = read_json(path)
         .with_context(|| format!("Failed to read or parse tokenizer_config.json: {:?}", path))?;
     let token_str = extract_token_string(config.get(token_key), token_key)?;
-    let added_tokens = config
+    if let Some(added_tokens) = config
         .get("added_tokens_decoder")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| {
-            anyhow::anyhow!("added_tokens_decoder not found in tokenizer_config.json")
-        })?;
-    lookup_id_in_added_tokens_decoder(added_tokens, &token_str)
+        && let Ok(id) = lookup_id_in_added_tokens_decoder(added_tokens, &token_str)
+    {
+        return Ok(id);
+    }
+    let model_dir = path.parent().unwrap_or_else(|| Path::new(""));
+    lookup_id_in_tokenizer_json(model_dir, &token_str).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{token_key} '{token_str}' from tokenizer_config.json not found in \
+             added_tokens_decoder or tokenizer.json added_tokens"
+        )
+    })
 }
 
 /// Read and JSON-parse a file, returning `None` if it is missing or invalid.
@@ -2111,6 +2121,31 @@ mod tests {
         assert!(
             eos.contains(&200),
             "eos should resolve to 200 from special_tokens_map"
+        );
+        Ok(())
+    }
+
+    /// Rung 3, `tokenizer.json` fallback: `tokenizer_config.json` names the
+    /// eos token as a bare string but ships NO `added_tokens_decoder`, so the
+    /// string->id mapping lives only in `tokenizer.json:added_tokens`. With
+    /// `generation_config.json` and `special_tokens_map.json` both absent, this
+    /// is the only path that can recover the id. (bos is null in this model, so
+    /// only eos is exercised here.)
+    ///
+    /// Models in the wild that need this: `jinaai/jina-embeddings-v5-omni-small`
+    /// (https://huggingface.co/jinaai/jina-embeddings-v5-omni-small), reported
+    /// in https://github.com/ai-dynamo/dynamo/issues/10805: its eos `<|im_end|>`
+    /// resolves to 151645 from `tokenizer.json` alone. The fixture mirrors that
+    /// layout (ids/strings kept identical to the real model).
+    #[test]
+    fn test_config_json_eos_bos_from_tokenizer_json_fallback() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-tokenizer-json-fallback/config.json");
+        let config = HFConfig::from_json_file(&config_file)?;
+        let eos: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        assert!(
+            eos.contains(&151645),
+            "eos should resolve to 151645 (<|im_end|>) from tokenizer.json"
         );
         Ok(())
     }

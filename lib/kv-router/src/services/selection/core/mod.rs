@@ -20,7 +20,7 @@ use crate::scheduling::overlap::{
 use crate::scheduling::policy::RouterSchedulingPolicy;
 use crate::scheduling::selector::DefaultWorkerSelector;
 use crate::scheduling::{
-    LocalScheduler, PotentialLoad, effective_prefill_tokens,
+    KvSchedulerError, LocalScheduler, PotentialLoad, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -128,7 +128,11 @@ impl SelectionCore {
         replica_config: Option<ReplicaSyncConfig>,
         signal_indexer_ready: bool,
     ) -> Self {
-        let indexer_registry = Arc::new(WorkerRegistry::new(indexer_threads));
+        let cancel_token = cancel_token.child_token();
+        let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
+            indexer_threads,
+            cancel_token.clone(),
+        ));
         if signal_indexer_ready {
             indexer_registry.signal_ready();
         }
@@ -140,6 +144,25 @@ impl SelectionCore {
             cancel_token,
             replica_config,
         }
+    }
+
+    /// Cancel core-scoped tasks (KV-event listeners, scheduling, replica sync,
+    /// periodic expiry) without cancelling the parent token. In-flight and
+    /// queued selections then fail fast.
+    ///
+    /// The KV indexer thread pool is owned by the registry and released when
+    /// this `SelectionCore` is dropped. Idempotent.
+    pub fn shutdown(&self) {
+        self.cancel_token.cancel();
+    }
+
+    fn ensure_running(&self) -> Result<(), SelectionError> {
+        if self.cancel_token.is_cancelled() {
+            return Err(SelectionError::NotReady(
+                "selection service is shutting down".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn recover_indexer_from_peers(
@@ -202,6 +225,7 @@ impl SelectionCore {
         &self,
         req: WorkerRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        self.ensure_running()?;
         let (previous, record) = self.catalog.upsert(req);
         self.reconcile_worker(record.worker_id, previous).await
     }
@@ -211,6 +235,7 @@ impl SelectionCore {
         worker_id: WorkerId,
         patch: WorkerPatchRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        self.ensure_running()?;
         let (previous, record) = self.catalog.patch(worker_id, patch)?;
         self.reconcile_worker(record.worker_id, Some(previous))
             .await
@@ -250,7 +275,7 @@ impl SelectionCore {
         let schedulable_workers = self.catalog.schedulable_count();
         let workers = self.catalog.list(None, None);
         ReadyResponse {
-            ready: schedulable_workers > 0,
+            ready: !self.cancel_token.is_cancelled() && schedulable_workers > 0,
             schedulable_workers,
             workers,
         }
@@ -589,6 +614,8 @@ impl SelectionCore {
             allowed_worker_ids,
             routing_constraints,
         } = operation;
+        self.ensure_running()?;
+
         let entry = self.ready_entry(&key)?;
         let PreparedSelectionInputs {
             sequence_hashes,
@@ -610,9 +637,12 @@ impl SelectionCore {
         } else {
             None
         };
-        let response = entry
-            .scheduler
-            .schedule_with_block_hashes(
+        let response = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
+            }
+            result = entry.scheduler.schedule_with_block_hashes(
                 scheduler_request_id,
                 isl_tokens,
                 Some(sequence_hashes),
@@ -630,8 +660,8 @@ impl SelectionCore {
                 allowed_worker_ids,
                 routing_constraints,
                 None,
-            )
-            .await?;
+            ) => result?,
+        };
         let endpoint = self
             .catalog
             .schedulable_endpoint(response.best_worker.worker_id, &key)
@@ -668,6 +698,7 @@ impl SelectionCore {
         &self,
         req: ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
+        self.ensure_running()?;
         let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
         let entry = self.ready_entry(&key)?;
         let normalized = req
@@ -909,5 +940,248 @@ impl SelectionCore {
             }
         }
         workers
+    }
+}
+
+impl Drop for SelectionCore {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
+        crate::config::KvRouterConfig {
+            use_kv_events,
+            router_queue_threshold: None,
+            ..Default::default()
+        }
+    }
+
+    fn worker(worker_id: WorkerId) -> WorkerRequest {
+        WorkerRequest {
+            worker_id,
+            model_name: "model".to_string(),
+            tenant_id: "default".to_string(),
+            endpoint: Some(format!("http://worker-{worker_id}:8000")),
+            kv_events_endpoint: None,
+            kv_events_endpoints: HashMap::new(),
+            replay_endpoint: None,
+            block_size: Some(4),
+            data_parallel_start_rank: None,
+            data_parallel_size: None,
+            max_num_batched_tokens: Some(1024),
+            total_kv_blocks: None,
+            stable_routing_id: None,
+            is_eagle: None,
+            taints: HashSet::new(),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
+        }
+    }
+
+    fn worker_with_kv_events(worker_id: WorkerId) -> WorkerRequest {
+        WorkerRequest {
+            kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+            ..worker(worker_id)
+        }
+    }
+
+    fn prompt() -> PromptRequest {
+        PromptRequest {
+            token_ids: Some(vec![1, 2, 3, 4]),
+            mm_routing_info: None,
+            block_mm_infos: None,
+            block_hashes: None,
+            sequence_hashes: None,
+            isl_tokens: None,
+            lora_name: None,
+            is_eagle: None,
+        }
+    }
+
+    fn select_request() -> SelectRequest {
+        SelectRequest {
+            model_name: "model".to_string(),
+            tenant_id: "default".to_string(),
+            selection_id: None,
+            prompt: prompt(),
+            router_config_override: None,
+            expected_output_tokens: None,
+            priority_jump: None,
+            strict_priority: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+        }
+    }
+
+    fn reserve_request(reservation_id: &str) -> SelectAndReserveRequest {
+        SelectAndReserveRequest {
+            model_name: "model".to_string(),
+            tenant_id: "default".to_string(),
+            selection_id: None,
+            reservation_id: Some(reservation_id.to_string()),
+            prompt: prompt(),
+            router_config_override: None,
+            expected_output_tokens: None,
+            priority_jump: None,
+            strict_priority: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+        }
+    }
+
+    async fn wait_for_pending_selection(core: &SelectionCore) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if core.loads(Some("model"), Some("default"))[0].pending_count == 1 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("selection did not queue");
+    }
+
+    fn assert_shutdown_error(error: SelectionError) {
+        assert!(matches!(
+            error,
+            SelectionError::NotReady(message)
+                if message == "selection service is shutting down"
+        ));
+    }
+
+    #[test]
+    fn parent_cancel_cancels_core() {
+        let parent = CancellationToken::new();
+        let core = SelectionCore::new(test_config(false), 1, parent.clone());
+
+        assert!(!core.cancel_token.is_cancelled());
+        parent.cancel();
+        assert!(core.cancel_token.is_cancelled());
+    }
+
+    #[test]
+    fn shutdown_keeps_parent_alive() {
+        let parent = CancellationToken::new();
+        let core = SelectionCore::new(test_config(false), 1, parent.clone());
+
+        core.shutdown();
+
+        assert!(core.cancel_token.is_cancelled());
+        assert!(!parent.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_listeners() {
+        let parent = CancellationToken::new();
+        let core = SelectionCore::new(test_config(true), 1, parent);
+
+        let record = core
+            .upsert_worker(worker_with_kv_events(1))
+            .await
+            .expect("worker upsert");
+        assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
+        assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(false));
+
+        core.shutdown();
+        assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_not_ready_and_rejects_new_work() {
+        let core = SelectionCore::new(test_config(false), 1, CancellationToken::new());
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        assert!(core.ready().ready);
+
+        core.shutdown();
+
+        let ready = core.ready();
+        assert!(!ready.ready);
+        assert_eq!(ready.schedulable_workers, 1);
+
+        let upsert_error = core
+            .upsert_worker(worker(2))
+            .await
+            .expect_err("upsert should fail after shutdown");
+        assert_shutdown_error(upsert_error);
+
+        let patch = serde_json::from_value(serde_json::json!({
+            "endpoint": "http://worker-1:9000"
+        }))
+        .expect("worker patch");
+        let patch_error = core
+            .patch_worker(1, patch)
+            .await
+            .expect_err("patch should fail after shutdown");
+        assert_shutdown_error(patch_error);
+
+        let select_error = core
+            .select(select_request())
+            .await
+            .expect_err("selection should fail after shutdown");
+        assert_shutdown_error(select_error);
+
+        let reservation_error = core
+            .create_reservation(ReservationRequest {
+                model_name: "model".to_string(),
+                tenant_id: "default".to_string(),
+                reservation_id: "res-after-shutdown".to_string(),
+                worker_id: 1,
+                dp_rank: None,
+                prompt: prompt(),
+                router_config_override: None,
+                expected_output_tokens: None,
+                effective_prefill_tokens: None,
+            })
+            .await
+            .expect_err("reservation should fail after shutdown");
+        assert_shutdown_error(reservation_error);
+
+        assert_eq!(core.list_workers(None, None).len(), 1);
+        assert_eq!(core.loads(None, None).len(), 1);
+        let deleted = core
+            .delete_worker(1)
+            .await
+            .expect("delete should remain available after shutdown");
+        assert_eq!(deleted.lifecycle, WorkerLifecycle::Unschedulable);
+    }
+
+    #[tokio::test]
+    async fn queued_selection_errors_on_shutdown() {
+        let mut config = test_config(false);
+        config.router_queue_threshold = Some(0.0);
+        let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
+
+        let record = core.upsert_worker(worker(1)).await.expect("worker upsert");
+        assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
+        core.select_and_reserve(reserve_request("res-a"))
+            .await
+            .expect("initial reservation");
+
+        let queued_core = core.clone();
+        let queued = tokio::spawn(async move { queued_core.select(select_request()).await });
+        wait_for_pending_selection(&core).await;
+
+        core.shutdown();
+        let err = tokio::time::timeout(Duration::from_secs(1), queued)
+            .await
+            .expect("queued selection timed out")
+            .expect("queued selection task panicked")
+            .expect_err("queued selection should fail");
+
+        assert!(matches!(
+            err,
+            SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)
+        ));
     }
 }
