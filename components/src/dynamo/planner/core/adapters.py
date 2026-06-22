@@ -39,10 +39,8 @@ class PrefillPlanner(NativePlannerBase):
     async def _bootstrap_regression(self) -> None:
         # Always drive ``_install_benchmark_fpms`` even on fetch failure
         # (fpms=None). The orchestrator path needs an empty-but-present
-        # regression installed so runtime ``_observe_fpm`` has somewhere
-        # to accumulate observations — PSM's constructor builds empty
-        # regressions unconditionally; this mirrors that semantics on
-        # the orchestrator path.
+        # regression installed so runtime FPM observation has somewhere
+        # to accumulate samples.
         fpms = None
         try:
             fpms = await fetch_pre_deployment_metrics(
@@ -53,9 +51,9 @@ class PrefillPlanner(NativePlannerBase):
                 component_type=SubComponentType.PREFILL,
                 aic_spec=self.config.aic_interpolation,
             )
-            await self._install_benchmark_fpms(prefill_fpms=fpms)
         except PreDeploymentMetricsUnavailableError as e:
             _log_missing_pre_deployment_data("prefill", e)
+        await self._install_benchmark_fpms(prefill_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_prefill is None:
@@ -94,9 +92,9 @@ class DecodePlanner(NativePlannerBase):
                 component_type=SubComponentType.DECODE,
                 aic_spec=self.config.aic_interpolation,
             )
-            await self._install_benchmark_fpms(decode_fpms=fpms)
         except PreDeploymentMetricsUnavailableError as e:
             _log_missing_pre_deployment_data("decode", e)
+        await self._install_benchmark_fpms(decode_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
@@ -133,9 +131,9 @@ class AggPlanner(NativePlannerBase):
                 component_type=SubComponentType.DECODE,
                 aic_spec=self.config.aic_interpolation,
             )
-            await self._install_benchmark_fpms(agg_fpms=fpms)
         except PreDeploymentMetricsUnavailableError as e:
             _log_missing_pre_deployment_data("agg", e)
+        await self._install_benchmark_fpms(agg_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:

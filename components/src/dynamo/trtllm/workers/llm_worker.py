@@ -65,10 +65,11 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
 def build_kv_connector_config(config: Config):
@@ -134,16 +135,16 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
 
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
-        "release_memory_occupation",
+        "control/release_memory_occupation",
         handler.release_memory_occupation,
     )
     runtime.register_engine_route(
-        "resume_memory_occupation",
+        "control/resume_memory_occupation",
         handler.resume_memory_occupation,
     )
     logging.info(
         "Registered engine routes: "
-        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
+        "/engine/control/release_memory_occupation, /engine/control/resume_memory_occupation"
     )
 
 
@@ -529,6 +530,7 @@ async def init_llm_worker(
         # So for now, we just set the parsers from the config
         # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
+        runtime_config.context_length = config.max_seq_len
 
         # Set values from config that are available immediately
         # Note: We populate max_num_seqs and max_num_batched_tokens from config
@@ -566,6 +568,17 @@ async def init_llm_worker(
 
         # Set topology and KV transfer policy for topology-aware routing
         apply_topology_config(runtime_config)
+
+        spec_decode_runtime_data = get_spec_decode_runtime_data(engine_args)
+        if spec_decode_runtime_data is not None:
+            runtime_config.set_engine_specific(
+                SPEC_DECODE_RUNTIME_KEY,
+                json.dumps(spec_decode_runtime_data),
+            )
+            logging.info(
+                "Published TRT-LLM spec decode runtime metadata: %s",
+                spec_decode_runtime_data,
+            )
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
@@ -712,7 +725,6 @@ async def init_llm_worker(
             endpoint,
             config.model,
             config.served_model_name,
-            context_length=config.max_seq_len,
             kv_cache_block_size=config.kv_block_size,
             runtime_config=runtime_config,
             custom_template_path=config.custom_jinja_template,

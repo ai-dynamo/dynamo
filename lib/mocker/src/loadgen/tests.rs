@@ -25,6 +25,8 @@ fn test_from_mooncake_single_turn_preserves_fields() {
         "input_length": 8,
         "output_length": 4,
         "hash_ids": [7, 8],
+        "priority": -3,
+        "strict_priority": 7,
     })]);
 
     let trace = Trace::from_mooncake(file.path(), 4).unwrap();
@@ -35,6 +37,8 @@ fn test_from_mooncake_single_turn_preserves_fields() {
     assert_eq!(session.turns[0].input_length, 8);
     assert_eq!(session.turns[0].max_output_tokens, 4);
     assert_eq!(session.turns[0].hash_ids, vec![7, 8]);
+    assert_eq!(session.turns[0].priority, -3);
+    assert_eq!(session.turns[0].strict_priority, 7);
 }
 
 #[test]
@@ -94,6 +98,8 @@ fn test_from_agentic_mooncake_preserves_dependencies_and_tool_wait() {
             "input_length": 4,
             "output_length": 1,
             "hash_ids": [1],
+            "priority": 5,
+            "strict_priority": 6,
             "prefix_reset": true
         }),
         serde_json::json!({
@@ -113,6 +119,8 @@ fn test_from_agentic_mooncake_preserves_dependencies_and_tool_wait() {
     assert_eq!(trace.turns.len(), 2);
     assert_eq!(trace.turns[0].request_id, "r1");
     assert!(trace.turns[0].prefix_reset);
+    assert_eq!(trace.turns[0].priority, 5);
+    assert_eq!(trace.turns[0].strict_priority, 6);
     assert_eq!(trace.turns[1].wait_for, vec!["r1"]);
     assert_eq!(trace.turns[1].delay_after_dependencies_ms, 12.0);
 }
@@ -232,6 +240,8 @@ fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
         max_output_tokens: 3,
         hash_ids: vec![1, 2],
         delay_after_previous_ms: 0.0,
+        priority: -2,
+        strict_priority: 8,
     };
 
     let request = turn
@@ -239,6 +249,8 @@ fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
         .unwrap();
     assert_eq!(request.tokens, vec![1, 1, 1, 1, 2, 2]);
     assert_eq!(request.arrival_timestamp_ms, Some(5.0));
+    assert_eq!(request.priority, -2);
+    assert_eq!(request.strict_priority, 8);
 }
 
 #[test]
@@ -248,6 +260,7 @@ fn test_turn_replay_hashes_match_full_blocks_only() {
         max_output_tokens: 3,
         hash_ids: vec![1, 2],
         delay_after_previous_ms: 0.0,
+        ..Default::default()
     };
 
     let request = turn
@@ -272,6 +285,7 @@ fn test_turn_replay_hashes_support_distinct_trace_and_engine_block_sizes() {
         max_output_tokens: 3,
         hash_ids: vec![1, 2],
         delay_after_previous_ms: 0.0,
+        ..Default::default()
     };
 
     let request = turn
@@ -367,6 +381,7 @@ fn test_expand_hash_prefix_depth_scales_hashes_and_input_length() {
                 max_output_tokens: 2,
                 hash_ids: vec![7, 8],
                 delay_after_previous_ms: 0.0,
+                ..Default::default()
             }],
         }],
     }
@@ -396,12 +411,14 @@ fn test_rescale_ready_span_scales_session_starts_and_inter_turn_delays() {
                         max_output_tokens: 1,
                         hash_ids: vec![1],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![2],
                         delay_after_previous_ms: 20.0,
+                        ..Default::default()
                     },
                 ],
             },
@@ -413,6 +430,7 @@ fn test_rescale_ready_span_scales_session_starts_and_inter_turn_delays() {
                     max_output_tokens: 1,
                     hash_ids: vec![3],
                     delay_after_previous_ms: 0.0,
+                    ..Default::default()
                 }],
             },
         ],
@@ -438,12 +456,14 @@ fn test_driver_requires_completion_before_follow_up_turn() {
                     max_output_tokens: 1,
                     hash_ids: vec![1],
                     delay_after_previous_ms: 0.0,
+                    ..Default::default()
                 },
                 TurnTrace {
                     input_length: 4,
                     max_output_tokens: 1,
                     hash_ids: vec![2],
                     delay_after_previous_ms: 10.0,
+                    ..Default::default()
                 },
             ],
         }],
@@ -475,12 +495,14 @@ fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
                         max_output_tokens: 1,
                         hash_ids: vec![1],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![2],
                         delay_after_previous_ms: 5.0,
+                        ..Default::default()
                     },
                 ],
             },
@@ -492,6 +514,7 @@ fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
                     max_output_tokens: 1,
                     hash_ids: vec![3],
                     delay_after_previous_ms: 0.0,
+                    ..Default::default()
                 }],
             },
         ],
@@ -526,12 +549,14 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
                         max_output_tokens: 2,
                         hash_ids: vec![1, 2],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     },
                     TurnTrace {
                         input_length: 2,
                         max_output_tokens: 3,
                         hash_ids: vec![3],
                         delay_after_previous_ms: 5.0,
+                        ..Default::default()
                     },
                 ],
             },
@@ -543,6 +568,7 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
                     max_output_tokens: 1,
                     hash_ids: vec![4],
                     delay_after_previous_ms: 0.0,
+                    ..Default::default()
                 }],
             },
         ],
@@ -666,6 +692,7 @@ fn test_trace_driver_rechunks_trace_blocks_into_engine_blocks() {
                 max_output_tokens: 2,
                 hash_ids: vec![1, 2],
                 delay_after_previous_ms: 0.0,
+                ..Default::default()
             }],
         }],
     };
@@ -683,6 +710,7 @@ fn test_trace_driver_rechunks_trace_blocks_into_engine_blocks() {
                 max_output_tokens: 2,
                 hash_ids: vec![1, 2],
                 delay_after_previous_ms: 0.0,
+                ..Default::default()
             }
             .to_replay_hashes(4, 2)
             .unwrap()

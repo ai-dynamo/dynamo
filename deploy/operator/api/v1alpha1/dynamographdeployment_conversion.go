@@ -585,9 +585,10 @@ func ConvertToDynamoGraphDeploymentExperimentalSpec(src *v1beta1.DynamoGraphDepl
 // v1beta1.
 func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferPolicy) {
 	*dst = v1beta1.KvTransferPolicy{
-		LabelKey:    src.LabelKey,
-		Domain:      v1beta1.TopologyDomain(src.Domain),
-		Enforcement: v1beta1.KvTransferEnforcement(src.Enforcement),
+		ClusterTopologyName: src.ClusterTopologyName,
+		LabelKey:            src.LabelKey,
+		Domain:              v1beta1.TopologyDomain(src.Domain),
+		Enforcement:         v1beta1.KvTransferEnforcement(src.Enforcement),
 	}
 	if src.PreferredWeight != nil {
 		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
@@ -598,9 +599,10 @@ func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferP
 // v1alpha1.
 func ConvertToKvTransferPolicy(src *v1beta1.KvTransferPolicy, dst *KvTransferPolicy) {
 	*dst = KvTransferPolicy{
-		LabelKey:    src.LabelKey,
-		Domain:      TopologyDomain(src.Domain),
-		Enforcement: KvTransferEnforcement(src.Enforcement),
+		ClusterTopologyName: src.ClusterTopologyName,
+		LabelKey:            src.LabelKey,
+		Domain:              TopologyDomain(src.Domain),
+		Enforcement:         KvTransferEnforcement(src.Enforcement),
 	}
 	if src.PreferredWeight != nil {
 		dst.PreferredWeight = ptr.To(*src.PreferredWeight)

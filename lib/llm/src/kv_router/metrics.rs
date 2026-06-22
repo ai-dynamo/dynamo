@@ -61,6 +61,8 @@ use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
 
+pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
+
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
     prometheus::exponential_buckets(0.001, 2.0, 15).unwrap()
@@ -185,6 +187,56 @@ impl KvPublisherMetrics {
 
 pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
     KV_PUBLISHER_METRICS.get().cloned()
+}
+
+// ---------------------------------------------------------------------------
+// Router worker status metrics (component-scoped gauges)
+// ---------------------------------------------------------------------------
+
+/// Component-scoped router gauges for worker discovery.
+pub(crate) struct RouterWorkerStatusMetrics {
+    pub registered: IntGaugeVec,
+}
+
+static ROUTER_WORKER_STATUS_METRICS: OnceLock<Arc<RouterWorkerStatusMetrics>> = OnceLock::new();
+
+impl RouterWorkerStatusMetrics {
+    /// Create component-scoped gauges for standalone router observability.
+    ///
+    /// The `MetricsHierarchy` injects labels such as `dynamo_namespace` and
+    /// `dynamo_component`. It reserves `worker_id` for the metric producer, so
+    /// the backend worker ID discovered by the router uses `router_worker_id`.
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        ROUTER_WORKER_STATUS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let registered = metrics
+                    .create_intgaugevec(
+                        router::WORKER_REGISTERED,
+                        "Whether the router currently has this worker/dp_rank registered (1 = registered)",
+                        &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
+                        &[],
+                    )
+                    .expect("failed to create router_worker_registered gauge");
+
+                Arc::new(Self { registered })
+            })
+            .clone()
+    }
+
+    pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
+        let worker_id = worker_id.to_string();
+        let dp_rank = dp_rank.to_string();
+        let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
+        self.registered.with_label_values(labels).set(1);
+    }
+
+    pub fn remove_worker(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
+        let worker_id = worker_id.to_string();
+        let dp_rank = dp_rank.to_string();
+        let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
+        let _ = self.registered.remove_label_values(labels);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +801,45 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         assert_eq!(
             output, expected,
             "\nActual PEF:\n{output}\nExpected PEF:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_router_worker_status_metrics_pef() {
+        let registry = prometheus::Registry::new();
+        let metrics = RouterWorkerStatusMetrics {
+            registered: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::COMPONENT,
+                        router::WORKER_REGISTERED
+                    ),
+                    "Whether the router currently has this worker/dp_rank registered (1 = registered)",
+                ),
+                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .unwrap(),
+        };
+        registry
+            .register(Box::new(metrics.registered.clone()))
+            .unwrap();
+
+        metrics.set_registered(123, 0, "decode");
+
+        let output = gather_pef(&registry);
+        assert!(
+            output.contains(
+                "dynamo_component_router_worker_registered{dp_rank=\"0\",router_worker_id=\"123\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+
+        metrics.remove_worker(123, 0, "decode");
+        let output = gather_pef(&registry);
+        assert!(
+            !output.contains("router_worker_id=\"123\""),
+            "\nActual PEF after remove:\n{output}"
         );
     }
 

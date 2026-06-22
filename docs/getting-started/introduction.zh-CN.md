@@ -118,7 +118,7 @@ Dynamo 的 [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/) 通过
 
 一旦通过 AIConfigurator 或 DGDR 找到离线配置，开发者就可以将所需模型部署到生产环境。然而，生产流量在线上可能变化很大，离线确定的静态配置将无法充分处理流量峰值。
 
-Dynamo 提供 [Planner](../design-docs/planner-design.md) 来规避这个问题。开发者只需用 TTFT 和 Time Per Output Token (TPOT) 设置 SLA。Planner 会检查在线流量，并自动决定如何扩展 prefill 和 decode worker，从而在维持指定 SLA 的同时有效处理流量峰值。
+Dynamo 提供 [Planner](../design-docs/planner-design.zh-CN.md) 来规避这个问题。开发者只需用 TTFT 和 Time Per Output Token (TPOT) 设置 SLA。Planner 会检查在线流量，并自动决定如何扩展 prefill 和 decode worker，从而在维持指定 SLA 的同时有效处理流量峰值。
 
 最近，Planner 已扩展到处理更复杂的场景，例如在相同 SLA 下 Input Sequence Length (ISL) 剧烈变化。请参阅 [Planner documentation](../components/planner/planner-guide.zh-CN.md) 了解更多详细信息。
 

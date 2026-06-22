@@ -127,15 +127,15 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 
 | Route | Description |
 |-------|-------------|
-| `/engine/start_profile` | Start PyTorch profiling |
-| `/engine/stop_profile` | Stop profiling and save traces |
-| `/engine/release_memory_occupation` | Release GPU memory for maintenance |
-| `/engine/resume_memory_occupation` | Resume GPU memory after release |
-| `/engine/update_weights_from_disk` | Update model weights from disk |
-| `/engine/update_weights_from_tensor` | Update model weights from tensor payload |
-| `/engine/update_weights_from_distributed` | Update model weights from distributed source |
-| `/engine/update_weights_from_ipc` | Update model weights from IPC payload |
-| `/engine/update_weight_version` | Update weight version metadata |
+| `/engine/control/start_profile` | Start PyTorch profiling |
+| `/engine/control/stop_profile` | Stop profiling and save traces |
+| `/engine/control/release_memory_occupation` | Release GPU memory for maintenance |
+| `/engine/control/resume_memory_occupation` | Resume GPU memory after release |
+| `/engine/control/update_weights_from_disk` | Update model weights from disk |
+| `/engine/control/update_weights_from_tensor` | Update model weights from tensor payload |
+| `/engine/control/update_weights_from_distributed` | Update model weights from distributed source |
+| `/engine/control/update_weights_from_ipc` | Update model weights from IPC payload |
+| `/engine/control/update_weight_version` | Update weight version metadata |
 
 ## See Also
 

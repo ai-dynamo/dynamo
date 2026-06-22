@@ -490,7 +490,7 @@ async fn test_multi_turn_with_continuation() {
 pub mod openai_preprocessor_tests {
     // re-export all the tests from the parent module
     pub use super::*;
-    use dynamo_llm::protocols::openai::nvext::{AgentContext, NvExt};
+    use dynamo_llm::protocols::common::extensions::{AgentContext, NvExt};
     use std::collections::HashSet;
 
     #[tokio::test]
@@ -574,8 +574,11 @@ pub mod openai_preprocessor_tests {
         let agent_context = preprocessed_request
             .agent_context
             .expect("agent_context should propagate");
-        assert_eq!(agent_context.session_type_id, "deep_research:v1");
-        assert_eq!(agent_context.session_id, "run-123");
+        assert_eq!(
+            agent_context.session_type_id.as_deref(),
+            Some("deep_research:v1")
+        );
+        assert_eq!(agent_context.session_id.as_deref(), Some("run-123"));
         assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
         assert_eq!(
             agent_context.parent_trajectory_id.as_deref(),
@@ -714,7 +717,7 @@ mod context_length_validation {
     async fn test_prompt_exceeding_context_length_returns_400() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // Set a very small context length so even a short prompt exceeds it
-        mdc.context_length = 5;
+        mdc.runtime_config.context_length = Some(5);
 
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(
@@ -748,7 +751,7 @@ mod context_length_validation {
     async fn test_prompt_exactly_at_context_length_returns_400() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // First, preprocess with a large context_length to discover the token count
-        mdc.context_length = 131072;
+        mdc.runtime_config.context_length = Some(131072);
         let preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
         let request = make_chat_request(
             r#"[{"role": "user", "content": "What is deep learning?"}]"#,
@@ -761,7 +764,7 @@ mod context_length_validation {
         let token_count = preprocessed.token_ids.len() as u32;
 
         // Now set context_length to exactly the token count — no room for output
-        mdc.context_length = token_count;
+        mdc.runtime_config.context_length = Some(token_count);
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(
             r#"[{"role": "user", "content": "What is deep learning?"}]"#,
@@ -782,7 +785,8 @@ mod context_length_validation {
     async fn test_context_length_zero_skips_validation() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // context_length = 0 means unconfigured, should skip validation
-        mdc.context_length = 0;
+        mdc.runtime_config.context_length = None;
+        mdc.architectural_max_context_length = None;
 
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(

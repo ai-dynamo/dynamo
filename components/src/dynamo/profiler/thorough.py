@@ -512,7 +512,7 @@ async def run_thorough(
         request_latency=request_latency,
     )
     dgd_config = _generate_dgd_from_pick(
-        dgdr, best_config_df, "disagg", {"disagg": task}
+        dgdr, best_config_df, "disagg", {"disagg": task}, picking_mode
     )
 
     return {

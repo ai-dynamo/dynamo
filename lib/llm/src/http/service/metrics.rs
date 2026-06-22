@@ -1002,7 +1002,7 @@ impl Metrics {
 
         self.model_context_length
             .with_label_values(&[&card.display_name])
-            .set(card.context_length as i64);
+            .set(card.effective_context_length() as i64);
 
         self.model_kv_cache_block_size
             .with_label_values(&[&card.display_name])

@@ -18,7 +18,7 @@ use super::overlap_refresh::{
     refresh_overlap,
 };
 use super::policy::{FcfsPolicy, SchedulingPolicy};
-use super::prefill_load::PrefillLoadEstimator;
+use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
@@ -467,6 +467,9 @@ impl<
             return;
         }
 
+        // Strict priority only orders requests parked in `pending`. Preserve
+        // direct admission for eligible arrivals to avoid global head-of-line
+        // blocking across requests with different worker eligibility.
         self.admit_one(request, decay_now);
     }
 
@@ -568,15 +571,11 @@ impl<
     }
 
     /// Run the full scheduling pipeline for a single request:
-    /// compute potential load -> select worker -> book tracked state -> respond.
+    /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
-            request.token_seq.as_deref(),
-            &request.prefill_token_deltas(),
-            decay_now,
-        );
-        request.decode_blocks = decode_blocks;
-        request.prefill_tokens = prefill_tokens;
+        request.worker_loads = self
+            .slots
+            .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
         let selection = {
             let workers = self.workers_with_configs.borrow();
@@ -676,11 +675,11 @@ impl<
             return None;
         }
 
-        let prefix = cached_tokens.min(isl_tokens);
-        let effective_isl = isl_tokens.saturating_sub(prefix);
+        let effective_isl = effective_prefill_tokens(isl_tokens, cached_tokens);
         if effective_isl == 0 {
             return None;
         }
+        let prefix = isl_tokens - effective_isl;
 
         let expected_prefill_duration = match &self.prefill_load_estimator {
             Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
@@ -867,9 +866,20 @@ mod tests {
 
             let mut best_worker = None;
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                let load = request.worker_load_for(worker);
+                let potential_prefill_tokens = if request.track_prefill_tokens {
+                    load.active_prefill_tokens
+                        .saturating_add(effective_prefill_tokens(
+                            request.isl_tokens,
+                            request.effective_cached_tokens_for(worker),
+                        ))
+                } else {
+                    0
+                };
+                let potential_decode_blocks = load.potential_decode_blocks();
                 let key = (
-                    request.prefill_tokens_for(worker),
-                    request.decode_blocks.get(&worker).copied().unwrap_or(0),
+                    potential_prefill_tokens,
+                    potential_decode_blocks,
                     worker.worker_id,
                     worker.dp_rank,
                 );
@@ -1264,13 +1274,13 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks: HashMap::new(),
             effective_cached_tokens: HashMap::new(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1302,6 +1312,43 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_strict_priority_drains_before_policy_score() {
+        let isl = 512;
+        let (queue, slots) = make_queue(1, 16, isl, Some(0.0));
+
+        let (first, first_rx) = make_request("first", isl);
+        queue.enqueue(first).await;
+        first_rx.await.unwrap().unwrap();
+
+        let (mut low, mut low_rx) = make_request("low", isl);
+        low.priority_jump = 10_000.0;
+        queue.enqueue(low).await;
+
+        let (mut high, high_rx) = make_request("high", isl);
+        high.strict_priority = 1;
+        queue.enqueue(high).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        slots.free(&"first".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        let high_response = high_rx.await.unwrap().unwrap();
+        assert_eq!(high_response.best_worker, WorkerWithDpRank::new(0, 0));
+        assert!(
+            low_rx.try_recv().is_err(),
+            "lower strict priority should remain queued"
+        );
+
+        slots.free(&"high".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        low_rx.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+
+        slots.free(&"low".to_string(), decay_now()).unwrap();
         slots.assert_completely_drained(decay_now());
     }
 
@@ -1853,13 +1900,13 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks: HashMap::new(),
             effective_cached_tokens: HashMap::new(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: Some(allowed),
