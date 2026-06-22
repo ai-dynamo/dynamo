@@ -4,8 +4,6 @@
 # HTTPRoute for the on-ramp example in the `atchernych` namespace.
 # Binds to the shared cluster Gateway in `agentgateway-system`.
 #
-# Apply with:
-#   kubectl apply -n atchernych -f httproute-atchernych.yaml
 
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
