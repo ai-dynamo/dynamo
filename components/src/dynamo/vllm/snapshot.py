@@ -5,7 +5,11 @@ import gc
 import logging
 from collections.abc import Callable
 
-from dynamo.common.snapshot.lifecycle import EngineSnapshotController, SnapshotConfig
+from dynamo.common.snapshot.lifecycle import (
+    EngineSnapshotController,
+    SnapshotConfig,
+    configure_snapshot_capture_env,
+)
 
 from .args import Config
 from .handlers import VllmEnginePauseController
@@ -29,6 +33,7 @@ async def prepare_snapshot_engine(
             "Remove --headless or unset DYN_SNAPSHOT_CONTROL_DIR."
         )
 
+    configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
     config.engine_args.enable_sleep_mode = True
 

@@ -23,8 +23,6 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.snapshot.lifecycle import is_snapshot_enabled
-from dynamo.common.snapshot.model_fetch import fetch_model_in_subprocess
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -183,10 +181,7 @@ async def worker(argv: list[str] | None = None) -> None:
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if should_prefetch_model(config):
-        if is_snapshot_enabled():
-            await fetch_model_in_subprocess(config.model)
-        else:
-            await fetch_model(config.model)
+        await fetch_model(config.model)
 
     # Snapshot mode: load engine before runtime creation so there are no
     # runtime connections when CRIU captures GPU state.

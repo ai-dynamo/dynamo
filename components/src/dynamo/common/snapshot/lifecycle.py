@@ -32,17 +32,9 @@ def is_snapshot_enabled() -> bool:
 class SnapshotConfig:
     """Parsed snapshot configuration plus the sentinel-driven lifecycle."""
 
-    def __init__(
-        self,
-        control_dir: str,
-        *,
-        hf_hub_offline: str | None = None,
-        restore_hf_hub_offline: bool = False,
-    ):
+    def __init__(self, control_dir: str):
         self.control_dir = control_dir
         self.ready_file = os.path.join(control_dir, READY_FOR_SNAPSHOT_FILE)
-        self._hf_hub_offline = hf_hub_offline
-        self._restore_hf_hub_offline = restore_hf_hub_offline
 
     @classmethod
     def from_env(cls) -> "SnapshotConfig | None":
@@ -50,13 +42,7 @@ class SnapshotConfig:
         if not control_dir:
             return None
 
-        configure_snapshot_transport_env()
-        hf_hub_offline = _force_hf_hub_offline_for_capture()
-        return cls(
-            control_dir=control_dir,
-            hf_hub_offline=hf_hub_offline,
-            restore_hf_hub_offline=True,
-        )
+        return cls(control_dir=control_dir)
 
     async def run_lifecycle(
         self,
@@ -78,8 +64,6 @@ class SnapshotConfig:
 
             event = await self._wait_for_sentinel()
         finally:
-            if self._restore_hf_hub_offline:
-                _restore_env("HF_HUB_OFFLINE", self._hf_hub_offline)
             self._cleanup_ready_and_sentinels()
 
         if event == "restore":
@@ -117,7 +101,7 @@ class SnapshotConfig:
                 logger.exception("Failed to clean up %s at %s", name, path)
 
 
-def configure_snapshot_transport_env() -> None:
+def configure_snapshot_capture_env() -> None:
     nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
     if nccl_cumem_enable and nccl_cumem_enable != "0":
         logger.warning(
@@ -174,8 +158,6 @@ def configure_snapshot_transport_env() -> None:
     os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
     os.environ.setdefault("TORCH_NCCL_DUMP_ON_TIMEOUT", "0")
 
-
-def _force_hf_hub_offline_for_capture() -> str | None:
     hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
     if hf_hub_offline and hf_hub_offline != "1":
         logger.warning(
@@ -184,14 +166,6 @@ def _force_hf_hub_offline_for_capture() -> str | None:
             hf_hub_offline,
         )
     os.environ["HF_HUB_OFFLINE"] = "1"
-    return hf_hub_offline
-
-
-def _restore_env(name: str, value: str | None) -> None:
-    if value is None:
-        os.environ.pop(name, None)
-    else:
-        os.environ[name] = value
 
 
 @dataclass

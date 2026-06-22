@@ -21,8 +21,10 @@ from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.snapshot.lifecycle import is_snapshot_enabled
-from dynamo.common.snapshot.model_fetch import fetch_model_in_subprocess
+from dynamo.common.snapshot.lifecycle import (
+    configure_snapshot_capture_env,
+    is_snapshot_enabled,
+)
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -418,10 +420,10 @@ async def parse_args(args: list[str]) -> Config:
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if should_fetch_model(parsed_args, model_path):
-        if is_snapshot_enabled():
-            await fetch_model_in_subprocess(model_path)
-        else:
-            await fetch_model(model_path)
+        await fetch_model(model_path)
+
+    if is_snapshot_enabled():
+        configure_snapshot_capture_env()
 
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_model (download the model) here, in `parse_args`. `parse_args` should not

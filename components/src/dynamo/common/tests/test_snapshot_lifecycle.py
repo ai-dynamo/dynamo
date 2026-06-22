@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import os
 
 import pytest
 
@@ -22,7 +21,6 @@ class _PauseController:
         self.resumed = False
 
     async def pause(self) -> None:
-        assert os.environ["HF_HUB_OFFLINE"] == "1"
         self.paused = True
 
     async def resume(self) -> None:
@@ -32,13 +30,11 @@ class _PauseController:
         pass
 
 
-async def test_hf_offline_is_only_for_snapshot_capture_window(monkeypatch, tmp_path):
-    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tmp_path):
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
     controller = _PauseController()
     config = SnapshotConfig.from_env()
     assert config is not None
-    assert os.environ["HF_HUB_OFFLINE"] == "1"
 
     lifecycle = asyncio.create_task(config.run_lifecycle(controller))
     try:
@@ -49,13 +45,13 @@ async def test_hf_offline_is_only_for_snapshot_capture_window(monkeypatch, tmp_p
 
         assert controller.paused is True
         assert (tmp_path / READY_FOR_SNAPSHOT_FILE).exists()
-        assert os.environ["HF_HUB_OFFLINE"] == "1"
 
         (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
 
         assert await lifecycle is True
         assert controller.resumed is True
-        assert "HF_HUB_OFFLINE" not in os.environ
+        assert not (tmp_path / READY_FOR_SNAPSHOT_FILE).exists()
+        assert not (tmp_path / RESTORE_COMPLETE_FILE).exists()
     finally:
         if not lifecycle.done():
             lifecycle.cancel()

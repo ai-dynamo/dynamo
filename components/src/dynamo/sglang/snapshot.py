@@ -9,7 +9,11 @@ import time
 
 import sglang as sgl
 
-from dynamo.common.snapshot.lifecycle import EngineSnapshotController, SnapshotConfig
+from dynamo.common.snapshot.lifecycle import (
+    EngineSnapshotController,
+    SnapshotConfig,
+    configure_snapshot_capture_env,
+)
 
 from .pause import SGLangEnginePauseController
 
@@ -36,6 +40,7 @@ async def prepare_snapshot_engine(
     if snapshot_config is None:
         return None
 
+    configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
 
     # Enable memory_saver so GPU memory can be released for CRIU.
