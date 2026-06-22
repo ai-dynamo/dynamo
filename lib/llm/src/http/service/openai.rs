@@ -35,7 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
-    metadata::extract_metadata_from_http,
+    metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_response_and_observe_metrics,
@@ -73,7 +73,6 @@ use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
-const X_REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
@@ -491,25 +490,6 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
 
     // Fallback: use validated header for backwards compat, or generate new UUID
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-}
-
-pub(super) fn attach_x_request_id<T: Send + Sync + 'static>(
-    request: &mut Context<T>,
-    headers: &HeaderMap,
-) {
-    if !crate::request_trace::is_enabled() {
-        return;
-    }
-
-    if let Some(x_request_id) = headers
-        .get(X_REQUEST_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-    {
-        request.insert(
-            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
-            x_request_id.to_string(),
-        );
-    }
 }
 
 fn context_from_headers<T: Send + Sync + 'static>(

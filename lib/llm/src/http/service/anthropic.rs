@@ -55,8 +55,8 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::SanitizedError;
-use super::metadata::extract_metadata_from_http;
-use super::openai::{attach_x_request_id, get_body_limit, get_or_create_request_id};
+use super::metadata::{attach_x_request_id, extract_metadata_from_http};
+use super::openai::{get_body_limit, get_or_create_request_id};
 
 // ---------------------------------------------------------------------------
 // Router
