@@ -45,47 +45,50 @@ on:
 jobs:
   audit:
     name: Compliance audit
-    # syft pulls the FULL multi-GB image (from our ECR) and catalogs it.
-    # Runner history (every PR pool has a distinct wall for 15-20GB CUDA images):
+    # syft catalogs the FULL multi-GB image. Runner history (every PR pool has a
+    # distinct wall for 15-20GB CUDA images):
     #   small-v2       : disk too small (dies on all large images)
     #   prod-default-v2: disk short for ~20GB (frontend/planner OK, big CUDA die)
     #   deploy-tester-v1: IRSA role lacks ECR -> NoCredentials (Azure ACR + vCluster)
     #   prod-builder-v3: 482GB disk but the runner pod OOMs syft on large images
     #                    (sized to orchestrate REMOTE BuildKit, not scan locally)
     # prod-tester-amd-v2 RUNS these images for tests, so it has the memory the
-    # builder lacked. Open risk: PR-path tester jobs pull via RUNNERS_REGISTRY
-    # (a mirror), not ECR, so ECR-IRSA here is unconfirmed — this run proves it.
-    # Non-GPU tester (syft needs no GPU); registry scan is daemon-independent.
+    # builder lacked. Non-GPU tester (syft needs no GPU); registry scan is
+    # daemon-independent.
     runs-on: prod-tester-amd-v2
+    # Run inside the framework's own -test image (same image + runner combo as
+    # shared-test.yml, proven on this pool): satisfies the runner's job-container
+    # requirement and provides python3 for the audit. The scan then reads the
+    # shipped image from RUNNERS_REGISTRY — the mirror the runner already serves
+    # container images from — so no ECR / aws CLI (absent from the image) and no
+    # ECR-IRSA-in-container is needed.
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}-test
+      env:
+        # The image's 'dynamo' user is uid 1000 but the ARC runner executes the
+        # pod as uid 1001; override HOME/USER so actions/checkout and
+        # getpass.getuser() don't trip on the mismatch (same as shared-test.yml).
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
     # Safety net: if a scan still runs away, fail cleanly instead of holding a
     # runner for the 360-min default. A healthy scan completes in <20 min.
     timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Docker Login
-        # Best-effort: prod-builder-v3 builds via remote BuildKit and may have no
-        # usable local docker daemon, so `docker login` can fail. That's fine —
-        # the scan auths to ECR directly via SYFT_REGISTRY_AUTH_* (see below),
-        # so this step must never block the job.
-        continue-on-error: true
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Install syft
+        # Best-effort: the audit is a soft gate, so never hard-fail the job on a
+        # syft install hiccup — the scan step below is also continue-on-error.
+        continue-on-error: true
         shell: bash
         run: |
-          # The runner doesn't allow writing to /usr/local/bin without sudo, so
-          # install into a runner-writable dir and put it on PATH.
+          # Install into a runner-writable dir and put it on PATH (no sudo).
           mkdir -p "${RUNNER_TEMP}/bin"
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "${RUNNER_TEMP}/bin"
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
       - name: Resolve image ref, baseline + artifact name
         id: resolve
         shell: bash
-        env:
-          ECR: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           set -euo pipefail
           CUDA="${{ inputs.cuda_version }}"
@@ -95,7 +98,9 @@ jobs:
           if [ -n "${CUDA}" ] && [ "${CUDA%%.*}" != "13" ]; then
             IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA%%.*}"
           fi
-          echo "image_ref=${ECR}/ai-dynamo/dynamo:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          # Scan the shipped image from RUNNERS_REGISTRY (the runner's mirror),
+          # not ECR — keeps the scan daemon- and aws-CLI-independent.
+          echo "image_ref=${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           # Compliance artifact name — compliance-<git-sha>-<container>, matching
           # compliance-extract's upload (target_tag_plain == container name). For
@@ -130,23 +135,15 @@ jobs:
       - name: Syft scan (amd64) + audit vs osrb-deps.csv
         continue-on-error: true   # soft gate — never block tests/merge
         shell: bash
-        env:
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           set -euo pipefail
-          # Daemon-independent: scan straight from the registry (syft pulls image
-          # layers from ECR to a temp dir — no docker daemon / DinD needed, which
-          # matters on prod-builder-v3). Auth via SYFT_REGISTRY_AUTH_* from an ECR
-          # token (aws ecr get-login-password works here via the builder's IRSA
-          # role). Keeps creds out of docker config so it works with no daemon.
-          SYFT_REGISTRY_AUTH_PASSWORD="$(aws ecr get-login-password --region "${AWS_DEFAULT_REGION}")"
-          export SYFT_REGISTRY_AUTH_AUTHORITY="${ECR_HOSTNAME}"
-          export SYFT_REGISTRY_AUTH_USERNAME="AWS"
-          export SYFT_REGISTRY_AUTH_PASSWORD
+          # Daemon-independent: syft pulls image layers from RUNNERS_REGISTRY (the
+          # runner's mirror) to a temp dir — no docker daemon / DinD needed. The
+          # runner already serves this registry for the job container, so no
+          # explicit registry auth / aws CLI is required here.
           # syft materializes the full image to disk. If a large CUDA image still
           # exhausts the runner, the post-pull snapshot pinpoints it (a sudden
-          # 100% on the work mount = disk ceiling too low even for the builder).
+          # 100% on the work mount = disk ceiling too low).
           syft "registry:${{ steps.resolve.outputs.image_ref }}" --platform linux/amd64 \
             -o cyclonedx-json=/tmp/syft.cdx.json
           echo "::group::disk after scan"; df -h; echo "::endgroup::"
