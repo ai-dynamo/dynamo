@@ -918,6 +918,9 @@ impl JailedStream {
     /// finalize strips residual markers rather than releasing the raw buffer.
     /// Allowlisted by name (the pinned `dynamo-parsers` predates the config's
     /// `discard_unparseable_wrapper` flag); extend when a new family opts in.
+    // TODO: read `discard_unparseable_wrapper` from the parser config once the
+    // `dynamo-parsers` dependency is bumped to a version that exports it, and
+    // drop this hardcoded name allowlist.
     fn suppresses_tool_call_markup(&self) -> bool {
         matches!(
             self.tool_call_parser.as_deref(),
