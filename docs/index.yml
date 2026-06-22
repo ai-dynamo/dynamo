@@ -301,6 +301,8 @@ navigation:
                 path: agents/trajectory-ids.md
               - page: Agent Tracing
                 path: agents/agent-tracing.md
+              - page: Agent Simulation
+                path: agents/agent-simulation.md
               - page: Agent Hints
                 path: agents/agent-hints.md
               - page: Priority Scheduling
