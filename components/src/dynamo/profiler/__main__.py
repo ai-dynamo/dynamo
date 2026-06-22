@@ -70,8 +70,26 @@ def _parse_dgdr_spec(config_arg: str) -> DynamoGraphDeploymentRequestSpec:
 
     Accepts a file path (JSON/YAML) or an inline JSON string.
     """
+    # Inline JSON can be very large (for example full DGDR specs marshaled by
+    # the operator). Parse obvious JSON first so we avoid probing it as a path.
+    stripped_arg = config_arg.lstrip()
+    if stripped_arg.startswith("{") or stripped_arg.startswith("["):
+        try:
+            data = json.loads(config_arg)
+            return DynamoGraphDeploymentRequestSpec.model_validate(data)
+        except json.JSONDecodeError:
+            # Fall through to file-path and generic JSON parsing below so the
+            # caller gets the existing consolidated validation error.
+            pass
+
     path = Path(config_arg)
-    if path.is_file():
+    try:
+        is_file = path.is_file()
+    except OSError:
+        # Very long inline JSON strings can exceed path-length limits.
+        is_file = False
+
+    if is_file:
         text = path.read_text()
         suffix = path.suffix.lower()
         if suffix in (".yaml", ".yml"):
