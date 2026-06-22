@@ -870,11 +870,20 @@ impl PyEngineCore {
         }
     }
 
-    async fn drain(&self) -> Result<(), DynamoError> {
-        self.call_method0_async("drain")
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        let py_obj = self
+            .call_method0_async("is_quiescent")
             .await
             .map_err(py_err_to_dynamo)?;
-        Ok(())
+        Python::with_gil(|py| -> PyResult<Option<bool>> {
+            let bound = py_obj.bind(py);
+            // Python `None` maps to `Ok(None)`; a bool to `Some(bool)`.
+            if bound.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(bound.extract::<bool>()?))
+        })
+        .map_err(py_err_to_dynamo)
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
@@ -1284,8 +1293,8 @@ impl LLMEngine for PyLLMEngine {
         self.core.abort(ctx).await
     }
 
-    async fn drain(&self) -> Result<(), DynamoError> {
-        self.core.drain().await
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        self.core.is_quiescent().await
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
@@ -1435,8 +1444,8 @@ impl RawEngine for PyRawEngine {
         self.core.abort(ctx).await
     }
 
-    async fn drain(&self) -> Result<(), DynamoError> {
-        self.core.drain().await
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        self.core.is_quiescent().await
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
