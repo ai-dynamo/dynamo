@@ -800,12 +800,13 @@ def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
 
     remaining = model_max_len - 3
 
+    # omitted max_tokens → capped to configured default
     sp = build_sampling_params(make({}), defaults, model_max_len)
     assert sp.max_tokens == 32
 
-    injected = {"max_tokens": remaining}
-    sp = build_sampling_params(make(injected), defaults, model_max_len)
-    assert sp.max_tokens == 32
+    # explicit max_tokens == remaining context → treated as explicit, not capped
+    sp = build_sampling_params(make({"max_tokens": remaining}), defaults, model_max_len)
+    assert sp.max_tokens == remaining
 
     sp = build_sampling_params(make({"max_tokens": 10}), defaults, model_max_len)
     assert sp.max_tokens == 10
