@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Agent Quickstart
 subtitle: Send your first agent-aware request to a running Dynamo deployment
@@ -21,8 +21,11 @@ python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null
 python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
 ```
 
-Agent metadata is backend-agnostic - substitute `dynamo.vllm` or `dynamo.trtllm`
-and the requests below work unchanged.
+Agent metadata is backend-agnostic, so the requests below work unchanged against
+a vLLM or TensorRT-LLM worker. The launch flags differ by backend, though - for
+example, vLLM uses `python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B`. See the
+[installation guide](../getting-started/local-installation.md) for each backend's
+exact launch command.
 
 ## 1. Send a Normal Request
 
@@ -95,19 +98,20 @@ matrix, and [Priority Scheduling](priority-scheduling.md) for priority semantics
 
 ## 4. (Optional) Capture a Trace
 
-To see what Dynamo measured for these requests, enable tracing **before** you
-start the worker:
+To see what Dynamo measured for these requests, export the trace switch **before**
+you start the deployment, so the process recording traces picks it up:
 
 ```bash
-export DYN_AGENT_TRACE=1
-python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+export DYN_REQUEST_TRACE=1
+# then start the frontend and worker as in Prerequisites
 ```
 
-Dynamo writes one `request_end` record per request - carrying your
-`agent_context`, output tokens, and autodetected tool-call and finish metadata -
-to `/tmp/dynamo-agent-trace.*.jsonl.gz`. From there you can visualize the run in
-Perfetto. See [Agent Tracing → Enable output](agent-tracing.md#enable-output) for
-the sink options and the Perfetto converter.
+With the default sink, Dynamo writes one `request_end` record per request -
+carrying your `agent_context`, output tokens, and autodetected tool-call and
+finish metadata - to `/tmp/dynamo-request-trace.*.jsonl.gz`. From there you can
+visualize the run in Perfetto. See
+[Agent Tracing → Enable output](agent-tracing.md#enable-output) for the sink
+options and the Perfetto converter.
 
 ## Next Steps
 
