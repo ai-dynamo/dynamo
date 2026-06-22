@@ -626,6 +626,28 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "multi_node_tp_headless_unified": VLLMConfig(
+        name="multi_node_tp_headless_unified",
+        directory=os.path.join(WORKSPACE_DIR, "tests/serve"),
+        script_name="multi_node_tp_headless.sh",
+        # --unified runs both nodes via dynamo.vllm.unified_main, so the
+        # headless worker exercises unified_main -> run_dynamo_headless (the
+        # unified backend's headless path, mock-only in unit tests).
+        script_args=["--unified"],
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_2,
+            pytest.mark.pre_merge,
+            pytest.mark.unified,
+            # TODO: profile to get max_vram
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "guided_decoding": VLLMConfig(
         name="guided_decoding",
         directory=vllm_dir,
