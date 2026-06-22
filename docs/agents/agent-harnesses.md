@@ -9,25 +9,19 @@ Use this page to point common coding-agent harnesses at a running NVIDIA Dynamo 
 
 ## Local Dynamo
 
-For a local SGLang-backed smoke test, use the in-repo agent launcher. It starts a Dynamo frontend on port `8000` and an SGLang worker for `zai-org/GLM-4.7-Flash`.
+For a local SGLang-backed smoke test, use the in-repo agent launcher. It starts a Dynamo frontend on port `8000`, enables JSONL request tracing with a per-run `/tmp/dynamo-request-trace-*.jsonl` path, and starts an SGLang worker for `zai-org/GLM-4.7-Flash`.
 
 ```bash
-export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_SINKS=jsonl
-export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-request-trace.jsonl
-
 bash examples/backends/sglang/launch/agg_agent.sh
 ```
 
-Set `DYN_HTTP_PORT` before launching if your deployment should listen on a different port.
+Set `DYN_HTTP_PORT` or `DYN_REQUEST_TRACE_OUTPUT_PATH` before launching if your deployment should listen on a different port or write traces to a specific file.
 
 ## Codex
 
 Codex should use Dynamo's OpenAI-compatible Responses API. Add a local provider in `~/.codex/config.toml`:
 
 ```toml
-model_max_output_tokens = 4096
-
 [model_providers.dynamo]
 name = "dynamo"
 base_url = "http://localhost:8000/v1"
@@ -54,7 +48,6 @@ Claude Code should use Dynamo's Anthropic-compatible Messages API. The local lau
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8000
 export ANTHROPIC_AUTH_TOKEN=dummy
-export CLAUDE_CODE_MAX_OUTPUT_TOKENS=4096
 
 claude --model zai-org/GLM-4.7-Flash -p "Say ok"
 ```
