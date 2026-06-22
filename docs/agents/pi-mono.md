@@ -83,8 +83,7 @@ pi --model dynamo/zai-org/GLM-4.7-Flash \
    -p "Run the tests in this folder, fix the smallest bug, and rerun the tests."
 ```
 
-If `DYN_AGENT_TRAJECTORY_ID` is unset, Pi's session id is used as the
-trajectory id.
+If `DYN_AGENT_TRAJECTORY_ID` is unset, Pi's session id is used as the trajectory id.
 
 ### 4. View the trace in Perfetto
 

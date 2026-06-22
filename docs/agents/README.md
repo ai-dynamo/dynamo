@@ -5,15 +5,9 @@ title: Agents
 subtitle: Agent-aware serving features in Dynamo
 ---
 
-NVIDIA Dynamo serves agent workloads through a small set of request extensions,
-trace utilities, and backend features. The harness remains responsible for agent
-semantics. Dynamo receives lightweight metadata and uses it for observability,
-replay, routing hints, priority, and cache-aware serving.
+NVIDIA Dynamo optimizes agent workloads through a lightweight set of headers and request extensions that affect the behavior of the router, the inference engine and the the KV cache manager. The harness remains responsible for agent semantics. Dynamo receives lightweight metadata and uses it for observability, replay, routing hints, priority, and cache-aware serving.
 
-The common identity concept is `trajectory_id`: one stable ID for one agent
-reasoning/tool chain. Supported coding agents can rely on the HTTP headers they
-already emit, and custom clients can send Dynamo trajectory headers. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs)
-for the exact contract.
+The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. Supported coding agents can rely on the HTTP headers they already emit, and custom clients can send Dynamo trajectory headers. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for the exact contract.
 
 ## Core Concepts
 
@@ -26,13 +20,10 @@ for the exact contract.
 | [Priority Scheduling](priority-scheduling.md) | Request priority semantics across the router queue, backend engines, and cache policy. |
 | [Use Pi-Mono with Dynamo](pi-mono.md) | End-to-end quickstart that drives the Pi coding agent through Dynamo with trajectory identity and tool tracing turned on. |
 | [ThunderAgent Program Scheduler](thunderagent-router.md) | Experimental scheduler keyed by trajectory identity with tool-boundary pause/resume on top of KV-aware routing: the 5s scheduler tick, the utilization-driven control loop and its knobs, and scheduler observability. |
-| [Tool Calling](../tool-calling/README.md) | Supported tool-call parsers and parser names, plus engine-fallback configurations. |
-| [Reasoning](../reasoning/README.md) | Supported reasoning parsers for chain-of-thought models, plus engine-fallback configurations. |
 
 ## Backend-Specific Guides
 
-Agent features are exposed through common request metadata, but backend support
-varies by runtime.
+Agent features are exposed through common request metadata, but backend support varies by runtime.
 
 | Backend Guide | Contents |
 |---------------|----------|
@@ -40,8 +31,7 @@ varies by runtime.
 
 ## Request Surface
 
-Agent trajectory identity is header-only. Agent-facing body metadata under
-`nvext` is reserved for serving hints and controls, not identity:
+Agent trajectory identity is header-only. Agent-facing body metadata under `nvext` is for hints and controls.
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -61,6 +51,4 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-Use trajectory IDs when you want traceability across LLM calls, tool calls, and
-external trajectory files. Use `agent_hints` only when the harness has
-serving-relevant intent that Dynamo can act on.
+Use trajectory IDs when you want traceability across LLM calls, tool calls, and external trajectory files. Use `agent_hints` when you want to influence serving behavior at the router and engine layer.
