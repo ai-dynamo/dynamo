@@ -5,313 +5,267 @@ SPDX-License-Identifier: Apache-2.0
 
 # Decode Migration Test Recipe
 
-This recipe brings up Dynamo's normal HTTP frontend with two migration-enabled
-SGLang decode workers, then exercises active request migration through NIXL. It
-covers a two-GPU correctness smoke test and the DeepSeek-V2-Lite DEP8 to DEP2
-performance experiment.
+This recipe defines the process arguments and validation workload for a
+DeepSeek-V2-Lite DEP8-to-DEP2 decode-migration deployment. It deliberately
+does not prescribe Kubernetes manifests, Services, GPU resource classes, or
+pod placement. The deployment layer should translate the three process specs
+below into the local Dynamo Kubernetes conventions.
 
-## Validation Status
-
-The TP1 to TP1 path is the correctness gate and has local coverage for exact
-token parity, stream intervals, cancellation, finish races, cleanup, and
-concurrent migrations.
-
-The DEP8 to DEP2 command below is the target experiment, not yet a release
-claim. It needs ten non-collocated GPUs and exercises multi-DP-rank migration.
-The current host has eight GPUs, so run this part on a B200 or newer system with
-at least ten free GPUs. Do not publish its Pareto point until all success gates
-at the end of this recipe pass.
-
-DeepSeek-V2-Lite is an MLA model, but it is not a thinking model. The static
-experiment therefore treats the first 60% of each generated sequence as
-reasoning and migrates at a sequence-length trigger. Use a token-ID trigger on
-a model with an explicit end-of-thinking token.
-
-## Branches
+## Revisions
 
 Use these branches together:
 
-| Repository | Remote | Branch |
-|---|---|---|
-| SGLang | `git@github.com:aphoh/sglang.git` | `req-migration-2.0` |
-| Dynamo | `git@github.com:ai-dynamo/dynamo.git` | `warnold/sglang-dd-2.0` |
+| Repository | Remote | Branch | Minimum revision |
+|---|---|---|---|
+| SGLang | `git@github.com:Aphoh/sglang.git` | `req-migration-2.0` | `df1f4d7632` |
+| Dynamo | `git@github.com:ai-dynamo/dynamo.git` | `warnold/sglang-dd-2.0` | `e36500de6d` |
 
-For fresh checkouts:
+The runtime image must contain the Dynamo revision and import the SGLang
+revision above. Record both full SHAs and the image digest with every result.
 
-```bash
-mkdir -p /root/proj/decode-migration
-cd /root/proj/decode-migration
+## Deployment Shape
 
-git clone git@github.com:aphoh/sglang.git sglang
-git -C sglang fetch origin req-migration-2.0
-git -C sglang switch --track origin/req-migration-2.0
+The minimum migration deployment is distributed across two worker pods:
 
-git clone git@github.com:ai-dynamo/dynamo.git dynamo
-git -C dynamo fetch origin warnold/sglang-dd-2.0
-git -C dynamo switch --track origin/warnold/sglang-dd-2.0
-```
+| Role | Pods | GPUs per pod | SGLang topology | Taint |
+|---|---:|---:|---|---|
+| Fast reasoning source | 1 | 8 | TP8, DP8 attention, EP8 | `decode/fast` |
+| Slow visible destination | 1 | 2 | TP2, DP2 attention, EP2 | `decode/slow` |
 
-For existing checkouts, fetch and fast-forward instead of resetting local work:
+The frontend is a separate CPU process. The workers do not need to share a
+node. Each pod sees only its assigned GPUs, so neither command uses
+`CUDA_VISIBLE_DEVICES`.
 
-```bash
-git -C /root/proj/decode-migration/sglang fetch aphoh req-migration-2.0
-git -C /root/proj/decode-migration/sglang switch req-migration-2.0
-git -C /root/proj/decode-migration/sglang pull --ff-only aphoh req-migration-2.0
+DeepSeek-V2-Lite is an MLA model and does not need the GQA/MHA heterogeneous-TP
+staging buffer. The source and destination use the same BF16 checkpoint, page
+size, context length, KV dtype, pipeline layout, and NIXL transport.
 
-git -C /root/proj/decode-migration/dynamo fetch origin warnold/sglang-dd-2.0
-git -C /root/proj/decode-migration/dynamo switch warnold/sglang-dd-2.0
-git -C /root/proj/decode-migration/dynamo pull --ff-only
-```
+DeepSeek-V2-Lite is not a thinking model. This controlled benchmark treats the
+first 60% of generated tokens as the reasoning stage and uses a sequence-length
+trigger. For a thinking model, replace that trigger with its end-of-thinking
+token ID.
 
-Record the tested revisions:
+## Frontend
 
-```bash
-git -C /root/proj/decode-migration/sglang rev-parse HEAD
-git -C /root/proj/decode-migration/dynamo rev-parse HEAD
-```
-
-## Prerequisites
-
-The launch scripts expect:
-
-- Linux with Docker, NVIDIA Container Toolkit, and `--gpus all` support;
-- CUDA-capable GPUs with peer/NIXL connectivity;
-- `maturin` and `protoc` on the host for the Dynamo runtime wheel;
-- a local Hugging Face-format model checkpoint; and
-- free ports `18000`, `18081`, `18082`, `18101`, `18102`, `18201`,
-  and `18202`.
-
-Install the build tools if needed:
+Run the normal Dynamo frontend:
 
 ```bash
-uv tool install maturin
-sudo apt-get install -y protobuf-compiler
-docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu24.04 nvidia-smi
+python3 -m dynamo.frontend \
+  --http-port 8000 \
+  --namespace dynamo \
+  --router-mode kv \
+  --enable-decode-migration
 ```
 
-Set the two repository roots once per shell:
+Do not deploy the old Python migration frontend. Decode migration is a normal
+frontend operator enabled by `--enable-decode-migration`.
+
+## Worker Environment
+
+Set these environment variables on both worker pods:
 
 ```bash
-export DYNAMO_ROOT=/root/proj/decode-migration/dynamo
-export SGLANG_ROOT=/root/proj/decode-migration/sglang
-export RECIPE_DIR=$DYNAMO_ROOT/examples/backends/sglang/decode_migration
+SGLANG_ENABLE_JIT_DEEPGEMM=1
+SGLANG_JIT_DEEPGEMM_PRECOMPILE=0
+SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024
+SGLANG_DISAGG_STAGING_BUFFER=0
 ```
 
-## Build the Runtime Image
+Use the deployment-provided Dynamo discovery and request-plane environment.
+Do not force the file discovery backend used by the local smoke script.
 
-The image contains the SGLang runtime dependencies and a Dynamo Python wheel
-built from the selected Dynamo branch. The live source trees are mounted into
-the container, so rebuild after Dynamo Rust or binding changes; Python-only
-edits are visible immediately.
+## Fast Source Worker
+
+Run this command in an 8-GPU pod:
 
 ```bash
-IMAGE=dynamo-sglang-decode-migration:dev \
-DYNAMO_ROOT=$DYNAMO_ROOT \
-  $RECIPE_DIR/build_image.sh
+python3 -m dynamo.sglang \
+  --endpoint dyn://dynamo.backend.generate \
+  --model-path /models/deepseek-v2-lite \
+  --served-model-name deepseek-ai/DeepSeek-V2-Lite \
+  --host 0.0.0.0 \
+  --port 30000 \
+  --disaggregation-bootstrap-port 8998 \
+  --tensor-parallel-size 8 \
+  --data-parallel-size 8 \
+  --expert-parallel-size 8 \
+  --enable-dp-attention \
+  --moe-a2a-backend deepep \
+  --moe-runner-backend deep_gemm \
+  --deepep-mode low_latency \
+  --dtype bfloat16 \
+  --context-length 32768 \
+  --page-size 16 \
+  --max-running-requests 16 \
+  --mem-fraction-static 0.60 \
+  --cuda-graph-bs-decode 1 2 4 8 16 \
+  --disaggregation-transfer-backend nixl \
+  --enable-decode-migration \
+  --worker-taint decode/fast \
+  --stream-interval 1
 ```
 
-## Two-GPU Correctness Gate
+The selected operating point is 16 concurrent requests per DP rank, or 128
+requests across the DEP8 pod. Do not add `--disable-overlap-schedule` or
+`--disable-cuda-graph`.
 
-Use the small Qwen checkpoint first. This runs the full scenario suite and
-stops the deployment afterward:
+## Slow Destination Worker
+
+Run this command in a 2-GPU pod:
 
 ```bash
-IMAGE=dynamo-sglang-decode-migration:dev \
-DYNAMO_ROOT=$DYNAMO_ROOT \
-SGLANG_ROOT=$SGLANG_ROOT \
-MODEL_ROOT=/root/models/qwen3-0.6b \
-MODEL_PATH_IN_CONTAINER=/models/qwen3-0.6b \
-SERVED_MODEL_NAME=Qwen/Qwen3-0.6B \
-SOURCE_GPUS=0 \
-DESTINATION_GPUS=1 \
-SOURCE_TP=1 \
-DESTINATION_TP=1 \
-RESULT_DIR=/tmp/qwen-migration-smoke \
-  $RECIPE_DIR/run_container.sh
+python3 -m dynamo.sglang \
+  --endpoint dyn://dynamo.backend.generate \
+  --model-path /models/deepseek-v2-lite \
+  --served-model-name deepseek-ai/DeepSeek-V2-Lite \
+  --host 0.0.0.0 \
+  --port 30000 \
+  --disaggregation-bootstrap-port 8998 \
+  --tensor-parallel-size 2 \
+  --data-parallel-size 2 \
+  --expert-parallel-size 2 \
+  --enable-dp-attention \
+  --moe-a2a-backend deepep \
+  --moe-runner-backend deep_gemm \
+  --deepep-mode low_latency \
+  --dtype bfloat16 \
+  --context-length 32768 \
+  --page-size 16 \
+  --max-running-requests 128 \
+  --mem-fraction-static 0.60 \
+  --cuda-graph-bs-decode 1 2 4 8 16 32 64 128 \
+  --disaggregation-transfer-backend nixl \
+  --enable-decode-migration \
+  --worker-taint decode/slow \
+  --stream-interval 1
 ```
 
-Repeat with coalesced streaming. This specifically checks that a migration
-trigger hidden inside a multi-token stream chunk is still observed:
+The selected operating point is 128 concurrent requests per DP rank, or 256
+requests across the DEP2 pod. If graph capture at 128 exceeds memory, lower
+both the graph sizes and `--max-running-requests`, remeasure standalone DEP2,
+and label the new configuration separately.
+
+## Kubernetes Requirements
+
+The deployment agent may choose the concrete manifests, but it must preserve
+these properties:
+
+- source and destination pods have disjoint GPU allocations;
+- all worker replicas register the same public model and `generate`,
+  `migration_prepare`, `migration_sync`, and `migration_finalize` endpoints;
+- worker taints are published in Dynamo discovery;
+- pod IPs or advertised worker addresses are mutually routable;
+- TCP port 8998 is reachable directly between worker pods for bootstrap;
+- the selected NIXL data path and any required RDMA devices are available;
+- source and destination ranks remain distinguishable in discovery metadata;
+- frontend cancellation reaches both workers during handoff; and
+- termination grace periods allow migration cleanup to run.
+
+Do not encode rank identity in the bootstrap room. The room is opaque; source
+and destination rank metadata travels explicitly in the migration protocol.
+
+## Request Shape
+
+A migration request is opt-in through `nvext`. For ISL 1, OSL 512, and a 60%
+fast-stage fraction, migrate at total sequence length 308:
+
+```json
+{
+  "model": "deepseek-ai/DeepSeek-V2-Lite",
+  "prompt": [0],
+  "temperature": 0,
+  "max_tokens": 512,
+  "ignore_eos": true,
+  "stream": true,
+  "nvext": {
+    "decode_migration": {
+      "source": {"required_taints": ["decode/fast"]},
+      "destination": {"required_taints": ["decode/slow"]},
+      "trigger": {"type": "sequence_length", "tokens": 308}
+    },
+    "extra_fields": ["completion_token_ids"]
+  }
+}
+```
+
+Every worker can send and receive. The taints express placement policy, not
+one-way worker capabilities.
+
+## Benchmark
+
+Run the stdlib-only open-loop client from the SGLang checkout in a benchmark
+pod or operator shell that can reach the frontend Service:
 
 ```bash
-STREAM_INTERVAL=4 \
-RESULT_DIR=/tmp/qwen-migration-stream-4 \
-  $RECIPE_DIR/run_container.sh
+python3 benchmark/decode_migration/static_decode_pareto.py \
+  --base-url http://dynamo-frontend:8000 \
+  --model deepseek-ai/DeepSeek-V2-Lite \
+  --mode migration \
+  --arrival-rate 70 \
+  --requests 256 \
+  --warmup-seconds 5 \
+  --cooldown-seconds 5 \
+  --max-tokens 512 \
+  --source-fraction 0.6 \
+  --gpu-count 10 \
+  --min-visible-rate 20 \
+  --output /results/migration-rps-70.json
 ```
 
-The second command inherits the repository, image, model, and topology
-variables only if they were exported. Otherwise repeat those assignments.
+Sweep approximately 40, 50, 60, 70, 78, 82, and 86 requests/second without
+restarting the worker pods. Refine around the first point with sustained queue
+growth or TTFNT drift.
 
-## DEP8 to DEP2 Deployment
+For the baseline, deploy only the DEP8 source worker, use `--mode baseline`,
+`--gpu-count 8`, and sweep approximately 30, 40, 46, 50, and 54 requests/second.
+Do not count an idle destination deployment as part of the baseline.
 
-The local checkpoint used for the measurements is
-`/root/models/deepseek-v2-lite`. It is BF16 DeepSeek-V2-Lite with MLA. MLA
-does not use the GQA/MHA staging buffer, so leave
-`SGLANG_DISAGG_STAGING_BUFFER=0`.
-
-The source uses eight data/expert-parallel ranks, one per GPU. Its selected knee
-is 16 concurrent requests per GPU. The destination uses two ranks at 128
-concurrent requests per GPU. Start both once and sweep every offered load
-against the same long-lived processes:
-
-```bash
-IMAGE=dynamo-sglang-decode-migration:dev \
-DYNAMO_ROOT=$DYNAMO_ROOT \
-SGLANG_ROOT=$SGLANG_ROOT \
-MODEL_ROOT=/root/models/deepseek-v2-lite \
-MODEL_PATH_IN_CONTAINER=/models/deepseek-v2-lite \
-SERVED_MODEL_NAME=deepseek-ai/DeepSeek-V2-Lite \
-SOURCE_GPUS=0,1,2,3,4,5,6,7 \
-DESTINATION_GPUS=8,9 \
-SOURCE_TP=8 SOURCE_DP=8 SOURCE_EP=8 \
-DESTINATION_TP=2 DESTINATION_DP=2 DESTINATION_EP=2 \
-SOURCE_ENABLE_DP_ATTENTION=1 \
-DESTINATION_ENABLE_DP_ATTENTION=1 \
-SOURCE_MOE_A2A_BACKEND=deepep \
-DESTINATION_MOE_A2A_BACKEND=deepep \
-SOURCE_MOE_RUNNER_BACKEND=deep_gemm \
-DESTINATION_MOE_RUNNER_BACKEND=deep_gemm \
-SOURCE_DEEPEP_MODE=low_latency \
-DESTINATION_DEEPEP_MODE=low_latency \
-SOURCE_ENABLE_JIT_DEEPGEMM=1 \
-DESTINATION_ENABLE_JIT_DEEPGEMM=1 \
-DEEPEP_MAX_DISPATCH_TOKENS=1024 \
-SOURCE_MAX_RUNNING_REQUESTS=16 \
-DESTINATION_MAX_RUNNING_REQUESTS=128 \
-SOURCE_CUDA_GRAPH_BS="1 2 4 8 16" \
-DESTINATION_CUDA_GRAPH_BS="1 2 4 8 16 32 64 128" \
-SOURCE_MEM_FRACTION_STATIC=0.60 \
-DESTINATION_MEM_FRACTION_STATIC=0.60 \
-SGLANG_DISAGG_STAGING_BUFFER=0 \
-ENABLE_DETERMINISTIC_INFERENCE=0 \
-DISABLE_CUDA_GRAPH=0 \
-STREAM_INTERVAL=1 \
-TEST_MODE=serve \
-RESULT_DIR=/tmp/deepseek-dep-migration \
-  $RECIPE_DIR/run_container.sh
-```
-
-The frontend is the standard `python3 -m dynamo.frontend` path on port
-`18000`. The source and destination retain their public model cards and
-`generate` endpoints; migration is opt-in through `nvext.decode_migration`.
-Overlap scheduling remains enabled.
-
-Wait for:
+For a truncated-normal OSL distribution centered at 512, add:
 
 ```text
-Dynamo frontend and migration workers are ready on port 18000
+--osl-stddev 64 --osl-min 256 --osl-max 768
 ```
 
-If CUDA graph capture at batch 128 exceeds available destination memory, reduce
-`DESTINATION_CUDA_GRAPH_BS` and `DESTINATION_MAX_RUNNING_REQUESTS` together,
-then remeasure the standalone DEP2 point. Do not compare results from different
-graph or concurrency settings as if they were the same configuration.
+The trigger remains request-relative at 60% of each sampled OSL.
 
-## Run the Static Pareto Sweep
+## Rate-Matched Scale Example
 
-In a second terminal, run the included open-loop client. Its defaults are ISL
-1, fixed OSL 512, a 60/40 source/destination split, 256 measured requests,
-five seconds of warmup and cooldown traffic, and a 20 token/s visible-stage
-gate. The migration trigger is sequence length 308 including the one-token
-prompt.
+One DEP8 source pod and one DEP2 destination pod are useful for correctness and
+locating queue knees, but they are not perfectly rate matched. A 64 decode-GPU
+starting point is seven DEP8 source pods and four DEP2 destination pods:
 
-```bash
-export DYNAMO_ROOT=/root/proj/decode-migration/dynamo
-export SGLANG_ROOT=/root/proj/decode-migration/sglang
-export RECIPE_DIR=$DYNAMO_ROOT/examples/backends/sglang/decode_migration
-
-MODEL=deepseek-ai/DeepSeek-V2-Lite \
-MODES=migration \
-RATES="40 50 60 70 78 82 86" \
-REQUESTS=256 \
-RESULT_DIR=/tmp/deepseek-dep-pareto \
-  $RECIPE_DIR/run_static_pareto.sh
+```text
+fast GPUs = 7 * 8 = 56
+slow GPUs = 4 * 2 = 8
+total     = 64
 ```
 
-Run the source-only logical baseline on the same deployment with the
-destination idle and disjoint:
+Scale whole worker replicas. Confirm balance from per-tier queue depth and
+generated token rate rather than assuming the analytical ratio is exact.
 
-```bash
-MODES=baseline \
-RATES="30 40 46 50 54" \
-REQUESTS=256 \
-RESULT_DIR=/tmp/deepseek-dep-baseline \
-  $RECIPE_DIR/run_static_pareto.sh
-```
+## Acceptance Gates
 
-The baseline reports throughput per eight active source GPUs. Migration reports
-throughput per all ten active GPUs. For a truncated-normal OSL distribution
-centered at 512, add:
+Accept a migration point only when:
 
-```bash
-OSL_STDDEV=64 OSL_MIN=256 OSL_MAX=768
-```
+1. all measured requests complete with the expected output length;
+2. the frontend records one committed migration per migrated request;
+3. no prepare, sync, activation, finalize, cancellation, or reservation state
+   leaks remain;
+4. overlap scheduling and CUDA graphs remain enabled;
+5. early-half and late-half TTFNT show stationary queues;
+6. visible decode remains at or above 20 tokens/second/user;
+7. no worker restarts, OOMs, or scheduler invariant failures occur; and
+8. paired task accuracy remains within the accepted baseline tolerance.
 
-Keep the 60/40 boundary request-relative; the client computes it independently
-for every sampled OSL.
+Record token fingerprints for debugging loss or duplication. Require exact
+fingerprint parity in deterministic same-topology smoke tests; heterogeneous
+DEP8-to-DEP2 execution may have legitimate numerical drift.
 
-## Inspect Results
+The standalone measurements motivating these settings were approximately
+222.8 token/s/user and 3201.1 output token/s/GPU for DEP8 at 16 concurrent
+requests/GPU, and 143.4 token/s/user and 15441.5 output token/s/GPU for DEP2 at
+128 concurrent requests/GPU. Treat them as sanity ranges, not acceptance
+thresholds on different hardware or software.
 
-Summarize the sweep:
-
-```bash
-jq -r '
-  [.summary.mode,
-   .summary.arrival_rate_rps,
-   .summary.completed,
-   .summary.slo_compliant,
-   .summary.p95_ttfnt_s,
-   .summary.offered_goodput_per_gpu,
-   .summary.p50_ttfnt_drift_s,
-   .summary.min_visible_rate_tps] | @tsv
-' /tmp/deepseek-dep-pareto/*.json
-```
-
-Confirm that migrations actually committed:
-
-```bash
-rg -c "decode migration committed" \
-  /tmp/deepseek-dep-migration/stream-1/frontend.log
-rg -n "ERROR|Traceback|timed out|declined|failed" \
-  /tmp/deepseek-dep-migration/stream-1
-```
-
-Inspect `fast.log` and `slow.log` through the entire measured interval.
-Running and queued request counts should be stationary rather than growing
-between the early and late halves of the run.
-
-## Success Gates
-
-Accept a point only when all of these hold:
-
-1. All 256 measured requests complete with exactly 512 output tokens.
-2. All measured requests meet the 20 token/s visible-stage gate.
-3. The frontend records one committed migration per migrated request.
-4. There are no source-quiesce, prepare, sync, finalize, cancellation, or KV
-   reservation leaks.
-5. `p50_ttfnt_drift_s` is small enough to show a stationary queue.
-6. The TP1 deterministic smoke has exact baseline/migration token fingerprints.
-   For heterogeneous DEP8-to-DEP2, record fingerprints to diagnose loss or
-   duplication and use paired task accuracy to bound expected numeric drift.
-7. P95 TTFNT and throughput/GPU are reported from the same request set and GPU
-   accounting described above.
-8. No process restarts, OOMs, or scheduler invariant failures occur.
-
-The measured standalone capacities that motivated this pairing were
-approximately 222.8 token/s/user and 3201.1 output token/s/GPU for DEP8 at
-16 concurrent requests/GPU, and 143.4 token/s/user and 15441.5 output
-token/s/GPU for DEP2 at 128 concurrent requests/GPU. Treat these as a sanity
-range, not an acceptance threshold for a different machine or build.
-
-## Stop and Clean Up
-
-Press Ctrl-C in the deployment terminal. The launcher terminates the frontend,
-both workers, and its discovery keepalive process. Confirm no process remains:
-
-```bash
-docker ps --filter ancestor=dynamo-sglang-decode-migration:dev
-nvidia-smi
-```
-
-Keep the JSON results, all three logs, both Git SHAs, image ID, GPU type, driver,
-and CUDA versions with every reported Pareto plot.
+Multi-DP-rank migration remains an experimental validation target until this
+distributed deployment passes every gate above.

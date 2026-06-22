@@ -59,9 +59,9 @@ STREAM_INTERVAL=4 \
   ./examples/backends/sglang/decode_migration/run_container.sh
 ```
 
-See [recipe.md](recipe.md) for branch checkout, image build, a ten-GPU
-DeepSeek-V2-Lite DEP8-to-DEP2 deployment, the open-loop Pareto sweep, and its
-correctness gates.
+See [recipe.md](recipe.md) for exact frontend and worker engine arguments for a
+multi-pod DeepSeek-V2-Lite DEP8-to-DEP2 deployment, its open-loop Pareto sweep,
+and correctness gates.
 
 Choose GPUs with `SOURCE_GPUS` and `DESTINATION_GPUS`. Results are written to
 `RESULT_DIR/stream-N`.
@@ -94,7 +94,7 @@ To run the included paired GSM8K check, add `TEST_MODE=gsm8k`,
   dtype/layout, and NIXL transport. Heterogeneous TP requires a supported direct
   or staging path.
 - Multi-DP-rank migration is wired through the protocol but still needs the
-  ten-GPU live validation in [recipe.md](recipe.md).
+  distributed live validation in [recipe.md](recipe.md).
 - Advanced generation state remains outside current coverage.
 
 See [SIZING.md](SIZING.md) for decode-only capacity planning and
