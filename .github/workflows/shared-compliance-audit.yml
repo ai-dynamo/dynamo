@@ -56,14 +56,14 @@ jobs:
     # builder lacked. Non-GPU tester (syft needs no GPU); registry scan is
     # daemon-independent.
     runs-on: prod-tester-amd-v2
-    # Run inside the framework's own -test image (same image + runner combo as
-    # shared-test.yml, proven on this pool): satisfies the runner's job-container
-    # requirement and provides python3 for the audit. The scan then reads the
-    # shipped image from RUNNERS_REGISTRY — the mirror the runner already serves
-    # container images from — so no ECR / aws CLI (absent from the image) and no
-    # ECR-IRSA-in-container is needed.
+    # Run inside the shipped image itself (same runner combo as shared-test.yml,
+    # proven on this pool): satisfies the runner's job-container requirement and
+    # provides python3 for the audit. syft then scans the container's OWN
+    # filesystem — the image is already materialized as our rootfs, so there's no
+    # registry re-pull and no ECR / aws CLI / IRSA needed. The plain shipped tag
+    # (no -test) so the fs we scan is exactly what ships.
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}
       env:
         # The image's 'dynamo' user is uid 1000 but the ARC runner executes the
         # pod as uid 1001; override HOME/USER so actions/checkout and
@@ -83,8 +83,15 @@ jobs:
         shell: bash
         run: |
           # Install into a runner-writable dir and put it on PATH (no sudo).
+          # curl||wget — the shipped image normally has curl, but fall back so a
+          # missing one doesn't silently no-op the audit.
           mkdir -p "${RUNNER_TEMP}/bin"
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "${RUNNER_TEMP}/bin"
+          INSTALL_URL=https://raw.githubusercontent.com/anchore/syft/main/install.sh
+          if command -v curl >/dev/null 2>&1; then
+            curl -sSfL "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin"
+          else
+            wget -qO- "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin"
+          fi
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
       - name: Resolve image ref, baseline + artifact name
         id: resolve
@@ -98,9 +105,8 @@ jobs:
           if [ -n "${CUDA}" ] && [ "${CUDA%%.*}" != "13" ]; then
             IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA%%.*}"
           fi
-          # Scan the shipped image from RUNNERS_REGISTRY (the runner's mirror),
-          # not ECR — keeps the scan daemon- and aws-CLI-independent.
-          echo "image_ref=${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          # image_tag is used only for report naming + the audit --image label;
+          # the scan reads the container's own filesystem, not a registry ref.
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           # Compliance artifact name — compliance-<git-sha>-<container>, matching
           # compliance-extract's upload (target_tag_plain == container name). For
@@ -121,32 +127,21 @@ jobs:
         with:
           name: ${{ steps.resolve.outputs.artifact }}
           path: /tmp/compliance
-      - name: Reclaim disk before scan
-        continue-on-error: true   # best-effort; never block the audit
-        shell: bash
-        run: |
-          # The runner is shared/reused — stale docker images + build cache from
-          # prior jobs can leave too little room for a 15-20GB CUDA image pull.
-          # Same prune pattern as .github/actions/docker-build. Best-effort
-          # (no-op / failure tolerated if there's no local docker daemon).
-          echo "::group::disk before prune"; df -h; echo "::endgroup::"
-          docker system prune -af || true
-          echo "::group::disk after prune"; df -h; echo "::endgroup::"
-      - name: Syft scan (amd64) + audit vs osrb-deps.csv
+      - name: Syft scan (container fs) + audit vs osrb-deps.csv
         continue-on-error: true   # soft gate — never block tests/merge
         shell: bash
         run: |
           set -euo pipefail
-          # Daemon-independent: syft pulls image layers from RUNNERS_REGISTRY (the
-          # runner's mirror) to a temp dir — no docker daemon / DinD needed. The
-          # runner already serves this registry for the job container, so no
-          # explicit registry auth / aws CLI is required here.
-          # syft materializes the full image to disk. If a large CUDA image still
-          # exhausts the runner, the post-pull snapshot pinpoints it (a sudden
-          # 100% on the work mount = disk ceiling too low).
-          syft "registry:${{ steps.resolve.outputs.image_ref }}" --platform linux/amd64 \
+          # Scan the container's OWN filesystem: this job runs inside the shipped
+          # image, so the image is already on disk as our rootfs — no registry
+          # re-pull, no docker daemon, no ECR / aws creds. Exclude virtual fs +
+          # the GHA workspace/runner mounts so syft catalogs only the image's
+          # packages (dpkg + the venv), not the checkout or /proc.
+          syft dir:/ \
+            --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
+            --exclude './__w/**' --exclude './tmp/**' --exclude './run/**' \
+            --exclude './home/runner/**' \
             -o cyclonedx-json=/tmp/syft.cdx.json
-          echo "::group::disk after scan"; df -h; echo "::endgroup::"
           OUR_CSV=$(find /tmp/compliance -path '*linux_amd64*' -name 'osrb-*.csv' | head -1)
           [ -z "${OUR_CSV}" ] && OUR_CSV=$(find /tmp/compliance -name 'osrb-*.csv' | head -1)
           echo "auditing against ${OUR_CSV}"
