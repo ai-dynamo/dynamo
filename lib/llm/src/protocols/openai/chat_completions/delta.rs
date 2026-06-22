@@ -386,7 +386,8 @@ mod tests {
     use crate::protocols::openai::DeltaGeneratorExt;
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+        ChatCompletionRequestUserMessageContent, CompletionTokensDetails, CompletionUsage,
+        CreateChatCompletionRequest,
     };
 
     fn create_test_request() -> NvCreateChatCompletionRequest {
@@ -480,6 +481,35 @@ mod tests {
             encoder_result: None,
             routing_data: None,
         }
+    }
+
+    #[test]
+    fn test_completion_token_details_are_propagated_from_backend_usage() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-token-details".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 1,
+            total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(3),
+                ..Default::default()
+            }),
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        let completion_details = usage
+            .completion_tokens_details
+            .expect("completion token details should be propagated");
+
+        assert_eq!(completion_details.reasoning_tokens, Some(3));
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
