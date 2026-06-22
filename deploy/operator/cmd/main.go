@@ -264,6 +264,11 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		// PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
+		// Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
+		mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
+			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
+		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
 		banner := strings.Repeat("=", 80)
@@ -708,6 +713,13 @@ func registerControllers(
 		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
+	}
+
+	if err = (&controller.PodSnapshotReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorderFor("snapshot"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
 
 	if runtimeConfig.GroveEnabled {
