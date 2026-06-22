@@ -171,4 +171,4 @@ uv run --no-project python benchmarks/request_trace/convert_to_perfetto.py \
 
 Open the output in [Perfetto UI](https://ui.perfetto.dev/). The default view shows the normal request stack for LLM requests, backend stages, and tool spans when present.
 
-To replay collected traces using the dynamo mock inference engines, see [Agent Simulation](agent-simulation.md).
+To replay collected traces using the dynamo mock inference engines, see [Agent Simulation](agent-replay.md).

@@ -22,7 +22,7 @@ The common identity concept is `trajectory_id`: one stable ID for one agent reas
 | [Agent Harnesses](agent-harnesses.md) | Quickstart for running popular agent harnesses through Dynamo. |
 | [Trajectory IDs](trajectory-ids.md) | Stable agent identity for scheduling, tracing, and more |
 | [Agent Tracing](agent-tracing.md) | Request traces, inferred tool calls, optional harness tool spans, and Perfetto conversion. |
-| [Agent Simulation](agent-simulation.md) | Convert agent traces into replay and simulation inputs. |
+| [Agent Simulation](agent-replay.md) | Convert agent traces into replay and simulation inputs. |
 | [Agent Hints](agent-hints.md) | Per-request hints such as priority, expected output length, and speculative prefill. |
 | [Priority Scheduling](priority-scheduling.md) | Priority behavior across the router queue, backend engines, and cache policy. |
 | [ThunderAgent Program Scheduler](thunderagent-router.md) | Experimental tool-boundary pause/resume scheduler on top of KV-aware routing. |
