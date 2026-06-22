@@ -266,7 +266,8 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiac
 	// If it is unset, nothing was bound, so drop the finalizer. (Accepted orphan risk: a content
 	// created via SSA but whose status write did not land before the process crashed AND the
 	// PodSnapshot was deleted during that downtime would leak; deemed acceptable, not guarded.)
-	if snap.Status.BoundPodSnapshotContentName == nil {
+	contentName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, "")
+	if contentName == "" {
 		controllerutil.RemoveFinalizer(snap, podSnapshotFinalizer)
 		if err := sr.Update(ctx, snap); err != nil {
 			return ctrl.Result{}, fmt.Errorf("remove snapshot finalizer: %w", err)
@@ -274,7 +275,6 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiac
 		return ctrl.Result{}, nil
 	}
 
-	contentName := *snap.Status.BoundPodSnapshotContentName
 	content := &nvidiacomv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}}
 	if err := sr.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("delete PodSnapshotContent %q: %w", contentName, err)
