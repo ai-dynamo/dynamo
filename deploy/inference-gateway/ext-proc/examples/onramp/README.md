@@ -81,12 +81,24 @@ runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
 ```bash
 kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml
 kubectl apply  -n <ns> -f http-route.yaml # adjust per your namespace
-GW=$(kubectl -n agentgateway-system get gateway inference-gateway -o jsonpath='{.status.addresses[0].value}')
-echo "$GW"
-curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "Qwen/Qwen3-0.6B",
-  "messages": [{"role":"user","content":"hello"}]
-}'
+
+# terminal 1
+kubectl -n agentgateway-system port-forward svc/inference-gateway 8000:80
+
+# terminal 2
+GATEWAY_URL=http://localhost:8000
+
+# quick health/smoke first
+curl --max-time 20 -sS "$GATEWAY_URL/v1/models" | jq .
+
+# then chat completion
+curl --max-time 120 -sS "$GATEWAY_URL/v1/chat/completions" \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role":"user","content":"hello"}]
+  }' | jq .
+
 ```
 
 ## router-only-mode environment contract
