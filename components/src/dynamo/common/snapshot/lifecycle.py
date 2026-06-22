@@ -32,9 +32,17 @@ def is_snapshot_enabled() -> bool:
 class SnapshotConfig:
     """Parsed snapshot configuration plus the sentinel-driven lifecycle."""
 
-    def __init__(self, control_dir: str):
+    def __init__(
+        self,
+        control_dir: str,
+        *,
+        hf_hub_offline: str | None = None,
+        restore_hf_hub_offline: bool = False,
+    ):
         self.control_dir = control_dir
         self.ready_file = os.path.join(control_dir, READY_FOR_SNAPSHOT_FILE)
+        self._hf_hub_offline = hf_hub_offline
+        self._restore_hf_hub_offline = restore_hf_hub_offline
 
     @classmethod
     def from_env(cls) -> "SnapshotConfig | None":
@@ -43,7 +51,12 @@ class SnapshotConfig:
             return None
 
         configure_snapshot_transport_env()
-        return cls(control_dir=control_dir)
+        hf_hub_offline = _force_hf_hub_offline_for_capture()
+        return cls(
+            control_dir=control_dir,
+            hf_hub_offline=hf_hub_offline,
+            restore_hf_hub_offline=True,
+        )
 
     async def run_lifecycle(
         self,
@@ -53,7 +66,6 @@ class SnapshotConfig:
         logger.info("Pausing model")
         await pause_controller.pause(*pause_args)
 
-        hf_hub_offline = _force_hf_hub_offline_for_capture()
         try:
             with open(self.ready_file, "w", encoding="utf-8") as ready_file:
                 ready_file.write("ready")
@@ -66,7 +78,8 @@ class SnapshotConfig:
 
             event = await self._wait_for_sentinel()
         finally:
-            _restore_env("HF_HUB_OFFLINE", hf_hub_offline)
+            if self._restore_hf_hub_offline:
+                _restore_env("HF_HUB_OFFLINE", self._hf_hub_offline)
             self._cleanup_ready_and_sentinels()
 
         if event == "restore":
@@ -166,7 +179,7 @@ def _force_hf_hub_offline_for_capture() -> str | None:
     hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
     if hf_hub_offline and hf_hub_offline != "1":
         logger.warning(
-            "Overriding HF_HUB_OFFLINE=%r with '1' while ready for snapshot "
+            "Overriding HF_HUB_OFFLINE=%r with '1' in snapshot mode "
             "to avoid external Hugging Face sockets in snapshotted processes",
             hf_hub_offline,
         )

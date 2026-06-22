@@ -9,6 +9,7 @@ import pytest
 from dynamo.common.snapshot.constants import (
     READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
+    SNAPSHOT_CONTROL_DIR_ENV,
 )
 from dynamo.common.snapshot.lifecycle import SnapshotConfig
 
@@ -21,7 +22,7 @@ class _PauseController:
         self.resumed = False
 
     async def pause(self) -> None:
-        assert "HF_HUB_OFFLINE" not in os.environ
+        assert os.environ["HF_HUB_OFFLINE"] == "1"
         self.paused = True
 
     async def resume(self) -> None:
@@ -33,8 +34,11 @@ class _PauseController:
 
 async def test_hf_offline_is_only_for_snapshot_capture_window(monkeypatch, tmp_path):
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
     controller = _PauseController()
-    config = SnapshotConfig(str(tmp_path))
+    config = SnapshotConfig.from_env()
+    assert config is not None
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
 
     lifecycle = asyncio.create_task(config.run_lifecycle(controller))
     try:
