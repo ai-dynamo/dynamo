@@ -1036,6 +1036,7 @@ def _try_run_claude_subagent_smoke(
             marker_filename,
             frontend_port,
             request_trace_path,
+            trace_start_index,
         )
     except Exception:
         logger.warning("Optional Claude subagent smoke failed", exc_info=True)
@@ -1049,6 +1050,7 @@ def _run_claude_subagent_smoke(
     marker_filename: str,
     frontend_port: int,
     request_trace_path: Path,
+    trace_start_index: int,
 ) -> None:
     base_url = f"http://localhost:{frontend_port}"
     logger.info("Running optional Claude subagent smoke test against %s", base_url)
