@@ -115,14 +115,11 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
 	}
 
-	// The checkpoint ID is read from the source pod's label (set there by the DynamoCheckpoint
-	// controller); the PodSnapshot does not duplicate it. The pod is the single source of truth.
-	id := pod.Labels[snapshotprotocol.CheckpointIDLabel]
-	if id == "" {
-		return sr.failPodSnapshot(ctx, snap, "MissingCheckpointID",
-			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotprotocol.CheckpointIDLabel))
-	}
-	contentName := podSnapshotContentName(id)
+	// The content is named from the PodSnapshot UID, not the checkpoint ID: the ID is a
+	// restore-time concern that lives on the pod's labels, and the content does not need it.
+	// UID is immutable and already populated here (the finalizer branch above round-tripped an
+	// Update), so the name is stable and deterministic for the PodSnapshot's lifetime.
+	contentName := podSnapshotContentName(snap)
 
 	content, err := sr.ensurePodSnapshotContent(ctx, snap, contentName, pod)
 	if err != nil {
@@ -331,9 +328,14 @@ func podSnapshotRefFromContentObj(obj any) (nvidiacomv1alpha1.PodSnapshotReferen
 	return content.Spec.PodSnapshotRef, true
 }
 
-// podSnapshotContentName composes the deterministic cluster-scoped PodSnapshotContent name.
-func podSnapshotContentName(checkpointID string) string {
-	return "podsnapshotcontent-" + checkpointID
+// podSnapshotContentName composes the deterministic cluster-scoped PodSnapshotContent name from
+// the PodSnapshot UID, following the Kubernetes convention for naming a cluster-scoped object
+// bound to a namespaced one (a dynamically provisioned PV is pvc-<PVC.UID>; an external-snapshotter
+// content is snapcontent-<VolumeSnapshot.UID>). The UID-derived name is collision-proof cluster-wide
+// and stable for the PodSnapshot's lifetime, so re-reconcile after a partial create Gets the same
+// content rather than creating a duplicate.
+func podSnapshotContentName(snap *nvidiacomv1alpha1.PodSnapshot) string {
+	return "podsnapshotcontent-" + string(snap.UID)
 }
 
 // jitteredBackoff adds up to 50% jitter to a base delay to avoid synchronized requeues.
