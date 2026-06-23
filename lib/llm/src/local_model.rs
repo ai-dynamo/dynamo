@@ -647,9 +647,7 @@ impl LocalModel {
         let endpoint_id = endpoint.id();
 
         let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
-
-        drt.metadata_artifacts()
-            .unregister_for_owner(&(instance_id, model_suffix.clone()));
+        let registry_owner = (instance_id, model_suffix.clone());
 
         let instance = DiscoveryInstance::Model {
             namespace: endpoint_id.namespace,
@@ -662,6 +660,7 @@ impl LocalModel {
 
         let discovery = drt.discovery();
         discovery.unregister(instance).await?;
+        drt.metadata_artifacts().unregister_for_owner(&registry_owner);
 
         if let Some(lora_name) = lora_name {
             tracing::info!(
