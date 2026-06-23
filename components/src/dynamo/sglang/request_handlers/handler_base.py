@@ -974,31 +974,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         trajectory_id = self._trajectory_id(request)
         return {"session_params": {"id": trajectory_id}} if trajectory_id else {}
 
-    def _wrap_trajectory_stream(
-        self, stream: AsyncGenerator[ResponseT, None], request: Dict[str, Any]
-    ) -> AsyncGenerator[ResponseT, None]:
-        trajectory_id = self._trajectory_id(request)
-        kv_hints = (request.get("agent_context") or {}).get("kv_hints") or {}
-        if trajectory_id is None or kv_hints.get("evict_trajectory") is not True:
-            return stream
-        return self._close_trajectory_after_stream(stream, trajectory_id)
-
-    async def _close_trajectory_after_stream(
-        self, stream: AsyncGenerator[ResponseT, None], trajectory_id: str
-    ) -> AsyncGenerator[ResponseT, None]:
-        try:
-            async for item in stream:
-                yield item
-        finally:
-            from sglang.srt.managers.io_struct import CloseSessionReqInput
-
-            try:
-                await self.engine.tokenizer_manager.close_session(
-                    CloseSessionReqInput(session_id=trajectory_id), None
-                )
-            except Exception:
-                logger.exception("Failed to close trajectory %s", trajectory_id)
-
     @staticmethod
     def _get_guided_decoding_params(
         guided_decoding: Optional[Dict[str, Any]],

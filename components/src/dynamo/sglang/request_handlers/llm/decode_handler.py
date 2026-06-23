@@ -397,8 +397,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
-            decode = self._wrap_trajectory_stream(decode, request)
-
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     decode,
@@ -465,7 +463,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
-            agg = self._wrap_trajectory_stream(agg, request)
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     agg,
