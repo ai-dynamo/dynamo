@@ -66,6 +66,8 @@ navigation:
             path: kubernetes/README.md
           - page: Local Quickstart
             path: getting-started/quickstart.mdx
+          - page: Compatibility
+            path: getting-started/compatibility.md
 
       # ==================== Usage ====================
       - section: Model Deployment # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
@@ -646,12 +648,8 @@ navigation:
       # Support Matrix + Feature Matrix consolidated into getting-started/compatibility.md
       - section: Reference
         contents:
-          - page: Compatibility
-            path: getting-started/compatibility.md
           - page: Release Artifacts
             path: reference/release-artifacts.md
-          - page: Examples # TODO: get rid of this bc it doesn't actually give anything new beyond linking to other pages -- maybe just link to the relevant sections
-            path: getting-started/examples.md
           - page: Glossary
             path: reference/glossary.md
 

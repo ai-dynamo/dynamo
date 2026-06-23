@@ -290,7 +290,5 @@ favicon: ../docs/assets/NVIDIA_symbol.svg
 js:
   - url: https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js
     strategy: beforeInteractive
-  - url: https://buttons.github.io/buttons.js
-    strategy: afterInteractive
 css:
   - ./main.css

@@ -813,3 +813,61 @@ svg.card-icon{
     text-decoration-style: underline !important;
 }
 
+/* ===================== Welcome (Home) landing page ===================== */
+
+/* GitHub Star/Fork buttons: rendered as ghbtns.com iframes (immune to Fern's
+   SPA link rewriting). Lay them out in a row with a little breathing room. */
+.github-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    margin: 0.5rem 0 1.5rem;
+}
+.github-buttons iframe {
+    border: 0;
+    overflow: hidden;
+    /* iframes are inline by default; keep them aligned to the text baseline row */
+    display: inline-block;
+    vertical-align: middle;
+}
+
+/* Brand gradient wash anchored to the top of the page content, echoing the
+   SGLang landing hero. Scoped to the Welcome page via the .welcome-gradient
+   marker div so it never bleeds onto other docs pages. Sits behind content. */
+.welcome-gradient {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 480px;
+    pointer-events: none;
+    z-index: 0;
+    background: radial-gradient(ellipse 120% 80% at 50% 0%,
+        rgba(118, 185, 0, 0.18) 0%,
+        rgba(118, 185, 0, 0.10) 28%,
+        rgba(118, 185, 0, 0.04) 55%,
+        transparent 80%);
+}
+.dark .welcome-gradient {
+    background: radial-gradient(ellipse 120% 80% at 50% 0%,
+        rgba(118, 185, 0, 0.22) 0%,
+        rgba(118, 185, 0, 0.12) 28%,
+        rgba(118, 185, 0, 0.05) 55%,
+        transparent 80%);
+}
+/* Keep page content above the gradient wash. */
+.welcome-gradient ~ * {
+    position: relative;
+    z-index: 1;
+}
+
+/* Widen the Welcome page beyond the default 812px content width so the cards use
+   the horizontal space freed by hide-toc. Scoped via :has() to the article that
+   contains the .welcome-gradient marker, so other docs pages keep their reading
+   width. The article is normally `w-content-width mx-auto` (812px, centered). */
+article:has(.welcome-gradient) {
+    width: 100% !important;
+    max-width: 1200px !important;
+}
+
