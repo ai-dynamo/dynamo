@@ -14,7 +14,7 @@ use super::validate::{
 };
 use super::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayWorkerArtifacts,
-    TraceSimulationReport,
+    SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
@@ -162,6 +162,7 @@ pub fn simulate_trace_file_with_router_mode(
         0,
         false,
         None,
+        SlaThresholds::default(),
     )
 }
 
@@ -180,6 +181,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
     trace_num_prefix_groups: usize,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode)?;
@@ -193,6 +195,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             trace,
             num_workers,
             router_mode,
+            sla,
         );
     }
     if trace_format == TraceFileFormat::AppliedComputeAgentic {
@@ -220,6 +223,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )?
     } else if trace_accumulates_session_deltas(trace_format) {
         crate::replay::offline::simulate_trace_workload_accumulating_deltas(
@@ -231,6 +235,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )?
     } else {
         crate::replay::offline::simulate_trace_workload(
@@ -242,6 +247,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )?
     };
     Ok(report)
@@ -269,6 +275,7 @@ pub fn simulate_trace_file_disagg_with_router_mode(
         0,
         false,
         None,
+        SlaThresholds::default(),
     )
 }
 
@@ -286,6 +293,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
     trace_num_prefix_groups: usize,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
@@ -319,6 +327,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )?
     } else {
         crate::replay::offline::simulate_trace_workload_disagg(
@@ -329,6 +338,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )?
     };
     Ok(report)
@@ -479,6 +489,7 @@ pub fn simulate_trace_requests_with_router_mode(
         router_mode,
         false,
         None,
+        SlaThresholds::default(),
     )?;
     Ok(report)
 }
@@ -506,6 +517,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         router_mode,
         false,
         None,
+        SlaThresholds::default(),
     )?;
     Ok(report)
 }
@@ -597,6 +609,7 @@ pub fn simulate_concurrency_file_with_router_mode(
         0,
         false,
         None,
+        SlaThresholds::default(),
     )
 }
 
@@ -615,6 +628,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
     trace_num_prefix_groups: usize,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_concurrency_args(&args, num_workers, max_in_flight, router_mode)?;
@@ -639,6 +653,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )?
     } else {
         crate::replay::offline::simulate_concurrency_workload(
@@ -651,6 +666,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )?
     };
     Ok(report)
@@ -678,6 +694,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode(
         0,
         false,
         None,
+        SlaThresholds::default(),
     )
 }
 
@@ -695,6 +712,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
     trace_num_prefix_groups: usize,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
@@ -720,6 +738,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
         router_mode,
         record_per_request,
         max_sim_time_ms,
+        sla,
     )?;
     Ok(report)
 }
@@ -894,6 +913,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
         router_mode,
         false,
         None,
+        SlaThresholds::default(),
     )
 }
 
@@ -920,6 +940,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
         router_mode,
         false,
         None,
+        SlaThresholds::default(),
     )
 }
 
@@ -957,6 +978,7 @@ pub fn simulate_trace_workload_with_router_mode(
         router_mode,
         false,
         None,
+        SlaThresholds::default(),
     )?;
     Ok(report)
 }
@@ -978,6 +1000,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
         router_mode,
         false,
         None,
+        SlaThresholds::default(),
     )?;
     Ok(report)
 }
@@ -1055,6 +1078,7 @@ pub fn simulate_concurrency_workload_with_router_mode(
         router_mode,
         false,
         None,
+        SlaThresholds::default(),
     )
 }
 
@@ -1077,6 +1101,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode(
         router_mode,
         false,
         None,
+        SlaThresholds::default(),
     )
 }
 

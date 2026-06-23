@@ -63,24 +63,17 @@ where
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentContext {
-    /// Reusable session/profile class.
-    pub session_type_id: String,
-
-    /// Top-level agent run/session identifier.
-    pub session_id: String,
-
     /// Schedulable reasoning/tool trajectory identifier.
     pub trajectory_id: String,
 
     /// Optional parent trajectory for subagents.
     #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_trajectory_id: Option<String>,
 
-    /// Optional terminal marker: when true, this request signals that the
-    /// trajectory is complete.
+    /// Optional terminal marker for lifecycle-aware internal consumers.
     #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub trajectory_final: Option<bool>,
 }
 
@@ -209,10 +202,6 @@ pub struct NvExt {
 
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_context: Option<AgentContext>,
-
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timestamp_ms: Option<f64>,
 
     #[builder(default, setter(strip_option))]
@@ -276,31 +265,28 @@ const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
         Self {
-            session_type_id: values.session_type_id.to_string(),
-            session_id: values.session_id.clone(),
             trajectory_id: values.trajectory_id,
             parent_trajectory_id: values.parent_trajectory_id,
-            trajectory_final: None,
+            trajectory_final: values.trajectory_final,
         }
     }
 }
 
-/// Apply HTTP header overrides to nvext.
+pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
+
+pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
+    agent_context_header_values(headers).map(AgentContext::from)
+}
+
+/// Apply HTTP routing header overrides to nvext.
 ///
 /// Header mappings:
 /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
 /// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
-/// - coding-agent session headers -> `agent_context.session_id` and
-///   `agent_context.trajectory_id`
-/// - coding-agent child trajectory headers -> `agent_context.trajectory_id`
-/// - coding-agent source -> `agent_context.session_type_id`
-/// - configured coding-agent parent session headers ->
-///   `agent_context.parent_trajectory_id`
 ///
 /// Routing headers take priority over existing nvext values when present.
-/// Explicit `nvext.agent_context` takes priority over coding-agent headers.
 /// If no headers are present, returns the original nvext unchanged.
 pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
     let worker_id = headers
@@ -325,20 +311,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
-    let has_agent_context = nvext
-        .as_ref()
-        .is_some_and(|ext| ext.agent_context.is_some());
-    let header_agent_context = if has_agent_context {
-        None
-    } else {
-        agent_context_header_values(headers).map(AgentContext::from)
-    };
-
-    if worker_id.is_none()
-        && prefill_id.is_none()
-        && dp_rank.is_none()
-        && prefill_dp_rank.is_none()
-        && header_agent_context.is_none()
+    if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
     {
         return nvext;
     }
@@ -357,9 +330,6 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     if let Some(rank) = prefill_dp_rank {
         ext.prefill_dp_rank = Some(rank);
     }
-    if ext.agent_context.is_none() {
-        ext.agent_context = header_agent_context;
-    }
     Some(ext)
 }
 
@@ -376,24 +346,6 @@ pub fn validate_nvext_semantics(nvext: Option<&NvExt>) -> anyhow::Result<()> {
     let Some(nvext) = nvext else {
         return Ok(());
     };
-
-    if let Some(agent_context) = nvext.agent_context.as_ref() {
-        validate_non_empty(
-            &agent_context.session_type_id,
-            "nvext.agent_context.session_type_id",
-        )?;
-        validate_non_empty(&agent_context.session_id, "nvext.agent_context.session_id")?;
-        validate_non_empty(
-            &agent_context.trajectory_id,
-            "nvext.agent_context.trajectory_id",
-        )?;
-        if let Some(parent_trajectory_id) = agent_context.parent_trajectory_id.as_ref() {
-            validate_non_empty(
-                parent_trajectory_id,
-                "nvext.agent_context.parent_trajectory_id",
-            )?;
-        }
-    }
 
     if let Some(session_control) = nvext.session_control.as_ref() {
         validate_non_empty(
@@ -651,7 +603,8 @@ mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID,
-        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_PARENT_TRAJECTORY_ID, HEADER_DYNAMO_TRAJECTORY_FINAL,
+        HEADER_DYNAMO_TRAJECTORY_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[test]
@@ -669,7 +622,6 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
-        assert_eq!(nv_ext.agent_context, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
         assert_eq!(nv_ext.session_control, None);
         assert_eq!(nv_ext.routing_constraints, None);
@@ -731,35 +683,15 @@ mod tests {
     }
 
     #[test]
-    fn shared_agent_context_semantics_reject_empty_required_ids() {
-        let nvext = NvExt::builder()
-            .agent_context(AgentContext {
-                session_type_id: "deep_research:v1".to_string(),
-                session_id: "run-123".to_string(),
-                trajectory_id: " ".to_string(),
-                parent_trajectory_id: None,
-                trajectory_final: None,
-            })
-            .build()
-            .unwrap();
-
-        let err = validate_nvext_semantics(Some(&nvext)).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("nvext.agent_context.trajectory_id must not be empty")
-        );
-    }
-
-    #[test]
-    fn agent_context_serde_missing_required_field_fails() {
-        let json = r#"{
-            "agent_context": {
-                "session_type_id": "deep_research:v1",
-                "trajectory_id": "run-123:researcher-0"
-            }
-        }"#;
-
-        assert!(serde_json::from_str::<NvExt>(json).is_err());
+    fn nvext_agent_context_is_rejected() {
+        for json in [
+            r#"{"agent_context":{"trajectory_id":"run-123"}}"#,
+            r#"{"agent_context":{"trajectory_id":"run-123","parent_trajectory_id":"root-1"}}"#,
+            r#"{"agent_context":{"trajectory_id":"run-123","trajectory_final":true}}"#,
+        ] {
+            let err = serde_json::from_str::<NvExt>(json).unwrap_err();
+            assert!(err.to_string().contains("unknown field `agent_context`"));
+        }
     }
 
     #[test]
@@ -843,41 +775,28 @@ mod tests {
     }
 
     #[test]
-    fn apply_header_routing_overrides_derives_agent_context_table() {
+    fn agent_context_from_headers_derives_agent_context_table() {
         use axum::http::{HeaderMap, HeaderName};
 
         let cases = [
-            (
-                HEADER_CLAUDE_CODE_SESSION_ID,
-                "claude-run-1",
-                None,
-                "claude_code",
-                None,
-            ),
-            ("Session-ID", "codex-run-1", None, "codex", None),
+            (HEADER_CLAUDE_CODE_SESSION_ID, "claude-run-1", None, None),
+            ("Session-ID", "codex-run-1", None, None),
             (
                 HEADER_CODEX_SESSION_ID,
                 "codex-run-2",
                 Some("opencode-parent"),
-                "codex",
                 None,
             ),
             (
                 HEADER_OPENCODE_SESSION_ID,
                 "opencode-run-1",
                 Some("parent-run-1"),
-                "opencode",
                 Some("parent-run-1"),
             ),
+            (HEADER_DYNAMO_TRAJECTORY_ID, "generic-run-1", None, None),
         ];
 
-        for (
-            header_name,
-            header_value,
-            parent_header_value,
-            expected_session_type_id,
-            expected_parent_trajectory_id,
-        ) in cases
+        for (header_name, header_value, parent_header_value, expected_parent_trajectory_id) in cases
         {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -888,29 +807,18 @@ mod tests {
                 headers.insert(HEADER_OPENCODE_PARENT_SESSION_ID, parent.parse().unwrap());
             }
 
-            let agent_context = apply_header_routing_overrides(None, &headers)
-                .unwrap()
-                .agent_context
-                .unwrap();
+            let agent_context = agent_context_from_headers(&headers).unwrap();
+            assert_eq!(agent_context.trajectory_id.as_str(), header_value);
             assert_eq!(
-                (
-                    agent_context.session_type_id.as_str(),
-                    agent_context.session_id.as_str(),
-                    agent_context.trajectory_id.as_str(),
-                    agent_context.parent_trajectory_id.as_deref(),
-                ),
-                (
-                    expected_session_type_id,
-                    header_value,
-                    header_value,
-                    expected_parent_trajectory_id,
-                )
+                agent_context.parent_trajectory_id.as_deref(),
+                expected_parent_trajectory_id
             );
+            assert_eq!(agent_context.trajectory_final, None);
         }
     }
 
     #[test]
-    fn apply_header_routing_overrides_uses_claude_agent_id_as_child_trajectory() {
+    fn agent_context_from_headers_uses_claude_agent_id_as_child_trajectory() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -918,18 +826,33 @@ mod tests {
         );
         headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
 
-        let agent_context = apply_header_routing_overrides(None, &headers)
-            .unwrap()
-            .agent_context
-            .unwrap();
+        let agent_context = agent_context_from_headers(&headers).unwrap();
 
-        assert_eq!(agent_context.session_type_id, "claude_code");
-        assert_eq!(agent_context.session_id, "claude-session");
         assert_eq!(agent_context.trajectory_id, "claude-agent");
         assert_eq!(
             agent_context.parent_trajectory_id.as_deref(),
             Some("claude-session")
         );
+    }
+
+    #[test]
+    fn agent_context_from_headers_reads_dynamo_parent_and_final() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DYNAMO_TRAJECTORY_ID, "generic-run".parse().unwrap());
+        headers.insert(
+            HEADER_DYNAMO_PARENT_TRAJECTORY_ID,
+            "generic-parent".parse().unwrap(),
+        );
+        headers.insert(HEADER_DYNAMO_TRAJECTORY_FINAL, "true".parse().unwrap());
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+
+        assert_eq!(agent_context.trajectory_id, "generic-run");
+        assert_eq!(
+            agent_context.parent_trajectory_id.as_deref(),
+            Some("generic-parent")
+        );
+        assert_eq!(agent_context.trajectory_final, Some(true));
     }
 
     #[test]
@@ -945,31 +868,6 @@ mod tests {
 
             assert!(apply_header_routing_overrides(None, &headers).is_none());
         }
-    }
-
-    #[test]
-    fn apply_header_routing_overrides_explicit_agent_context_wins() {
-        let mut headers = HeaderMap::new();
-        headers.insert(HEADER_CODEX_SESSION_ID, "header-run".parse().unwrap());
-        headers.insert(
-            HEADER_OPENCODE_PARENT_SESSION_ID,
-            "header-parent".parse().unwrap(),
-        );
-        let explicit = AgentContext::builder()
-            .session_type_id("native".to_string())
-            .session_id("native-session".to_string())
-            .trajectory_id("native-trajectory".to_string())
-            .parent_trajectory_id("native-parent".to_string())
-            .build()
-            .unwrap();
-        let nvext = NvExt::builder()
-            .agent_context(explicit.clone())
-            .build()
-            .unwrap();
-
-        let result = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
-
-        assert_eq!(result.agent_context, Some(explicit));
     }
 
     #[test]
