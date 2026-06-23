@@ -1,19 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for ``OrchestratorEngineAdapter`` cadence parity.
+"""Regression tests for ``OrchestratorEngineAdapter`` cadence.
 
-Covers PSM-parity bugs caught after K8s smoke / dual-path review:
+Covers bugs caught after K8s smoke / plugin-path review:
 
 - ``initial_tick`` previously read ``self._config.throughput_adjustment_interval``
   (missing ``_seconds`` suffix). The Pydantic ``validation_alias`` only affects
   input parsing — attribute access requires the canonical name. Triggered an
   ``AttributeError`` whenever ``enable_throughput_scaling=True``.
 
-- ``_MERGE_TOLERANCE_S`` was set to ``1e-9`` (float epsilon framing) instead
-  of PSM's ``0.5`` (wall-clock-drift padding). With the tight tolerance a
-  load tick and a throughput tick scheduled within ~ms of each other failed
-  to merge — splitting into 2 ticks where PSM produces 1.
+- The old dual-cadence merge used a too-tight tolerance, which split load
+  and throughput work that should have been coordinated.
 
 - Hard-coded ``WallClock`` broke replay: plugin scheduler / CircuitBreaker
   / HOLD_LAST cache all read ``self._clock.monotonic()``, but replay
@@ -37,6 +35,7 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.plugins.clock import VirtualClock
+from dynamo.planner.plugins.merge.types import ChainAugmentOutcome
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
 from dynamo.planner.plugins.types import ComponentTarget, ScalingProposal
@@ -70,6 +69,51 @@ def _agg_config_throughput_on() -> PlannerConfig:
     )
 
 
+def _agg_config_custom_intervals(
+    *, load_interval: float, throughput_interval: float
+) -> PlannerConfig:
+    return PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": True,
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": load_interval,
+            "throughput_adjustment_interval_seconds": throughput_interval,
+        }
+    )
+
+
+def _agg_config_with_in_process_plugin() -> PlannerConfig:
+    from dynamo.planner.plugins.registry.config import (
+        InProcessPluginSpec,
+        PluginRegistrationConfig,
+    )
+
+    return PlannerConfig(
+        mode="agg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        plugin_registration=PluginRegistrationConfig(
+            in_process_plugins=[
+                InProcessPluginSpec.model_validate(
+                    {
+                        "module": "dynamo.planner.tests.plugins.orchestrator._fake_in_process_plugin",
+                        "class": "FakePlugin",
+                        "plugin_id": "configured_in_process",
+                        "plugin_type": "propose",
+                        "priority": 50,
+                        "kwargs": {"tag": "from-config"},
+                    }
+                )
+            ]
+        ),
+    )
+
+
 def _disagg_caps() -> WorkerCapabilities:
     return WorkerCapabilities(
         prefill=EngineCapabilities(
@@ -88,6 +132,18 @@ def _disagg_config_sla() -> PlannerConfig:
         enable_throughput_scaling=True,
         optimization_target="sla",
         served_model_name="test",
+    )
+
+
+def _disagg_config_sla_no_budget() -> PlannerConfig:
+    return PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=-1,
+        min_gpu_budget=-1,
     )
 
 
@@ -115,19 +171,70 @@ def _make_fpm(worker_id: str = "w1", dp_rank: int = 0):
     )
 
 
+@pytest.mark.asyncio
+async def test_builtin_load_propose_refreshes_throughput_bound_before_load():
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPropose
+    from dynamo.planner.plugins.types import (
+        ObservationData,
+        PipelineContext,
+        PredictionData,
+        ProposeStageRequest,
+        TrafficMetrics,
+    )
+
+    calls: list[str] = []
+
+    class State:
+        def advance_throughput_from_prediction(self, *args, **kwargs):
+            calls.append("throughput")
+            return None
+
+        def advance_load(self, obs, **kwargs):
+            calls.append("load")
+            return None
+
+    cfg = _agg_config_throughput_on()
+    plugin = BuiltinLoadPropose(cfg, State())  # type: ignore[arg-type]
+
+    response = await plugin.Propose(
+        ProposeStageRequest(
+            context=PipelineContext(
+                observations=ObservationData(
+                    traffic=TrafficMetrics(
+                        duration_s=60.0,
+                        num_req=100.0,
+                        isl=512.0,
+                        osl=128.0,
+                    )
+                ),
+                predictions=PredictionData(
+                    predicted_num_req=120.0,
+                    predicted_isl=512.0,
+                    predicted_osl=128.0,
+                    predicted_kv_hit_rate=0.1,
+                    source="builtin_load_predict",
+                ),
+            )
+        )
+    )
+
+    assert calls == ["throughput", "load"]
+    assert response.accept is not None
+
+
 def _build_real_regression(cfg: PlannerConfig, caps: WorkerCapabilities, kind: str):
     """Build a regression the exact way production does.
 
-    A ``PlannerStateMachine`` in SLA mode constructs ``PlannerEnginePerfModel``
+    ``PlannerScalingState`` in SLA mode constructs ``PlannerEnginePerfModel``
     instances in its ``_{agg,prefill,decode}_regression`` slots — the same
     objects the orchestrator path installs via ``install_regressions``. We
     reuse that construction so the test exercises the real type (which only
     exposes ``add_observations``, never the singular ``add_observation``).
     """
-    from dynamo.planner.core.state_machine import PlannerStateMachine
+    from dynamo.planner.core.state_machine import PlannerScalingState
 
-    psm = PlannerStateMachine(cfg, caps)
-    return getattr(psm, f"_{kind}_regression")
+    state = PlannerScalingState(cfg, caps)
+    return getattr(state, f"_{kind}_regression")
 
 
 def test_observe_fpm_feeds_installed_regression_without_crashing_agg():
@@ -141,7 +248,7 @@ def test_observe_fpm_feeds_installed_regression_without_crashing_agg():
     and crashed the tick. No unit test or K8s smoke exercised this exact
     combination (SLA + live FPM + installed regression), so the crash
     shipped silently. Feed a *real* ``PlannerEnginePerfModel`` (built the
-    same way PSM builds it) and assert ``_observe_fpm`` does not raise.
+    same way builtin planner state builds it) and assert ``_observe_fpm`` does not raise.
     """
     cfg = _agg_config_throughput_on()  # agg, SLA
     caps = _caps()
@@ -184,6 +291,7 @@ def _apply_outcome(targets):
 
 def test_project_scale_to_both_components_changed():
     # apply + prefill & decode both differ from current → full decision.
+    adapter = OrchestratorEngineAdapter(_disagg_config_sla_no_budget(), _disagg_caps())
     wc = WorkerCounts(ready_num_prefill=2, ready_num_decode=4)
     outcome = _apply_outcome(
         [
@@ -191,14 +299,15 @@ def test_project_scale_to_both_components_changed():
             ComponentTarget(sub_component_type="decode", replicas=8),
         ]
     )
-    dec = OrchestratorEngineAdapter._project_scale_to(outcome, wc)
+    dec = adapter._project_scale_to(outcome, wc)
     assert dec is not None
     assert dec.num_prefill == 6
     assert dec.num_decode == 8
 
 
 def test_project_scale_to_no_change_returns_none():
-    # apply but both equal current → PSM-equivalent "no change → None".
+    # apply but both equal current -> planner "no change -> None".
+    adapter = OrchestratorEngineAdapter(_disagg_config_sla_no_budget(), _disagg_caps())
     wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=8)
     outcome = _apply_outcome(
         [
@@ -206,27 +315,95 @@ def test_project_scale_to_no_change_returns_none():
             ComponentTarget(sub_component_type="decode", replicas=8),
         ]
     )
-    assert OrchestratorEngineAdapter._project_scale_to(outcome, wc) is None
+    assert adapter._project_scale_to(outcome, wc) is None
 
 
 def test_project_scale_to_single_component_proposal():
-    # Proposal mentions only prefill → num_decode stays None (no opinion),
-    # prefill changed → decision emitted.
+    # Agg-mode proposals mention only decode; prefill stays None (no opinion),
+    # decode changed → decision emitted.
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
     wc = WorkerCounts(ready_num_prefill=2, ready_num_decode=4)
-    outcome = _apply_outcome(
-        [ComponentTarget(sub_component_type="prefill", replicas=6)]
-    )
-    dec = OrchestratorEngineAdapter._project_scale_to(outcome, wc)
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=6)])
+    dec = adapter._project_scale_to(outcome, wc)
     assert dec is not None
-    assert dec.num_prefill == 6
-    assert dec.num_decode is None
+    assert dec.num_prefill is None
+    assert dec.num_decode == 6
 
 
 def test_project_scale_to_non_apply_action_returns_none():
+    adapter = OrchestratorEngineAdapter(_disagg_config_sla_no_budget(), _disagg_caps())
     wc = WorkerCounts(ready_num_prefill=2, ready_num_decode=4)
     for action in ("skip_short_circuit", "skip_no_targets", "skip_tick_timeout"):
         outcome = PipelineOutcome(execute_action=action, final_proposal=None)
-        assert OrchestratorEngineAdapter._project_scale_to(outcome, wc) is None
+        assert adapter._project_scale_to(outcome, wc) is None
+
+
+def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=4,
+        min_gpu_budget=-1,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(ready_num_prefill=1, ready_num_decode=1)
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=5),
+            ComponentTarget(sub_component_type="decode", replicas=5),
+        ]
+    )
+
+    dec = adapter._project_scale_to(outcome, wc)
+
+    assert dec is not None
+    assert dec.num_prefill + dec.num_decode <= 4
+
+
+def test_project_scale_to_budget_preserves_single_component_target_mask():
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=4,
+        min_gpu_budget=-1,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=1)
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
+
+    dec = adapter._project_scale_to(outcome, wc)
+
+    assert dec is not None
+    assert dec.num_prefill is None
+    assert dec.num_decode == 2
+
+
+def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=4,
+        min_gpu_budget=-1,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=6)
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=6),
+            ComponentTarget(sub_component_type="decode", replicas=6),
+        ]
+    )
+
+    assert adapter._project_scale_to(outcome, wc) is None
 
 
 def test_tick_input_to_context_maps_observations_and_fpm():
@@ -410,12 +587,23 @@ async def test_bootstrap_registers_static_externals_before_bootstrap_fanout():
     assert call_order == ["wire_externals", "bootstrap", "gateway"], call_order
 
 
-def test_pipeline_fires_at_scale_interval_cadence():
-    """Replaces the previous ``test_merge_tolerance_matches_psm_500ms_window``.
+@pytest.mark.asyncio
+async def test_bootstrap_loads_configured_in_process_plugins():
+    adapter = OrchestratorEngineAdapter(_agg_config_with_in_process_plugin(), _caps())
+    assert adapter._orchestrator.registry.get_plugin("configured_in_process") is None
 
-    Under the scale_interval cadence model, the engine_adapter no longer
-    runs the PSM ``_MERGE_TOLERANCE_S = 0.5`` merge logic — there is no
-    dual ``_next_load_s`` / ``_next_throughput_s`` to reconcile.
+    await adapter.bootstrap_plugins()
+
+    plugin = adapter._orchestrator.registry.get_plugin("configured_in_process")
+    assert plugin is not None
+    assert plugin.is_builtin is False
+    assert plugin.transport._instance.tag == "from-config"  # noqa: SLF001
+
+
+def test_pipeline_fires_at_scale_interval_cadence():
+    """Under the scale_interval cadence model, the engine_adapter no longer
+    runs dual-cadence merge logic.
+
     Pipeline fires once per ``scale_interval_seconds`` from the last
     tick moment.  Per-plugin throttling (in ``PluginScheduler._is_due``)
     decides which plugins actually fire each tick — the merge-tolerance
@@ -423,25 +611,22 @@ def test_pipeline_fires_at_scale_interval_cadence():
     plugin scheduler, which evaluates each plugin's throttle
     independently using the same ``now`` value.
 
-    Cadence-merge parity with PSM is preserved at the *decision* level
-    rather than the *tick-shape* level (see Decision 1 in
-    /tmp/scale_interval_design.md §11).  This test locks the new shape:
-    next_tick.at_s = last_tick + scale_interval, exactly.
+    This test locks the shape:
+    ``next_tick.at_s = last_tick + scale_interval``, exactly.
     """
     adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
     tick = adapter.initial_tick(start_s=0.0)
     # Default scale_interval_seconds = 5.0 (see SchedulingConfig).
     assert tick.at_s == pytest.approx(5.0, abs=1e-9)
-    assert tick.run_load_scaling, "scale_interval ticks fire both flags"
-    assert tick.run_throughput_scaling, "scale_interval ticks fire both flags"
+    assert tick.run_load_scaling
+    assert not tick.run_throughput_scaling
 
 
 def test_scale_interval_advances_from_actual_tick_now():
     """Sequential ticks anchor on ``tick_input.now_s``, not on a
     pre-computed schedule — so a 700ms-late tick at T=5.7 produces the
-    next tick at T=10.7, accumulating drift symmetrically with PSM
-    (PSM also advances from ``tick_input.now_s``).  This is the basic
-    contract for scale_interval cadence advancement.
+    next tick at T=10.7. This is the basic contract for scale_interval
+    cadence advancement.
     """
 
     adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
@@ -449,21 +634,289 @@ def test_scale_interval_advances_from_actual_tick_now():
     assert initial.at_s == pytest.approx(5.0)
 
 
-@pytest.mark.asyncio
-async def test_lazy_traffic_pull_skips_prometheus_when_no_plugin_needs_traffic():
+def test_lazy_traffic_pull_skips_prometheus_when_no_plugin_needs_traffic():
     """Under scale_interval, ``need_traffic_metrics`` is True only
     when some registered plugin both lists ``observations.traffic``
-    in its ``needs`` AND is due at the next tick.  With no traffic
-    consumer registered, every pipeline tick should signal
-    ``need_traffic_metrics=False`` to the gather layer — saving
-    36 Prometheus queries per 180s window compared to the eager
-    "always pull" alternative.
+    in its ``needs`` AND is due at the next tick. Builtin throughput
+    plugins consume traffic, but they are not due on the first 5s
+    pipeline tick when their execution interval is 180s.
     """
-    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    vc = VirtualClock()
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps(), clock=vc)
     tick = adapter.initial_tick(start_s=0.0)
-    # No plugin is registered, so no plugin needs ``observations.traffic``.
     assert tick.need_traffic_metrics is False
+    assert tick.use_full_traffic_metrics is False
     assert tick.traffic_metrics_duration_s == 0.0
+
+
+def test_lazy_traffic_pull_fires_when_builtin_predict_is_due():
+    """At the throughput interval boundary, builtin predict/propose plugins
+    are due and the adapter requests the throughput-sized traffic window."""
+    vc = VirtualClock()
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps(), clock=vc)
+    adapter.initial_tick(start_s=0.0)
+    adapter._last_tick_s = 175.0
+    adapter._last_tick_monotonic = 175.0
+
+    tick = adapter._compute_next_scheduled_tick()
+
+    assert tick.at_s == pytest.approx(180.0)
+    assert tick.need_traffic_metrics is True
+    assert tick.use_full_traffic_metrics is True
+    assert tick.traffic_metrics_duration_s == pytest.approx(
+        adapter._config.throughput_adjustment_interval_seconds
+    )
+
+
+def test_load_only_sla_uses_kv_hit_rate_traffic_scrape():
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": False,
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": 7.0,
+            "throughput_adjustment_interval_seconds": 60.0,
+        }
+    )
+    vc = VirtualClock()
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=vc)
+
+    tick = adapter.initial_tick(start_s=0.0)
+
+    assert tick.at_s == pytest.approx(7.0)
+    assert tick.run_load_scaling
+    assert not tick.run_throughput_scaling
+    assert tick.need_traffic_metrics is True
+    assert tick.use_full_traffic_metrics is False
+    assert tick.traffic_metrics_duration_s == pytest.approx(
+        cfg.load_adjustment_interval_seconds
+    )
+
+
+def test_lazy_fpm_pull_only_when_load_builtin_is_due():
+    cfg = _agg_config_custom_intervals(load_interval=7.0, throughput_interval=60.0)
+    assert cfg.scheduling.scale_interval_seconds == pytest.approx(1.0)
+    vc = VirtualClock()
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=vc)
+
+    first = adapter.initial_tick(start_s=0.0)
+    assert first.at_s == pytest.approx(1.0)
+    assert first.need_worker_fpm is False
+    assert not first.run_load_scaling
+    assert not first.run_throughput_scaling
+
+    adapter._last_tick_s = 6.0
+    adapter._last_tick_monotonic = 6.0
+    load_tick = adapter._compute_next_scheduled_tick()
+    assert load_tick.at_s == pytest.approx(7.0)
+    assert load_tick.need_worker_fpm is True
+    assert load_tick.run_load_scaling
+    assert not load_tick.run_throughput_scaling
+
+
+def test_throughput_only_sla_still_pulls_fpm_for_live_regression():
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": False,
+            "enable_throughput_scaling": True,
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": 7.0,
+            "throughput_adjustment_interval_seconds": 60.0,
+        }
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    assert adapter._orchestrator.registry.get_plugin("builtin_load_propose") is None
+
+    first = adapter.initial_tick(start_s=0.0)
+    assert first.need_worker_fpm is False
+
+    adapter._last_tick_s = 6.0
+    adapter._last_tick_monotonic = 6.0
+    load_interval_tick = adapter._compute_next_scheduled_tick()
+    assert load_interval_tick.at_s == pytest.approx(7.0)
+    assert load_interval_tick.need_worker_fpm is True
+    assert load_interval_tick.run_load_scaling
+    assert not load_interval_tick.run_throughput_scaling
+
+
+def test_builtin_first_fire_is_anchored_to_initial_tick_not_construction():
+    cfg = _agg_config_custom_intervals(load_interval=7.0, throughput_interval=60.0)
+    vc = VirtualClock()
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=vc)
+    vc.advance(30.0)
+
+    first = adapter.initial_tick(start_s=0.0)
+
+    assert first.at_s == pytest.approx(1.0)
+    assert first.need_worker_fpm is False
+
+
+@pytest.mark.asyncio
+async def test_tick_skips_fpm_observation_when_fpm_was_not_requested():
+    cfg = _agg_config_custom_intervals(load_interval=7.0, throughput_interval=60.0)
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    tick = adapter.initial_tick(start_s=0.0)
+    assert tick.need_worker_fpm is False
+
+    calls: list[FpmObservations] = []
+
+    def record_fpm(obs):
+        calls.append(obs)
+
+    adapter._scaling_state.observe_fpm = record_fpm  # type: ignore[method-assign]
+
+    await adapter.tick(
+        tick,
+        TickInput(
+            now_s=tick.at_s,
+            fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
+        ),
+    )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_external_fpm_request_does_not_feed_builtin_regression_early():
+    cfg = _agg_config_custom_intervals(load_interval=7.0, throughput_interval=60.0)
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    adapter._orchestrator.register_internal(
+        plugin_id="external_fpm_consumer",
+        plugin_type="propose",
+        priority=90,
+        instance=object(),
+        execution_interval_seconds=0.0,
+        needs=["observations.fpm"],
+        is_builtin=False,
+    )
+    tick = adapter.initial_tick(start_s=0.0)
+    assert tick.at_s == pytest.approx(1.0)
+    assert tick.need_worker_fpm is True
+    assert not tick.run_load_scaling
+
+    async def fake_orchestrator_tick(ctx, baseline):
+        return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
+
+    adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
+    calls: list[FpmObservations] = []
+
+    def record_fpm(obs):
+        calls.append(obs)
+
+    adapter._scaling_state.observe_fpm = record_fpm  # type: ignore[method-assign]
+
+    await adapter.tick(
+        tick,
+        TickInput(
+            now_s=tick.at_s,
+            fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
+        ),
+    )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_internal_load_tick_feeds_builtin_regression():
+    cfg = _agg_config_custom_intervals(load_interval=7.0, throughput_interval=60.0)
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    adapter.initial_tick(start_s=0.0)
+    adapter._last_tick_s = 6.0
+    adapter._last_tick_monotonic = 6.0
+    tick = adapter._compute_next_scheduled_tick()
+    assert tick.at_s == pytest.approx(7.0)
+    assert tick.need_worker_fpm is True
+    assert tick.run_load_scaling
+
+    async def fake_orchestrator_tick(ctx, baseline):
+        return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
+
+    adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
+    calls: list[FpmObservations] = []
+
+    def record_fpm(obs):
+        calls.append(obs)
+
+    adapter._scaling_state.observe_fpm = record_fpm  # type: ignore[method-assign]
+
+    await adapter.tick(
+        tick,
+        TickInput(
+            now_s=tick.at_s,
+            fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
+        ),
+    )
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_disabled_load_scaling_reports_disabled_on_load_tick():
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": False,
+            "enable_throughput_scaling": True,
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": 7.0,
+            "throughput_adjustment_interval_seconds": 60.0,
+        }
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    adapter.initial_tick(start_s=0.0)
+    adapter._last_tick_s = 6.0
+    adapter._last_tick_monotonic = 6.0
+    tick = adapter._compute_next_scheduled_tick()
+    assert tick.run_load_scaling
+    assert not tick.run_throughput_scaling
+
+    async def fake_orchestrator_tick(ctx, baseline):
+        return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
+
+    adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
+
+    effects = await adapter.tick(
+        tick,
+        TickInput(now_s=tick.at_s, worker_counts=WorkerCounts(ready_num_decode=1)),
+    )
+
+    assert effects.diagnostics.load_decision_reason == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_predict_failed_reason_surfaces_on_throughput_tick():
+    adapter = OrchestratorEngineAdapter(
+        _agg_config_throughput_on(), _caps(), clock=VirtualClock()
+    )
+    adapter.initial_tick(start_s=0.0)
+    adapter._last_tick_s = 175.0
+    adapter._last_tick_monotonic = 175.0
+    tick = adapter._compute_next_scheduled_tick()
+    assert tick.run_throughput_scaling
+
+    async def fake_orchestrator_tick(ctx, baseline):
+        return PipelineOutcome(
+            execute_action="skip_no_targets",
+            final_proposal=None,
+            predict_outcome=ChainAugmentOutcome(
+                prediction=None,
+                reasons=["predict_failed"],
+            ),
+        )
+
+    adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
+
+    effects = await adapter.tick(
+        tick,
+        TickInput(now_s=tick.at_s, worker_counts=WorkerCounts(ready_num_decode=1)),
+    )
+
+    assert effects.diagnostics.throughput_decision_reason == "predict_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -481,8 +934,7 @@ async def test_tick_advances_injected_virtual_clock_to_trace_time():
     Without this bump, a fast-forward replay (e.g. 1hr trace in 10s
     real time) would leave every plugin with
     ``execution_interval_seconds`` greater than the real elapsed time
-    never re-firing after its first call — breaking PSM-parity on the
-    replay path and blocking PR #10's ``use_orchestrator=True`` default.
+    never re-firing after its first call on the replay path.
     """
     vc = VirtualClock()
     adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps(), clock=vc)

@@ -16,6 +16,7 @@ from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -35,7 +36,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import (
@@ -43,6 +44,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     random_uuid,
+    resolve_chat_template,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,17 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
     if mapped is None:
         logger.warning("Unknown finish_reason from router: %s", raw_reason)
     return mapped
+
+
+def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return None
+
+    context_length = runtime_config.get("context_length")
+    if type(context_length) is not int or context_length <= 0:
+        return None
+    return context_length
 
 
 def _build_reasoning_parser_metadata(
@@ -769,12 +782,12 @@ class EngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
-        # instead of re-running fetch_model. The MDC cache already has
-        # blake3-verified copies; this path duplicates the download.
-        source_path = mdc.source_path()
-        if not os.path.exists(source_path):
-            await fetch_model(source_path, ignore_weights=True)
+        local_dir = mdc.local_dir()
+        if not os.path.isdir(local_dir):
+            raise RuntimeError(
+                f"MDC local_dir {local_dir!r} not populated for model {mdc.name()!r}; "
+                f"download_config must run before the engine factory."
+            )
 
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
@@ -782,12 +795,22 @@ class EngineFactory:
         trust_remote_code = self.config.trust_remote_code
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
-        model_config = ModelConfig(
-            model=source_path,
-            tokenizer_mode=tokenizer_mode,
-            config_format=config_format,
-            trust_remote_code=trust_remote_code,
-        )
+        model_config_kwargs = {
+            "model": local_dir,
+            "tokenizer_mode": tokenizer_mode,
+            "config_format": config_format,
+            "trust_remote_code": trust_remote_code,
+        }
+        context_length = _runtime_config_context_length(mdc)
+        if context_length:
+            os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+            model_config_kwargs["max_model_len"] = context_length
+            logger.info(
+                "vLLM frontend ModelConfig max_model_len=%d "
+                "from runtime_config.context_length",
+                context_length,
+            )
+        model_config = ModelConfig(**model_config_kwargs)
         # Use processor_only cache so tensor data persists across requests.
         # The default "lru" sender cache drops tensor data on cache hits
         # (designed for disagg where P1 holds tensors), but we need the
@@ -814,6 +837,17 @@ class EngineFactory:
 
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
+
+        # vLLM's renderer skips its AutoProcessor fallback when tools are present,
+        # so tool calls crash unless tokenizer.chat_template is set; load from disk.
+        if tokenizer.chat_template is None:
+            tokenizer.chat_template = resolve_chat_template(local_dir)
+
+        # --chat-template overrides; load_chat_template accepts either a file path
+        # or an inline Jinja template string.
+        chat_template_flag = getattr(self.flags, "chat_template", None)
+        if chat_template_flag:
+            tokenizer.chat_template = load_chat_template(chat_template_flag)
 
         # Resolve stream_interval: env var override > backend config > default (20)
         stream_interval = self.stream_interval

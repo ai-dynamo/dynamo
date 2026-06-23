@@ -47,6 +47,10 @@ const fn default_prefill_load_scale() -> f64 {
     1.0
 }
 
+const fn default_overlap_score_credit_decay() -> f64 {
+    0.0
+}
+
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
     "overlap_score_credit must be between 0.0 and 1.0";
 pub const OVERLAP_SCORE_CREDIT_MIGRATION_ERROR: &str = concat!(
@@ -91,6 +95,7 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
     let config = kv_router_config_from_lookup(|key| env::var(key).ok());
     tracing::info!(
         overlap_score_credit = config.overlap_score_credit,
+        overlap_score_credit_decay = config.overlap_score_credit_decay,
         prefill_load_scale = config.prefill_load_scale,
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
@@ -123,6 +128,9 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
 
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
         config.overlap_score_credit = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY") {
+        config.overlap_score_credit_decay = value;
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREFILL_LOAD_SCALE") {
         config.prefill_load_scale = value;
@@ -498,6 +506,7 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
 #[serde(default)]
 struct KvRouterConfigSerde {
     overlap_score_credit: f64,
+    overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
     overlap_score_weight: Option<f64>,
     host_cache_hit_weight: f64,
@@ -532,6 +541,7 @@ impl Default for KvRouterConfigSerde {
         let config = KvRouterConfig::default();
         Self {
             overlap_score_credit: config.overlap_score_credit,
+            overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
             overlap_score_weight: None,
             host_cache_hit_weight: config.host_cache_hit_weight,
@@ -571,6 +581,12 @@ pub struct KvRouterConfig {
     /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
     #[validate(custom(function = "validate_overlap_score_credit"))]
     pub overlap_score_credit: f64,
+
+    /// Decay rate for device-local overlap credit as active prefill load rises
+    /// above the least-loaded eligible worker. A value of 0.0 disables decay.
+    #[serde(default = "default_overlap_score_credit_decay")]
+    #[validate(range(min = 0.0))]
+    pub overlap_score_credit_decay: f64,
 
     /// Scale applied after overlap/cache-hit credits reduce the prompt-side
     /// prefill load. Defaults to 1.0.
@@ -712,6 +728,7 @@ impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_credit: 1.0,
+            overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
@@ -758,6 +775,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
 
         validate_and_return(Self {
             overlap_score_credit,
+            overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
@@ -937,6 +955,10 @@ mod tests {
         let default = KvRouterConfig::default();
 
         assert_eq!(config.overlap_score_credit, default.overlap_score_credit);
+        assert_eq!(
+            config.overlap_score_credit_decay,
+            default.overlap_score_credit_decay
+        );
         assert_eq!(config.prefill_load_scale, default.prefill_load_scale);
         assert_eq!(config.use_kv_events, default.use_kv_events);
         assert_eq!(
@@ -949,6 +971,7 @@ mod tests {
     fn dynamo_env_config_parses_canonical_settings() {
         let config = config_from_values(&[
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
+            ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY", "0.75"),
             ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"),
             ("DYN_ROUTER_TEMPERATURE", "0.7"),
             ("DYN_USE_KV_EVENTS", "false"),
@@ -960,6 +983,7 @@ mod tests {
         ]);
 
         assert_eq!(config.overlap_score_credit, 0.25);
+        assert_eq!(config.overlap_score_credit_decay, 0.75);
         assert_eq!(config.prefill_load_scale, 2.5);
         assert_eq!(config.router_temperature, 0.7);
         assert!(!config.use_kv_events);
