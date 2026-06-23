@@ -656,14 +656,17 @@ impl Node {
         SplitLookupData { suffix }
     }
 
-    pub(super) fn remove_worker_for_hash(
+    pub(super) fn remove_worker_for_hashes(
         &self,
         worker: WorkerWithDpRank,
-        block_hash: ExternalSequenceBlockHash,
+        block_hashes: &[ExternalSequenceBlockHash],
     ) -> Option<RemoveOutcome> {
         let _gate = self.shape_gate.write();
         let mut state = self.state.write();
-        let pos = state.edge_index.get(&block_hash).copied()?;
+        let (pos, block_hash) = block_hashes
+            .iter()
+            .filter_map(|&hash| state.edge_index.get(&hash).copied().map(|pos| (pos, hash)))
+            .min_by_key(|&(pos, _)| pos)?;
         let outcome = state.remove_worker_at_pos(worker, pos, block_hash);
         let should_clear_children = state.full_edge_workers.is_empty();
         drop(state);

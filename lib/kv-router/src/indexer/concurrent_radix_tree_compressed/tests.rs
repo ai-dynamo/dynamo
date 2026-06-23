@@ -286,6 +286,47 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 3, 4], worker2, 1);
             assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker3, 6);
         }
+
+        #[test]
+        fn remove_multiple_hashes_from_same_compressed_edge() {
+            let index = Arc::new(ConcurrentRadixTreeCompressed::new());
+            let worker0 = worker(0);
+            let worker1 = worker(1);
+            let mut lookup0 = direct_lookup();
+            let mut lookup1 = direct_lookup();
+
+            apply_direct(
+                &index,
+                &mut lookup0,
+                make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+            );
+            apply_direct(
+                &index,
+                &mut lookup1,
+                make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+            );
+
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+
+            apply_direct(
+                &index,
+                &mut lookup0,
+                make_remove_event_with_parent(0, &[1, 2], &[3, 4, 5]),
+            );
+
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+
+            apply_direct(
+                &index,
+                &mut lookup0,
+                make_store_event_with_parent(0, &[1, 2], &[3, 4, 5, 6]),
+            );
+
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        }
     }
 
     mod cleanup {
