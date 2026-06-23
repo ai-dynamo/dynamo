@@ -46,8 +46,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, agent_context_from_headers,
-    apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+    agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -497,12 +497,22 @@ fn context_from_headers<T: Send + Sync + 'static>(
     request_id: String,
     headers: &HeaderMap,
 ) -> Result<Context<T>, ErrorResponse> {
-    let metadata = extract_metadata_from_http(headers)
+    let mut metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
+    let session_affinity = session_affinity_from_headers(headers);
+    if let Some(session_affinity) = session_affinity.as_ref() {
+        metadata.insert(
+            SESSION_AFFINITY_CONTEXT_KEY.to_string(),
+            session_affinity.as_str().to_string(),
+        );
+    }
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
     if let Some(agent_context) = agent_context_from_headers(headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+    }
+    if let Some(session_affinity) = session_affinity {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     Ok(request)
 }
@@ -523,6 +533,13 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 
     if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
         target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
+    }
+
+    if let Ok(session_affinity) = source.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
+        target.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            session_affinity.as_ref().clone(),
+        );
     }
 }
 
@@ -3158,6 +3175,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    use crate::protocols::agents::HEADER_DYNAMO_SESSION_ID;
     use crate::protocols::common::extensions::NvExt;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
@@ -3198,7 +3216,7 @@ mod tests {
     fn test_openai_nvext_rejects_agent_context() {
         let err = serde_json::from_value::<NvExt>(serde_json::json!({
             "agent_context": {
-                "trajectory_id": "run-123"
+                "session_id": "run-123"
             }
         }))
         .unwrap_err();
@@ -3212,9 +3230,9 @@ mod tests {
         source.insert(
             AGENT_CONTEXT_CONTEXT_KEY,
             AgentContext {
-                trajectory_id: "traj-123".to_string(),
-                parent_trajectory_id: Some("parent-456".to_string()),
-                trajectory_final: Some(true),
+                session_id: "session-123".to_string(),
+                parent_session_id: Some("parent-456".to_string()),
+                session_final: Some(true),
                 kv_hints: None,
             },
         );
@@ -3225,12 +3243,32 @@ mod tests {
         let agent_context = target
             .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
             .expect("agent context copied");
-        assert_eq!(agent_context.trajectory_id, "traj-123");
+        assert_eq!(agent_context.session_id, "session-123");
         assert_eq!(
-            agent_context.parent_trajectory_id.as_deref(),
+            agent_context.parent_session_id.as_deref(),
             Some("parent-456")
         );
-        assert_eq!(agent_context.trajectory_final, Some(true));
+        assert_eq!(agent_context.session_final, Some(true));
+    }
+
+    #[test]
+    fn test_context_from_headers_preserves_session_affinity_in_context_and_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "session-123".parse().unwrap());
+
+        let request = context_from_headers((), "req-1".to_string(), &headers).unwrap();
+
+        let session_affinity = request
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity copied to typed context");
+        assert_eq!(session_affinity.as_str(), "session-123");
+        assert_eq!(
+            request
+                .metadata()
+                .get(SESSION_AFFINITY_CONTEXT_KEY)
+                .map(String::as_str),
+            Some("session-123")
+        );
     }
 
     #[test]

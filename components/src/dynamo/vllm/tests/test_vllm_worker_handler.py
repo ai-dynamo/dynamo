@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -352,6 +353,107 @@ class TestReasoningParserForwarding:
             base64.b64decode(routed["data"]), dtype=np.dtype(routed["dtype"])
         )
         np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_emits_decode_kv_transfer_params_on_final_chunk(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        kv_transfer_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "remote_block_ids": [7, 8],
+        }
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=None,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+                kv_transfer_params=kv_transfer_params,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-1",
+            emit_kv_transfer_params=True,
+        ):
+            chunks.append(chunk)
+
+        assert chunks[-1]["disaggregated_params"] == {
+            "kv_transfer_params": kv_transfer_params
+        }
+
+    @pytest.mark.asyncio
+    async def test_text_mode_emits_decode_kv_transfer_params_on_final_chunk(self):
+        config = _make_config(disaggregation_mode="DECODE")
+        handler = _make_handler(config)
+        handler.config = config
+        handler.input_param_manager = MagicMock()
+        handler.input_param_manager.get_input_param.return_value = "hello"
+        handler.default_sampling_params = {}
+        handler._to_local_dp_rank = MagicMock(return_value=None)
+        handler.engine_client = MagicMock()
+
+        @asynccontextmanager
+        async def noop_abort_monitor(*args, **kwargs):
+            yield None
+
+        handler._abort_monitor = noop_abort_monitor
+
+        kv_transfer_params = {
+            "do_remote_decode": False,
+            "do_remote_prefill": False,
+            "remote_block_ids": [[1, 2]],
+        }
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        text="ok",
+                        token_ids=[11],
+                        finish_reason="stop",
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+                kv_transfer_params=kv_transfer_params,
+            )
+
+        handler.engine_client.generate = fake_generate
+        context = MagicMock()
+        context.trace_headers.return_value = {}
+
+        with patch.object(
+            mod, "build_sampling_params_openai", return_value=SimpleNamespace()
+        ):
+            chunks = [
+                chunk
+                async for chunk in handler._generate_text_mode(
+                    {"routing": {}}, context, "req-1"
+                )
+            ]
+
+        assert chunks[-1]["disaggregated_params"] == {
+            "kv_transfer_params": kv_transfer_params
+        }
 
     @pytest.mark.asyncio
     async def test_generate_tokens_routed_experts_start_echoes_prompt_start(self):
@@ -873,6 +975,119 @@ def _make_prefill_handler(model: str = "test-model") -> mod.PrefillWorkerHandler
     handler.config = config
     handler.model_config = model_config
     return handler
+
+
+def _multi_nixl_offload_vllm_config():
+    return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "cpu_bytes_to_use": 128849018880,
+                            "store_threshold": 2,
+                            "max_tracker_size": 262144,
+                            "eviction_policy": "arc",
+                            "offload_prompt_only": True,
+                        },
+                    },
+                ]
+            },
+        )
+    )
+
+
+class TestPrefillKvTransferParams:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "vllm_config",
+        [
+            SimpleNamespace(
+                kv_transfer_config=SimpleNamespace(kv_connector="NixlConnector")
+            ),
+            _multi_nixl_offload_vllm_config(),
+        ],
+    )
+    async def test_prefill_merges_cached_nixl_kv_transfer_params(self, vllm_config):
+        handler = _make_prefill_handler()
+        handler.config.enable_rl = False
+        handler.default_sampling_params = {}
+        handler.model_max_len = None
+        handler.engine_client = MagicMock()
+        handler.engine_client.vllm_config = vllm_config
+        handler._get_mm_processor_kwargs = MagicMock(return_value={})
+        handler._extract_multimodal_data = AsyncMock(return_value=None)
+        handler._build_prompt_from_request = MagicMock(
+            return_value=(PatchedTokensPrompt(prompt_token_ids=[1, 2, 3]), None, None)
+        )
+        handler._resolve_lora_request = MagicMock(return_value=None)
+        handler._build_embedding_params = MagicMock(return_value=None)
+        handler._to_local_dp_rank = MagicMock(return_value=None)
+
+        @asynccontextmanager
+        async def noop_abort_monitor(*args, **kwargs):
+            yield None
+
+        handler._abort_monitor = noop_abort_monitor
+
+        captured = {}
+
+        async def fake_generate(prompt, sampling_params, request_id, **kwargs):
+            captured["kv_transfer_params"] = sampling_params.extra_args[
+                "kv_transfer_params"
+            ]
+            yield SimpleNamespace(
+                outputs=[SimpleNamespace(token_ids=[99])],
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+                kv_transfer_params={"do_remote_prefill": True},
+            )
+
+        handler.engine_client.generate = fake_generate
+
+        context = MagicMock()
+        context.trace_headers.return_value = {}
+        request = {
+            "model": "test-model",
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "routing": {},
+            "extra_args": {
+                "kv_transfer_params": {
+                    "do_remote_decode": False,
+                    "do_remote_prefill": True,
+                    "remote_engine_id": "decode-engine",
+                    "remote_block_ids": [7, 8],
+                    "remote_host": "10.0.0.2",
+                    "remote_port": 5555,
+                    "remote_num_tokens": 42,
+                }
+            },
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler._generate_token_mode(
+                request, context, "prefill-req"
+            )
+        ]
+
+        assert chunks
+        assert captured["kv_transfer_params"] == {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "remote_engine_id": "decode-engine",
+            "remote_block_ids": [7, 8],
+            "remote_host": "10.0.0.2",
+            "remote_port": 5555,
+            "remote_num_tokens": 42,
+        }
 
 
 class TestBuildEmbeddingParams:

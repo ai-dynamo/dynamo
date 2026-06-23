@@ -1607,6 +1607,7 @@ impl KvRouter {
                     |infos| llm_rs::protocols::common::preprocessor::MmRoutingInfo {
                         routing_token_ids: token_ids.clone(),
                         block_mm_infos: infos,
+                        expanded_prompt_len: token_ids.len(),
                     },
                 )
             };

@@ -15,7 +15,10 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
+use super::{
+    InnerPrefillRouter, PrefillLifecycleState, PrefillRouter,
+    session_kv_cache::SessionKvTransferCache,
+};
 use crate::{
     discovery::ModelManager,
     kv_router::{KvPushRouter, KvRouter},
@@ -48,6 +51,7 @@ impl PrefillRouter {
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            session_kv_cache: SessionKvTransferCache::from_env().map(Arc::new),
         })
     }
 
@@ -97,6 +101,7 @@ impl PrefillRouter {
             namespace,
             is_eagle,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            session_kv_cache: SessionKvTransferCache::from_env().map(Arc::new),
         });
 
         // Spawn background task to wait for activation
