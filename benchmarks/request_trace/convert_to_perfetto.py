@@ -241,9 +241,7 @@ class TrackTable:
         lane = 0
         while lane in active_lanes:
             lane += 1
-        self._max_lanes[session_id] = max(
-            self._max_lanes.get(session_id, 0), lane + 1
-        )
+        self._max_lanes[session_id] = max(self._max_lanes.get(session_id, 0), lane + 1)
         heapq.heappush(active, (end_us, lane))
         return lane
 
@@ -466,9 +464,7 @@ def _prepare_inferred_tool_items(
                 tool_name = _safe_label(tool_call.get("name"), "unknown-tool")
                 args = {
                     "session_id": request_item["session_id"],
-                    "parent_session_id": request_item["args"].get(
-                        "parent_session_id"
-                    ),
+                    "parent_session_id": request_item["args"].get("parent_session_id"),
                     "event_type": "inferred_tool_call",
                     "event_source": "dynamo",
                     "source": "request.finish_reason_metadata.tool_calls",
@@ -550,9 +546,7 @@ def convert_records(
             request = event.get("request")
             if not isinstance(request, dict):
                 continue
-            session_id = _safe_label(
-                agent_context.get("session_id"), "request-only"
-            )
+            session_id = _safe_label(agent_context.get("session_id"), "request-only")
 
             start_ms = _request_start_ms(event, request)
             if start_ms is None:
@@ -582,9 +576,7 @@ def convert_records(
             event_time_us = _ms_to_trace_us(event.get("event_time_unix_ms"))
             if not isinstance(tool, dict) or event_time_us is None:
                 continue
-            session_id = _safe_label(
-                agent_context.get("session_id"), "unknown-session"
-            )
+            session_id = _safe_label(agent_context.get("session_id"), "unknown-session")
 
             tool_records.append(
                 {

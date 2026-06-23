@@ -966,9 +966,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         if not self.enable_session_radix_cache:
             return None
         session_id = (request.get("agent_context") or {}).get("session_id")
-        return (
-            session_id if isinstance(session_id, str) and session_id else None
-        )
+        return session_id if isinstance(session_id, str) and session_id else None
 
     def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
         session_id = self._session_id(request)
