@@ -75,7 +75,7 @@ fi
 # not writable, e.g. a read-only working directory in CI. Without this, the
 # failing mkdir would trip `set -e` and fire the EXIT trap's `kill 0`, taking
 # the whole launch down before the workers ever start.
-if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+if ! mkdir -p "$LOG_DIR" 2>/dev/null || [ ! -w "$LOG_DIR" ]; then
     FALLBACK_LOG_DIR="$(mktemp -d)"
     echo "Warning: cannot create log dir '$LOG_DIR'; using '$FALLBACK_LOG_DIR'" >&2
     LOG_DIR="$FALLBACK_LOG_DIR"
