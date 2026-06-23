@@ -112,7 +112,7 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
-        let Some(session_id) = affinity_id(request) else {
+        let Some(session_id) = affinity_id(request)? else {
             return Ok((
                 self.select_request(request, phase, is_query_only, None)
                     .await?,

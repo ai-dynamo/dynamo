@@ -10,7 +10,7 @@ use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, RouterConfig},
+    entrypoint::EngineConfig,
     http::service::metrics::Metrics,
     kv_router::indexer::try_build_cache_indexer,
     kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
@@ -256,7 +256,7 @@ pub async fn prepare_engine(
             let mut watcher = ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
-                RouterConfig::default(),
+                local_model.router_config().clone(),
                 local_model.migration_limit(),
                 local_model.migration_max_seq_len(),
                 None,

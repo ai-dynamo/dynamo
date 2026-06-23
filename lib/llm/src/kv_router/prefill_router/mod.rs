@@ -182,8 +182,8 @@ impl
         }
 
         let session_affinity = context
-            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
-            .ok();
+            .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
 
         // Ensure tracker exists for routing decisions in disaggregated mode.
         // Create one if not provided by the upstream DeltaGenerator.

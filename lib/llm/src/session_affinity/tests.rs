@@ -3,14 +3,18 @@
 
 use std::{sync::Arc, time::Duration};
 
-use dynamo_runtime::pipeline::{ResponseStream, context::Controller};
+use dynamo_runtime::pipeline::{Context, ResponseStream, context::Controller};
 use futures::{StreamExt, stream};
 
-use super::{AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, explicit_target};
+use super::{
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id, explicit_target,
+};
 use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
-        extensions::SessionAffinityId, llm_backend::LLMEngineOutput, preprocessor::RoutingHints,
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        llm_backend::LLMEngineOutput,
+        preprocessor::RoutingHints,
         timing::RequestPhase,
     },
     types::Annotated,
@@ -69,7 +73,16 @@ fn session_affinity_explicit_targets_are_phase_local_and_preserve_rank_zero() {
     );
     assert_eq!(
         explicit_target(&request, RequestPhase::Aggregated).unwrap(),
-        Some(target(1, Some(0)))
+        Some(target(3, Some(0)))
+    );
+
+    let decode_only = request_with_routing(RoutingHints {
+        decode_worker_id: Some(3),
+        ..Default::default()
+    });
+    assert_eq!(
+        explicit_target(&decode_only, RequestPhase::Aggregated).unwrap(),
+        Some(target(3, None))
     );
 
     let rank_without_worker = request_with_routing(RoutingHints {
@@ -77,6 +90,19 @@ fn session_affinity_explicit_targets_are_phase_local_and_preserve_rank_zero() {
         ..Default::default()
     });
     assert!(explicit_target(&rank_without_worker, RequestPhase::Decode).is_err());
+}
+
+#[test]
+fn session_affinity_context_type_errors_are_preserved() {
+    let mut request = Context::new(request_with_routing(RoutingHints::default()));
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, "wrong type".to_string());
+
+    let error = affinity_id(&request).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid session affinity context")
+    );
 }
 
 #[tokio::test(start_paused = true)]

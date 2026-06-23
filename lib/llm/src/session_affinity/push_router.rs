@@ -83,7 +83,8 @@ impl SessionAffinityPushRouter {
     where
         F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M, Error>,
     {
-        let Some(session_id) = affinity_id(&request) else {
+        let session_id = affinity_id(&request)?;
+        if !self.direct && session_id.is_none() {
             let pinned_worker = phase_worker_id(&request, RequestPhase::Prefill);
             return self
                 .inner
@@ -91,11 +92,26 @@ impl SessionAffinityPushRouter {
                     prepare(request, worker_id, None)
                 })
                 .await;
-        };
+        }
         let explicit = self.direct_target(
             explicit_target(&request, RequestPhase::Prefill)?,
             RequestPhase::Prefill,
         )?;
+        let Some(session_id) = session_id else {
+            let Some(pinned_worker) = explicit else {
+                return Err(invalid_argument(
+                    "Direct routing requires an explicit prefill target",
+                ));
+            };
+            return self
+                .inner
+                .select_and_dispatch_exact(
+                    request,
+                    Some(pinned_worker.worker_id),
+                    move |request, worker_id| prepare(request, worker_id, None),
+                )
+                .await;
+        };
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         if is_query_only {
             let selected = self
@@ -151,19 +167,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<LlmResponse>, Error> {
         let phase = Self::phase(&request);
-        let Some(session_id) = affinity_id(&request) else {
-            if self.direct {
-                let worker_id = phase_worker_id(&request, phase).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Worker ID required (--direct-route) but none found in request. Expected \
-                         a phase-appropriate worker ID to be set by the external router."
-                    )
-                })?;
-                return self.inner.direct(request, worker_id).await;
-            }
+        let session_id = affinity_id(&request)?;
+        if !self.direct && session_id.is_none() {
             return self.inner.generate(request).await;
-        };
+        }
         let explicit = self.direct_target(explicit_target(&request, phase)?, phase)?;
+        let Some(session_id) = session_id else {
+            let Some(target) = explicit else {
+                return Err(invalid_argument(format!(
+                    "Direct routing requires an explicit {phase} target"
+                )));
+            };
+            return self.inner.direct(request, target.worker_id).await;
+        };
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         if is_query_only {
@@ -225,7 +241,7 @@ fn phase_worker_id(request: &PreprocessedRequest, phase: RequestPhase) -> Option
     match phase {
         RequestPhase::Prefill => routing.prefill_worker_id.or(routing.backend_instance_id),
         RequestPhase::Decode => routing.decode_worker_id.or(routing.backend_instance_id),
-        RequestPhase::Aggregated => routing.backend_instance_id,
+        RequestPhase::Aggregated => routing.decode_worker_id.or(routing.backend_instance_id),
     }
 }
 
@@ -369,6 +385,33 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("worker ID required"));
         assert_eq!(router.affinity.entry_count(), 0);
+
+        let error = router
+            .generate(Context::new(request(None, false)))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("worker ID required for aggregated request in Direct routing mode")
+        );
+        let error = router
+            .select_and_dispatch_prefill(Context::new(request(None, false)), |_, _, _| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("worker ID required for prefill request in Direct routing mode")
+        );
+        assert_eq!(router.affinity.entry_count(), 0);
+
+        let mut decode_only = request(None, false);
+        decode_only.routing_mut().decode_worker_id = Some(99);
+        assert_eq!(
+            phase_worker_id(&decode_only, RequestPhase::Aggregated),
+            Some(99)
+        );
 
         runtime.shutdown();
     }

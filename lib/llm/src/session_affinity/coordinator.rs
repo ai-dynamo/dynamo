@@ -475,11 +475,10 @@ impl Drop for AffinityTrackedStream {
 
 pub fn affinity_id(
     request: &dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-) -> Option<Arc<SessionAffinityId>> {
+) -> Result<Option<Arc<SessionAffinityId>>, Error> {
     request
         .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
-        .ok()
-        .flatten()
+        .map_err(|message| invalid_argument(format!("invalid session affinity context: {message}")))
 }
 
 pub fn explicit_target(
@@ -498,7 +497,10 @@ pub fn explicit_target(
             routing.decode_worker_id.or(routing.backend_instance_id),
             routing.dp_rank,
         ),
-        RequestPhase::Aggregated => (routing.backend_instance_id, routing.dp_rank),
+        RequestPhase::Aggregated => (
+            routing.decode_worker_id.or(routing.backend_instance_id),
+            routing.dp_rank,
+        ),
     };
     if worker_id.is_none() && dp_rank.is_some() {
         return Err(invalid_argument(
