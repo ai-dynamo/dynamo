@@ -12,15 +12,14 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{
-        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
-    },
+    kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
+    session_affinity::SessionAffinityPushRouter,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -116,20 +115,25 @@ fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
+    session_affinity_ttl: Duration,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(DirectRoutingRouter::new(router)),
-        RouterMode::Random
+        RouterMode::Direct
+        | RouterMode::Random
         | RouterMode::RoundRobin
         | RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => Arc::new(router),
+        | RouterMode::DeviceAwareWeighted => Arc::new(SessionAffinityPushRouter::new(
+            router,
+            session_affinity_ttl,
+            router_mode.is_direct_routing(),
+        )),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new(router, chooser))
+            Arc::new(KvPushRouter::new(router, chooser, session_affinity_ttl))
         }
     };
 
@@ -145,6 +149,7 @@ pub async fn build_preprocessed_routing(
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    session_affinity_ttl_secs: u64,
 ) -> anyhow::Result<PreprocessedRouting> {
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
@@ -163,10 +168,21 @@ pub async fn build_preprocessed_routing(
     // OnceLock), which covers the standalone router path as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
-    let prefill_router = prefill_chooser
-        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
+    let prefill_router = prefill_chooser.unwrap_or_else(|| {
+        PrefillRouter::disabled(
+            model_manager,
+            router_mode,
+            enforce_disagg,
+            session_affinity_ttl_secs,
+        )
+    });
 
-    let backend_engine = preprocessed_backend_engine(router, router_mode, chooser)?;
+    let backend_engine = preprocessed_backend_engine(
+        router,
+        router_mode,
+        chooser,
+        Duration::from_secs(session_affinity_ttl_secs),
+    )?;
 
     Ok(PreprocessedRouting {
         backend_engine,

@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
+use std::time::Duration;
 use tokio_stream::StreamExt;
 
 use super::local_model::RoutingConstraints;
@@ -1433,13 +1434,19 @@ impl KvRouter {
     /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
     /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=300))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
         aic_perf_config: Option<&AicPerfConfig>,
+        session_affinity_ttl_secs: u64,
     ) -> PyResult<Self> {
+        if !(1..=31_536_000).contains(&session_affinity_ttl_secs) {
+            return Err(PyValueError::new_err(
+                "session_affinity_ttl_secs must be between 1 and 31536000",
+            ));
+        }
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
                 Python::with_gil(|py| {
@@ -1487,7 +1494,11 @@ impl KvRouter {
             )
             .await?;
 
-            let kv_push_router = RsKvPushRouter::new(push_router, kv_router);
+            let kv_push_router = RsKvPushRouter::new(
+                push_router,
+                kv_router,
+                Duration::from_secs(session_affinity_ttl_secs),
+            );
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),

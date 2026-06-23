@@ -125,6 +125,7 @@ impl KvPushRouter {
         routing_parts: RoutingRequestParts<'_>,
         phase: RequestPhase,
         is_query_only: bool,
+        affinity_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
@@ -142,7 +143,11 @@ impl KvPushRouter {
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
-        let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
+        let explicit_pin = pinned_worker_hint(phase, routing);
+        let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let Some((pinned_worker_id, requested_dp_rank)) =
+            merge_affinity_pin(explicit_pin, affinity_pin)
+        else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
@@ -233,6 +238,21 @@ impl KvPushRouter {
     }
 }
 
+fn merge_affinity_pin(
+    explicit: Option<(u64, Option<u32>)>,
+    affinity: Option<(u64, Option<u32>)>,
+) -> Option<(u64, Option<u32>)> {
+    match (explicit, affinity) {
+        (Some((worker_id, None)), Some((affinity_worker_id, affinity_rank)))
+            if worker_id == affinity_worker_id =>
+        {
+            Some((worker_id, affinity_rank))
+        }
+        (Some(explicit), _) => Some(explicit),
+        (None, affinity) => affinity,
+    }
+}
+
 fn resolve_pinned_worker_rank(
     worker_id: WorkerId,
     requested_dp_rank: Option<u32>,
@@ -278,7 +298,7 @@ mod tests {
         scheduling::{RoutingEligibility, WorkerEligibilityError},
     };
 
-    use super::{pinned_worker_hint, resolve_pinned_worker_rank};
+    use super::{merge_affinity_pin, pinned_worker_hint, resolve_pinned_worker_rank};
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
         protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
@@ -304,6 +324,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("requires an explicit dp_rank"));
+    }
+
+    #[test]
+    fn affinity_pin_supplies_rank_for_matching_explicit_worker() {
+        assert_eq!(
+            merge_affinity_pin(Some((7, None)), Some((7, Some(0)))),
+            Some((7, Some(0)))
+        );
+        assert_eq!(
+            merge_affinity_pin(Some((7, Some(2))), Some((7, Some(3)))),
+            Some((7, Some(2)))
+        );
     }
 
     #[test]
@@ -352,14 +384,14 @@ mod tests {
     }
 
     #[test]
-    fn sticky_validation_style_ignores_transient_overload() {
+    fn affinity_validation_ignores_transient_overload() {
         let worker = WorkerWithDpRank::new(7, 0);
         let configs = HashMap::from([(7, ModelRuntimeConfig::default())]);
         let constraints = RoutingConstraints::default();
         let overloaded = HashSet::from([7]);
         let scheduling_eligibility =
             RoutingEligibility::new(None, Some(&overloaded), Some(worker), &constraints);
-        let sticky_eligibility = RoutingEligibility::new(None, None, Some(worker), &constraints);
+        let affinity_eligibility = RoutingEligibility::new(None, None, Some(worker), &constraints);
 
         assert_eq!(
             scheduling_eligibility
@@ -368,7 +400,7 @@ mod tests {
             Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
         );
         assert!(
-            sticky_eligibility
+            affinity_eligibility
                 .validate_worker_rank(&configs, worker)
                 .is_ok()
         );

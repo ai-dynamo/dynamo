@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
@@ -23,6 +23,9 @@ use crate::{
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData},
     },
+    session_affinity::{
+        AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
+    },
 };
 
 mod cancellation;
@@ -36,19 +39,25 @@ use selection::{RoutingRequestParts, WorkerSelection};
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    affinity: AffinityCoordinator,
 }
 
 impl KvPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
+        session_affinity_ttl: Duration,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        KvPushRouter { inner, chooser }
+        KvPushRouter {
+            inner,
+            chooser,
+            affinity: AffinityCoordinator::new(session_affinity_ttl),
+        }
     }
 
     async fn select_request(
@@ -56,14 +65,22 @@ impl KvPushRouter {
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
+        affinity_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let mut selection_future = Box::pin(async {
-            self.select_worker(&context_id, request, routing_parts, phase, is_query_only)
-                .instrument(tracing::info_span!("kv_router.select_worker"))
-                .await
+            self.select_worker(
+                &context_id,
+                request,
+                routing_parts,
+                phase,
+                is_query_only,
+                affinity_worker,
+            )
+            .instrument(tracing::info_span!("kv_router.select_worker"))
+            .await
         });
         let selection_result = tokio::select! {
             biased;
@@ -88,10 +105,40 @@ impl KvPushRouter {
         }
     }
 
+    async fn select_with_affinity(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        is_query_only: bool,
+    ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
+        let Some(session_id) = affinity_id(request) else {
+            return Ok((
+                self.select_request(request, phase, is_query_only, None)
+                    .await?,
+                None,
+            ));
+        };
+        let explicit = explicit_target(request, phase)?;
+        if is_query_only {
+            let target = self.affinity.query_target(&session_id, explicit)?;
+            let worker = target.and_then(affinity_worker);
+            return Ok((
+                self.select_request(request, phase, true, worker).await?,
+                None,
+            ));
+        }
+
+        let operation = self.affinity.acquire(&session_id, explicit).await?;
+        let worker = operation.target().and_then(affinity_worker);
+        let selection = self.select_request(request, phase, false, worker).await?;
+        Ok((selection, Some(operation)))
+    }
+
     async fn track_selection(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
+        is_query_only: bool,
     ) -> Result<RequestGuard, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -105,7 +152,7 @@ impl KvPushRouter {
         );
 
         let record_result: Result<(), Error> = async {
-            if self.chooser.indexer().records_routing_decisions() {
+            if !is_query_only && self.chooser.indexer().records_routing_decisions() {
                 let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
                 let record_result = if let Some(hashes) = selection.routing_hashes.take() {
                     cancel_on_stop(
@@ -271,8 +318,13 @@ impl KvPushRouter {
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let mut selection = self.select_request(&request, phase, false).await?;
-        let mut guard = self.track_selection(&request, &mut selection).await?;
+        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+        let (mut selection, operation) = self
+            .select_with_affinity(&request, phase, is_query_only)
+            .await?;
+        let mut guard = self
+            .track_selection(&request, &mut selection, is_query_only)
+            .await?;
         let metadata = match prepare(&mut request, selection.instance_id, Some(selection.dp_rank)) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -280,11 +332,18 @@ impl KvPushRouter {
                 return Err(error);
             }
         };
+        let selected_target = AffinityTarget {
+            worker_id: selection.instance_id,
+            dp_rank: Some(selection.dp_rank),
+        };
         drop(route_guard);
         let stream = self
             .dispatch_selection(request, selection, guard, true)
             .await?;
-        Ok((metadata, stream))
+        let Some(operation) = operation else {
+            return Ok((metadata, stream));
+        };
+        Ok((metadata, operation.into_stream(selected_target, stream)?))
     }
 }
 
@@ -323,7 +382,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let mut selection = self.select_request(&request, phase, is_query_only).await?;
+        let (mut selection, operation) = self
+            .select_with_affinity(&request, phase, is_query_only)
+            .await?;
         if is_query_only {
             let routing_parts = RoutingRequestParts::new(&request);
             if let Some(ref tracker) = request.tracker {
@@ -369,11 +430,28 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let guard = self.track_selection(&request, &mut selection).await?;
+        let guard = self
+            .track_selection(&request, &mut selection, false)
+            .await?;
         drop(route_guard);
-        self.dispatch_selection(request, selection, guard, false)
-            .await
+        let selected_target = AffinityTarget {
+            worker_id: selection.instance_id,
+            dp_rank: Some(selection.dp_rank),
+        };
+        let stream = self
+            .dispatch_selection(request, selection, guard, operation.is_some())
+            .await?;
+        match operation {
+            Some(operation) => operation.into_stream(selected_target, stream),
+            None => Ok(stream),
+        }
     }
+}
+
+fn affinity_worker(target: AffinityTarget) -> Option<WorkerWithDpRank> {
+    target
+        .dp_rank
+        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
 }
 
 /// A direct routing wrapper for `RouterMode::Direct`.
