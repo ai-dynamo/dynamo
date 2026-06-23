@@ -7,10 +7,12 @@ package cert
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +49,7 @@ const (
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
+	defaultMountedCertPollInterval   = 500 * time.Millisecond
 )
 
 // convertibleCRDs is the list of CRDs whose conversion webhook this operator
@@ -125,6 +128,38 @@ func (cm *CertManager) SetupAndRunOnce(ctx context.Context, mgr ctrl.Manager) er
 	default:
 		return fmt.Errorf("unsupported cert provision mode: %q", cm.cfg.CertProvisionMode)
 	}
+}
+
+// WaitForMountedCertificate waits until the webhook server certificate and key
+// are available through the mounted Secret volume. The Secret API object may be
+// created or updated before kubelet has projected valid files into the pod.
+func (cm *CertManager) WaitForMountedCertificate(ctx context.Context) error {
+	return cm.waitForMountedCertificate(ctx, defaultMountedCertPollInterval)
+}
+
+func (cm *CertManager) waitForMountedCertificate(ctx context.Context, pollInterval time.Duration) error {
+	certPath := filepath.Join(cm.cfg.CertDir, defaultCertName)
+	keyPath := filepath.Join(cm.cfg.CertDir, defaultKeyName)
+	var lastErr error
+	err := wait.PollUntilContextCancel(ctx, pollInterval, true, func(ctx context.Context) (bool, error) {
+		if _, err := tls.LoadX509KeyPair(certPath, keyPath); err != nil {
+			lastErr = err
+			cm.logger.Info("Waiting for webhook TLS certificate files",
+				"cert", certPath, "key", keyPath, "error", err.Error())
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		if lastErr != nil {
+			return fmt.Errorf("waiting for webhook TLS certificate files %s and %s: %w (last read error: %v)",
+				certPath, keyPath, err, lastErr)
+		}
+		return fmt.Errorf("waiting for webhook TLS certificate files %s and %s: %w", certPath, keyPath, err)
+	}
+
+	cm.logger.Info("Webhook TLS certificate files are ready", "cert", certPath, "key", keyPath)
+	return nil
 }
 
 func (cm *CertManager) setupAutoProvisioning(ctx context.Context, mgr ctrl.Manager) error {

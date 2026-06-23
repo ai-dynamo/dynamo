@@ -622,6 +622,14 @@ func main() {
 		}
 	}
 
+	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
+	// synchronously. Secret API updates are not enough because kubelet projects
+	// them into already-running pods asynchronously.
+	if err := certMgr.WaitForMountedCertificate(mainCtx); err != nil {
+		setupLog.Error(err, "failed waiting for mounted webhook TLS certificate")
+		os.Exit(1)
+	}
+
 	// Kubernetes propagates webhook configuration asynchronously, especially
 	// with HA apiservers. A missing or stale CA must fail closed during manager
 	// cache startup rather than allowing the operator to run without conversion

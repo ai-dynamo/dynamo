@@ -10,6 +10,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -235,6 +237,53 @@ func TestCertManager_AutoModeProvisionerError(t *testing.T) {
 	}
 	if !prov.called {
 		t.Fatal("expected provisioner.AddRotator to be called")
+	}
+}
+
+func TestWaitForMountedCertificate_SucceedsWhenKeyPairIsMounted(t *testing.T) {
+	cfg := &configv1alpha1.WebhookServer{
+		CertDir:     t.TempDir(),
+		SecretName:  testSecretName,
+		ServiceName: testServiceName,
+	}
+	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	rotator := cm.newCertRotator()
+	now := time.Now()
+	ca, err := rotator.CreateCACert(now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("creating CA certificate: %v", err)
+	}
+	cert, key, err := rotator.CreateCertPEM(ca, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("creating server certificate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.CertDir, defaultCertName), cert, 0o600); err != nil {
+		t.Fatalf("writing cert file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.CertDir, defaultKeyName), key, 0o600); err != nil {
+		t.Fatalf("writing key file: %v", err)
+	}
+
+	if err := cm.waitForMountedCertificate(context.Background(), time.Millisecond); err != nil {
+		t.Fatalf("expected mounted certificate to be ready, got: %v", err)
+	}
+}
+
+func TestWaitForMountedCertificate_WaitsWhenKeyPairIsMissing(t *testing.T) {
+	cfg := &configv1alpha1.WebhookServer{
+		CertDir:    t.TempDir(),
+		SecretName: testSecretName,
+	}
+	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	err := cm.waitForMountedCertificate(ctx, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected context timeout while waiting for missing certificate files")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got: %v", err)
 	}
 }
 
