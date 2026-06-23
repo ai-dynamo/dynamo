@@ -309,14 +309,13 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Session control graceful degradation**: Session control is request-driven --
-  the router's `AgentController` and `StickySessionRouter` are always created but
-  activate lazily. If no worker has `--enable-streaming-session`, the router warns
-  once and ignores `session_control` in requests. On the handler side,
-  `_session_kwargs()` checks `enable_streaming_session` before injecting
-  `session_params` into SGLang calls. Both layers must agree: the router skips
-  lifecycle RPCs, and the handler skips session params. Without both guards,
-  SGLang errors with "session id does not exist".
+- **Session control lifecycle**: Session control is request-driven and the router
+  requires an explicit open or bind before continuation. Engine-backed open fails
+  if no worker exposes `session_control`; it does not degrade to router-only
+  affinity. On the handler side, `_session_kwargs()` checks
+  `enable_streaming_session` before injecting `session_params` into SGLang calls.
+  The open response must report whether it created a session so the router never
+  attaches to stale backend state.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.

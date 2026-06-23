@@ -183,6 +183,8 @@ Backend details:
 
 `session_control` enables sticky routing by `session_id`. Use `action: "bind"` for router-only sticky affinity without backend engine RPCs. Use `action: "open"` / `"close"` for backend streaming-session lifecycle when the engine supports it.
 
+Open or bind a session before sending a continuation or close request. Continuations route to the exact worker selected during setup and never fall back to another worker. Direct mode requires an explicit instance ID on every request, including continuations. Concurrent continuations are allowed, but close fails until their request streams finish.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
@@ -201,7 +203,7 @@ Backend details:
 }
 ```
 
-Requires `--router-mode=kv` on the frontend. Router-only sticky routing uses `action: "bind"` and does not require backend session support. Engine-backed session lifecycle requires backend support; see [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for SGLang streaming-session setup details.
+Session control works with every frontend routing mode. KV mode preserves worker and data parallel rank affinity; non-KV modes preserve worker affinity unless the request supplies an explicit rank. Router-only sticky routing uses `action: "bind"` and does not require backend session support. Engine-backed lifecycle requires backend support; see [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for SGLang streaming-session setup details.
 
 
 ## Response Extensions

@@ -167,17 +167,20 @@ Key behaviors:
 - **Turns 2+** skip the radix tree entirely. KV is restored from the `SessionSlot` in O(1).
 - **Session KV is invisible to eviction**. It cannot be evicted -- only freed by explicit close or inactivity timeout.
 - **Deterministic cleanup**: On close, session KV is freed immediately.
-- **Router-side affinity**: The `StickySessionRouter` maintains a `session_id -> (worker_id, dp_rank)` mapping with sliding-window TTL. Clients can use `action: "bind"` for router-only sticky routing, or `action: "open"` for SGLang streaming-session KV isolation; both route later turns to the pinned worker/rank.
+- **Router-side affinity**: The session coordinator maintains a `session_id -> (worker_id, dp_rank)` mapping with an idle timeout. Clients can use `action: "bind"` for router-only sticky routing, or `action: "open"` for SGLang streaming-session KV isolation; both route later turns to the pinned target.
 
 ### Enabling Session Control
 
-Session control is request-driven. The `StickySessionRouter` activates automatically when a request carries `nvext.session_control` -- no additional frontend flags are needed beyond `--router-mode kv`. Use `action: "bind"` for router-only sticky routing without calling SGLang. On the worker side, streaming sessions must be explicitly enabled only for `action: "open"` / `action: "close"` lifecycle RPCs and session KV isolation.
+Session control is request-driven and works with every frontend router mode. Use `action: "bind"` for router-only sticky routing without calling SGLang. On the worker side, enable streaming sessions for `action: "open"` / `action: "close"` lifecycle RPCs and session KV isolation. Direct routing requires explicit worker IDs on every session request.
 
 > [!NOTE]
 > Session control is currently supported only on the SGLang backend. vLLM and TensorRT-LLM do not yet expose the streaming session API.
 
 > [!IMPORTANT]
 > Streaming sessions require SGLang `0.5.11` or later, which includes changes from [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, race condition fixes, session metrics).
+
+> [!NOTE]
+> Current `main` and this change still require explicit `open_session`. [Dynamo PR #10214](https://github.com/ai-dynamo/dynamo/pull/10214) and [SGLang PR #27058](https://github.com/sgl-project/sglang/pull/27058) propose implicit opening through tagged generate requests, where `trajectory_id` reaches SGLang on every generate and `trajectory_final=true` triggers the remaining `close_session` RPC. Deprecating explicit session control and deriving finality from headers remain future work; this change adds no related headers, schemas, flags, dependencies, or code paths.
 
 **SGLang worker:**
 
@@ -277,7 +280,9 @@ Include `action: "close"`. The close RPC fires after generation completes:
 ### Limitations
 
 - **Streaming sessions only**: Sessions are opened with `streaming=True`, which means only sequential append operations are supported. Branching (`replace`), token-level rewind (`offset`), and `drop_previous_output` are not supported.
-- **Timeout is idle-based**: The timeout refreshes on every request. If a subagent pauses for a long tool call that exceeds the timeout, the session is reaped and KV is freed. The subagent must re-open the session and re-prefill.
+- **Timeout is idle-based**: The timeout refreshes when a request stream finishes or is dropped. Active requests prevent expiry. If a subagent pauses for a long tool call that exceeds the timeout, the session enters closing and its KV is freed. The subagent must use a new session ID and re-prefill.
+- **Frontend-local state**: Bindings are local to one frontend process. Frontend restart or routing a continuation to another replica produces an unknown-session error.
+- **Concurrent requests**: The router permits concurrent continuations, while the current SGLang streaming-session implementation may impose stricter sequencing requirements. Close fails while continuations are active.
 - **Session metrics**: Active session count (`sglang:num_streaming_sessions`) and held KV tokens (`sglang:streaming_session_held_tokens`) are exported as Prometheus gauges on the worker's metrics endpoint.
 
 ## Quickstart

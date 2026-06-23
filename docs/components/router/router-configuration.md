@@ -110,12 +110,18 @@ For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`
 
 ### Session Control and Sticky Routing
 
-When a request carries `nvext.session_control`, the KV router can activate two session-related components:
+When a request carries `nvext.session_control`, the frontend activates a routing-neutral session coordinator:
 
-- **StickySessionRouter**: Maintains an in-memory `session_id -> (worker_id, dp_rank)` affinity map with sliding-window TTL. `action: "bind"` creates router-only affinity without backend engine RPCs. Subsequent requests with the same `session_id` are routed to the pinned worker/rank, bypassing KV overlap scoring.
-- **AgentController**: Sends session lifecycle RPCs (`open_session`, `close_session`) to the worker's `session_control` endpoint when `action` is `"open"` or `"close"`. The event-plane client is lazily initialized on the first lifecycle request.
+- `action: "bind"` creates router-only worker affinity without backend RPCs.
+- `action: "open"` creates worker affinity and opens an engine-backed session. Engine lifecycle currently requires SGLang with `--enable-streaming-session`.
+- Requests without an action continue an existing session and route to its exact worker. KV routing also preserves the data parallel rank selected at open time; non-KV modes preserve worker affinity unless the request supplies an explicit rank.
+- `action: "close"` reserves the session for its final request. The binding remains unroutable until backend close succeeds or its tombstone expires.
 
-These activate automatically with `--router-mode kv` -- no additional flags are needed. Requests without `session_control` are unaffected and follow the standard KV-aware routing path. Router-only sticky routing only requires `action: "bind"`; engine-backed session lifecycle currently requires the SGLang backend with `--enable-streaming-session`. See [SGLang for Agentic Workloads -- Session Control](../../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental) for details.
+Session affinity works with every router mode. Round-robin, random, power-of-two, least-loaded, and device-aware routing select a worker on the opening request and dispatch later requests exactly to it. Direct mode requires an explicit instance ID on every session request; an existing binding validates that ID but does not supply a missing one. Session requests never fall back to another worker after target selection.
+
+Open or bind a session before continuing or closing it. Repeating an identical `open` or `bind` request reuses the existing setup but still performs that request's generation. Conflicting worker, rank, timeout, or lifecycle-kind values fail with `InvalidArgument`. Close fails while another request lease is active, and requests fail while the session is closing. The idle timeout refreshes only after a request stream finishes or is dropped; active requests cannot expire.
+
+Requests without `session_control` use the normal routing path without session-state work. Session state is local to one frontend process, so a continuation sent to another replica or to a restarted frontend is unknown. See [SGLang for Agentic Workloads -- Session Control](../../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental) for engine setup.
 
 ## Tuning Guidelines
 
