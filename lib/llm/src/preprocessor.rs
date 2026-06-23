@@ -113,6 +113,11 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
 pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
+/// Marks the audit-only usage chunk. It carries the same `LLMMetricAnnotation`
+/// payload as `ANNOTATION_LLM_METRICS` but on a dedicated tag so the client-path
+/// `EventConverter` can strip it entirely (data included). It exists solely to
+/// carry `usage` to the audit `DeltaAggregator` and is never sent to the client.
+pub const ANNOTATION_AUDIT_USAGE: &str = "audit_usage";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
@@ -157,21 +162,15 @@ impl LLMMetricAnnotation {
     pub fn from_annotation<T>(
         annotation: &Annotated<T>,
     ) -> Result<Option<LLMMetricAnnotation>, Box<dyn std::error::Error>> {
-        if let Some(event) = &annotation.event {
-            if event != ANNOTATION_LLM_METRICS {
-                return Ok(None);
-            }
-        } else {
-            let Some(comments) = annotation.comment.as_ref() else {
-                return Ok(None);
-            };
-            if comments.len() != 1 {
-                return Ok(None);
-            }
-            return match serde_json::from_str(&comments[0]) {
-                Ok(metrics) => Ok(Some(metrics)),
-                Err(_) => Ok(None),
-            };
+        // Metrics ride on an event-tagged annotation: `ANNOTATION_LLM_METRICS`
+        // for per-chunk metrics (kept on the client stream as content, comment
+        // stripped) and `ANNOTATION_AUDIT_USAGE` for the audit-only final usage
+        // chunk. Both carry the serialized `LLMMetricAnnotation` as their comment.
+        let Some(event) = annotation.event.as_deref() else {
+            return Ok(None);
+        };
+        if event != ANNOTATION_LLM_METRICS && event != ANNOTATION_AUDIT_USAGE {
+            return Ok(None);
         }
         let comments = annotation
             .comment
@@ -2209,14 +2208,14 @@ impl OpenAIPreprocessor {
                     }
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
-                        // Per-chunk: only attach comment (stripped by EventConverter; tracing only).
-                        // Do NOT set event here — "llm_metrics" event is reserved for the
-                        // final ANNOTATION_LLM_METRICS usage chunk so EventConverter can
-                        // suppress its data from the client stream. Setting event on every
-                        // content chunk would cause EventConverter to strip all content data.
-                        // Guard on event.is_none() so a pre-existing event's comment
-                        // (e.g. an error annotation) is not clobbered.
+                        // Per-chunk metrics ride on the content chunk as an
+                        // ANNOTATION_LLM_METRICS event. The metrics collector
+                        // observes them, then the EventConverter strips the event
+                        // and comment while keeping the content `data`. Only set
+                        // event if not already set, to avoid overriding an existing
+                        // event (e.g. an error annotation).
                         if response.event.is_none() {
+                            response.event = metrics_annotated.event;
                             response.comment = metrics_annotated.comment;
                         }
                     }
@@ -2302,30 +2301,53 @@ impl OpenAIPreprocessor {
                             Annotated::<()>::from_data(())
                         });
 
-                        let client_usage = inner.response_generator.is_usage_enabled().then(|| {
-                            Annotated::<Resp> {
-                                id: None,
-                                data: Some(usage_chunk.clone()),
-                                event: None,
-                                comment: None,
-                                error: None,
-                            }
-                        });
+                        let usage_requested = inner.response_generator.is_usage_enabled();
 
-                        // When the client requested include_usage, buffer a separate
-                        // plain SSE data chunk (no event). EventConverter emits this
-                        // to the client on the next iteration, after the audit chunk.
+                        // Audit decouples usage capture from the client's
+                        // include_usage preference. With an audit sink active we
+                        // emit a dedicated ANNOTATION_AUDIT_USAGE chunk that always
+                        // carries usage for the audit DeltaAggregator (the
+                        // EventConverter strips it entirely from the client), and
+                        // separately buffer the plain client usage chunk only when
+                        // include_usage was requested. With audit off the behavior is
+                        // identical to the non-audit path: a single
+                        // ANNOTATION_LLM_METRICS chunk whose `data` (the usage) is
+                        // forwarded to the client only when include_usage was set.
                         if inner.emit_audit_usage_chunk {
-                            if let Some(client_chunk) = client_usage {
-                                inner.pending_client_usage = Some(client_chunk);
+                            if usage_requested {
+                                inner.pending_client_usage = Some(Annotated::<Resp> {
+                                    id: None,
+                                    data: Some(usage_chunk.clone()),
+                                    event: None,
+                                    comment: None,
+                                    error: None,
+                                });
                             }
 
-                            // ANNOTATION_LLM_METRICS chunk: carries usage for the audit
-                            // DeltaAggregator. EventConverter always strips its `data`
-                            // before forwarding to the client (audit-only path).
-                            let annotated_usage = Annotated::<Resp> {
+                            let audit_usage = Annotated::<Resp> {
                                 id: None,
                                 data: Some(usage_chunk),
+                                event: Some(ANNOTATION_AUDIT_USAGE.to_string()),
+                                comment: annotation.comment,
+                                error: None,
+                            };
+
+                            tracing::trace!(
+                                request_id = inner.context.id(),
+                                "Sending audit-only usage chunk, audit_usage: {:?}",
+                                audit_usage
+                            );
+
+                            Some((audit_usage, inner))
+                        } else {
+                            let data = if usage_requested {
+                                Some(usage_chunk)
+                            } else {
+                                None
+                            };
+                            let annotated_usage = Annotated::<Resp> {
+                                id: None,
+                                data,
                                 event: Some(ANNOTATION_LLM_METRICS.to_string()),
                                 comment: annotation.comment,
                                 error: None,
@@ -2333,21 +2355,11 @@ impl OpenAIPreprocessor {
 
                             tracing::trace!(
                                 request_id = inner.context.id(),
-                                "Sending final audit usage chunk, annotated_usage: {:?}",
+                                "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
                                 annotated_usage
                             );
 
                             Some((annotated_usage, inner))
-                        } else if let Some(client_chunk) = client_usage {
-                            tracing::trace!(
-                                request_id = inner.context.id(),
-                                "Sending final usage chunk for OpenAI compliance, client_chunk: {:?}",
-                                client_chunk
-                            );
-
-                            Some((client_chunk, inner))
-                        } else {
-                            None
                         }
                     } else {
                         // stream closed
@@ -3384,44 +3396,57 @@ mod tests {
     }
 
     #[test]
-    fn llm_metrics_from_annotation_accepts_comment_only_metrics() {
-        let event_annotation = test_llm_metrics_annotation()
+    fn llm_metrics_from_annotation_recognizes_both_metric_event_tags() {
+        // Both the per-chunk `llm_metrics` event and the audit-only `audit_usage`
+        // event carry the serialized LLMMetricAnnotation as their comment and must
+        // be observed by the metrics collector.
+        let base = test_llm_metrics_annotation()
             .to_annotation::<()>()
             .expect("metrics annotation serializes");
-        let comment_only = Annotated::<()> {
-            id: None,
-            data: None,
-            event: None,
-            comment: event_annotation.comment,
-            error: None,
-        };
-
-        let metrics = LLMMetricAnnotation::from_annotation(&comment_only)
-            .expect("comment-only annotation parses")
-            .expect("comment-only metrics are recognized");
-
-        assert_eq!(metrics.input_tokens, 10);
-        assert_eq!(metrics.output_tokens, 20);
-        assert_eq!(metrics.chunk_tokens, 3);
-        assert_eq!(metrics.cached_tokens, Some(4));
-        assert_eq!(metrics.prefill_worker_id, Some(1));
-        assert_eq!(metrics.decode_worker_id, Some(3));
-        assert_eq!(metrics.detokenize_count, Some(6));
+        for tag in [ANNOTATION_LLM_METRICS, ANNOTATION_AUDIT_USAGE] {
+            let tagged = Annotated::<()> {
+                id: None,
+                data: None,
+                event: Some(tag.to_string()),
+                comment: base.comment.clone(),
+                error: None,
+            };
+            let metrics = LLMMetricAnnotation::from_annotation(&tagged)
+                .expect("metrics annotation parses")
+                .unwrap_or_else(|| panic!("metrics recognized for tag {tag}"));
+            assert_eq!(metrics.input_tokens, 10);
+            assert_eq!(metrics.output_tokens, 20);
+            assert_eq!(metrics.detokenize_count, Some(6));
+        }
     }
 
     #[test]
-    fn llm_metrics_from_annotation_ignores_non_metrics_comment_only_chunks() {
-        let annotated = Annotated::<()> {
+    fn llm_metrics_from_annotation_ignores_untagged_and_other_events() {
+        // No event → not metrics (per-chunk metrics are event-tagged again).
+        let untagged = Annotated::<()> {
             id: None,
             data: None,
             event: None,
-            comment: Some(vec!["not metrics".to_string()]),
+            comment: Some(vec!["{\"input_tokens\":1}".to_string()]),
             error: None,
         };
-
         assert!(
-            LLMMetricAnnotation::from_annotation(&annotated)
-                .expect("non-metrics comment is not an error")
+            LLMMetricAnnotation::from_annotation(&untagged)
+                .expect("untagged chunk is not an error")
+                .is_none()
+        );
+
+        // A different event tag → not metrics.
+        let other = Annotated::<()> {
+            id: None,
+            data: None,
+            event: Some(ANNOTATION_TOKEN_IDS.to_string()),
+            comment: None,
+            error: None,
+        };
+        assert!(
+            LLMMetricAnnotation::from_annotation(&other)
+                .expect("other event is not an error")
                 .is_none()
         );
     }
