@@ -404,6 +404,8 @@ navigation:
                 path: ../pages-dev/components/router/router-concepts.md
               - page: Configuration and Tuning
                 path: ../pages-dev/components/router/router-configuration.md
+              - page: Deficit Round Robin Queue Scheduling
+                path: ../pages-dev/components/router/deficit-round-robin.md
               - page: Priority Scheduling
                 path: ../pages-dev/components/router/priority-scheduling.md
               - page: Disaggregated Serving

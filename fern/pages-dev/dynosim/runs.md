@@ -128,6 +128,7 @@ The trace file must be Mooncake-style JSONL. Each line should contain:
 - `hash_ids`
 - optional `priority` (signed soft-priority hint)
 - optional `strict_priority` (unsigned queue tier; larger values run first)
+- optional `policy_class` (requested policy family or explicit class)
 
 Example:
 
@@ -246,6 +247,8 @@ The dedicated DynoSim CLI exposes:
 - `--prefill-engine-args` (JSON string)
 - `--decode-engine-args` (JSON string)
 - `--router-config` (JSON string)
+- `--router-policy-config` (policy-family/cache-bucket queue YAML path; `DYN_ROUTER_POLICY_CONFIG` fallback)
+- `--model-name` (selects an exact model profile from the policy YAML)
 - `--aic-backend`
 - `--aic-system`
 - `--aic-backend-version`
@@ -293,6 +296,14 @@ as `block_size`, `engine_type`, `dp_size`, `speedup_ratio`, and `decode_speedup_
 `--extra-engine-args`, not as top-level DynoSim CLI flags. `--trace-block-size` is separate and is
 used only for trace-file runs. Unspecified fields fall back to the same defaults used by
 `MockEngineArgs::default()` and `KvRouterConfig::default()`.
+
+`--router-policy-config` sets the startup-only policy YAML path and overrides a
+`router_policy_config` value embedded in `--router-config`. Requests may provide an optional
+`policy_class` field in Mooncake JSONL rows. A recognized family combines with the
+router-observed uncached-ISL bucket to select a physical queue. An exact explicit class
+bypasses cache bucketing. Missing, unknown, and ordinary physical-class names use the selected
+profile's `default_policy_family`. Use `--model-name` to select an exact model profile,
+otherwise the YAML root profile is used.
 
 DynoSim has two independent AIC surfaces:
 
