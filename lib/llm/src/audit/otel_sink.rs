@@ -758,6 +758,45 @@ mod tests {
     }
 
     #[test]
+    fn payload_size_guard_boundary_is_inclusive() {
+        // Lock the `payload.len() <= max_payload_bytes` boundary: a payload that
+        // exactly fits is emitted complete; one byte tighter forces the marker.
+        let rec = sample_record_with_request();
+        let header_policy = OtelHeaderPolicy::default();
+        let exact = OtelSink::serialize_payload(&rec, &header_policy)
+            .expect("serializes")
+            .len();
+
+        let (payload, complete, drop_reason) =
+            OtelSink::payload_for_limit(&rec, exact, &header_policy).expect("fits at boundary");
+        assert!(complete, "payload exactly at the limit must be complete");
+        assert!(drop_reason.is_none());
+        assert_eq!(payload.len(), exact);
+
+        let (_marker, complete, drop_reason) =
+            OtelSink::payload_for_limit(&rec, exact - 1, &header_policy)
+                .expect("marker serializes");
+        assert!(!complete, "one byte over the limit must emit the marker");
+        assert!(drop_reason.unwrap().starts_with("otel_payload_too_large:"));
+    }
+
+    #[test]
+    fn over_limit_marker_preserves_record_identity() {
+        // Oversized records must stay identifiable (not silently dropped): the
+        // marker keeps schema_version / request_id / model / streaming.
+        let rec = sample_record();
+        let header_policy = OtelHeaderPolicy::default();
+        let (payload, _complete, _reason) =
+            OtelSink::payload_for_limit(&rec, 1, &header_policy).expect("marker serializes");
+
+        let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(decoded["schema_version"], rec.schema_version);
+        assert_eq!(decoded["request_id"], rec.request_id);
+        assert_eq!(decoded["model"], rec.model);
+        assert_eq!(decoded["requested_streaming"], rec.requested_streaming);
+    }
+
+    #[test]
     #[serial]
     fn protocol_env_defaults_to_grpc() {
         temp_env::with_vars(
