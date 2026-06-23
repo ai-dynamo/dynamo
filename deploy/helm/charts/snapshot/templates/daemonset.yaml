@@ -78,8 +78,8 @@ spec:
         # Deploy seccomp profile to host before starting the agent
         # This profile blocks io_uring syscalls that CRIU doesn't support
         - name: deploy-seccomp
-          image: "{{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}"
-          imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+          image: {{ .Values.daemonset.initContainer.image | default "busybox:latest" }}
+          imagePullPolicy: {{ .Values.daemonset.initContainer.imagePullPolicy }}
           command:
             - sh
             - -c
