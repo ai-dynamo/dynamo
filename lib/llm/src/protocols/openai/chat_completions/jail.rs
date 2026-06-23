@@ -1040,11 +1040,31 @@ impl JailedStream {
     }
 
     fn markerless_json_completion_base(&self, content: &str) -> Option<usize> {
-        if self.tool_call_parser.as_deref() != Some("mistral") {
+        if !self.allows_markerless_json_completion() {
             return None;
         }
 
         content.find(['{', '['])
+    }
+
+    fn allows_markerless_json_completion(&self) -> bool {
+        let Some(parser_name) = self.tool_call_parser.as_deref() else {
+            return false;
+        };
+
+        if parser_name == "mistral" {
+            return true;
+        }
+
+        let parser_map = get_tool_parser_map();
+        matches!(
+            parser_map
+                .get(parser_name)
+                .map(|config| &config.parser_config),
+            Some(ParserConfig::Json(config))
+                if !config.tool_call_end_tokens.is_empty()
+                    && config.tool_call_end_tokens.iter().all(|token| token.is_empty())
+        )
     }
 
     fn has_orphan_end_marker_after(&self, content: &str, split_pos: usize) -> bool {
@@ -2410,6 +2430,63 @@ mod tests {
         assert!(
             all_text.contains("Done!"),
             "Trailing text should pass through after no-end-token JSON unjails. Got: {:?}",
+            all_text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_markerless_llama3_json_rejails_bare_json_after_complete_payload() {
+        let jail = JailedStream::builder()
+            .tool_call_parser("llama3_json")
+            .build();
+
+        let chunks = vec![
+            text_chunk(
+                "<|python_tag|>{\"name\":\"get_weather\",\"arguments\":{\"location\":\"SF\"}}",
+            ),
+            text_chunk("{\"name\":\"get_time\",\"arguments\":{\"timezone\":\"UTC\"}}"),
+        ];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert_eq!(tool_calls.len(), 2, "responses: {responses:?}");
+        assert_eq!(tool_calls[0].0, "get_weather");
+        assert_eq!(tool_calls[0].1, r#"{"location":"SF"}"#);
+        assert_eq!(tool_calls[1].0, "get_time");
+        assert_eq!(tool_calls[1].1, r#"{"timezone":"UTC"}"#);
+
+        let all_text = collect_text_content(&responses);
+        assert!(
+            !all_text.contains("get_time"),
+            "markerless second call should not leak as text. Got: {:?}",
+            all_text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_markerless_phi4_rejails_bare_array_payload() {
+        let jail = JailedStream::builder().tool_call_parser("phi4").build();
+
+        let chunks = vec![text_chunk(
+            "[{\"name\":\"get_weather\",\"arguments\":{\"location\":\"SF\"}}]",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert_eq!(tool_calls.len(), 1, "responses: {responses:?}");
+        assert_eq!(tool_calls[0].0, "get_weather");
+        assert_eq!(tool_calls[0].1, r#"{"location":"SF"}"#);
+
+        let all_text = collect_text_content(&responses);
+        assert!(
+            !all_text.contains("get_weather"),
+            "markerless phi4 call should not leak as text. Got: {:?}",
             all_text
         );
     }
