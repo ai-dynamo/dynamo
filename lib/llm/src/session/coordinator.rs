@@ -32,6 +32,72 @@ use crate::protocols::common::extensions::{SessionAction, SessionControl};
 pub(super) const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) const MAX_SESSION_TIMEOUT_SECS: u64 = 365 * 24 * 60 * 60;
 
+#[derive(Clone, Copy)]
+enum SessionIntent {
+    Ensure(SessionKind),
+    Continue,
+    Close,
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedSessionRequest {
+    intent: SessionIntent,
+    explicit_target: Option<SessionTarget>,
+    timeout: Duration,
+}
+
+impl ValidatedSessionRequest {
+    fn new(
+        control: &SessionControl,
+        explicit_target: Option<SessionTarget>,
+        direct: bool,
+    ) -> Result<Self, Error> {
+        if control.timeout == 0 {
+            return Err(invalid_argument(
+                "session timeout must be greater than zero",
+            ));
+        }
+        if control.timeout > MAX_SESSION_TIMEOUT_SECS {
+            return Err(invalid_argument(format!(
+                "session timeout must not exceed {MAX_SESSION_TIMEOUT_SECS} seconds"
+            )));
+        }
+        if direct && explicit_target.is_none() {
+            return Err(invalid_argument(
+                "worker ID is required for every session request in Direct routing mode",
+            ));
+        }
+
+        let intent = match control.action.as_ref() {
+            Some(SessionAction::Open) => SessionIntent::Ensure(SessionKind::EngineBacked),
+            Some(SessionAction::Bind) => SessionIntent::Ensure(SessionKind::RouterOnly),
+            Some(SessionAction::Close) => SessionIntent::Close,
+            None => SessionIntent::Continue,
+        };
+        Ok(Self {
+            intent,
+            explicit_target,
+            timeout: Duration::from_secs(control.timeout),
+        })
+    }
+
+    fn ensure_kind(self) -> Option<SessionKind> {
+        match self.intent {
+            SessionIntent::Ensure(kind) => Some(kind),
+            SessionIntent::Continue | SessionIntent::Close => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExistingDisposition {
+    Expired,
+    OpeningMatch,
+    OpeningUnavailable,
+    BoundLease { duplicate_setup: bool },
+    BoundClose,
+}
+
 pub(super) struct SessionCoordinatorInner {
     pub(super) sessions: DashMap<String, SessionState>,
     lifecycle: Arc<dyn SessionLifecycleBackend>,
@@ -169,32 +235,23 @@ impl SessionCoordinator {
         explicit_target: Option<SessionTarget>,
         direct: bool,
     ) -> Result<SessionOperation, Error> {
-        validate_control(control, explicit_target, direct)?;
-        let requested_kind = match control.action {
-            Some(SessionAction::Open) => Some(SessionKind::EngineBacked),
-            Some(SessionAction::Bind) => Some(SessionKind::RouterOnly),
-            _ => None,
-        };
-        let timeout = Duration::from_secs(control.timeout);
+        let request = ValidatedSessionRequest::new(control, explicit_target, direct)?;
 
         loop {
             let mut wait = None;
             let now = Instant::now();
             let operation = match self.inner.sessions.entry(control.session_id.clone()) {
                 Entry::Vacant(entry) => {
-                    let Some(kind) = requested_kind else {
-                        return Err(invalid_argument(format!(
-                            "session {} must be opened or bound before continuation or close",
-                            control.session_id
-                        )));
+                    let Some(kind) = request.ensure_kind() else {
+                        return Err(unknown_session(&control.session_id));
                     };
                     let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
                     entry.insert(SessionState::Opening(OpeningState {
                         revision,
                         kind,
-                        requested_target: explicit_target,
+                        requested_target: request.explicit_target,
                         target: None,
-                        timeout,
+                        timeout: request.timeout,
                         notify: Arc::new(tokio::sync::Notify::new()),
                     }));
                     Some(SessionOperation::opening(
@@ -205,64 +262,54 @@ impl SessionCoordinator {
                     ))
                 }
                 Entry::Occupied(mut entry) => {
-                    let expired = match entry.get() {
-                        SessionState::Bound(bound)
-                            if bound.active_leases == 0 && bound.binding.expires_at <= now =>
-                        {
-                            Some((bound.revision, bound.binding.clone()))
-                        }
-                        _ => None,
-                    };
-                    if let Some((revision, binding)) = expired {
-                        if binding.kind == SessionKind::EngineBacked {
-                            entry.insert(SessionState::Closing(ClosingState {
-                                revision,
-                                remove_at: now + binding.timeout + SESSION_TIMEOUT_FALLBACK_BUFFER,
-                                binding,
-                                retry_started: false,
-                            }));
-                            drop(entry);
-                            Self::ensure_close_task(&self.inner, control.session_id.clone());
-                            return Err(invalid_argument(format!(
-                                "session {} expired and is closing",
-                                control.session_id
-                            )));
-                        }
-
-                        let Some(kind) = requested_kind else {
-                            entry.remove();
-                            return Err(invalid_argument(format!(
-                                "session {} must be opened or bound before continuation or close",
-                                control.session_id
-                            )));
-                        };
-                        let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
-                        entry.insert(SessionState::Opening(OpeningState {
-                            revision,
-                            kind,
-                            requested_target: explicit_target,
-                            target: None,
-                            timeout,
-                            notify: Arc::new(tokio::sync::Notify::new()),
-                        }));
-                        return Ok(SessionOperation::opening(
-                            Arc::downgrade(&self.inner),
-                            control.session_id.clone(),
-                            revision,
-                            kind,
-                        ));
-                    }
-
-                    let state = entry.get_mut();
-                    match state {
-                        SessionState::Opening(opening) => {
-                            let Some(kind) = requested_kind else {
+                    match validate_existing_state(&control.session_id, entry.get(), request, now)? {
+                        ExistingDisposition::Expired => {
+                            let SessionState::Bound(bound) = entry.get() else {
+                                unreachable!("only bound sessions expire")
+                            };
+                            let revision = bound.revision;
+                            let binding = bound.binding.clone();
+                            if binding.kind == SessionKind::EngineBacked {
+                                entry.insert(SessionState::Closing(ClosingState {
+                                    revision,
+                                    remove_at: now
+                                        + binding.timeout
+                                        + SESSION_TIMEOUT_FALLBACK_BUFFER,
+                                    binding,
+                                    retry_started: false,
+                                }));
+                                drop(entry);
+                                Self::ensure_close_task(&self.inner, control.session_id.clone());
                                 return Err(invalid_argument(format!(
-                                    "session {} is opening; only a matching open or bind may coalesce",
+                                    "session {} expired and is closing",
                                     control.session_id
                                 )));
+                            }
+
+                            let Some(kind) = request.ensure_kind() else {
+                                entry.remove();
+                                return Err(unknown_session(&control.session_id));
                             };
-                            ensure_opening_matches(opening, kind, explicit_target, timeout)?;
+                            let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
+                            entry.insert(SessionState::Opening(OpeningState {
+                                revision,
+                                kind,
+                                requested_target: request.explicit_target,
+                                target: None,
+                                timeout: request.timeout,
+                                notify: Arc::new(tokio::sync::Notify::new()),
+                            }));
+                            return Ok(SessionOperation::opening(
+                                Arc::downgrade(&self.inner),
+                                control.session_id.clone(),
+                                revision,
+                                kind,
+                            ));
+                        }
+                        ExistingDisposition::OpeningMatch => {
+                            let SessionState::Opening(opening) = entry.get_mut() else {
+                                unreachable!("validated opening state changed under entry guard")
+                            };
                             tracing::warn!(session_id = %control.session_id, "Coalescing duplicate session setup");
                             #[cfg(test)]
                             if let Some(hooks) = self.inner.test_hooks.as_ref() {
@@ -271,65 +318,48 @@ impl SessionCoordinator {
                             wait = Some(opening.notify.clone().notified_owned());
                             None
                         }
-                        SessionState::Bound(bound) => {
-                            if let Some(kind) = requested_kind {
-                                ensure_binding_matches(
-                                    &bound.binding,
-                                    kind,
-                                    explicit_target,
-                                    timeout,
-                                )?;
-                                tracing::warn!(session_id = %control.session_id, "Ignoring duplicate session setup");
-                            } else if let Some(target) = explicit_target
-                                && !target_matches(bound.binding.target, target)
-                            {
-                                return Err(target_mismatch(
-                                    &control.session_id,
-                                    bound.binding.target,
-                                    target,
-                                ));
-                            }
-
-                            if matches!(control.action, Some(SessionAction::Close)) {
-                                if bound.active_leases != 0 {
-                                    return Err(invalid_argument(format!(
-                                        "session {} cannot close while {} request lease(s) are active",
-                                        control.session_id, bound.active_leases
-                                    )));
-                                }
-                                let prior = bound.clone();
-                                let revision = bound.revision;
-                                let binding = bound.binding.clone();
-                                *state = SessionState::Closing(ClosingState {
-                                    revision,
-                                    remove_at: now
-                                        + binding.timeout
-                                        + SESSION_TIMEOUT_FALLBACK_BUFFER,
-                                    binding: binding.clone(),
-                                    retry_started: false,
-                                });
-                                Some(SessionOperation::closing(
-                                    Arc::downgrade(&self.inner),
-                                    control.session_id.clone(),
-                                    revision,
-                                    binding.target,
-                                    prior,
-                                ))
-                            } else {
-                                bound.active_leases += 1;
-                                Some(SessionOperation::lease(
-                                    Arc::downgrade(&self.inner),
-                                    control.session_id.clone(),
-                                    bound.revision,
-                                    bound.binding.target,
-                                ))
-                            }
-                        }
-                        SessionState::Closing(_) => {
+                        ExistingDisposition::OpeningUnavailable => {
                             return Err(invalid_argument(format!(
-                                "session {} is closing and is not routable",
+                                "session {} is opening; only a matching open or bind may coalesce",
                                 control.session_id
                             )));
+                        }
+                        ExistingDisposition::BoundLease { duplicate_setup } => {
+                            let SessionState::Bound(bound) = entry.get_mut() else {
+                                unreachable!("validated bound state changed under entry guard")
+                            };
+                            if duplicate_setup {
+                                tracing::warn!(session_id = %control.session_id, "Ignoring duplicate session setup");
+                            }
+                            bound.active_leases += 1;
+                            Some(SessionOperation::lease(
+                                Arc::downgrade(&self.inner),
+                                control.session_id.clone(),
+                                bound.revision,
+                                bound.binding.target,
+                            ))
+                        }
+                        ExistingDisposition::BoundClose => {
+                            let state = entry.get_mut();
+                            let SessionState::Bound(bound) = state else {
+                                unreachable!("validated bound state changed under entry guard")
+                            };
+                            let prior = bound.clone();
+                            let revision = bound.revision;
+                            let binding = bound.binding.clone();
+                            *state = SessionState::Closing(ClosingState {
+                                revision,
+                                remove_at: now + binding.timeout + SESSION_TIMEOUT_FALLBACK_BUFFER,
+                                binding: binding.clone(),
+                                retry_started: false,
+                            });
+                            Some(SessionOperation::closing(
+                                Arc::downgrade(&self.inner),
+                                control.session_id.clone(),
+                                revision,
+                                binding.target,
+                                prior,
+                            ))
                         }
                     }
                 }
@@ -348,63 +378,31 @@ impl SessionCoordinator {
         control: &SessionControl,
         explicit_target: Option<SessionTarget>,
     ) -> Result<Option<SessionTarget>, Error> {
-        validate_control(control, explicit_target, false)?;
-        let requested_kind = match control.action {
-            Some(SessionAction::Open) => Some(SessionKind::EngineBacked),
-            Some(SessionAction::Bind) => Some(SessionKind::RouterOnly),
-            _ => None,
+        let request = ValidatedSessionRequest::new(control, explicit_target, false)?;
+        let Some(state) = self.inner.sessions.get(&control.session_id) else {
+            return if request.ensure_kind().is_some() {
+                Ok(None)
+            } else {
+                Err(unknown_session(&control.session_id))
+            };
         };
-        let timeout = Duration::from_secs(control.timeout);
-        match self.inner.sessions.get(&control.session_id).as_deref() {
-            None if requested_kind.is_some() => Ok(None),
-            None => Err(invalid_argument(format!(
-                "session {} must be opened or bound before continuation or close",
+        match validate_existing_state(&control.session_id, &state, request, Instant::now())? {
+            ExistingDisposition::Expired => Err(invalid_argument(format!(
+                "session {} has expired",
                 control.session_id
             ))),
-            Some(SessionState::Opening(opening)) => {
-                let Some(kind) = requested_kind else {
-                    return Err(invalid_argument(format!(
-                        "session {} is opening and is not yet routable",
-                        control.session_id
-                    )));
-                };
-                ensure_opening_matches(opening, kind, explicit_target, timeout)?;
+            ExistingDisposition::OpeningMatch | ExistingDisposition::OpeningUnavailable => {
                 Err(invalid_argument(format!(
                     "session {} is opening and is not yet routable",
                     control.session_id
                 )))
             }
-            Some(SessionState::Bound(bound)) => {
-                if bound.binding.expires_at <= Instant::now() && bound.active_leases == 0 {
-                    return Err(invalid_argument(format!(
-                        "session {} has expired",
-                        control.session_id
-                    )));
-                }
-                if let Some(kind) = requested_kind {
-                    ensure_binding_matches(&bound.binding, kind, explicit_target, timeout)?;
-                } else if let Some(target) = explicit_target
-                    && !target_matches(bound.binding.target, target)
-                {
-                    return Err(target_mismatch(
-                        &control.session_id,
-                        bound.binding.target,
-                        target,
-                    ));
-                }
-                if matches!(control.action, Some(SessionAction::Close)) && bound.active_leases != 0
-                {
-                    return Err(invalid_argument(format!(
-                        "session {} cannot close while {} request lease(s) are active",
-                        control.session_id, bound.active_leases
-                    )));
-                }
+            ExistingDisposition::BoundLease { .. } | ExistingDisposition::BoundClose => {
+                let SessionState::Bound(bound) = state.value() else {
+                    unreachable!("validated bound state changed under read guard")
+                };
                 Ok(Some(bound.binding.target))
             }
-            Some(SessionState::Closing(_)) => Err(invalid_argument(format!(
-                "session {} is closing and is not routable",
-                control.session_id
-            ))),
         }
     }
 
@@ -553,27 +551,64 @@ fn ensure_binding_matches(
     Ok(())
 }
 
-fn validate_control(
-    control: &SessionControl,
-    explicit_target: Option<SessionTarget>,
-    direct: bool,
-) -> Result<(), Error> {
-    if control.timeout == 0 {
-        return Err(invalid_argument(
-            "session timeout must be greater than zero",
-        ));
+fn validate_existing_state(
+    session_id: &str,
+    state: &SessionState,
+    request: ValidatedSessionRequest,
+    now: Instant,
+) -> Result<ExistingDisposition, Error> {
+    match state {
+        SessionState::Opening(opening) => {
+            let SessionIntent::Ensure(kind) = request.intent else {
+                return Ok(ExistingDisposition::OpeningUnavailable);
+            };
+            ensure_opening_matches(opening, kind, request.explicit_target, request.timeout)?;
+            Ok(ExistingDisposition::OpeningMatch)
+        }
+        SessionState::Bound(bound) => {
+            if bound.active_leases == 0 && bound.binding.expires_at <= now {
+                return Ok(ExistingDisposition::Expired);
+            }
+
+            let duplicate_setup = if let SessionIntent::Ensure(kind) = request.intent {
+                ensure_binding_matches(
+                    &bound.binding,
+                    kind,
+                    request.explicit_target,
+                    request.timeout,
+                )?;
+                true
+            } else {
+                if let Some(target) = request.explicit_target
+                    && !target_matches(bound.binding.target, target)
+                {
+                    return Err(target_mismatch(session_id, bound.binding.target, target));
+                }
+                false
+            };
+
+            if matches!(request.intent, SessionIntent::Close) {
+                if bound.active_leases != 0 {
+                    return Err(invalid_argument(format!(
+                        "session {session_id} cannot close while {} request lease(s) are active",
+                        bound.active_leases
+                    )));
+                }
+                Ok(ExistingDisposition::BoundClose)
+            } else {
+                Ok(ExistingDisposition::BoundLease { duplicate_setup })
+            }
+        }
+        SessionState::Closing(_) => Err(invalid_argument(format!(
+            "session {session_id} is closing and is not routable"
+        ))),
     }
-    if control.timeout > MAX_SESSION_TIMEOUT_SECS {
-        return Err(invalid_argument(format!(
-            "session timeout must not exceed {MAX_SESSION_TIMEOUT_SECS} seconds"
-        )));
-    }
-    if direct && explicit_target.is_none() {
-        return Err(invalid_argument(
-            "worker ID is required for every session request in Direct routing mode",
-        ));
-    }
-    Ok(())
+}
+
+fn unknown_session(session_id: &str) -> Error {
+    invalid_argument(format!(
+        "session {session_id} must be opened or bound before continuation or close"
+    ))
 }
 
 fn target_mismatch(session_id: &str, expected: SessionTarget, actual: SessionTarget) -> Error {

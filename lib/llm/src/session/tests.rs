@@ -315,6 +315,12 @@ async fn transition_contract_table() {
         let coordinator = coordinator(lifecycle, hooks());
         seed(&coordinator, case.state);
         let request = control(case.action);
+        assert_eq!(
+            coordinator.query_target(&request, None).is_ok(),
+            matches!(case.expected, Expected::Ready),
+            "{} query-only validation",
+            case.name
+        );
         let mut future = Box::pin(coordinator.begin(&request, None, false));
         match case.expected {
             Expected::Ready => assert!(
