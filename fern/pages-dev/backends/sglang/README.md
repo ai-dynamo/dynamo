@@ -42,7 +42,7 @@ Requires Rust and the CUDA toolkit (`nvcc`).
 ```bash
 # install dynamo
 uv venv --python 3.12 --seed
-uv pip install maturin nixl
+uv pip install 'maturin[patchelf]' nixl
 cd $DYNAMO_HOME/lib/bindings/python
 maturin develop --uv
 cd $DYNAMO_HOME
