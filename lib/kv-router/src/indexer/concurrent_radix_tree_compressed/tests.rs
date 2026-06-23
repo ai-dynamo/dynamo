@@ -299,7 +299,6 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 3, 4], worker2, 1);
             assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker3, 6);
         }
-
     }
 
     mod cleanup {
@@ -539,7 +538,10 @@ mod remove_tests {
             index.edge_topology_for_test(),
             vec![edge_topology(
                 &[1, 2, 3],
-                vec![edge_topology(&[4, 5, 6], vec![]), edge_topology(&[7], vec![])],
+                vec![
+                    edge_topology(&[4, 5, 6], vec![]),
+                    edge_topology(&[7], vec![])
+                ],
             )],
         );
 

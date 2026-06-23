@@ -141,9 +141,12 @@ impl ConcurrentRadixTreeCompressed {
         block_hash: ExternalSequenceBlockHash,
         id: u64,
     ) {
-        let Some(mut cur_node) =
-            self.resolve_lookup(lookup, worker, block_hash, LookupRepairDirection::TowardHead)
-        else {
+        let Some(mut cur_node) = self.resolve_lookup(
+            lookup,
+            worker,
+            block_hash,
+            LookupRepairDirection::TowardHead,
+        ) else {
             tracing::debug!(
                 worker_id = worker.worker_id.to_string(),
                 dp_rank = worker.dp_rank,
