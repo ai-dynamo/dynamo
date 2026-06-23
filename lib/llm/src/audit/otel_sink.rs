@@ -17,7 +17,6 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    sync::Arc,
     time::SystemTime,
 };
 
@@ -63,7 +62,6 @@ const DEFAULT_REDACTED_HTTP_HEADERS: &[&str] = &[
 
 const SENSITIVE_HTTP_HEADER_NAME_FRAGMENTS: &[&str] =
     &["token", "secret", "password", "credential"];
-const DEFAULT_REDACTION_EXEMPT_HTTP_HEADER_PREFIXES: &[&str] = &["nvcf-"];
 
 /// Logical endpoint label so phase 2 (completions / responses) can be
 /// distinguished without changing the body.
@@ -78,11 +76,10 @@ const DEFAULT_SERVICE_NAME: &str = "dynamo";
 pub struct OtelSink {
     /// Held so the SDK's batch processor stays alive for the sink's lifetime
     /// and can be force-flushed when the audit worker shuts down.
-    #[allow(dead_code)]
     provider: SdkLoggerProvider,
     logger: SdkLogger,
     max_payload_bytes: usize,
-    header_policy: Arc<OtelHeaderPolicy>,
+    header_policy: OtelHeaderPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -106,7 +103,7 @@ impl Default for OtelHeaderPolicy {
 }
 
 impl OtelHeaderPolicy {
-    fn from_env() -> Arc<Self> {
+    fn from_env() -> Self {
         let mut policy = Self::default();
         if let Ok(raw) = std::env::var(env_audit::DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST) {
             for name in raw.split(|c: char| c == ',' || c.is_whitespace()) {
@@ -116,17 +113,16 @@ impl OtelHeaderPolicy {
                 }
             }
         }
-        Arc::new(policy)
+        policy
     }
 
     fn should_redact(&self, name: &str) -> bool {
+        // No prefix is exempt from the fragment heuristic: `nvcf-session-token`
+        // is redacted, while fragment-free routing headers (`nvcf-function-id`) are not.
         self.redact_names.contains(name)
-            || (!DEFAULT_REDACTION_EXEMPT_HTTP_HEADER_PREFIXES
+            || SENSITIVE_HTTP_HEADER_NAME_FRAGMENTS
                 .iter()
-                .any(|prefix| name.starts_with(prefix))
-                && SENSITIVE_HTTP_HEADER_NAME_FRAGMENTS
-                    .iter()
-                    .any(|fragment| name.contains(fragment)))
+                .any(|fragment| name.contains(fragment))
     }
 }
 
@@ -167,11 +163,19 @@ impl OtlpLogsProtocol {
 }
 
 fn logs_endpoint_from_env(protocol: OtlpLogsProtocol) -> String {
-    if let Ok(endpoint) = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) {
+    // `std::env::var` returns Ok("") for a set-but-empty var; treat empty as unset
+    // and fall through, matching the runtime's resolve_otlp_endpoint.
+    if let Some(endpoint) = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
         return endpoint;
     }
 
-    if let Ok(endpoint) = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT) {
+    if let Some(endpoint) = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
         return match protocol {
             OtlpLogsProtocol::HttpProtobuf => {
                 let trimmed = endpoint.trim_end_matches('/');
@@ -206,7 +210,7 @@ fn otel_http_request_value(
 ) -> serde_json::Value {
     let mut out = BTreeMap::new();
     let mut bytes_used = 0usize;
-    let mut truncated = false;
+    let mut is_truncated = false;
     let header_map = headers.headers();
 
     'headers: for name in header_map.keys() {
@@ -217,8 +221,11 @@ fn otel_http_request_value(
             let rendered = render_header_value(&name, value, policy);
             let next_bytes = name.len().saturating_add(rendered.len());
             if bytes_used.saturating_add(next_bytes) > policy.max_total_bytes {
-                truncated = true;
-                break 'headers;
+                // Stop collecting once the budget is hit, but fall through so the
+                // values already gathered for this header are still inserted
+                // rather than dropped along with the header.
+                is_truncated = true;
+                break;
             }
             bytes_used = bytes_used.saturating_add(next_bytes);
             values.push(serde_json::Value::String(rendered));
@@ -229,11 +236,15 @@ fn otel_http_request_value(
         } else if !values.is_empty() {
             out.insert(name, serde_json::Value::Array(values));
         }
+
+        if is_truncated {
+            break 'headers;
+        }
     }
 
     json!({
         "headers": out,
-        "headers_truncated": truncated,
+        "headers_truncated": is_truncated,
     })
 }
 
@@ -241,7 +252,7 @@ impl OtelSink {
     fn new(
         provider: SdkLoggerProvider,
         max_payload_bytes: usize,
-        header_policy: Arc<OtelHeaderPolicy>,
+        header_policy: OtelHeaderPolicy,
     ) -> Self {
         let logger = provider.logger(AUDIT_INSTRUMENTATION_SCOPE);
         Self {
@@ -325,7 +336,7 @@ impl OtelSink {
         let payload = match Self::serialize_payload(rec, header_policy) {
             Ok(s) => s,
             Err(err) => {
-                tracing::warn!(target: "dynamo_llm::audit", "audit otel: serialize failed: {err}");
+                tracing::warn!(target: "dynamo_llm::audit", error = %err, "audit otel: serialize failed");
                 return None;
             }
         };
@@ -364,7 +375,7 @@ fn marker_payload(rec: &AuditRecord, reason: String) -> Option<(String, bool, Op
     match serde_json::to_string(&payload) {
         Ok(s) => Some((s, false, Some(reason))),
         Err(err) => {
-            tracing::warn!(target: "dynamo_llm::audit", "audit otel: marker serialize failed: {err}");
+            tracing::warn!(target: "dynamo_llm::audit", error = %err, "audit otel: marker serialize failed");
             None
         }
     }
@@ -408,7 +419,7 @@ impl AuditSink for OtelSink {
         record.set_observed_timestamp(observed_timestamp);
         record.set_severity_number(Severity::Info);
         record.set_severity_text("INFO");
-        record.set_body(AnyValue::String("openai.chat_completion".into()));
+        record.set_body(AnyValue::String(AUDIT_ENDPOINT_CHAT_COMPLETION.into()));
         record.add_attribute("rid", AnyValue::String(rec.request_id.clone().into()));
         record.add_attribute(
             "endpoint",
@@ -448,6 +459,7 @@ mod tests {
     };
     use axum::http::{HeaderMap, HeaderValue};
     use serial_test::serial;
+    use std::sync::Arc;
 
     fn sample_record() -> AuditRecord {
         AuditRecord {
@@ -662,7 +674,7 @@ mod tests {
         );
 
         let mut rec = sample_record();
-        rec.otel_http_headers = Some(Arc::new(AuditHttpRequestHeaders::new(Arc::new(headers))));
+        rec.otel_http_headers = Some(Arc::new(AuditHttpRequestHeaders::new(headers)));
 
         let normal_sink_value = serde_json::to_value(&rec).expect("record serializes");
         assert!(normal_sink_value.get("http").is_none());
@@ -722,13 +734,15 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_preserves_nvcf_headers() {
+    fn default_policy_preserves_nvcf_routing_headers_but_redacts_sensitive_ones() {
         let policy = OtelHeaderPolicy::default();
+        // Routing headers carry no sensitive fragment and are preserved.
         assert!(!policy.should_redact("nvcf-function-id"));
         assert!(!policy.should_redact("nvcf-function-name"));
         assert!(!policy.should_redact("nvcf-ncaid"));
         assert!(!policy.should_redact("nvcf-sub"));
-        assert!(!policy.should_redact("nvcf-token-shaped-name"));
+        // A credential-bearing nvcf header is still redacted (no prefix exemption).
+        assert!(policy.should_redact("nvcf-session-token"));
     }
 
     #[test]

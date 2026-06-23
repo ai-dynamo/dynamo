@@ -16,16 +16,16 @@ pub const OTEL_HTTP_HEADERS_CONTEXT_KEY: &str = "audit.otel.http.request.headers
 
 #[derive(Clone)]
 pub struct AuditHttpRequestHeaders {
-    headers: Arc<HeaderMap>,
+    headers: HeaderMap,
 }
 
 impl AuditHttpRequestHeaders {
-    pub fn new(headers: Arc<HeaderMap>) -> Self {
+    pub fn new(headers: HeaderMap) -> Self {
         Self { headers }
     }
 
     pub fn headers(&self) -> &HeaderMap {
-        self.headers.as_ref()
+        &self.headers
     }
 }
 

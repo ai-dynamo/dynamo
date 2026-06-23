@@ -523,7 +523,7 @@ fn attach_audit_otel_http_headers<T: Send + Sync + 'static>(
 
     request.insert(
         crate::audit::handle::OTEL_HTTP_HEADERS_CONTEXT_KEY,
-        crate::audit::handle::AuditHttpRequestHeaders::new(Arc::new(headers.clone())),
+        crate::audit::handle::AuditHttpRequestHeaders::new(headers.clone()),
     );
 }
 
