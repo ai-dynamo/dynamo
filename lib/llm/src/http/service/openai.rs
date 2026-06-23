@@ -46,8 +46,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, agent_context_from_headers,
-    apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+    agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -504,6 +504,9 @@ fn context_from_headers<T: Send + Sync + 'static>(
     if let Some(agent_context) = agent_context_from_headers(headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
+    if let Some(session_affinity) = session_affinity_from_headers(headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     Ok(request)
 }
 
@@ -523,6 +526,12 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 
     if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
         target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
+    }
+    if let Ok(session_affinity) = source.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
+        target.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            session_affinity.as_ref().clone(),
+        );
     }
 }
 
@@ -3229,6 +3238,24 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.trajectory_final, Some(true));
+    }
+
+    #[test]
+    fn test_context_metadata_preserves_session_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let source = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let affinity = source
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+        assert_eq!(affinity.as_str(), "session-123");
+
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+        let affinity = target
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity copied");
+        assert_eq!(affinity.as_str(), "session-123");
     }
 
     #[test]

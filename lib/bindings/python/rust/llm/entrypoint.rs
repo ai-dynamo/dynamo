@@ -395,12 +395,13 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     enforce_disagg: bool,
+    session_affinity_ttl_secs: u64,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=300))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -408,15 +409,22 @@ impl RouterConfig {
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
-    ) -> Self {
-        Self {
+        session_affinity_ttl_secs: u64,
+    ) -> PyResult<Self> {
+        if !(1..=31_536_000).contains(&session_affinity_ttl_secs) {
+            return Err(PyValueError::new_err(
+                "session_affinity_ttl_secs must be between 1 and 31536000",
+            ));
+        }
+        Ok(Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             enforce_disagg,
-        }
+            session_affinity_ttl_secs,
+        })
     }
 }
 
@@ -431,6 +439,7 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
             enforce_disagg: rc.enforce_disagg,
+            session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
         }
     }
 }

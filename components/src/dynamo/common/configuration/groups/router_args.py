@@ -31,6 +31,7 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
     "enforce_disagg",
+    "session_affinity_ttl_secs",
 )
 
 # Valid values for --admission-control.
@@ -74,6 +75,7 @@ class RouterConfigBase(ConfigBase):
     router_mode: str
     min_initial_workers: int
     enforce_disagg: bool
+    session_affinity_ttl_secs: int
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -235,6 +237,18 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="min_initial_workers",
+        )
+        add_argument(
+            g,
+            flag_name="--router-session-affinity-ttl-secs",
+            env_var="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
+            default=300,
+            help=(
+                "Idle time in seconds before router-local session affinity expires. "
+                "This is independent of KV prediction TTL settings."
+            ),
+            arg_type=int,
+            dest="session_affinity_ttl_secs",
         )
         add_negatable_bool_argument(
             g,

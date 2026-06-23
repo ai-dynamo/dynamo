@@ -41,13 +41,33 @@ pub type ChatEngineFactoryCallback = Arc<
         + Sync,
 >;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub const DEFAULT_SESSION_AFFINITY_TTL_SECS: u64 = 300;
+
+const fn default_session_affinity_ttl_secs() -> u64 {
+    DEFAULT_SESSION_AFFINITY_TTL_SECS
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
     /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
     pub enforce_disagg: bool,
+    #[serde(default = "default_session_affinity_ttl_secs")]
+    pub session_affinity_ttl_secs: u64,
+}
+
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self {
+            router_mode: RouterMode::default(),
+            kv_router_config: KvRouterConfig::default(),
+            load_threshold_config: LoadThresholdConfig::default(),
+            enforce_disagg: false,
+            session_affinity_ttl_secs: DEFAULT_SESSION_AFFINITY_TTL_SECS,
+        }
+    }
 }
 
 impl RouterConfig {
@@ -57,6 +77,7 @@ impl RouterConfig {
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
+            session_affinity_ttl_secs: DEFAULT_SESSION_AFFINITY_TTL_SECS,
         }
     }
 
@@ -67,6 +88,11 @@ impl RouterConfig {
 
     pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
         self.enforce_disagg = enforce_disagg;
+        self
+    }
+
+    pub fn with_session_affinity_ttl_secs(mut self, ttl_secs: u64) -> Self {
+        self.session_affinity_ttl_secs = ttl_secs;
         self
     }
 }

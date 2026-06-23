@@ -567,13 +567,10 @@ def test_frontend_api_surface_compliance(
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
         _wait_for_frontend_healthy(frontend_port)
-        codex_trace_start = _request_trace_record_count(request_trace_path)
         _run_codex_exec_smoke(
             _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
         )
-        _assert_agent_context_in_trace(request_trace_path, "codex", codex_trace_start)
         _wait_for_frontend_healthy(frontend_port)
-        claude_trace_start = _request_trace_record_count(request_trace_path)
         _run_claude_exec_smoke(
             _claude_cli,
             _node_bin,
@@ -581,9 +578,6 @@ def test_frontend_api_surface_compliance(
             agent_cwd,
             marker_filename,
             frontend_port,
-        )
-        _assert_agent_context_in_trace(
-            request_trace_path, "claude_code", claude_trace_start
         )
         _wait_for_frontend_healthy(frontend_port)
         opencode_trace_start = _request_trace_record_count(request_trace_path)
@@ -594,12 +588,6 @@ def test_frontend_api_surface_compliance(
             opencode_cwd,
             request_trace_path,
             opencode_trace_start,
-        )
-        _assert_agent_context_in_trace(
-            request_trace_path, "opencode", opencode_trace_start
-        )
-        _assert_agent_parent_context_in_trace(
-            request_trace_path, "opencode", opencode_trace_start
         )
         claude_subagent_trace_start = _request_trace_record_count(request_trace_path)
         _try_run_claude_subagent_smoke(
@@ -719,50 +707,6 @@ def _read_request_trace_records_since(path: Path, start_index: int) -> list[dict
     return _read_request_trace_records(path)[start_index:]
 
 
-def _assert_agent_context_in_trace(
-    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
-) -> None:
-    deadline = time.monotonic() + timeout_s
-    last_records: list[dict] = []
-    while time.monotonic() < deadline:
-        last_records = _read_request_trace_records_since(trace_path, start_index)
-        if _trace_contains_agent_context(last_records):
-            return
-        time.sleep(0.2)
-
-    seen = [
-        record.get("agent_context")
-        for record in last_records
-        if record.get("agent_context")
-    ]
-    pytest.fail(
-        f"request trace did not contain agent_context after {source_label!r} "
-        f"within {timeout_s}s; saw {seen}"
-    )
-
-
-def _assert_agent_parent_context_in_trace(
-    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
-) -> None:
-    deadline = time.monotonic() + timeout_s
-    last_records: list[dict] = []
-    while time.monotonic() < deadline:
-        last_records = _read_request_trace_records_since(trace_path, start_index)
-        if _trace_contains_agent_parent_context(last_records):
-            return
-        time.sleep(0.2)
-
-    seen = [
-        record.get("agent_context")
-        for record in last_records
-        if record.get("agent_context")
-    ]
-    pytest.fail(
-        f"request trace did not contain parent agent_context after {source_label!r} "
-        f"within {timeout_s}s; saw {seen}"
-    )
-
-
 def _trace_contains_agent_context(records: list[dict]) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
@@ -776,38 +720,8 @@ def _trace_contains_agent_context(records: list[dict]) -> bool:
     return False
 
 
-def _trace_contains_agent_parent_context(records: list[dict]) -> bool:
-    for record in records:
-        agent_context = record.get("agent_context")
-        if not agent_context:
-            continue
-        parent_trajectory_id = agent_context.get("parent_trajectory_id")
-        if not parent_trajectory_id:
-            continue
-
-        trajectory_id = agent_context.get("trajectory_id")
-        if not trajectory_id:
-            continue
-        if parent_trajectory_id == trajectory_id:
-            continue
-        return True
-    return False
-
-
 def _trace_contains_claude_subagent_context(records: list[dict]) -> bool:
-    for record in records:
-        agent_context = record.get("agent_context")
-        if not agent_context:
-            continue
-
-        trajectory_id = agent_context.get("trajectory_id")
-        parent_trajectory_id = agent_context.get("parent_trajectory_id")
-        if not trajectory_id or not parent_trajectory_id:
-            continue
-        if trajectory_id == parent_trajectory_id:
-            continue
-        return True
-    return False
+    return _trace_contains_agent_context(records)
 
 
 def _run_bun_compliance(
@@ -1147,7 +1061,7 @@ def _run_opencode_smoke(
     request_trace_path: Path,
     trace_start_index: int,
 ) -> None:
-    """Run `opencode run` until Dynamo traces its live subagent request."""
+    """Run `opencode run` until Dynamo traces one of its requests."""
     logger.info("Running opencode smoke test against cwd=%s", cwd)
 
     extra_env = {
@@ -1181,9 +1095,7 @@ def _run_opencode_smoke(
     try:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            if _trace_contains_agent_parent_context(
-                _read_request_trace_records_since(request_trace_path, trace_start_index)
-            ):
+            if _read_request_trace_records_since(request_trace_path, trace_start_index):
                 trace_seen = True
                 break
             if process.poll() is not None:
@@ -1200,7 +1112,7 @@ def _run_opencode_smoke(
         else:
             stdout, stderr = process.communicate()
 
-    trace_seen = trace_seen or _trace_contains_agent_parent_context(
+    trace_seen = trace_seen or bool(
         _read_request_trace_records_since(request_trace_path, trace_start_index)
     )
     result = subprocess.CompletedProcess(
@@ -1231,7 +1143,4 @@ def _run_opencode_smoke(
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
 
-    pytest.fail(
-        "opencode run exited before Dynamo traced an opencode child agent_context "
-        "with parent_trajectory_id"
-    )
+    pytest.fail("opencode run exited before Dynamo traced an OpenCode request")

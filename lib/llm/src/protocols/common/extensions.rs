@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::protocols::TokenIdType;
-use crate::protocols::agents::{AgentContextHeaderValues, agent_context_header_values};
+use crate::protocols::agents::{
+    AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
+};
 use crate::protocols::common::llm_backend::PromptLogprobs;
 use crate::protocols::common::timing::TimingInfo;
 
@@ -258,8 +260,27 @@ impl From<AgentContextHeaderValues> for AgentContext {
 
 pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
 
+pub const SESSION_AFFINITY_CONTEXT_KEY: &str = "dynamo.llm.session_affinity";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAffinityId(String);
+
+impl SessionAffinityId {
+    pub(crate) fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
     agent_context_header_values(headers).map(AgentContext::from)
+}
+
+pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
+    session_affinity_header_value(headers).map(SessionAffinityId::new)
 }
 
 /// Apply HTTP routing header overrides to nvext.
@@ -564,8 +585,8 @@ mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID,
-        HEADER_DYNAMO_PARENT_TRAJECTORY_ID, HEADER_DYNAMO_TRAJECTORY_FINAL,
-        HEADER_DYNAMO_TRAJECTORY_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_PARENT_TRAJECTORY_ID, HEADER_DYNAMO_SESSION_ID,
+        HEADER_DYNAMO_TRAJECTORY_FINAL, HEADER_DYNAMO_TRAJECTORY_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[test]
@@ -710,65 +731,67 @@ mod tests {
     }
 
     #[test]
-    fn agent_context_from_headers_derives_agent_context_table() {
-        use axum::http::{HeaderMap, HeaderName};
+    fn session_affinity_headers_follow_precedence_and_ignore_empty_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        headers.insert(HEADER_CLAUDE_CODE_SESSION_ID, "claude".parse().unwrap());
+        headers.insert(HEADER_CODEX_SESSION_ID, "codex".parse().unwrap());
+        headers.insert(HEADER_OPENCODE_SESSION_ID, "opencode".parse().unwrap());
 
-        let cases = [
-            (HEADER_CLAUDE_CODE_SESSION_ID, "claude-run-1", None, None),
-            ("Session-ID", "codex-run-1", None, None),
-            (
-                HEADER_CODEX_SESSION_ID,
-                "codex-run-2",
-                Some("opencode-parent"),
-                None,
-            ),
-            (
-                HEADER_OPENCODE_SESSION_ID,
-                "opencode-run-1",
-                Some("parent-run-1"),
-                Some("parent-run-1"),
-            ),
-            (HEADER_DYNAMO_TRAJECTORY_ID, "generic-run-1", None, None),
-        ];
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "canonical"
+        );
 
-        for (header_name, header_value, parent_header_value, expected_parent_trajectory_id) in cases
-        {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header_name.parse::<HeaderName>().unwrap(),
-                header_value.parse().unwrap(),
-            );
-            if let Some(parent) = parent_header_value {
-                headers.insert(HEADER_OPENCODE_PARENT_SESSION_ID, parent.parse().unwrap());
-            }
-
-            let agent_context = agent_context_from_headers(&headers).unwrap();
-            assert_eq!(agent_context.trajectory_id.as_str(), header_value);
-            assert_eq!(
-                agent_context.parent_trajectory_id.as_deref(),
-                expected_parent_trajectory_id
-            );
-            assert_eq!(agent_context.trajectory_final, None);
-            assert_eq!(agent_context.kv_hints, None);
-        }
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude"
+        );
+        headers.remove(HEADER_CLAUDE_CODE_SESSION_ID);
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "codex"
+        );
+        headers.remove(HEADER_CODEX_SESSION_ID);
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "opencode"
+        );
     }
 
     #[test]
-    fn agent_context_from_headers_uses_claude_agent_id_as_child_trajectory() {
+    fn affinity_and_agent_identity_are_independent() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
             "claude-session".parse().unwrap(),
         );
         headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_TRAJECTORY_ID, "dynamo-agent".parse().unwrap());
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
 
-        assert_eq!(agent_context.trajectory_id, "claude-agent");
+        assert_eq!(agent_context.trajectory_id, "dynamo-agent");
+        assert_eq!(agent_context.parent_trajectory_id, None);
         assert_eq!(
-            agent_context.parent_trajectory_id.as_deref(),
-            Some("claude-session")
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
         );
+    }
+
+    #[test]
+    fn native_session_headers_do_not_create_agent_context() {
+        for header in [
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            HEADER_CODEX_SESSION_ID,
+            HEADER_OPENCODE_SESSION_ID,
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header, "session".parse().unwrap());
+            assert!(agent_context_from_headers(&headers).is_none());
+            assert!(session_affinity_from_headers(&headers).is_some());
+        }
     }
 
     #[test]
