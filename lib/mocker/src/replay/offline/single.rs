@@ -769,8 +769,15 @@ mod tests {
     ) {
         let args = replay_args(enable_prefix_caching, enable_chunked_prefill);
         let manual = run_trace_manually(&args, replay_fixture());
-        let replay_report =
-            simulate_trace_single(args, replay_fixture(), 1.0, false, None).unwrap();
+        let replay_report = simulate_trace_single(
+            args,
+            replay_fixture(),
+            1.0,
+            false,
+            None,
+            crate::replay::SlaThresholds::default(),
+        )
+        .unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
@@ -797,6 +804,44 @@ mod tests {
         }
 
         assert_report_close(&replay_report, &manual.report);
+    }
+
+    #[test]
+    fn test_trace_replay_emits_goodput_only_with_sla() {
+        // Threading regression: the plain (non-planner) trace replay computes
+        // goodput iff an SLA is supplied. A loose SLA -> every request qualifies.
+        let with_sla = simulate_trace_single(
+            replay_args(false, false),
+            replay_fixture(),
+            1.0,
+            false,
+            None,
+            crate::replay::SlaThresholds {
+                ttft_ms: Some(1.0e9),
+                itl_ms: Some(1.0e9),
+                e2e_ms: Some(1.0e9),
+            },
+        )
+        .unwrap();
+        assert!(
+            with_sla.goodput.is_some(),
+            "goodput should be present when an SLA is supplied"
+        );
+
+        // No SLA (the default) -> goodput stays absent (unchanged behavior).
+        let no_sla = simulate_trace_single(
+            replay_args(false, false),
+            replay_fixture(),
+            1.0,
+            false,
+            None,
+            crate::replay::SlaThresholds::default(),
+        )
+        .unwrap();
+        assert!(
+            no_sla.goodput.is_none(),
+            "goodput should be omitted without an SLA"
+        );
     }
 
     #[test]
@@ -829,7 +874,15 @@ mod tests {
             },
         ];
         let manual = run_concurrency_manually(&args, requests.clone(), 2);
-        let replay_report = simulate_concurrency_single(args, requests, 2, false, None).unwrap();
+        let replay_report = simulate_concurrency_single(
+            args,
+            requests,
+            2,
+            false,
+            None,
+            crate::replay::SlaThresholds::default(),
+        )
+        .unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
@@ -914,6 +967,7 @@ mod tests {
             1,
             false,
             None,
+            crate::replay::SlaThresholds::default(),
         )
         .unwrap();
 

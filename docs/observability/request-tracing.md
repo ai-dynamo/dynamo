@@ -6,10 +6,10 @@ subtitle: Capture live chat and completion traffic for Mooncake replay
 ---
 
 Request replay tracing records one `request_end` row for each eligible Rust OpenAI
-chat or completion request. Without `nvext.agent_context`, the row stays compact
-and contains only replay metadata. With `nvext.agent_context`, the same
-`dynamo.request.trace.v1` stream also includes agent identity, request metrics,
-finish metadata, and optional harness tool events.
+chat or completion request. Without trajectory headers, the row stays compact
+and contains only replay metadata. With trajectory headers, the same
+`dynamo.request.trace.v1` stream also includes trajectory identity, request
+metrics, finish metadata, and optional harness tool events.
 
 Request tracing does not record prompts, responses, or tool arguments. Use the
 audit sink when payload capture is required.
@@ -87,8 +87,6 @@ Agent-enriched row:
   "event_time_unix_ms": 1777312801000,
   "event_source": "dynamo",
   "agent_context": {
-    "session_type_id": "deep_research",
-    "session_id": "research-run-42",
     "trajectory_id": "research-run-42:researcher",
     "parent_trajectory_id": "research-run-42:planner"
   },
@@ -123,19 +121,14 @@ Agent-enriched row:
 }
 ```
 
-Optional harness tool events use the same request trace schema:
+Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to sinks.
 
 ```json
 {
   "schema": "dynamo.request.trace.v1",
   "event_type": "tool_end",
   "event_time_unix_ms": 1777312801500,
-  "event_source": "harness",
-  "agent_context": {
-    "session_type_id": "deep_research",
-    "session_id": "research-run-42",
-    "trajectory_id": "research-run-42:researcher"
-  },
+  "trajectory_id": "research-run-42:researcher",
   "tool": {
     "tool_call_id": "call-abc",
     "tool_class": "web_search",
@@ -166,7 +159,7 @@ Context-free replay rows must represent one Mooncake request, so tracing skips:
 - Requests without a tracker or usable KV cache block size
 
 Skipped requests produce a structured warning and no partial replay row.
-`nvext.agent_context` enriches supported request trace rows; it does not bypass
+Header-derived trajectory context enriches supported request trace rows; it does not bypass
 these shape checks or create an agent-only fallback row.
 
 ## Convert And Replay
@@ -199,5 +192,5 @@ TRACE_BLOCK_SIZE=64
 ```
 
 `DYN_REQUEST_TRACE` is the switch for replay and agent-aware capture. Agent
-context does not require a separate trace flag; if `nvext.agent_context` is
+context does not require a separate trace flag; if trajectory headers are
 present, the request trace row is enriched automatically.
