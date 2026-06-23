@@ -217,6 +217,7 @@ where
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -235,6 +236,7 @@ where
             update_states,
             lora_name,
             priority_jump,
+            strict_priority,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -262,6 +264,7 @@ where
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -286,6 +289,7 @@ where
             update_states,
             lora_name,
             priority_jump,
+            strict_priority,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -364,12 +368,8 @@ where
             let by_worker = effective_cached_tokens
                 .iter()
                 .map(|(worker, cached_tokens)| {
-                    let delta = isl_tokens.checked_sub(*cached_tokens).unwrap_or_else(|| {
-                        tracing::error!(
-                            "prefill_tokens < 0 with ISL {isl_tokens} < cached_tokens {cached_tokens}, returning 0"
-                        );
-                        0
-                    });
+                    let delta =
+                        super::prefill_load::effective_prefill_tokens(isl_tokens, *cached_tokens);
                     (*worker, delta)
                 })
                 .collect();
@@ -656,6 +656,7 @@ mod tests {
                 true,
                 Some("adapter-a".to_string()),
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -707,6 +708,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -752,6 +754,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -798,6 +801,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -822,6 +826,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        0,
                         None,
                         None,
                         None,
@@ -867,6 +872,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -891,6 +897,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        0,
                         None,
                         None,
                         None,
@@ -950,6 +957,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -974,6 +982,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        0,
                         None,
                         None,
                         None,
@@ -1032,6 +1041,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -1056,6 +1066,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        0,
                         None,
                         None,
                         None,
@@ -1112,6 +1123,7 @@ mod tests {
                 true,
                 Some("adapter-a".to_string()),
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -1215,6 +1227,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -1452,6 +1465,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,

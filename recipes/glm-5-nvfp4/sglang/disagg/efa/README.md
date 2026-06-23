@@ -176,4 +176,3 @@ With 20× larger per-request KV cache, LIBFABRIC is **39% higher throughput** an
 
 - [ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/pull/12019) — `efa_mr_is_cuda` patch
 - [README.md](../../../README.md) — non-EFA variant of this recipe
-

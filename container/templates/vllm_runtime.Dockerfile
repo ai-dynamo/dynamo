@@ -134,10 +134,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         "nixl-cu12==${NIXL_VERSION}"
 {% endif %}
 
-# Copy attribution files and wheels
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-
 # Install device-specific NIXL wheels for non-CUDA devices.
 # These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
 {% if device != "cuda" %}
@@ -200,7 +196,7 @@ RUN uv pip uninstall triton && \
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    uv pip install --system --no-deps \
+    uv pip install {{ pip_target }} --no-deps \
         "modelexpress==${MODELEXPRESS_VERSION}"
 {% endif %}
 

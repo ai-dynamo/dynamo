@@ -31,6 +31,14 @@ type PodOptions struct {
 	SeccompProfile  string
 }
 
+const (
+	// RestoreStandbyModeEnv asks Dynamo backend entrypoints to capture restore
+	// context and sleep instead of cold-starting the workload. Generic
+	// images that do not honor this env must still provide their own inert
+	// restore command.
+	RestoreStandbyModeEnv = "DYN_SNAPSHOT_RESTORE_STANDBY"
+)
+
 // NewRestorePod shapes every annotated target container for restore.
 func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 	pod = pod.DeepCopy()
@@ -50,6 +58,10 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 }
 
 // PrepareRestorePodSpec applies restore shaping to annotated target containers.
+// It does not change container command/args. Once the checkpoint is ready, it
+// sets DYN_SNAPSHOT_RESTORE_STANDBY=1 so Dynamo standby entrypoints
+// sleep before CRIU restore; generic images that do not honor the env must
+// still provide their own inert restore command.
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
@@ -84,8 +96,24 @@ func PrepareRestorePodSpec(
 		}
 		EnsureControlVolume(podSpec, container)
 		if isCheckpointReady {
-			container.Command = []string{"sleep", "infinity"}
-			container.Args = nil
+			// Dynamo standby entrypoints honor this env by writing restore
+			// context and sleeping. Keep command/args intact so generic images
+			// can provide their own inert restore entrypoint when needed.
+			foundRestoreStandbyModeEnv := false
+			for i := range container.Env {
+				if container.Env[i].Name == RestoreStandbyModeEnv {
+					container.Env[i].Value = "1"
+					container.Env[i].ValueFrom = nil
+					foundRestoreStandbyModeEnv = true
+					break
+				}
+			}
+			if !foundRestoreStandbyModeEnv {
+				container.Env = append(container.Env, corev1.EnvVar{
+					Name:  RestoreStandbyModeEnv,
+					Value: "1",
+				})
+			}
 			ensureRestoreStartupProbe(container)
 		}
 	}
