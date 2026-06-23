@@ -40,8 +40,7 @@ Enable replica synchronization:
 ```bash
 .venv/bin/python -m dynamo.slot_tracker \
   --port 8091 \
-  --replica-sync-bind 'tcp://*:8092' \
-  --replica-sync-advertise 'tcp://slot-tracker-a:8092' \
+  --replica-sync-port 8092 \
   --replica-sync-peers 'tcp://slot-tracker-b:8092'
 ```
 
@@ -55,14 +54,14 @@ internal network or place it behind an appropriate network policy.
 
 ## Replica Synchronization
 
-`--replica-sync-bind` enables a ZMQ PUB endpoint and replica-event consumption. The
-service generates an ephemeral process identity internally; it is not a configuration
-parameter. `--replica-sync-advertise` is the externally reachable form of the local
-endpoint and prevents exact self-registration. `--replica-sync-peers` accepts a
-comma-separated list of peer PUB endpoints.
+`--replica-sync-port` enables a ZMQ PUB endpoint and replica-event consumption. The
+service binds `tcp://*:<port>` internally and generates an ephemeral process identity;
+neither the bind expression nor process identity is a configuration parameter.
+`--replica-sync-peers` accepts a comma-separated list of peer PUB endpoints and requires
+`--replica-sync-port`.
 
 Peer connections are directional. For bidirectional synchronization, configure each
-replica with the other replica's advertised endpoint. All replicas must independently
+replica with the other replica's reachable ZMQ endpoint. All replicas must independently
 receive the same worker registrations before lifecycle traffic begins. A replica event
 for an unknown `(model_name, tenant_id)`, block size, worker ID, or DP rank is dropped.
 Replica traffic never creates workers.
@@ -77,15 +76,17 @@ cross-replica lifecycle ownership.
 Peers may also be managed dynamically:
 
 ```http
-POST /register_peer
+POST /replica_sync/register_peer
 Content-Type: application/json
 
-{"url":"tcp://slot-tracker-b:8092"}
+{"endpoint":"tcp://slot-tracker-b:8092"}
 ```
 
-The same body is accepted by `POST /deregister_peer`. `GET /peers` returns the sorted
-configured endpoints. Registration confirms that the endpoint was accepted by the local
-SUB socket, not that the asynchronous ZMQ subscription handshake has completed.
+The same body is accepted by `POST /replica_sync/deregister_peer`.
+`GET /replica_sync/peers` returns the sorted configured endpoints. Registration confirms
+that the endpoint was accepted by the local SUB socket, not that the asynchronous ZMQ
+subscription handshake has completed. Dynamic membership is in-memory; after restart,
+only peers supplied through `--replica-sync-peers` are restored.
 
 ## Common Responses
 
@@ -260,7 +261,8 @@ Returns:
     "worker_id": 7,
     "dp_rank": 0,
     "potential_prefill_tokens": 96,
-    "potential_decode_blocks": 4
+    "potential_decode_blocks": 4,
+    "active_requests": 2
   }
 ]
 ```

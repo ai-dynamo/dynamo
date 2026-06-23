@@ -6,7 +6,7 @@
 These test the perf_model classes directly (PrefillRegressionModel,
 DecodeRegressionModel, AggRegressionModel) without any planner adapter.
 
-FPM-driven scaling integration tests live in test_state_machine.py.
+FPM-driven scaling integration tests live in the plugin/orchestrator test suite.
 """
 
 import os
@@ -880,19 +880,16 @@ class TestRefreshWorkerInfoFromConnector:
         planner._refresh_worker_info_from_connector()  # must not raise
         assert planner.decode_worker_info.max_num_batched_tokens is None
 
-    def test_updates_state_machine_capabilities(self):
-        """State machine capabilities are updated via update_capabilities()."""
+    def test_updates_engine_capabilities(self):
+        """Builtin engine capabilities are refreshed after worker-info discovery."""
         planner = self._make_planner()
-        _ = planner.state_machine
-        assert planner._state_machine is not None
+        engine = planner._ensure_engine()
 
         self._install_mock_connector(planner, max_num_batched_tokens=4096)
 
         planner._refresh_worker_info_from_connector()
         assert planner.decode_worker_info.max_num_batched_tokens == 4096
-        assert (
-            planner._state_machine._capabilities.decode.max_num_batched_tokens == 4096
-        )
+        assert engine._scaling_state._capabilities.decode.max_num_batched_tokens == 4096
 
     def test_refresh_skips_unneeded_sub_component(self):
         """Only sub-components with require_* True are refreshed."""

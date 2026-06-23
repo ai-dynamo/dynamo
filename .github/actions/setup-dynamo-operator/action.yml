@@ -302,6 +302,14 @@ runs:
           rollout status deployment -n default --watch --timeout=900s
         echo "::endgroup::"
 
+    - name: Wait for CRDs to be established
+      shell: bash
+      run: |
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          wait --for=condition=established \
+          crd/dynamographdeployments.nvidia.com \
+          --timeout=120s
+
     - name: Debug deployment failure
       if: failure()
       shell: bash

@@ -110,6 +110,7 @@ See also: [Agent Hints documentation](../../docs/components/frontend/nvext.md#ag
 ```bash
 cargo bench --package dynamo-bench --bench offline_replay_bench -- \
   /path/to/mooncake_trace.jsonl \
+  --engine-type sglang \
   --num-workers 4 \
   --router-mode kv-router \
   --arrival-speedup-ratio 4 \
@@ -117,6 +118,7 @@ cargo bench --package dynamo-bench --bench offline_replay_bench -- \
   --block-size 64
 ```
 
+`--engine-type` accepts `vllm`, `sglang`, or `trtllm` and defaults to `vllm`.
 Use `--speedup-ratio` and `--decode-speedup-ratio` if you want a simple scaling
 knob while keeping the same internal polynomial model.
 

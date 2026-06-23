@@ -1,0 +1,427 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Request trace tool-event relay.
+//!
+//! Dynamo binds a local PULL socket so any number of external harness processes
+//! can connect with PUSH sockets, validate domain records, then publish them to
+//! the Dynamo event plane. The ZMQ wire format is multipart:
+//! `[topic, seq_be_u64, msgpack(RequestTraceToolEventIngress)]`.
+
+use anyhow::Result;
+use dynamo_runtime::component::Component;
+use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::transports::event_plane::EventPublisher;
+use futures::StreamExt;
+use tokio_util::sync::CancellationToken;
+
+use crate::utils::zmq::{PullSocket, bind_pull_socket, multipart_message};
+
+use super::DEFAULT_TOOL_EVENTS_TOPIC;
+use crate::request_trace::{RequestTraceRecord, RequestTraceToolEventIngress};
+
+/// Relay from local tool-event ZMQ PUSH producers to the Dynamo event plane.
+pub struct ToolEventRelay {
+    cancel: CancellationToken,
+}
+
+impl ToolEventRelay {
+    pub async fn start(
+        component: Component,
+        zmq_endpoint: String,
+        zmq_topic: Option<String>,
+        event_namespace: Option<String>,
+        event_topic: Option<String>,
+    ) -> Result<Self> {
+        let rt = component.drt().runtime().secondary();
+        let namespace = match event_namespace {
+            Some(namespace) => component.drt().namespace(namespace)?,
+            None => component.namespace().clone(),
+        };
+        let topic = event_topic.unwrap_or_else(|| DEFAULT_TOOL_EVENTS_TOPIC.to_string());
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let socket = bind_pull_socket(&zmq_endpoint).await?;
+        tracing::info!(endpoint = %zmq_endpoint, "request trace tool relay: bound");
+
+        let publisher = EventPublisher::for_namespace(&namespace, topic).await?;
+
+        rt.spawn(async move {
+            Self::relay_loop(socket, zmq_topic, publisher, cancel_clone).await;
+        });
+
+        Ok(Self { cancel })
+    }
+
+    pub fn shutdown(&self) {
+        self.cancel.cancel();
+    }
+
+    async fn relay_loop(
+        mut socket: PullSocket,
+        zmq_topic: Option<String>,
+        publisher: EventPublisher,
+        cancel: CancellationToken,
+    ) {
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    tracing::info!("request trace tool relay: shutting down");
+                    break;
+                }
+                result = socket.next() => {
+                    match result {
+                        Some(Ok(frames)) => {
+                            let mut frames = multipart_message(frames);
+                            if frames.len() != 3 {
+                                tracing::warn!(
+                                    "request trace tool relay: unexpected ZMQ frame count: expected 3, got {}",
+                                    frames.len()
+                                );
+                                continue;
+                            }
+
+                            if let Some(expected_topic) = zmq_topic.as_deref()
+                                && frames[0].as_slice() != expected_topic.as_bytes()
+                            {
+                                tracing::debug!(
+                                    expected_topic = expected_topic,
+                                    topic = %String::from_utf8_lossy(&frames[0]),
+                                    "request trace tool relay: dropping record for unexpected topic"
+                                );
+                                continue;
+                            }
+
+                            let payload = frames.swap_remove(2);
+                            let ingress = match rmp_serde::from_slice::<RequestTraceToolEventIngress>(&payload) {
+                                Ok(ingress) => ingress,
+                                Err(error) => {
+                                    tracing::warn!(%error, bytes = payload.len(), "request trace tool relay: failed to decode ingress payload");
+                                    continue;
+                                }
+                            };
+                            let record = RequestTraceRecord::from(ingress);
+
+                            if let Err(error) = crate::request_trace::validate_tool_record(&record) {
+                                tracing::warn!(%error, "request trace tool relay: dropping invalid record");
+                                continue;
+                            }
+
+                            if let Err(error) = publisher.publish(&record).await {
+                                tracing::warn!(%error, "request trace tool relay: event plane publish failed");
+                            }
+                        }
+                        Some(Err(error)) => {
+                            tracing::error!(%error, "request trace tool relay: ZMQ recv failed");
+                            break;
+                        }
+                        None => {
+                            tracing::error!("request trace tool relay: ZMQ stream ended");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ToolEventRelay {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
+    use dynamo_runtime::distributed::DistributedConfig;
+    use dynamo_runtime::transports::event_plane::EventSubscriber;
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::request_trace::{
+        RequestTraceEventSource, RequestTraceEventType, RequestTraceSchema, RequestTraceToolEvent,
+        RequestTraceToolStatus,
+    };
+    use crate::utils::zmq::{connect_push_socket, send_multipart_direct};
+
+    fn reserve_open_port() -> TcpListener {
+        TcpListener::bind("127.0.0.1:0").expect("failed to reserve TCP port")
+    }
+
+    fn endpoint_from_listener(listener: &TcpListener) -> String {
+        format!(
+            "tcp://127.0.0.1:{}",
+            listener
+                .local_addr()
+                .expect("failed to read reserved listener address")
+                .port()
+        )
+    }
+
+    fn valid_ingress() -> RequestTraceToolEventIngress {
+        RequestTraceToolEventIngress {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::ToolEnd,
+            event_time_unix_ms: 1,
+            session_id: "run-1:agent".to_string(),
+            parent_session_id: None,
+            tool: RequestTraceToolEvent {
+                tool_call_id: "tool-123".to_string(),
+                tool_class: "web_search".to_string(),
+                started_at_unix_ms: None,
+                ended_at_unix_ms: None,
+                status: Some(RequestTraceToolStatus::Succeeded),
+                duration_ms: Some(12.5),
+                output_tokens: Some(9),
+                output_bytes: Some(64),
+                tool_name_hash: None,
+                error_type: None,
+            },
+        }
+    }
+
+    fn valid_ingress_with_tool_call_id(tool_call_id: &str) -> RequestTraceToolEventIngress {
+        let mut record = valid_ingress();
+        record.tool.tool_call_id = tool_call_id.to_string();
+        record
+    }
+
+    #[tokio::test]
+    async fn relays_zmq_tool_record_to_event_plane() -> Result<()> {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let reserved = reserve_open_port();
+                let endpoint = endpoint_from_listener(&reserved);
+                drop(reserved);
+
+                let runtime = Runtime::from_current()?;
+                let drt =
+                    DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+                let namespace =
+                    drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
+                let component = namespace.component("worker")?;
+                let relay =
+                    ToolEventRelay::start(component, endpoint.clone(), None, None, None).await?;
+                let mut push_socket = connect_push_socket(&endpoint).await?;
+                let mut subscriber =
+                    EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
+                        .await?
+                        .typed::<RequestTraceRecord>();
+
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                let payload = rmp_serde::to_vec_named(&valid_ingress())?;
+                for _ in 0..5 {
+                    send_multipart_direct(
+                        &mut push_socket,
+                        vec![Vec::new(), 1u64.to_be_bytes().to_vec(), payload.clone()],
+                    )
+                    .await?;
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+
+                let (_envelope, record) = timeout(Duration::from_secs(5), subscriber.next())
+                    .await?
+                    .expect("event stream should stay open")?;
+
+                assert_eq!(record.event_type, RequestTraceEventType::ToolEnd);
+                assert_eq!(record.event_source, Some(RequestTraceEventSource::Harness));
+                assert_eq!(
+                    record.agent_context.expect("agent context").session_id,
+                    "run-1:agent"
+                );
+                assert_eq!(record.tool.unwrap().tool_call_id, "tool-123");
+
+                relay.shutdown();
+                drt.shutdown();
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn relays_records_from_multiple_zmq_push_producers() -> Result<()> {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let reserved = reserve_open_port();
+                let endpoint = endpoint_from_listener(&reserved);
+                drop(reserved);
+
+                let runtime = Runtime::from_current()?;
+                let drt =
+                    DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+                let namespace =
+                    drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
+                let component = namespace.component("worker")?;
+                let relay =
+                    ToolEventRelay::start(component, endpoint.clone(), None, None, None).await?;
+                let mut first_push = connect_push_socket(&endpoint).await?;
+                let mut second_push = connect_push_socket(&endpoint).await?;
+                let mut subscriber =
+                    EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
+                        .await?
+                        .typed::<RequestTraceRecord>();
+
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                let first_payload =
+                    rmp_serde::to_vec_named(&valid_ingress_with_tool_call_id("tool-first"))?;
+                let second_payload =
+                    rmp_serde::to_vec_named(&valid_ingress_with_tool_call_id("tool-second"))?;
+                send_multipart_direct(
+                    &mut first_push,
+                    vec![Vec::new(), 1u64.to_be_bytes().to_vec(), first_payload],
+                )
+                .await?;
+                send_multipart_direct(
+                    &mut second_push,
+                    vec![Vec::new(), 1u64.to_be_bytes().to_vec(), second_payload],
+                )
+                .await?;
+
+                let mut tool_call_ids = Vec::new();
+                for _ in 0..2 {
+                    let (_envelope, record) = timeout(Duration::from_secs(5), subscriber.next())
+                        .await?
+                        .expect("event stream should stay open")?;
+                    tool_call_ids.push(record.tool.expect("tool event").tool_call_id);
+                }
+                tool_call_ids.sort();
+
+                assert_eq!(tool_call_ids, vec!["tool-first", "tool-second"]);
+
+                relay.shutdown();
+                drt.shutdown();
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn start_returns_error_when_zmq_pull_bind_fails() -> Result<()> {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let reserved = reserve_open_port();
+                let endpoint = endpoint_from_listener(&reserved);
+
+                let runtime = Runtime::from_current()?;
+                let drt =
+                    DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+                let namespace =
+                    drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
+                let component = namespace.component("worker")?;
+
+                let result = ToolEventRelay::start(component, endpoint, None, None, None).await;
+
+                assert!(result.is_err());
+
+                drt.shutdown();
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn relay_filters_records_by_zmq_topic() -> Result<()> {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let reserved = reserve_open_port();
+                let endpoint = endpoint_from_listener(&reserved);
+                drop(reserved);
+
+                let runtime = Runtime::from_current()?;
+                let drt =
+                    DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+                let namespace =
+                    drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
+                let component = namespace.component("worker")?;
+                let relay = ToolEventRelay::start(
+                    component,
+                    endpoint.clone(),
+                    Some("matching-tools".to_string()),
+                    None,
+                    None,
+                )
+                .await?;
+                let mut push_socket = connect_push_socket(&endpoint).await?;
+                let mut subscriber =
+                    EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
+                        .await?
+                        .typed::<RequestTraceRecord>();
+
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                let dropped_payload =
+                    rmp_serde::to_vec_named(&valid_ingress_with_tool_call_id("tool-dropped"))?;
+                let accepted_payload =
+                    rmp_serde::to_vec_named(&valid_ingress_with_tool_call_id("tool-accepted"))?;
+
+                send_multipart_direct(
+                    &mut push_socket,
+                    vec![
+                        b"other-tools".to_vec(),
+                        1u64.to_be_bytes().to_vec(),
+                        dropped_payload,
+                    ],
+                )
+                .await?;
+                send_multipart_direct(
+                    &mut push_socket,
+                    vec![
+                        b"matching-tools".to_vec(),
+                        2u64.to_be_bytes().to_vec(),
+                        accepted_payload,
+                    ],
+                )
+                .await?;
+
+                let (_envelope, record) = timeout(Duration::from_secs(5), subscriber.next())
+                    .await?
+                    .expect("event stream should stay open")?;
+
+                assert_eq!(
+                    record.tool.expect("tool event").tool_call_id,
+                    "tool-accepted"
+                );
+
+                assert!(
+                    timeout(Duration::from_millis(200), subscriber.next())
+                        .await
+                        .is_err()
+                );
+
+                relay.shutdown();
+                drt.shutdown();
+                Ok(())
+            },
+        )
+        .await
+    }
+}

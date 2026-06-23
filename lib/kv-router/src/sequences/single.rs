@@ -375,6 +375,7 @@ impl ActiveSequences {
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
+            active_requests: self.requests.len(),
             prefill: self.prefill.snapshot(),
         }
     }

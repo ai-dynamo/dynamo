@@ -13,6 +13,8 @@ FROM framework AS runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 {% endif %}
 
+ARG MODELEXPRESS_VERSION
+
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -121,6 +123,16 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
+
+{% if context.sglang.enable_modelexpress == "true" %}
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# SGLang runtime dependency stack.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eux; \
+    export PIP_CACHE_DIR=/root/.cache/pip; \
+    pip install --break-system-packages --no-deps \
+        "modelexpress==${MODELEXPRESS_VERSION}"
+{% endif %}
 {% endif %}
 {% endif %}
 
@@ -181,12 +193,12 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-{% if device == "xpu" %}
+{%- if device == "xpu" %}
     echo '. /opt/miniforge3/bin/activate sglang' >> /etc/bash.bashrc && \
     echo 'source /opt/intel/oneapi/setvars.sh --force' >> /etc/bash.bashrc && \
     mkdir -p /sgl-workspace && \
     ln -sf /workspace /sgl-workspace/dynamo
-{% else %}
+{%- else %}
     ln -s /workspace /sgl-workspace/dynamo && \
     NSYS_BIN=$(find /opt/nvidia/nsight-compute -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
     if [ -n "$NSYS_BIN" ]; then ln -sf "$NSYS_BIN" /usr/local/bin/nsys; \
