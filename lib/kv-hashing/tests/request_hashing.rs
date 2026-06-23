@@ -432,3 +432,15 @@ fn request_sequence_hashes_match_canonical_chain() {
         );
     }
 }
+
+#[test]
+fn consuming_sequence_hashes_match_borrowed_path() {
+    let tokens: Vec<Token> = (1u32..=20).collect();
+    let block_size: u32 = 4;
+
+    let request = req(tokens, None, None, vec![]);
+    let borrowed = request.sequence_hashes(block_size).unwrap();
+    let consuming = request.into_sequence_hashes(block_size).unwrap();
+
+    assert_eq!(consuming, borrowed);
+}

@@ -36,6 +36,7 @@ from dynamo.llm import (
     ModelInput,
     ModelType,
     WorkerMetricsPublisher,
+    WorkerType,
     lora_name_to_id,
     register_llm,
     unregister_llm,
@@ -383,19 +384,32 @@ class LoraMixin:
 
                             # Match the base-model registration topology so the
                             # prefill router activates for the LoRA model name
-                            # the same way it does for the base model. Without
-                            # this, prefill workers register the LoRA as a
-                            # chat-completions target and the frontend routes
-                            # chat requests directly to prefill, which then
-                            # waits forever for a KV transfer. For non-prefill
-                            # workers, honor --endpoint-types so the LoRA is
-                            # exposed on the same endpoints as the base model.
+                            # the same way it does for the base model. The prefill
+                            # role is carried by `worker_type=Prefill`; we register
+                            # the legacy `ModelType.Prefill` marker bit (not a
+                            # surface) so an old frontend still detects it during
+                            # the cross-version rollout. Non-prefill workers honor
+                            # --endpoint-types so the LoRA is exposed on the same
+                            # endpoints as the base model.
                             if self.config.serving_mode == DisaggregationMode.PREFILL:
                                 lora_model_type = ModelType.Prefill
+                                lora_worker_type = WorkerType.Prefill
+                                lora_needs: list[list[WorkerType]] = [
+                                    [WorkerType.Decode]
+                                ]
                             else:
                                 lora_model_type = parse_endpoint_types(
                                     self.config.dynamo_args.endpoint_types
                                 )
+                                if (
+                                    self.config.serving_mode
+                                    == DisaggregationMode.DECODE
+                                ):
+                                    lora_worker_type = WorkerType.Decode
+                                    lora_needs = [[WorkerType.Prefill]]
+                                else:
+                                    lora_worker_type = WorkerType.Aggregated
+                                    lora_needs = []
                             await register_llm(
                                 model_input=ModelInput.Tokens,
                                 model_type=lora_model_type,
@@ -405,6 +419,8 @@ class LoraMixin:
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.server_args.model_path,
+                                worker_type=lora_worker_type,
+                                needs=lora_needs,
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
@@ -959,28 +975,29 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        runtime.register_engine_route("start_profile", self.start_profile)
-        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route("control/start_profile", self.start_profile)
+        runtime.register_engine_route("control/stop_profile", self.stop_profile)
         runtime.register_engine_route(
-            "release_memory_occupation", self.release_memory_occupation
+            "control/release_memory_occupation", self.release_memory_occupation
         )
         runtime.register_engine_route(
-            "resume_memory_occupation", self.resume_memory_occupation
+            "control/resume_memory_occupation", self.resume_memory_occupation
         )
         runtime.register_engine_route(
-            "update_weights_from_disk", self.update_weights_from_disk
+            "control/update_weights_from_disk", self.update_weights_from_disk
         )
         runtime.register_engine_route(
-            "update_weights_from_tensor", self.update_weights_from_tensor
+            "control/update_weights_from_tensor", self.update_weights_from_tensor
         )
         runtime.register_engine_route(
-            "update_weights_from_distributed", self.update_weights_from_distributed
+            "control/update_weights_from_distributed",
+            self.update_weights_from_distributed,
         )
         runtime.register_engine_route(
-            "update_weights_from_ipc", self.update_weights_from_ipc
+            "control/update_weights_from_ipc", self.update_weights_from_ipc
         )
         runtime.register_engine_route(
-            "update_weight_version", self.update_weight_version
+            "control/update_weight_version", self.update_weight_version
         )
         if getattr(self.config, "dynamo_args", None) and getattr(
             self.config.dynamo_args, "enable_rl", False

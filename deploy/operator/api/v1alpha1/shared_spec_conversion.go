@@ -354,10 +354,6 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		save.Failover = src.Failover.DeepCopy()
 		hasSave = true
 	}
-	if src.Checkpoint != nil && !src.Checkpoint.Enabled {
-		save.Checkpoint = src.Checkpoint.DeepCopy()
-		hasSave = true
-	}
 	if includeOriginSplits || hasSave || sharedMainContainerFieldOriginsNeedSave(src) {
 		saveSharedMainContainerOrigins(src, save)
 	}
@@ -1158,11 +1154,11 @@ func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
 	}
 }
 
-// ConvertFromServiceCheckpointConfig converts an enabled checkpoint config into
-// the v1beta1 experimental checkpoint config. Disabled configs are represented
-// by absence in v1beta1 and are skipped by the caller.
+// ConvertFromServiceCheckpointConfig converts a checkpoint config into the
+// v1beta1 experimental checkpoint config.
 func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1beta1.ComponentCheckpointConfig) {
 	*dst = v1beta1.ComponentCheckpointConfig{
+		Enabled:             src.Enabled,
 		Mode:                checkpointModeToV1beta1(src.Mode),
 		StartupPolicy:       checkpointStartupPolicyToV1beta1(src.StartupPolicy),
 		DeletionPolicy:      checkpointDeletionPolicyToV1beta1(src.DeletionPolicy),
@@ -1189,7 +1185,7 @@ func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1bet
 // config into the checkpoint config.
 func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, dst *ServiceCheckpointConfig) {
 	*dst = ServiceCheckpointConfig{
-		Enabled:             true,
+		Enabled:             src.Enabled,
 		Mode:                checkpointModeFromV1beta1(src.Mode),
 		StartupPolicy:       checkpointStartupPolicyFromV1beta1(src.StartupPolicy),
 		DeletionPolicy:      checkpointDeletionPolicyFromV1beta1(src.DeletionPolicy),
@@ -1261,7 +1257,7 @@ func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1b
 		ConvertFromFailoverSpec(src.Failover, exp.Failover)
 	}
 
-	if src.Checkpoint != nil && src.Checkpoint.Enabled {
+	if src.Checkpoint != nil {
 		ensureExp().Checkpoint = &v1beta1.ComponentCheckpointConfig{}
 		ConvertFromServiceCheckpointConfig(src.Checkpoint, exp.Checkpoint)
 	}

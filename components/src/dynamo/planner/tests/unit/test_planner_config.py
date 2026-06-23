@@ -110,6 +110,19 @@ def test_max_num_fpm_samples_field():
     assert config.max_num_fpm_samples == 100
 
 
+def test_speculative_nextn_default_and_positive_value():
+    config = PlannerConfig(namespace="test-ns")
+    assert config.speculative_nextn == 0
+
+    config = PlannerConfig(namespace="test-ns", speculative_nextn=3)
+    assert config.speculative_nextn == 3
+
+
+def test_speculative_nextn_rejects_negative_value():
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", speculative_nextn=-1)
+
+
 def test_agg_mode_supports_throughput_scaling():
     """Agg mode supports throughput-based scaling."""
     config = PlannerConfig(

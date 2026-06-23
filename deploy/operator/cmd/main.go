@@ -379,9 +379,15 @@ func main() {
 		runtimeConfig.ExcludedNamespaces = leaseWatcher
 	}
 
-	// Start resource counter background goroutine (after ExcludedNamespaces is set)
-	setupLog.Info("Starting resource counter")
-	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), runtimeConfig.ExcludedNamespaces)
+	// Register after ExcludedNamespaces is set so cluster-wide metrics skip restricted namespaces.
+	setupLog.Info("Registering resource counter")
+	if err := mgr.Add(observability.NewResourceCounter(
+		mgr.GetClient(),
+		runtimeConfig.ExcludedNamespaces,
+	)); err != nil {
+		setupLog.Error(err, "unable to register resource counter")
+		os.Exit(1)
+	}
 
 	// Detect orchestrators availability using discovery client.
 	// Config overrides (*bool) take precedence over auto-detection:

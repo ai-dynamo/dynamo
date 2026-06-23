@@ -35,7 +35,7 @@ LLMEngine (trait)              <-- engine boundary (engine.rs)
     |   - start(worker_id) -> Result<EngineConfig, DynamoError>
     |   - generate(request, ctx) -> Result<BoxStream<...>, DynamoError>
     |   - abort(ctx)                            (optional, default no-op)
-    |   - drain() -> Result<(), DynamoError>    (optional, default no-op)
+    |   - is_quiescent() -> Result<Option<bool>, DynamoError> (optional, default Ok(None))
     |   - cleanup() -> Result<(), DynamoError>
     |
     +-- MockerBackend          <-- examples/mocker/src/engine.rs
@@ -48,7 +48,7 @@ Worker (concrete, non-generic)  <-- runtime integration (worker.rs)
     - calls engine.start(worker_id), registers model with discovery
     - serves the generate endpoint with cancellation monitoring
     - on shutdown: discovery unregister -> grace period
-                   -> engine.drain() -> engine.cleanup()
+                   -> drain loop (poll engine.is_quiescent()) -> engine.cleanup()
                    -> 3-phase distributed-runtime teardown
 
 run(engine, config)             <-- src/run.rs
@@ -177,7 +177,7 @@ Roles and `Worker` behavior:
 | Mode | Role | Worker effects |
 | --- | --- | --- |
 | `Aggregated` | Self-contained inference (default) | Standard registration; KV indexer enabled |
-| `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers as `ModelType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
+| `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers with `ModelType::empty()` + `WorkerType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
 | `Decode`     | Resume from a prefill peer's KV | Disables the local indexer (KV is owned by the prefill peer) |
 
 The crate re-exports `PrefillResult` and `BootstrapInfo` from

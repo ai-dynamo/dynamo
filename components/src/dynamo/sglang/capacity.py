@@ -82,3 +82,18 @@ def kv_metrics_block_values(kv_metrics: Any, page_size: int | None) -> tuple[int
         tokens_to_kv_blocks(kv_metrics.kv_active_blocks, page_size),
         tokens_to_kv_blocks(kv_metrics.kv_total_blocks, page_size),
     )
+
+
+def get_spec_decode_runtime_data(server_args: Any) -> dict[str, Any] | None:
+    try:
+        nextn = int(getattr(server_args, "speculative_num_steps", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if nextn <= 0:
+        return None
+
+    data: dict[str, Any] = {"nextn": nextn, "source": "backend_config"}
+    method = getattr(server_args, "speculative_algorithm", None)
+    if method:
+        data["method"] = str(method)
+    return data
