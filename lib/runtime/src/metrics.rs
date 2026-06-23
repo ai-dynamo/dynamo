@@ -954,6 +954,8 @@ impl MetricsRegistry {
         let mut result = String::from_utf8(buffer)?;
 
         // Append expfmt callbacks deterministically in registry order.
+        // These callbacks return backend-authored Prometheus text, so const-label injection
+        // only applies to Rust metrics gathered from Prometheus registries above.
         let mut expfmt = String::new();
         for registry in registries {
             let text = registry.execute_expfmt_callbacks();

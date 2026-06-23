@@ -14,7 +14,7 @@ readme = "README.md"
 
 [features]
 default = []
-metrics = ["dep:prometheus"]
+metrics = ["dep:dynamo-runtime", "dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = []
 profile = []

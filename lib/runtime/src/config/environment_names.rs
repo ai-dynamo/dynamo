@@ -372,7 +372,9 @@ pub mod llm {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
         pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
 
-        /// Extra constant labels to add to Dynamo metrics.
+        /// Extra constant labels to add to Rust Prometheus registry metrics.
+        ///
+        /// Metrics emitted as raw exposition text by backend callbacks are appended unchanged.
         ///
         /// Format: `label:value;other_label:other_value`
         pub const DYN_METRICS_CONST_LABELS: &str = "DYN_METRICS_CONST_LABELS";
