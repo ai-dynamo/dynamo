@@ -365,8 +365,9 @@ def test_router_decisions_trtllm_disagg(
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 # This test syncs two indexers and routinely runs ~120-160s in nightly (observed
-# 118s, 141s, 159s across runs), so the old 150s cap flaked. Give ~2x headroom.
-@pytest.mark.timeout(300)
+# 118s, 141s, 159s across runs, avg ~140s), so the old 150s cap flaked. Use the
+# guideline ~3x-measured-average headroom (3x140s) to absorb variance.
+@pytest.mark.timeout(420)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [
