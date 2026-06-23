@@ -128,12 +128,12 @@ fn preprocessed_backend_engine(
             router,
             session_affinity_ttl,
             router_mode.is_direct_routing(),
-        )),
+        )?),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new(router, chooser, session_affinity_ttl))
+            Arc::new(KvPushRouter::new(router, chooser, session_affinity_ttl)?)
         }
     };
 

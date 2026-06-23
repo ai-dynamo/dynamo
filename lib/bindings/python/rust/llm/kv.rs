@@ -1498,7 +1498,8 @@ impl KvRouter {
                 push_router,
                 kv_router,
                 Duration::from_secs(session_affinity_ttl_secs),
-            );
+            )
+            .map_err(to_pyerr)?;
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),

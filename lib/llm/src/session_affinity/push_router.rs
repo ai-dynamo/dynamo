@@ -28,12 +28,12 @@ impl SessionAffinityPushRouter {
         inner: PushRouter<PreprocessedRequest, LlmResponse>,
         ttl: Duration,
         direct: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Error> {
+        Ok(Self {
             inner,
-            affinity: AffinityCoordinator::new(ttl),
+            affinity: AffinityCoordinator::new(ttl)?,
             direct,
-        }
+        })
     }
 
     fn phase(request: &PreprocessedRequest) -> RequestPhase {
@@ -303,7 +303,8 @@ mod tests {
                 inner,
                 Duration::from_secs(10),
                 mode.is_direct_routing(),
-            );
+            )
+            .unwrap();
             let worker_id = mode.is_direct_routing().then_some(99);
 
             assert!(
@@ -342,7 +343,7 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
             .await
             .unwrap();
-        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), false);
+        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), false).unwrap();
         assert!(router.generate(affinity_request(None, true)).await.is_err());
         assert_eq!(router.affinity.entry_count(), 0);
         assert!(
@@ -361,7 +362,7 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::Direct)
             .await
             .unwrap();
-        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), true);
+        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), true).unwrap();
         let error = router
             .generate(affinity_request(None, false))
             .await
@@ -390,7 +391,7 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
             .await
             .unwrap();
-        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), false);
+        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), false).unwrap();
         let session_id = SessionAffinityId::new("adapter-session");
         let AffinityAcquire::Initialize(initializer) =
             router.affinity.acquire(&session_id, None).await.unwrap()

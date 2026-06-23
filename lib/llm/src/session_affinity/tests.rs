@@ -24,6 +24,10 @@ fn target(worker_id: u64, dp_rank: Option<u32>) -> AffinityTarget {
     AffinityTarget { worker_id, dp_rank }
 }
 
+fn coordinator() -> AffinityCoordinator {
+    AffinityCoordinator::new(Duration::from_secs(10)).unwrap()
+}
+
 fn response_stream(items: usize) -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
     let items = (0..items).map(|_| Annotated::from_data(LLMEngineOutput::default()));
     ResponseStream::new(
@@ -77,7 +81,7 @@ fn session_affinity_explicit_targets_are_phase_local_and_preserve_rank_zero() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_initialization_is_atomic() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     let first = coordinator.acquire(&session_id(), None).await.unwrap();
     let AffinityAcquire::Initialize(first) = first else {
         panic!("first request must initialize");
@@ -104,7 +108,7 @@ async fn session_affinity_initialization_is_atomic() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_initializer_cancellation_wakes_waiter() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     let first = coordinator.acquire(&session_id(), None).await.unwrap();
     let AffinityAcquire::Initialize(first) = first else {
         panic!("first request must initialize");
@@ -123,7 +127,7 @@ async fn session_affinity_initializer_cancellation_wakes_waiter() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_validates_worker_and_rank_contract() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) = coordinator
         .acquire(&session_id(), Some(target(7, None)))
         .await
@@ -155,7 +159,7 @@ async fn session_affinity_validates_worker_and_rank_contract() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_active_leases_prevent_expiry() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
     else {
@@ -176,7 +180,7 @@ async fn session_affinity_active_leases_prevent_expiry() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_stream_drop_refreshes_idle_ttl() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
     else {
@@ -197,7 +201,7 @@ async fn session_affinity_stream_drop_refreshes_idle_ttl() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_stream_eof_refreshes_idle_ttl() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
     else {
@@ -226,7 +230,7 @@ async fn session_affinity_stream_eof_refreshes_idle_ttl() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_failed_bound_attempt_does_not_refresh_ttl() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
     else {
@@ -257,7 +261,7 @@ async fn session_affinity_failed_bound_attempt_does_not_refresh_ttl() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_query_is_read_only() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
     assert_eq!(coordinator.entry_count(), 0);
 
@@ -284,7 +288,7 @@ async fn session_affinity_query_is_read_only() {
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_reaper_removes_idle_entries_and_stops_on_drop() {
-    let coordinator = AffinityCoordinator::new(Duration::from_secs(10));
+    let coordinator = coordinator();
     let cancellation = coordinator.cancellation_token();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
@@ -300,4 +304,22 @@ async fn session_affinity_reaper_removes_idle_entries_and_stops_on_drop() {
 
     drop(coordinator);
     cancellation.cancelled().await;
+}
+
+#[test]
+fn session_affinity_rejects_invalid_ttl_before_starting_reaper() {
+    for ttl in [
+        Duration::ZERO,
+        Duration::from_secs(super::MAX_SESSION_AFFINITY_TTL_SECS + 1),
+    ] {
+        let Err(error) = AffinityCoordinator::new(ttl) else {
+            panic!("invalid TTL must fail coordinator construction");
+        };
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[dynamo_runtime::error::ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(error.to_string().contains("session affinity TTL"));
+    }
 }

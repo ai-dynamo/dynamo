@@ -21,7 +21,7 @@ use futures::Stream;
 use tokio::{sync::Notify, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::LlmResponse;
+use super::{LlmResponse, MAX_SESSION_AFFINITY_TTL_SECS};
 use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -72,7 +72,14 @@ pub struct AffinityCoordinator {
 }
 
 impl AffinityCoordinator {
-    pub fn new(ttl: Duration) -> Self {
+    pub fn new(ttl: Duration) -> Result<Self, Error> {
+        if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
+            .contains(&ttl)
+        {
+            return Err(invalid_argument(format!(
+                "session affinity TTL must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS} seconds"
+            )));
+        }
         let inner = Arc::new(AffinityCoordinatorInner {
             entries: DashMap::new(),
             ttl,
@@ -84,15 +91,13 @@ impl AffinityCoordinator {
             waiter_observed: Arc::new(Notify::new()),
         });
         Self::spawn_reaper(&inner);
-        Self { inner }
+        Ok(Self { inner })
     }
 
     fn spawn_reaper(inner: &Arc<AffinityCoordinatorInner>) {
         let weak = Arc::downgrade(inner);
         let cancel = inner.cancel.clone();
-        let period = inner
-            .ttl
-            .clamp(Duration::from_secs(1), Duration::from_secs(30));
+        let period = inner.ttl.min(Duration::from_secs(30));
         #[cfg(test)]
         let reaper_started = inner.reaper_started.clone();
         tokio::spawn(async move {
@@ -472,8 +477,9 @@ pub fn affinity_id(
     request: &dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
 ) -> Option<Arc<SessionAffinityId>> {
     request
-        .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+        .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
         .ok()
+        .flatten()
 }
 
 pub fn explicit_target(

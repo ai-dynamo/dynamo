@@ -3,7 +3,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -47,17 +46,19 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
         session_affinity_ttl: Duration,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        let affinity = AffinityCoordinator::new(session_affinity_ttl)?;
+
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        KvPushRouter {
+        Ok(KvPushRouter {
             inner,
             chooser,
-            affinity: AffinityCoordinator::new(session_affinity_ttl),
-        }
+            affinity,
+        })
     }
 
     async fn select_request(

@@ -166,7 +166,7 @@ impl PrefillRouter {
                 push_router,
                 kv_chooser,
                 self.session_affinity_ttl,
-            )))
+            )?))
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
@@ -187,7 +187,7 @@ impl PrefillRouter {
                     push_router,
                     self.session_affinity_ttl,
                     self.router_mode.is_direct_routing(),
-                ),
+                )?,
             ))
         };
 
