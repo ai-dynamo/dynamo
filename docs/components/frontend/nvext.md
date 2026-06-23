@@ -41,7 +41,6 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
 | `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
-| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for request traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
@@ -67,41 +66,12 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 | `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
 | `x-prefill-dp-rank` | `prefill_dp_rank` |
 
-## Agent Context
+Trajectory identity is header-only. Use the coding-agent headers or Dynamo
+trajectory headers described in [Trajectory IDs](../../agents/trajectory-ids.md);
+`nvext` does not accept trajectory identity fields.
 
-The `agent_context` sub-object carries passive session and trajectory identity for
-agentic requests. Dynamo uses this metadata to emit enriched request traces when
-request tracing is enabled. It does not change routing, scheduling, or cache
-behavior.
-
-Generic HTTP clients can send `x-dynamo-trajectory-id` instead of a body
-`agent_context`; Dynamo synthesizes the passive identity at the HTTP boundary.
-For the full header precedence and tracing contract, see
+For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../agents/agent-tracing.md).
-
-| Field | Type | Required | Description |
-|-------|------|:--------:|-------------|
-| `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
-| `session_type_id` | `string` | No | Reusable profile or agent class label. |
-| `session_id` | `string` | No | Top-level agent run/session identifier. |
-| `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
-| `trajectory_final` | `bool` | No | Terminal marker for lifecycle-aware consumers; ignored by consumers that do not track trajectory lifecycle. |
-
-```json
-{
-    "nvext": {
-        "agent_context": {
-            "session_type_id": "deep_research",
-            "session_id": "research-run-42",
-            "trajectory_id": "research-run-42:researcher",
-            "parent_trajectory_id": "research-run-42:planner"
-        }
-    }
-}
-```
-
-For identity semantics, trace sink configuration, and JSONL schema details,
-see [Agent Tracing](../../agents/agent-tracing.md).
 
 ## Agent Hints
 
@@ -272,6 +242,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
-| [Agent Tracing](../../agents/agent-tracing.md) | Passive session/trajectory identity, JSONL request traces, and harness tool-event ingestion |
+| [Trajectory IDs](../../agents/trajectory-ids.md) | Passive trajectory identity |
+| [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
 | [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
 | [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |

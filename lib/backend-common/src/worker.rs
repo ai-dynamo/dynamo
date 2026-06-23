@@ -42,6 +42,18 @@ const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 /// Shared with the Python helper so a single env var controls both.
 const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
 
+/// Default drain budget: max time spent polling `is_quiescent` before cleanup.
+/// Capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+const DEFAULT_DRAIN_TIMEOUT_S: f64 = 30.0;
+const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
+/// Interval between `engine.is_quiescent()` polls during drain.
+const DRAIN_POLL_INTERVAL_S: f64 = 0.5;
+/// Cadence at which the drain loop emits a progress log.
+const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
+/// Budget reserved for `cleanup()` so the drain loop can't consume the whole
+/// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
+const CLEANUP_RESERVE_S: f64 = 5.0;
+
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
 const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
@@ -244,10 +256,11 @@ impl EngineKind {
         }
     }
 
-    async fn drain(&self) -> Result<(), DynamoError> {
+    /// See [`LLMEngine::is_quiescent`].
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         match self {
-            EngineKind::Llm(e) => e.drain().await,
-            EngineKind::Raw(e) => e.drain().await,
+            EngineKind::Llm(e) => e.is_quiescent().await,
+            EngineKind::Raw(e) => e.is_quiescent().await,
         }
     }
 
@@ -384,7 +397,8 @@ impl Worker {
     ///   1. `endpoint.unregister_endpoint_instance()` — router stops routing.
     ///   2. Sleep `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default 5s) to
     ///      let in-flight router decisions complete.
-    ///   3. `engine.drain()` — backend-side drain (e.g. NIXL prefill).
+    ///   3. Poll `engine.is_quiescent()` until it returns true or the drain
+    ///      budget (`DYN_PREFILL_DRAIN_TIMEOUT_S`, default 30s) expires.
     ///   4. `engine.cleanup()` — release engine resources while NATS / etcd
     ///      are still reachable.
     ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
@@ -961,9 +975,10 @@ impl Worker {
         Ok(())
     }
 
-    /// Engine-facing shutdown sequence: grace period sleep → `engine.drain()`
-    /// → `cleanup_once()`. Each engine step swallows non-fatal failures so a
-    /// misbehaving engine can't block the worker from exiting.
+    /// Engine-facing shutdown sequence: grace period sleep → drain loop on
+    /// `engine.is_quiescent()` → `cleanup_once()`. Each engine step swallows
+    /// non-fatal failures so a misbehaving engine can't block the worker
+    /// from exiting.
     async fn run_engine_shutdown_steps(&mut self) {
         self.run_engine_shutdown_steps_with_grace(grace_period_secs())
             .await
@@ -980,15 +995,111 @@ impl Worker {
         }
 
         let drain_start = std::time::Instant::now();
-        if let Err(e) = self.engine.drain().await {
-            tracing::warn!(error = %e, "engine drain failed");
-        }
+        self.drain_until_idle_or_deadline().await;
         let drain_elapsed = drain_start.elapsed().as_secs_f64();
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_drain_time(drain_elapsed);
         }
 
         self.cleanup_once().await;
+    }
+
+    /// Hold a prefill worker open until its KV transfers finish, so cleanup
+    /// doesn't free GPU memory a decode peer is still pulling.
+    ///
+    /// Prefill-only: aggregated/decode workers return immediately. Otherwise
+    /// poll [`is_quiescent`](LLMEngine::is_quiescent) every
+    /// `DRAIN_POLL_INTERVAL_S`, exiting on `Some(true)` or when the budget
+    /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
+    /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+    async fn drain_until_idle_or_deadline(&self) {
+        if !self.config.disaggregation_mode.is_prefill() {
+            return;
+        }
+        let configured = drain_timeout_secs();
+        let cap = (graceful_shutdown_timeout().as_secs_f64() - CLEANUP_RESERVE_S).max(0.0);
+        let budget = configured.min(cap);
+        let deadline = std::time::Instant::now() + Duration::from_secs_f64(budget);
+        let start = std::time::Instant::now();
+        let mut last_heartbeat = start;
+        let mut announced = false;
+        loop {
+            match self.engine.is_quiescent().await {
+                // Quiescent: in-flight transfers done, safe to exit drain.
+                Ok(Some(true)) => {
+                    if announced {
+                        tracing::info!(
+                            "drain: exited (quiescent, elapsed={:.1}s)",
+                            start.elapsed().as_secs_f64()
+                        );
+                    }
+                    return;
+                }
+                // Busy (Some(false)) or no introspection (None): keep polling.
+                Ok(Some(false)) | Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "is_quiescent raised; treating as not quiescent")
+                }
+            }
+            if !announced {
+                // First non-quiescent poll: announce once that we're waiting.
+                tracing::info!(
+                    "drain: waiting for prefill to quiesce; polling is_quiescent (timeout={:.1}s)",
+                    budget
+                );
+                announced = true;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "drain: timed out at {:.1}s; proceeding with cleanup",
+                    start.elapsed().as_secs_f64()
+                );
+                return;
+            }
+            if last_heartbeat.elapsed().as_secs_f64() >= DRAIN_HEARTBEAT_INTERVAL_S {
+                tracing::info!(
+                    "drain: heartbeat (elapsed={:.1}s)",
+                    start.elapsed().as_secs_f64()
+                );
+                last_heartbeat = std::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
+        }
+    }
+}
+
+/// Drain-budget resolver: `DYN_PREFILL_DRAIN_TIMEOUT_S` with the same
+/// validation policy as `grace_period_secs` (invalid → default, negative
+/// → 0).
+fn drain_timeout_secs() -> f64 {
+    match std::env::var(DRAIN_TIMEOUT_ENV) {
+        Err(_) => DEFAULT_DRAIN_TIMEOUT_S,
+        Ok(s) if s.is_empty() => DEFAULT_DRAIN_TIMEOUT_S,
+        Ok(s) => match s.parse::<f64>() {
+            Ok(v) if !v.is_finite() => {
+                tracing::warn!(
+                    "Non-finite {}={:?}; using default {:.1}s",
+                    DRAIN_TIMEOUT_ENV,
+                    s,
+                    DEFAULT_DRAIN_TIMEOUT_S
+                );
+                DEFAULT_DRAIN_TIMEOUT_S
+            }
+            Ok(v) if v < 0.0 => {
+                tracing::warn!("Negative {}={:?}; clamping to 0", DRAIN_TIMEOUT_ENV, s);
+                0.0
+            }
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!(
+                    "Invalid {}={:?}; using default {:.1}s",
+                    DRAIN_TIMEOUT_ENV,
+                    s,
+                    DEFAULT_DRAIN_TIMEOUT_S
+                );
+                DEFAULT_DRAIN_TIMEOUT_S
+            }
+        },
     }
 }
 
@@ -1025,7 +1136,7 @@ fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
 /// timeout and the grace-period sleep that precedes them.
 ///
 /// The grace sleep is a fixed wait (not a hang risk), so reserving its
-/// duration on top of `timeout` ensures `engine.drain()` and
+/// duration on top of `timeout` ensures the drain loop and
 /// `engine.cleanup()` always get the full timeout budget regardless of
 /// how the operator configures the grace period. Without this reserve,
 /// a grace period equal to the timeout (the debug default — both 5s)
@@ -1984,6 +2095,18 @@ mod tests {
         Worker::new(engine, WorkerConfig::default())
     }
 
+    /// Prefill worker — the drain loop only runs for prefill (the framework
+    /// skips aggregated/decode), so drain-ordering tests must use this.
+    fn worker_with_prefill(engine: Arc<dyn LLMEngine>) -> Worker {
+        Worker::new(
+            engine,
+            WorkerConfig {
+                disaggregation_mode: DisaggregationMode::Prefill,
+                ..WorkerConfig::default()
+            },
+        )
+    }
+
     #[tokio::test]
     async fn start_engine_init_to_running_on_success() {
         let (engine, _) = StateMockEngine::new(false);
@@ -2069,19 +2192,23 @@ mod tests {
 
     use std::sync::Mutex as StdMutex;
 
-    /// Engine that records the order of `drain` and `cleanup` calls into a
-    /// shared log so tests can assert on sequencing.
+    /// Serializes env-mutating drain tests in this module so cargo's parallel
+    /// test threads don't race on `DYN_PREFILL_DRAIN_TIMEOUT_S`.
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    /// Engine that records the order of `is_quiescent` and `cleanup` calls
+    /// into a shared log so tests can assert on sequencing.
     struct OrderingMockEngine {
         log: Arc<StdMutex<Vec<&'static str>>>,
-        drain_should_fail: bool,
+        is_quiescent_should_fail: bool,
     }
 
     impl OrderingMockEngine {
-        fn new(drain_should_fail: bool) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
+        fn new(is_quiescent_should_fail: bool) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
             let log = Arc::new(StdMutex::new(Vec::new()));
             let eng = Arc::new(Self {
                 log: log.clone(),
-                drain_should_fail,
+                is_quiescent_should_fail,
             });
             (eng, log)
         }
@@ -2108,15 +2235,15 @@ mod tests {
             unreachable!("not used in orchestrator tests")
         }
 
-        async fn drain(&self) -> Result<(), DynamoError> {
-            self.log.lock().unwrap().push("drain");
-            if self.drain_should_fail {
+        async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+            self.log.lock().unwrap().push("is_quiescent");
+            if self.is_quiescent_should_fail {
                 Err(err(
                     ErrorType::Backend(BackendError::Unknown),
-                    "synthetic drain failure",
+                    "synthetic is_quiescent failure",
                 ))
             } else {
-                Ok(())
+                Ok(Some(true))
             }
         }
 
@@ -2131,7 +2258,7 @@ mod tests {
         // Use the explicit-grace helper so we don't have to mutate the
         // process-global env var (which would race other parallel tests).
         let (engine, log) = OrderingMockEngine::new(false);
-        let mut worker = worker_with(engine);
+        let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
@@ -2139,23 +2266,64 @@ mod tests {
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec!["start", "drain", "cleanup"],
-            "drain must run before cleanup"
+            vec!["start", "is_quiescent", "cleanup"],
+            "is_quiescent (drain) must run before cleanup"
         );
     }
 
+    // ENV_LOCK must span the `.await` below: it serializes the env set/restore
+    // window against other env-mutating drain tests, and the value must stay
+    // pinned while the awaited drain loop reads it. No code reachable from the
+    // await re-acquires ENV_LOCK, so there's no deadlock risk.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn shutdown_steps_drain_failure_does_not_block_cleanup() {
-        let (engine, log) = OrderingMockEngine::new(true); // drain fails
-        let mut worker = worker_with(engine);
+        // is_quiescent errors are treated as "not idle"; the drain loop keeps
+        // polling until the budget expires, then cleanup still runs.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var(DRAIN_TIMEOUT_ENV).ok();
+        // SAFETY: tests in this mod serialize env access via ENV_LOCK.
+        unsafe { std::env::set_var(DRAIN_TIMEOUT_ENV, "0") };
+
+        let (engine, log) = OrderingMockEngine::new(true); // is_quiescent fails
+        let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
 
-        // Drain ran (and failed), but cleanup still ran exactly once.
+        // is_quiescent ran at least once (and errored), then cleanup ran.
         let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
+        assert!(recorded.starts_with(&["start", "is_quiescent"]));
+        assert_eq!(recorded.last().copied(), Some("cleanup"));
         assert_eq!(worker.state, LifecycleState::Stopped);
+
+        // SAFETY: see above.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(DRAIN_TIMEOUT_ENV, v),
+                None => std::env::remove_var(DRAIN_TIMEOUT_ENV),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_steps_skip_drain_for_non_prefill() {
+        // Drain is prefill-only: an aggregated (or decode) worker must go
+        // straight to cleanup without ever polling is_quiescent, regardless of
+        // what the engine would report. Guards the mode-gate invariant that
+        // makes the `Ok(None)` default safe (only prefill workers drain).
+        let (engine, log) = OrderingMockEngine::new(false);
+        let mut worker = worker_with(engine); // WorkerConfig::default() => Aggregated
+        worker.start_engine(0).await.unwrap();
+
+        worker.run_engine_shutdown_steps_with_grace(0.0).await;
+
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec!["start", "cleanup"],
+            "non-prefill workers must not poll is_quiescent (no drain)"
+        );
     }
 
     // The "drain skipped when engine never started" scenario isn't
@@ -2353,7 +2521,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn shutdown_deadline_reserves_grace_so_drain_cleanup_complete() {
         let (engine, log) = OrderingMockEngine::new(false);
-        let mut worker = worker_with(engine);
+        let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
         let timeout = Duration::from_secs(5);
@@ -2369,7 +2537,7 @@ mod tests {
         );
 
         let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
+        assert_eq!(recorded, vec!["start", "is_quiescent", "cleanup"]);
     }
 
     // -------------------------------------------------------------------
