@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -50,20 +49,20 @@ const (
 	// deleted before the PodSnapshot is removed.
 	podSnapshotFinalizer = "nvidia.com/podsnapshotcontent-cleanup"
 
-	// podSnapshotContentFieldManager is the Server-Side Apply field owner for SnapshotContents.
-	podSnapshotContentFieldManager = "dynamo-podsnapshot-controller"
-
-	// snapshotPodResolveBackoffBase is the minimum requeue delay while waiting for the
-	// source pod to be scheduled; jitter is added on top to avoid a synchronized hot loop.
-	snapshotPodResolveBackoffBase = 2 * time.Second
-
 	// snapshotContentDeleteRequeue is the delay between cascade-delete progress checks.
 	snapshotContentDeleteRequeue = time.Second
 )
 
-// errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled and the
-// reconcile should retry with backoff rather than fail.
+// errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled to a node; the
+// reconcile returns it so controller-runtime requeues with backoff rather than failing the snapshot.
 var errPodSnapshotPodUnscheduled = errors.New("source pod is not yet scheduled to a node")
+
+// errPodSnapshotStalePodRef signals the live pod is a same-named recreation (UID mismatch) — a
+// terminal mismatch, not a retryable condition.
+var errPodSnapshotStalePodRef = errors.New("source pod UID does not match the pinned PodSnapshot source")
+
+// errContentConflict marks an existing PodSnapshotContent that does not belong to this PodSnapshot.
+var errContentConflict = errors.New("existing PodSnapshotContent belongs to another PodSnapshot")
 
 // PodSnapshotReconciler reconciles a PodSnapshot: it creates the bound, cluster-scoped
 // PodSnapshotContent work order for the node agent, mirrors the agent's terminal status
@@ -82,10 +81,9 @@ type PodSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
-// Reconcile drives a PodSnapshot through binding, status mirroring, and cascade deletion.
+// Reconcile drives a PodSnapshot through binding, status mirroring, and cascade deletion. It is a thin
+// orchestrator: each branch delegates to a helper that owns that path's detail.
 func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	snap := &nvidiacomv1alpha1.PodSnapshot{}
 	if err := sr.Get(ctx, req.NamespacedName, snap); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -94,38 +92,61 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if !snap.GetDeletionTimestamp().IsZero() {
 		return sr.handleDelete(ctx, snap)
 	}
-
-	if !controllerutil.ContainsFinalizer(snap, podSnapshotFinalizer) {
-		controllerutil.AddFinalizer(snap, podSnapshotFinalizer)
-		if err := sr.Update(ctx, snap); err != nil {
-			return ctrl.Result{}, fmt.Errorf("add snapshot finalizer: %w", err)
-		}
+	if added, err := sr.ensureFinalizer(ctx, snap); err != nil || added {
+		return ctrl.Result{}, err
+	}
+	if isPodSnapshotTerminal(snap) {
 		return ctrl.Result{}, nil
 	}
 
-	// Idempotency: a Ready or Failed PodSnapshot is terminal and sticky — never re-evaluate or flip
-	// it. A Ready capture is a durable artifact and a Failed snapshot never becomes Ready; this also
-	// stops a PodSnapshotContent-watch event from re-running the live path and storming status.
-	if meta.IsStatusConditionTrue(snap.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) ||
-		meta.IsStatusConditionTrue(snap.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed) {
-		return ctrl.Result{}, nil
-	}
-
-	// Once a PodSnapshotContent has been created (recorded in status), the snapshot is driven by
-	// that content, not the live source pod. Mirror its status without resolving the pod.
+	// Once a PodSnapshotContent is bound it drives the snapshot; the live source pod is consulted
+	// only on the path that has not yet created one.
 	if boundName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, ""); boundName != "" {
-		content := &nvidiacomv1alpha1.PodSnapshotContent{}
-		if err := sr.Get(ctx, client.ObjectKey{Name: boundName}, content); err != nil {
-			// Do NOT fail the snapshot: a NotFound here is almost always a stale informer-cache read
-			// right after creation. Return the error to requeue with backoff (heals on retry); the
-			// snapshot stays Pending rather than terminally failing.
-			return ctrl.Result{}, fmt.Errorf("get bound PodSnapshotContent %q: %w", boundName, err)
-		}
-		return sr.propagateStatus(ctx, snap, content)
+		return sr.mirrorBoundContent(ctx, snap, boundName)
 	}
+	return sr.captureFromSourcePod(ctx, snap)
+}
 
-	// No content has been created yet — this is the only path that needs the live source pod.
-	// Resolve it; if it no longer exists, fail the snapshot terminally rather than looping.
+// isPodSnapshotTerminal reports whether the snapshot has reached a terminal, sticky state. Only Failed
+// is terminal: a failed snapshot never recovers, so we stop re-evaluating it. Ready is intentionally
+// NOT terminal — it mirrors the content's status and may still change, so a Ready snapshot keeps
+// reconciling (and re-mirroring) on later content-watch events.
+func isPodSnapshotTerminal(snap *nvidiacomv1alpha1.PodSnapshot) bool {
+	return meta.IsStatusConditionTrue(snap.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
+}
+
+// ensureFinalizer adds the cleanup finalizer when absent, reporting added=true when it patched (the
+// caller returns early; the resulting watch event re-enqueues — so a fake-client test must reconcile
+// twice when it does not pre-seed the finalizer).
+func (sr *PodSnapshotReconciler) ensureFinalizer(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot) (bool, error) {
+	if controllerutil.ContainsFinalizer(snap, podSnapshotFinalizer) {
+		return false, nil
+	}
+	controllerutil.AddFinalizer(snap, podSnapshotFinalizer)
+	if err := sr.Update(ctx, snap); err != nil {
+		return false, fmt.Errorf("add snapshot finalizer: %w", err)
+	}
+	return true, nil
+}
+
+// mirrorBoundContent loads the bound PodSnapshotContent and mirrors its status onto the PodSnapshot.
+// It does not resolve the source pod (the binding already exists).
+func (sr *PodSnapshotReconciler) mirrorBoundContent(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, boundName string) (ctrl.Result, error) {
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
+	if err := sr.Get(ctx, client.ObjectKey{Name: boundName}, content); err != nil {
+		return ctrl.Result{}, fmt.Errorf("get bound PodSnapshotContent %q: %w", boundName, err)
+	}
+	// Defense-in-depth: the content's backref to this snapshot. Its spec is immutable, so this is a
+	// no-op after the first pass; it never triggers an extra API read (the Get above is needed anyway).
+	if err := verifyContentBacklink(snap, content); err != nil {
+		return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
+	}
+	return sr.propagateStatus(ctx, snap, content)
+}
+
+// captureFromSourcePod is the no-content path: it resolves and validates the live source pod, then
+// creates the PodSnapshotContent and records the binding.
+func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot) (ctrl.Result, error) {
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -134,57 +155,34 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, err
 	}
-	if err := validateSourcePod(pod); err != nil {
-		logger.V(1).Info("Source pod not ready, backing off", "snapshot", snap.Name, "reason", err.Error())
-		return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
+	if err = validateSourcePod(snap, pod); err != nil {
+		if errors.Is(err, errPodSnapshotPodUnscheduled) {
+			return ctrl.Result{}, err // controller-runtime backs off and requeues on a returned error
+		}
+		if errors.Is(err, errPodSnapshotStalePodRef) {
+			return sr.failPodSnapshot(ctx, snap, "StalePodReference", err)
+		}
+		return ctrl.Result{}, fmt.Errorf("validate source pod: %w", err)
 	}
 
-	// Provenance guard: when the PodSnapshot pins a source pod UID, refuse to capture a same-named
-	// recreation as the wrong workload.
-	if wantUID := snap.Spec.Source.PodRef.UID; wantUID != "" && pod.UID != wantUID {
-		return sr.failPodSnapshot(ctx, snap, "StalePodReference",
-			fmt.Errorf("source pod %q UID %q does not match PodSnapshot source UID %q", pod.Name, pod.UID, wantUID))
-	}
-
-	// The content is named deterministically from the PodSnapshot UID (immutable, already populated
-	// by the finalizer Update above).
-	contentName := podSnapshotContentName(snap)
-	content, err := sr.ensurePodSnapshotContent(ctx, snap, contentName, pod)
+	content, err := sr.ensurePodSnapshotContent(ctx, snap, podSnapshotContentName(snap), pod)
 	if err != nil {
+		if errors.Is(err, errContentConflict) {
+			return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
+		}
 		return ctrl.Result{}, err
 	}
-
-	// Backlink verification (CSI claimRef model): an existing PodSnapshotContent must point back at
-	// THIS PodSnapshot and the live pod before we adopt/mirror it, so a pre-created/foreign
-	// cluster-scoped object is never treated as this snapshot's artifact. A freshly-created content
-	// always passes (its backlink was just built from this snap + pod).
-	if err := verifyContentBacklink(snap, content, pod); err != nil {
-		return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
-	}
-
-	// Reschedule guard: a pre-existing content whose source pod moved nodes can't be captured
-	// (spec is immutable; CRIU checkpoints can't survive migration).
-	if content.Spec.Source.NodeName != pod.Spec.NodeName {
-		return sr.failPodSnapshot(ctx, snap, "PodRescheduled",
-			fmt.Errorf("source pod moved from node %q to %q; CRIU checkpoint cannot survive migration",
-				content.Spec.Source.NodeName, pod.Spec.NodeName))
-	}
-
-	return sr.propagateStatus(ctx, snap, content)
+	return sr.bindContent(ctx, snap, content.Name)
 }
 
-// verifyContentBacklink reports an error when an existing PodSnapshotContent does not belong to
-// this PodSnapshot: its snapshotRef must match (namespace/name, and uid when recorded) and its
-// recorded source pod UID must match the live pod. A freshly-created content always passes.
-func verifyContentBacklink(snap *nvidiacomv1alpha1.PodSnapshot, content *nvidiacomv1alpha1.PodSnapshotContent, pod *corev1.Pod) error {
+// verifyContentBacklink errors when a content's backref does not point at this PodSnapshot
+// (namespace/name, and uid when recorded). It is pod-free: the content↔pod relationship is the
+// PodSnapshotContent's own concern, not the PodSnapshot reconciler's.
+func verifyContentBacklink(snap *nvidiacomv1alpha1.PodSnapshot, content *nvidiacomv1alpha1.PodSnapshotContent) error {
 	if ref := content.Spec.PodSnapshotRef; ref.Namespace != snap.Namespace || ref.Name != snap.Name ||
 		(ref.UID != "" && ref.UID != snap.UID) {
 		return fmt.Errorf("PodSnapshotContent %q is bound to %s/%s (uid %q), not %s/%s (uid %q)",
 			content.Name, ref.Namespace, ref.Name, ref.UID, snap.Namespace, snap.Name, snap.UID)
-	}
-	if content.Spec.Source.PodRef.UID != pod.UID {
-		return fmt.Errorf("PodSnapshotContent %q source pod UID %q does not match live pod %q UID %q",
-			content.Name, content.Spec.Source.PodRef.UID, pod.Name, pod.UID)
 	}
 	return nil
 }
@@ -199,30 +197,41 @@ func (sr *PodSnapshotReconciler) getSourcePod(ctx context.Context, snap *nvidiac
 	return pod, nil
 }
 
-// validateSourcePod requires the pod to be scheduled to a node.
-func validateSourcePod(pod *corev1.Pod) error {
+// validateSourcePod requires the pod to be scheduled and, when the PodSnapshot pins a source pod UID,
+// to match it (rejecting a same-named recreation). It returns one of two sentinels:
+// errPodSnapshotPodUnscheduled (retryable) or errPodSnapshotStalePodRef (terminal).
+func validateSourcePod(snap *nvidiacomv1alpha1.PodSnapshot, pod *corev1.Pod) error {
 	if pod.Spec.NodeName == "" {
 		return errPodSnapshotPodUnscheduled
+	}
+	if wantUID := snap.Spec.Source.PodRef.UID; wantUID != "" && pod.UID != wantUID {
+		return fmt.Errorf("%w: live pod %q UID %q, want %q", errPodSnapshotStalePodRef, pod.Name, pod.UID, wantUID)
 	}
 	return nil
 }
 
-// ensurePodSnapshotContent returns the existing PodSnapshotContent or, when absent, creates the
-// trigger via a single Server-Side Apply carrying the source ref and the node mirror label.
-// The returned object is the source of truth for the reschedule guard.
+// ensurePodSnapshotContent creates the PodSnapshotContent trigger. The bound-content check already ran,
+// so the content almost never exists here — assume it does not and Create it. The only way it can
+// already exist is a prior reconcile that created it but crashed before the status write, surfaced as
+// AlreadyExists; only then do we re-fetch, confirm it is ours (the spec is immutable), and adopt it.
 func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, contentName string, pod *corev1.Pod) (*nvidiacomv1alpha1.PodSnapshotContent, error) {
-	existing := &nvidiacomv1alpha1.PodSnapshotContent{}
-	if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, existing); err == nil {
-		return existing, nil
-	} else if !apierrors.IsNotFound(err) {
-		return nil, err
-	}
-
 	content := sr.buildPodSnapshotContent(snap, contentName, pod)
-	if err := sr.Patch(ctx, content, client.Apply,
-		client.FieldOwner(podSnapshotContentFieldManager), client.ForceOwnership); err != nil {
+	if err := sr.Create(ctx, content); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			existing := &nvidiacomv1alpha1.PodSnapshotContent{}
+			// A NotFound here is a benign delete/recreate race; the returned error just requeues and the
+			// next Create succeeds.
+			if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, existing); err != nil {
+				return nil, fmt.Errorf("get existing PodSnapshotContent %q: %w", contentName, err)
+			}
+			if err := verifyContentBacklink(snap, existing); err != nil {
+				// %v on the inner: only errContentConflict needs to be unwrappable by the caller.
+				return nil, fmt.Errorf("%w: %v", errContentConflict, err)
+			}
+			return existing, nil
+		}
 		sr.Recorder.Event(snap, corev1.EventTypeWarning, "SnapshotContentCreateFailed", err.Error())
-		return nil, fmt.Errorf("apply PodSnapshotContent %q: %w", contentName, err)
+		return nil, fmt.Errorf("create PodSnapshotContent %q: %w", contentName, err)
 	}
 	return content, nil
 }
@@ -254,25 +263,30 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *nvidiacomv1alpha1
 	}
 }
 
-// propagateStatus records the binding and mirrors the PodSnapshotContent's terminal status to
-// the PodSnapshot, defaulting to a Pending condition until the agent writes a result. It
-// receives the content resolved earlier in the reconcile, so it never re-Gets it.
-func (sr *PodSnapshotReconciler) propagateStatus(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, content *nvidiacomv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
-	changed := false
-	if ptr.Deref(snap.Status.BoundPodSnapshotContentName, "") != content.Name {
-		snap.Status.BoundPodSnapshotContentName = ptr.To(content.Name)
-		changed = true
+// bindContent records the one-time binding of the created/adopted PodSnapshotContent. Mirroring the
+// content's status is the bound path's job (mirrorBoundContent), driven by the content watch.
+func (sr *PodSnapshotReconciler) bindContent(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, contentName string) (ctrl.Result, error) {
+	snap.Status.BoundPodSnapshotContentName = ptr.To(contentName)
+	if err := sr.Status().Update(ctx, snap); err != nil {
+		return ctrl.Result{}, fmt.Errorf("record bound PodSnapshotContent %q: %w", contentName, err)
 	}
+	return ctrl.Result{}, nil
+}
 
+// propagateStatus mirrors the bound PodSnapshotContent's status onto the PodSnapshot, defaulting to a
+// Pending condition until the agent writes a result. It receives the content resolved by the bound
+// path, so it never re-Gets it, and writes status only when a condition actually changed.
+func (sr *PodSnapshotReconciler) propagateStatus(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, content *nvidiacomv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
+	var changed bool
 	switch {
 	case nvidiacomv1alpha1.IsPodSnapshotContentSucceeded(content):
 		cond := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
-		changed = sr.markReady(snap, cond.Reason, cond.Message) || changed
+		changed = sr.markReady(snap, cond.Reason, cond.Message)
 	case nvidiacomv1alpha1.IsPodSnapshotContentFailed(content):
 		cond := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
-		changed = sr.markFailed(snap, cond.Reason, cond.Message) || changed
+		changed = sr.markFailed(snap, cond.Reason, cond.Message)
 	default:
-		changed = sr.markPending(snap, "Pending", "Waiting for node agent to capture the checkpoint") || changed
+		changed = sr.markPending(snap, "Pending", "Waiting for node agent to capture the checkpoint")
 	}
 
 	if !changed {
@@ -311,8 +325,9 @@ func (sr *PodSnapshotReconciler) markFailed(snap *nvidiacomv1alpha1.PodSnapshot,
 	return sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message) || changed
 }
 
-// markPending records the in-progress state: Ready=False, Failed left absent (both-False). Safe
-// because the reconcile short-circuits before reaching here once the snapshot is terminal.
+// markPending records the in-progress state: Ready=False, Failed left absent (both-False). It never
+// needs to clear Failed because Failed is terminal — isPodSnapshotTerminal short-circuits the reconcile
+// before reaching here once Failed is set, so this is only hit while Failed is absent or False.
 func (sr *PodSnapshotReconciler) markPending(snap *nvidiacomv1alpha1.PodSnapshot, reason, message string) bool {
 	return sr.setCondition(snap, nvidiacomv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message)
 }
@@ -341,7 +356,7 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiac
 	// a future bring-your-own-content mode will let the content name diverge from podsnapshotcontent-
 	// <uid>). If it is unset, nothing was bound, so drop the finalizer.
 	//
-	// Accepted orphan risk (deemed acceptable, not guarded here): a content created via SSA whose
+	// Accepted orphan risk (deemed acceptable, not guarded here): a content created via Create whose
 	// status write did not land before the process crashed AND the PodSnapshot was deleted during
 	// that downtime would leak. A future GC/cleanup policy will reclaim unbound content.
 	contentName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, "")
@@ -423,9 +438,4 @@ func podSnapshotRefFromContentObj(obj any) (nvidiacomv1alpha1.PodSnapshotReferen
 // content rather than creating a duplicate.
 func podSnapshotContentName(snap *nvidiacomv1alpha1.PodSnapshot) string {
 	return "podsnapshotcontent-" + string(snap.UID)
-}
-
-// jitteredBackoff adds up to 50% jitter to a base delay to avoid synchronized requeues.
-func jitteredBackoff(base time.Duration) time.Duration {
-	return base + time.Duration(rand.Int63n(int64(base/2)+1))
 }

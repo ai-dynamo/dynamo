@@ -98,8 +98,12 @@ func TestSnapshotReconciler_PodUnscheduledBacksOff(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference"}}
 	r := makeSnapshotReconciler(s, snap, pod)
 
-	res := reconcileSnapshot(t, r, snap.Name)
-	assert.Positive(t, res.RequeueAfter)
+	// Unscheduled pod: return the sentinel error so controller-runtime backs off and requeues; no
+	// content is created and the snapshot is not failed.
+	_, err := r.Reconcile(context.Background(),
+		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errPodSnapshotPodUnscheduled)
 
 	var contents nvidiacomv1alpha1.PodSnapshotContentList
 	require.NoError(t, r.List(context.Background(), &contents))
@@ -111,8 +115,8 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	snap := makeSnapshotForReconcile()
 	r := makeSnapshotReconciler(s, snap, scheduledPod("node-a", "abc123"))
 
-	// Creation path records the binding and returns without a requeue; the content watch drives
-	// the next reconcile.
+	// Creation path records the binding and returns without a requeue; conditions are mirrored on the
+	// next (bound-path) reconcile that the content watch drives.
 	res := reconcileSnapshot(t, r, snap.Name)
 	assert.Zero(t, res.RequeueAfter)
 
@@ -132,7 +136,8 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
 	require.NotNil(t, updated.Status.BoundPodSnapshotContentName)
 	assert.Equal(t, "podsnapshotcontent-snap-uid", *updated.Status.BoundPodSnapshotContentName)
-	// Not yet mirrored: Pending (Ready=False, Failed absent — don't deref a nil condition).
+	// Bound but not yet mirrored: no conditions written on the create pass (Ready not True, Failed
+	// absent — don't deref a nil condition); conditions appear on the next bound-path reconcile.
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
 	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 }
@@ -177,19 +182,56 @@ func TestSnapshotReconciler_MissingSourcePodFails(t *testing.T) {
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
 }
 
-func TestSnapshotReconciler_AlreadyReadyShortCircuits(t *testing.T) {
+func TestSnapshotReconciler_ReadySnapReMirrorsViaBoundContent(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
+	// Ready is NOT terminal: a bound, already-Ready snapshot keeps reconciling. With its content still
+	// Ready it stays Ready via the bound path — no source pod resolved, no flip to Failed.
 	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
 		Type: nvidiacomv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Captured", Message: "done"})
-	// Terminal Ready + pod absent: must stay Ready, never flip to Failed.
-	r := makeSnapshotReconciler(s, snap)
+	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
+			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
+		},
+		Status: nvidiacomv1alpha1.PodSnapshotContentStatus{
+			Conditions: []metav1.Condition{{Type: nvidiacomv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}},
+		},
+	}
+	r := makeSnapshotReconciler(s, snap, content) // no source pod
 
 	reconcileSnapshot(t, r, snap.Name)
 
 	updated := &nvidiacomv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
 	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestSnapshotReconciler_ReadySnapRevertsToPendingWhenContentPending(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	// Ready is not terminal and may change: a bound Ready snapshot whose content has reverted to no
+	// conditions (Pending) re-mirrors back to Ready=False, Failed absent.
+	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
+		Type: nvidiacomv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Captured", Message: "done"})
+	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
+			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
+		},
+	}
+	r := makeSnapshotReconciler(s, snap, content)
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	updated := &nvidiacomv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 }
 
@@ -275,27 +317,39 @@ func TestSnapshotReconciler_ContentConflictFails(t *testing.T) {
 	assert.Equal(t, "ContentConflict", failed.Reason)
 }
 
-func TestSnapshotReconciler_ContentConflictSourcePodUIDFails(t *testing.T) {
+func TestSnapshotReconciler_AdoptsExistingContentAndMirrors(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
-	// Existing content whose snapshotRef matches this snapshot, but whose recorded source pod UID
-	// differs from the live pod (pod-uid-9) — a same-named pod recreation. Must not be adopted.
+	// Crash-recovery adopt: the content was created on a prior reconcile but the binding was never
+	// recorded (BoundPodSnapshotContentName unset). The first pass adopts (Create→AlreadyExists→Get→
+	// backlink OK) and records the binding; the second pass (bound path) mirrors the agent's status.
 	content := &nvidiacomv1alpha1.PodSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
 		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
-			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: "stale-pod-uid"}, NodeName: "node-a"},
+			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
+		},
+		Status: nvidiacomv1alpha1.PodSnapshotContentStatus{
+			Conditions: []metav1.Condition{{Type: nvidiacomv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}},
 		},
 	}
 	r := makeSnapshotReconciler(s, snap, content, scheduledPod("node-a", "abc123"))
 
+	// First pass: adopt and bind, no mirroring yet (no ContentConflict).
 	reconcileSnapshot(t, r, snap.Name)
+	bound := &nvidiacomv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, bound))
+	require.NotNil(t, bound.Status.BoundPodSnapshotContentName)
+	assert.Equal(t, "podsnapshotcontent-snap-uid", *bound.Status.BoundPodSnapshotContentName)
+	assert.Nil(t, meta.FindStatusCondition(bound.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 
+	// Second pass (bound path): mirror the content's Ready status.
+	reconcileSnapshot(t, r, snap.Name)
 	updated := &nvidiacomv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
-	failed := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, failed)
-	assert.Equal(t, "ContentConflict", failed.Reason)
+	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
+	// markReady keeps the pair coherent (Failed=False), so Failed is present-but-False, never True.
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 }
 
 func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
@@ -342,29 +396,6 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 			assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, opposite))
 		})
 	}
-}
-
-func TestSnapshotReconciler_RescheduleFailsSnapshot(t *testing.T) {
-	s := snapshotReconcilerScheme()
-	snap := makeSnapshotForReconcile()
-	content := &nvidiacomv1alpha1.PodSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid", Finalizers: []string{podSnapshotFinalizer}},
-		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
-			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
-			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
-		},
-	}
-	// Pod now runs on a different node than the bound content (same pod UID — a reschedule).
-	r := makeSnapshotReconciler(s, snap, content, scheduledPod("node-b", "abc123"))
-
-	reconcileSnapshot(t, r, snap.Name)
-
-	updated := &nvidiacomv1alpha1.PodSnapshot{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
-	cond := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionTrue, cond.Status)
-	assert.Equal(t, "PodRescheduled", cond.Reason)
 }
 
 func TestSnapshotReconciler_ProceedsWithoutCheckpointIDLabel(t *testing.T) {
