@@ -144,6 +144,11 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          if [[ -z "$PR_SHA" ]]; then
+            echo "Could not determine PR head SHA; aborting /ok to test comment." >&2
+            exit 1
+          fi
+
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO_OWNER/$REPO_NAME" \
             --body "/ok to test $PR_SHA"
