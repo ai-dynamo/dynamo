@@ -404,6 +404,14 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    pub fn component(&self) -> &crate::component::Component {
+        self.client.endpoint.component()
+    }
+
+    pub fn is_direct_routing(&self) -> bool {
+        self.router_mode.is_direct_routing()
+    }
+
     /// Create a new PushRouter without a worker load monitor (no overload detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         Self::from_client_with_monitor(client, router_mode, None).await
@@ -649,6 +657,32 @@ where
     {
         let (instance_id, permit) = self.select_exact_target(pinned_worker).await?;
         let metadata = prepare(&mut request, instance_id)?;
+        let stream = self.dispatch_exact(request, instance_id).await?;
+        let stream = match permit {
+            Some(permit) => permit.into_tracked_stream(stream),
+            None => stream,
+        };
+        Ok((metadata, stream))
+    }
+
+    /// Select and book one worker, run asynchronous and synchronous request
+    /// preparation for that worker, then dispatch without reselection or
+    /// transport fallback.
+    pub async fn select_and_dispatch_exact_async<A, M, AF, AFut, F>(
+        &self,
+        mut request: SingleIn<T>,
+        pinned_worker: Option<u64>,
+        prepare_async: AF,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        AF: FnOnce(u64) -> AFut,
+        AFut: std::future::Future<Output = anyhow::Result<A>>,
+        F: FnOnce(&mut T, u64, A) -> anyhow::Result<M>,
+    {
+        let (instance_id, permit) = self.select_exact_target(pinned_worker).await?;
+        let async_metadata = prepare_async(instance_id).await?;
+        let metadata = prepare(&mut request, instance_id, async_metadata)?;
         let stream = self.dispatch_exact(request, instance_id).await?;
         let stream = match permit {
             Some(permit) => permit.into_tracked_stream(stream),
@@ -1735,6 +1769,43 @@ mod tests {
             state.load(worker_id),
             0,
             "preparation failure must release the selected worker"
+        );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn exact_selection_releases_occupancy_when_async_preparation_fails() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_exact_async_prepare_failure".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+        let state = router.occupancy_state.clone().unwrap();
+        let result = router
+            .select_and_dispatch_exact_async(
+                SingleIn::new(42),
+                None,
+                |_| async { Err::<(), _>(anyhow::anyhow!("lifecycle setup failed")) },
+                |_, _, ()| Ok(()),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            state.load(worker_id),
+            0,
+            "asynchronous preparation failure must release the selected worker"
         );
         rt.shutdown();
     }
