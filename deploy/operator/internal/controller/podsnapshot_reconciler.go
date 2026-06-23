@@ -111,8 +111,21 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// A PodSnapshot always applies to its live source pod. Resolve it; if it no longer exists, fail
-	// the snapshot terminally rather than looping on NotFound.
+	// Once a PodSnapshotContent has been created (recorded in status), the snapshot is driven by
+	// that content, not the live source pod. Mirror its status without resolving the pod.
+	if boundName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, ""); boundName != "" {
+		content := &nvidiacomv1alpha1.PodSnapshotContent{}
+		if err := sr.Get(ctx, client.ObjectKey{Name: boundName}, content); err != nil {
+			// Do NOT fail the snapshot: a NotFound here is almost always a stale informer-cache read
+			// right after creation. Return the error to requeue with backoff (heals on retry); the
+			// snapshot stays Pending rather than terminally failing.
+			return ctrl.Result{}, fmt.Errorf("get bound PodSnapshotContent %q: %w", boundName, err)
+		}
+		return sr.propagateStatus(ctx, snap, content)
+	}
+
+	// No content has been created yet — this is the only path that needs the live source pod.
+	// Resolve it; if it no longer exists, fail the snapshot terminally rather than looping.
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
