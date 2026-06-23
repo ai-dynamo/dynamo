@@ -13,6 +13,7 @@ from tensorrt_llm.llmapi.llm import BaseLLM
 from transformers import AutoConfig
 
 from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class TensorRTLLMEngine:
         disaggregation_mode: Optional[DisaggregationMode] = None,
     ) -> None:
         self._llm: Optional[LLM] = None
+        self._health_monitor: Optional[TrtllmEngineMonitor] = None
         self.disaggregation_mode = (
             disaggregation_mode
             if disaggregation_mode is not None
@@ -95,11 +97,15 @@ class TensorRTLLMEngine:
                 self._llm = self._llm_cls(**self.engine_args)
 
     async def cleanup(self) -> None:
+        await self.stop_health_monitor()
+        self.shutdown()
+
+    def shutdown(self) -> None:
         if self._llm:
             try:
                 self._llm.shutdown()
             except Exception as e:
-                logging.error(f"Error during cleanup: {e}")
+                logging.error(f"Error during shutdown: {e}")
             finally:
                 self._llm = None
 
@@ -108,6 +114,50 @@ class TensorRTLLMEngine:
         if not self._llm:
             raise RuntimeError("Engine not initialized")
         return self._llm
+
+    def supports_health_check(self) -> bool:
+        return self._get_health_check_fn() is not None
+
+    def check_health(self) -> bool:
+        if self._llm is None:
+            return False
+        check_health = self._get_health_check_fn()
+        if check_health is None:
+            return True
+        return bool(check_health())
+
+    def get_health_check_fatal_error(self) -> Optional[BaseException]:
+        if self._llm is None:
+            return None
+        executor = getattr(self._llm, "_executor", None)
+        return getattr(executor, "_fatal_error", None)
+
+    def start_health_monitor(
+        self, runtime: Optional[Any] = None, shutdown_event: Optional[Any] = None
+    ) -> Optional[TrtllmEngineMonitor]:
+        if self._health_monitor is None:
+            self._health_monitor = TrtllmEngineMonitor(
+                self, runtime=runtime, shutdown_event=shutdown_event
+            )
+        return self._health_monitor
+
+    async def stop_health_monitor(self) -> None:
+        if self._health_monitor is None:
+            return
+        await self._health_monitor.stop()
+        self._health_monitor = None
+
+    def _get_health_check_fn(self):
+        if self._llm is None:
+            return None
+        check_health = getattr(self._llm, "_check_health", None)
+        if callable(check_health):
+            return check_health
+        executor = getattr(self._llm, "_executor", None)
+        check_health = getattr(executor, "check_health", None)
+        if callable(check_health):
+            return check_health
+        return None
 
     def get_attention_dp_size(self) -> int:
         """Return attention_dp_size (tensor_parallel_size if attention DP enabled, else 1).

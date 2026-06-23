@@ -13,21 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Consolidated Fern Documentation Workflow
+# Trusted Fern Documentation Workflow
 #
-# This workflow handles all Fern documentation automation:
+# This workflow handles trusted Fern documentation automation:
 #
-# 1. LINT (PRs): Validates Fern configuration and checks for broken links
-#    - Triggers on PRs when docs/** files change
-#    - Runs `fern check` and `fern docs broken-links`
+# Safe pre-merge Fern lint runs in pre-merge.yml on normal pull_request events.
 #
-# 2. SYNC & PUBLISH/PREVIEW: Syncs docs/ from source branch to fern/ on docs-website
-#    - Triggers on push to main or PRs when docs/** files change
+# 1. SYNC & PUBLISH/PREVIEW: Syncs docs/ from source branch to fern/ on docs-website
+#    - Triggers on trusted pushes to main or pull-request/N when docs-site files change
 #    - On main: commits and pushes to docs-website, then publishes via `fern generate --docs`
-#    - On PRs: generates a preview URL via `fern generate --docs --preview` and comments on PR
+#    - On gated PR branches: generates a preview URL via `fern generate --docs --preview` and comments on PR
 #    - Preserves versioned documentation (products[0]) from docs-website's docs.yml
 #
-# 3. VERSION RELEASE (tags): Creates versioned documentation snapshot
+# 2. VERSION RELEASE (tags): Creates versioned documentation snapshot
 #    - Triggers on new version tags (vX.Y.Z format)
 #    - Creates fern/pages-vX.Y.Z/ directory on docs-website branch
 #    - Updates fern/docs.yml with new version entry
@@ -77,59 +75,9 @@ jobs:
           gh_token: ${{ github.token }}
 
   #############################################################################
-  # LINT JOBS - Run on PRs when docs/** files change
-  #############################################################################
-
-  fern-check:
-    name: Fern Configuration Check
-    needs: changed-files
-    if: |
-      github.ref_type != 'tag' &&
-      needs.changed-files.outputs.docs == 'true' &&
-      (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/'))
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install Fern CLI
-        run: npm install -g fern-api
-
-      - name: Validate Fern configuration
-        run: fern check
-
-  fern-broken-links:
-    name: Fern Broken Links Check
-    needs: changed-files
-    if: |
-      github.ref_type != 'tag' &&
-      needs.changed-files.outputs.docs == 'true' &&
-      (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/'))
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install Fern CLI
-        run: npm install -g fern-api
-
-      - name: Check for broken links
-        run: fern docs broken-links
-
-  #############################################################################
-  # SYNC & PUBLISH/PREVIEW - Syncs docs content to docs-website structure
+  # TRUSTED SYNC & PUBLISH/PREVIEW - Syncs docs content to docs-website structure
   # On main: commits, pushes, and publishes to Fern
-  # On PRs: generates a preview URL and comments on the PR
+  # On gated PR branches: generates a preview URL and comments on the PR
   #############################################################################
 
   preview-or-publish-docs:
@@ -255,6 +203,22 @@ jobs:
 
           # Restore the preserved products[0] block
           yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
+
+          # Inject the private NVIDIA global theme for production builds only.
+          # It is intentionally absent from the source repo's docs.yml so that
+          # external contributors can run `fern docs dev` without an nvidia-org
+          # FERN_TOKEN (otherwise the CLI 403s fetching the private theme and the
+          # local preview renders blank). See https://github.com/ai-dynamo/dynamo/issues/10073
+          #
+          # PR previews skip the theme: applying it masks the project `css:`
+          # stylesheet in hosted builds, so previews of any fern/main.css change
+          # render unstyled. The repo main.css already carries the NVIDIA
+          # branding rules, so unthemed previews stay visually faithful.
+          if [ "${{ steps.ctx.outputs.is_main }}" = "true" ]; then
+            yq -i '.global-theme = "nvidia"' docs.yml
+          else
+            yq -i 'del(.global-theme)' docs.yml
+          fi
 
           echo "Updated docs.yml:"
           cat docs.yml

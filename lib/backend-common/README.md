@@ -5,15 +5,22 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Rust Backend (`dynamo-backend-common`)
 
-> **Work in progress.** The unified backend supports aggregated and
-> disaggregated (prefill/decode) inference; multimodal, LoRA, logprobs,
-> guided decoding, and engine-level metrics are still on the
-> non-unified path. The Python `Worker`
+> **Work in progress.** The unified backend covers aggregated and
+> disaggregated (prefill/decode) inference, metrics + Prometheus
+> bridging, KV event publishing, KV-aware (DP-rank) routing,
+> health-check canaries, OpenTelemetry tracing, request-side
+> guided decoding, and both completion-side and prompt-side
+> logprobs. Multimodal, diffusion (image/video/DLLM), LoRA, engine
+> routes (pause/resume, profiling, weight updates), text-in-text-out,
+> and snapshot/CRIU are still on the non-unified path. See the
+> [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
+> for the per-engine matrix. The Python `Worker`
 > ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
 > is a thin shim over this crate.
 
 > **Looking for a walkthrough?** Start with
-> [Writing a Rust Unified Backend](../../docs/development/rust-backend-guide.md).
+> [Writing Unified Backends](../../docs/development/unified-backends.md)
+> and choose the Rust tab.
 > This README is the in-tree reference: trait shape, file layout,
 > disaggregation contract, error taxonomy, and the conformance kit.
 
@@ -28,7 +35,7 @@ LLMEngine (trait)              <-- engine boundary (engine.rs)
     |   - start(worker_id) -> Result<EngineConfig, DynamoError>
     |   - generate(request, ctx) -> Result<BoxStream<...>, DynamoError>
     |   - abort(ctx)                            (optional, default no-op)
-    |   - drain() -> Result<(), DynamoError>    (optional, default no-op)
+    |   - is_quiescent() -> Result<Option<bool>, DynamoError> (optional, default Ok(None))
     |   - cleanup() -> Result<(), DynamoError>
     |
     +-- MockerBackend          <-- examples/mocker/src/engine.rs
@@ -41,7 +48,7 @@ Worker (concrete, non-generic)  <-- runtime integration (worker.rs)
     - calls engine.start(worker_id), registers model with discovery
     - serves the generate endpoint with cancellation monitoring
     - on shutdown: discovery unregister -> grace period
-                   -> engine.drain() -> engine.cleanup()
+                   -> drain loop (poll engine.is_quiescent()) -> engine.cleanup()
                    -> 3-phase distributed-runtime teardown
 
 run(engine, config)             <-- src/run.rs
@@ -87,9 +94,9 @@ lives at
 cargo run --release -- --help
 ```
 
-See the [walkthrough](../../docs/development/rust-backend-guide.md) for
-how to set up the crate (Cargo.toml, `tokio_unstable` cfg flag, toolchain
-pin) and write the engine.
+See the [walkthrough](../../docs/development/unified-backends.md) and choose
+the Rust tab for how to set up the crate (Cargo.toml, `tokio_unstable` cfg
+flag, toolchain pin) and write the engine.
 
 ## Implementing a New Backend
 
@@ -143,8 +150,8 @@ fn main() -> anyhow::Result<()> {
 
 See [`examples/mocker/src/engine.rs`](examples/mocker/src/engine.rs)
 for a complete, runnable reference and the
-[walkthrough](../../docs/development/rust-backend-guide.md) for the
-step-by-step including Cargo.toml, `tokio_unstable` cfg, and the
+[walkthrough](../../docs/development/unified-backends.md) for the
+Rust step-by-step including Cargo.toml, `tokio_unstable` cfg, and the
 conformance kit.
 
 ## Disaggregated Serving
@@ -170,7 +177,7 @@ Roles and `Worker` behavior:
 | Mode | Role | Worker effects |
 | --- | --- | --- |
 | `Aggregated` | Self-contained inference (default) | Standard registration; KV indexer enabled |
-| `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers as `ModelType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
+| `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers with `ModelType::empty()` + `WorkerType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
 | `Decode`     | Resume from a prefill peer's KV | Disables the local indexer (KV is owned by the prefill peer) |
 
 The crate re-exports `PrefillResult` and `BootstrapInfo` from
@@ -249,7 +256,7 @@ Mid-stream errors have two equivalent terminal forms:
   pure message-level failures. Loses the typed `BackendError` variant.
 
 A tiny helper per backend keeps call sites clean — see the
-[guide's Step 6](../../docs/development/rust-backend-guide.md) for the
+[guide's Rust Step 6](../../docs/development/unified-backends.md) for the
 `invalid_arg` pattern.
 
 ## Conformance Kit
@@ -397,8 +404,8 @@ entry points lives at
 
 ## See Also
 
-- [Writing a Rust Unified Backend](../../docs/development/rust-backend-guide.md)
-  — step-by-step walkthrough.
+- [Writing Unified Backends](../../docs/development/unified-backends.md)
+  — step-by-step walkthrough; choose the Rust tab.
 - [`CLAUDE.md`](CLAUDE.md) — design notes (rationale, invariants,
   Phase 2 PyO3 plans).
 - [Mocker example](examples/mocker/) — reference engine + compose stack.

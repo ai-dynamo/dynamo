@@ -67,8 +67,8 @@ def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     assert decode_service.get("multinode") is None
 
 
-def test_build_dgd_config_sglang_prefill_mrr_one_sets_cuda_graph_bs() -> None:
-    """SGLang prefill with one running request must capture bs=1 explicitly."""
+def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() -> None:
+    """SGLang prefill capture bs must remain valid with DP attention."""
     modifier = CONFIG_MODIFIERS["sglang"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
@@ -106,7 +106,7 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_cuda_graph_bs() -> None:
     prefill_args = prefill_service["extraPodSpec"]["mainContainer"]["args"]
 
     assert prefill_args.count("--cuda-graph-bs") == 1
-    assert prefill_args[prefill_args.index("--cuda-graph-bs") + 1] == "1"
+    assert prefill_args[prefill_args.index("--cuda-graph-bs") + 1] == "2"
 
 
 def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
@@ -158,6 +158,7 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
     )
     service["extraPodSpec"]["mainContainer"]["args"] = [
         "--max-running-requests=512",
+        "--dp=2",
     ]
 
     result = modifier.set_prefill_config(
@@ -174,7 +175,7 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
 
     assert args[args.index("--max-running-requests") + 1] == "1"
     assert args.count("--cuda-graph-bs") == 1
-    assert args[args.index("--cuda-graph-bs") + 1] == "1"
+    assert args[args.index("--cuda-graph-bs") + 1] == "2"
 
 
 def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:

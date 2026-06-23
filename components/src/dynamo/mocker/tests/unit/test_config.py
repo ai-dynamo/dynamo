@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dynamo.llm import EngineType, EntrypointArgs, MockEngineArgs
+from dynamo.llm import EngineType, EntrypointArgs
+from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.args import parse_args
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
@@ -51,6 +53,7 @@ def make_args(**overrides):
         "sglang_chunked_prefill_size": None,
         "sglang_clip_max_new_tokens": None,
         "sglang_schedule_conservativeness": None,
+        "trtllm_capacity_scheduler_policy": None,
         "aic_perf_model": False,
         "aic_system": None,
         "aic_backend": None,
@@ -59,8 +62,12 @@ def make_args(**overrides):
         "aic_moe_tp_size": None,
         "aic_moe_ep_size": None,
         "aic_attention_dp_size": None,
+        "aic_nextn": None,
+        "aic_nextn_accept_rates": None,
+        "aic_mtp_seed": 42,
         "gpu_memory_utilization": None,
         "mem_fraction_static": None,
+        "free_gpu_memory_fraction": None,
         "model_path": None,
         "is_prefill_worker": False,
         "is_decode_worker": False,
@@ -77,6 +84,7 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     block_size, runtime_config = CONFIG.build_runtime_config(engine_args)
 
     assert block_size == 16
+    assert runtime_config.context_length == 0
     assert runtime_config.total_kv_blocks == 16384
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
@@ -101,6 +109,53 @@ def test_load_mocker_engine_args_from_json_file_normalizes_page_size(tmp_path):
 
     assert engine_args.block_size == 32
     assert engine_args.num_gpu_blocks == 1024
+
+
+def test_build_mocker_engine_args_trtllm_defaults_block_size():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(engine_type="trtllm", block_size=None)
+    )
+
+    # TRT-LLM PyTorch backend default tokens_per_block.
+    assert engine_args.block_size == 32
+
+
+def test_build_mocker_engine_args_trtllm_accepts_guaranteed_no_evict():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            engine_type="trtllm",
+            trtllm_capacity_scheduler_policy="guaranteed_no_evict",
+        )
+    )
+
+    assert engine_args.block_size == 32
+
+
+def test_build_mocker_engine_args_trtllm_rejects_unsupported_policy():
+    with pytest.raises(Exception, match="guaranteed_no_evict"):
+        CONFIG.build_mocker_engine_args(
+            make_args(
+                engine_type="trtllm",
+                trtllm_capacity_scheduler_policy="max_utilization",
+            )
+        )
+
+
+def test_load_mocker_engine_args_from_json_file_accepts_trtllm(tmp_path):
+    config_path = tmp_path / "engine_args.json"
+    config_path.write_text(
+        '{"engine_type":"trtllm",'
+        '"trtllm":{"capacity_scheduler_policy":"guaranteed_no_evict"},'
+        '"num_gpu_blocks":1024}'
+    )
+
+    engine_args = CONFIG.load_mocker_engine_args(
+        make_args(extra_engine_args=config_path)
+    )
+
+    assert engine_args.num_gpu_blocks == 1024
+    # block_size omitted from JSON -> normalized to the TRT-LLM default.
+    assert engine_args.block_size == 32
 
 
 def test_worker_overrides_drive_runtime_config_for_prefill_worker():
@@ -138,6 +193,31 @@ def test_g3_args_allow_kv_bytes_per_token_worker_override():
     )
     assert worker_args.kv_bytes_per_token == 131072
     assert worker_args.num_g3_blocks == 16384
+
+
+def test_g4_args_allow_kv_bytes_per_token_worker_override():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            model_path="/models/mock",
+            kv_bytes_per_token=None,
+            num_g2_blocks=8192,
+            enable_g4_storage=True,
+            bandwidth_g2_to_g4_gbps=4.0,
+            bandwidth_g4_to_g2_gbps=4.0,
+        )
+    )
+    assert engine_args.kv_bytes_per_token is None
+    assert engine_args.num_g2_blocks == 8192
+    assert engine_args.enable_g4_storage is True
+    assert engine_args.bandwidth_g2_to_g4_gbps == 4.0
+    assert engine_args.bandwidth_g4_to_g2_gbps == 4.0
+
+    worker_args = CONFIG.apply_worker_engine_args_overrides(
+        engine_args,
+        kv_bytes_per_token=131072,
+    )
+    assert worker_args.kv_bytes_per_token == 131072
+    assert worker_args.enable_g4_storage is True
 
 
 def test_runtime_config_disables_local_indexer_for_decode_worker():
@@ -266,6 +346,51 @@ def test_aic_backend_override_decouples_from_engine_type():
     assert engine_args.aic_backend == "trtllm"
 
 
+def test_build_mocker_engine_args_propagates_mtp_configuration():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            aic_perf_model=True,
+            aic_system="h200_sxm",
+            model_path="/models/mock",
+            num_gpu_blocks=128,
+            aic_nextn=3,
+            aic_nextn_accept_rates="1,0.5",
+            aic_mtp_seed=99,
+        )
+    )
+
+    assert engine_args.aic_nextn == 3
+    assert engine_args.aic_nextn_accept_rates == "1,0.5,0"
+    assert engine_args.aic_mtp_seed == 99
+
+
+def test_worker_override_offsets_mtp_seed():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(aic_nextn=1, aic_mtp_seed=2**64 - 1)
+    )
+
+    worker_args = CONFIG.apply_worker_engine_args_overrides(engine_args, aic_mtp_seed=0)
+
+    assert worker_args.aic_mtp_seed == 0
+
+
+def test_mocker_cli_accepts_mtp_configuration():
+    args = parse_args(
+        [
+            "--aic-nextn",
+            "3",
+            "--aic-nextn-accept-rates",
+            "1,0.5",
+            "--aic-mtp-seed",
+            "99",
+        ]
+    )
+
+    assert args.aic_nextn == 3
+    assert args.aic_nextn_accept_rates == "1,0.5"
+    assert args.aic_mtp_seed == 99
+
+
 def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):
     import dynamo.replay.main as replay_main
 
@@ -292,6 +417,35 @@ def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatc
 
     assert engine_args.num_g2_blocks == 8192
     assert engine_args.num_g3_blocks == 16384
+    assert calls == [("/models/mock", "auto")]
+
+
+def test_replay_engine_args_compute_kv_bytes_for_g4_before_validation(monkeypatch):
+    import dynamo.replay.main as replay_main
+
+    calls = []
+
+    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
+        calls.append((model_path, kv_cache_dtype))
+        return 131072
+
+    monkeypatch.setattr(
+        replay_main, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
+    )
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "num_g2_blocks": 8192,
+                "enable_g4_storage": True,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.num_g2_blocks == 8192
+    assert engine_args.enable_g4_storage is True
     assert calls == [("/models/mock", "auto")]
 
 
@@ -329,6 +483,7 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             "max_num_batched_tokens": 4096,
             "gpu_memory_utilization": 0.8,
             "mem_fraction_static": 0.7,
+            "free_gpu_memory_fraction": None,
             "backend_version": None,
             "moe_tp_size": None,
             "moe_ep_size": None,
@@ -360,6 +515,7 @@ def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
         aic_attention_dp_size=None,
         gpu_memory_utilization=0.0,
         mem_fraction_static=0.0,
+        free_gpu_memory_fraction=0.0,
         sglang_page_size=0,
     )
 
@@ -369,6 +525,7 @@ def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
     assert calls[0]["max_num_batched_tokens"] == 0
     assert calls[0]["gpu_memory_utilization"] == 0.0
     assert calls[0]["mem_fraction_static"] == 0.0
+    assert calls[0]["free_gpu_memory_fraction"] == 0.0
 
 
 def test_build_mocker_engine_args_estimates_sglang_blocks_with_static_fraction(

@@ -132,6 +132,21 @@ impl WorkerSet {
         self.has_chat_engine() || self.has_completions_engine()
     }
 
+    /// Whether this set has any engine capable of producing output for an
+    /// inference request. Single source of truth for the "is something attached
+    /// that can serve a request?" question — keep the engine-kind list here so
+    /// new modalities don't need to be added in multiple readiness predicates.
+    pub fn has_any_serving_engine(&self) -> bool {
+        self.has_chat_engine()
+            || self.has_completions_engine()
+            || self.has_embeddings_engine()
+            || self.has_images_engine()
+            || self.has_tensor_engine()
+            || self.has_videos_engine()
+            || self.has_audios_engine()
+            || self.has_realtime_engine()
+    }
+
     /// Whether this set tracks an Encode worker. Encode WorkerSets carry
     /// no serving engines (the watcher's Encode role gate skips
     /// pipeline construction) -- if we let `is_prefill_set` classify
@@ -157,14 +172,7 @@ impl WorkerSet {
     /// lifecycle). Excludes Encode sets, which also lack engines but
     /// are not gated through PrefillRouter.
     pub fn is_prefill_set(&self) -> bool {
-        !self.is_encode_set()
-            && !self.has_decode_engine()
-            && !self.has_embeddings_engine()
-            && !self.has_images_engine()
-            && !self.has_videos_engine()
-            && !self.has_audios_engine()
-            && !self.has_tensor_engine()
-            && !self.has_realtime_engine()
+        !self.is_encode_set() && !self.has_any_serving_engine()
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.

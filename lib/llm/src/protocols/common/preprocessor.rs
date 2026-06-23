@@ -11,9 +11,9 @@ use dynamo_kv_router::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::agents::context::AgentContext;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -59,6 +59,10 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_jump: Option<f64>,
 
+    /// Strict router pending-queue priority tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
+
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
@@ -71,11 +75,6 @@ pub struct RoutingHints {
     /// Request routing constraints used for worker compatibility and soft preference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_constraints: Option<RoutingConstraints>,
-
-    /// Session control for subagent KV isolation and sticky routing.
-    /// Contains session_id (for affinity) and optional action (open/close).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -126,6 +125,11 @@ pub struct MmRoutingInfo {
     /// Block-level multimodal metadata aligned with routing_token_ids blocks.
     /// Use `None` entries for blocks without multimodal objects.
     pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
+
+    /// Unpadded expanded prompt length. Use instead of `routing_token_ids.len()`
+    /// (which includes block-padding) when a real token count is needed.
+    #[serde(default)]
+    pub expanded_prompt_len: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -248,6 +252,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Router-specific parameters forwarded from `nvext.router`.
+    /// Consumed by router implementations (e.g. the global router) and ignored
+    /// by engines/backends.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterParams>,
 
     /// Optional agent identity metadata forwarded from nvext.
     #[builder(default)]

@@ -29,6 +29,14 @@ Default to upstream. Own a type only when at least one of these is true:
 - `src/types/anthropic.rs` — Anthropic Messages API. Fully owned (no upstream equivalent in `async-openai`).
 - `src/types/embeddings`, `src/types/images` — full upstream re-export (no Dynamo extensions).
 
+## Protocol-agnostic extension boundaries
+
+Keep this crate declarative and protocol-agnostic. It owns provider request/response shapes, serde compatibility, builders, and narrow conversions. It should not own Dynamo-specific semantics inside extension envelopes.
+
+If a provider-shaped API accepts a Dynamo extension envelope such as `nvext`, model only the envelope's placement in that protocol shape. Keep the envelope contents opaque, for example as `serde_json::Value`, and do not define typed subfields, validation rules, routing behavior, lifecycle semantics, or backend policy here.
+
+Adding or changing a field inside an extension envelope should not require editing this crate unless the provider request/response shape itself changes.
+
 ## Re-export conventions
 
 Use **explicit re-exports** (`pub use foo::{A, B, C}`), not globs, when you need to selectively shadow. Globs (`pub use foo::*`) are allowed at the top of a module — Rust lets a local `pub struct Foo` shadow a glob-imported `Foo` (the glob just emits `unused_imports` warnings). But explicit lists make the ownership split obvious to readers and catch mistakes at compile time when upstream renames or removes a type.

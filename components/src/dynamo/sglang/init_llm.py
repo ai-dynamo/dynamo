@@ -12,7 +12,7 @@ from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
@@ -93,6 +93,9 @@ async def init_decode(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
@@ -129,12 +132,13 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    # Only serve session_control when streaming sessions are enabled.
-    if getattr(server_args, "enable_streaming_session", False):
-        session_control_endpoint = runtime.endpoint(
-            f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
-        )
-        shutdown_endpoints.append(session_control_endpoint)
+    # Worker type and needs, derived from serving_mode.
+    if config.serving_mode == DisaggregationMode.DECODE:
+        decode_worker_type = WorkerType.Decode
+        decode_needs: list[list[WorkerType]] = [[WorkerType.Prefill]]
+    else:
+        decode_worker_type = WorkerType.Aggregated
+        decode_needs = []
 
     try:
         gather_tasks = [
@@ -163,12 +167,10 @@ async def init_decode(
                 dynamo_args,
                 output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
+                worker_type=decode_worker_type,
+                needs=decode_needs,
             ),
         ]
-        if getattr(server_args, "enable_streaming_session", False):
-            gather_tasks.append(
-                session_control_endpoint.serve_endpoint(handler.session_control)
-            )
         await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -238,6 +240,9 @@ async def init_prefill(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
 
@@ -291,8 +296,16 @@ async def init_prefill(
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Tokens,
+                # Prefill workers have no OpenAI surface — the role is carried
+                # by `worker_type=Prefill` below. We register the legacy
+                # `ModelType.Prefill` marker bit (not a surface) so an OLD
+                # frontend, which detects prefill via that bit, still routes
+                # disaggregated traffic during the cross-version rollout. A new
+                # frontend ignores it and dispatches off `worker_type`.
                 output_type=ModelType.Prefill,
                 readiness_gate=ready_event,
+                worker_type=WorkerType.Prefill,
+                needs=[[WorkerType.Decode]],
             ),
         )
     except Exception as e:

@@ -14,6 +14,20 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
 
+/// Per-position prompt logprob entry reported by an engine adapter.
+#[derive(Serialize, Deserialize, utoipa::ToSchema, Debug, Clone, PartialEq)]
+pub struct PromptLogprobEntry {
+    pub logprob: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoded_token: Option<String>,
+}
+
+/// Per-token map of `token_id -> PromptLogprobEntry`. The first position
+/// is `None` (no logprob exists for BOS / the very first prompt token).
+pub type PromptLogprobs = Vec<Option<std::collections::HashMap<TokenIdType, PromptLogprobEntry>>>;
+
 /// Output type discriminator for different modalities
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -129,6 +143,12 @@ pub struct BackendOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Router-computed data handed back to the frontend (e.g. per-request timing from
+    /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
+    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -210,6 +230,11 @@ pub struct LLMEngineOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
+    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
 
 impl LLMEngineOutput {
@@ -232,6 +257,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -254,6 +280,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -276,6 +303,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -298,6 +326,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -334,8 +363,17 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
+}
+
+pub(crate) fn prompt_logprobs_from_engine_data(
+    engine_data: Option<&serde_json::Value>,
+) -> Option<PromptLogprobs> {
+    engine_data?
+        .get("prompt_logprobs")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 impl MaybeError for LLMEngineOutput {

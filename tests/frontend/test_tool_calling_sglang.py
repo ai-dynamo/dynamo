@@ -44,6 +44,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 pytestmark = [
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.e2e,
     pytest.mark.gpu_1,
     pytest.mark.integration,

@@ -4,14 +4,15 @@
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap};
 
-use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
+use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
+    common::extensions::merge_response_nvext,
     convert_sse_stream,
-    openai::{ParsingOptions, nvext::merge_response_nvext},
+    openai::ParsingOptions,
 };
 
 use dynamo_protocols::types::ChatCompletionMessageContent;
@@ -72,7 +73,7 @@ struct DeltaChoice {
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
     // Optional tool calls for the chat choice, populated *after* fold either
     // by finalizing `tool_call_chunks` above, or by
-    // `try_tool_call_parse_aggregate` running against `text` for producers
+    // `try_tool_call_parse_aggregate_finalize` running against `text` for producers
     // that put tool calls in content rather than as structured chunks.
     tool_calls: Option<Vec<dynamo_protocols::types::ChatCompletionMessageToolCall>>,
 
@@ -248,6 +249,7 @@ impl DeltaAggregator {
 
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
+                        let choice_role = choice.delta.role;
                         let state_choice =
                             aggregator
                                 .choices
@@ -255,7 +257,7 @@ impl DeltaAggregator {
                                 .or_insert(DeltaChoice {
                                     index: choice.index,
                                     text: "".to_string(),
-                                    role: choice.delta.role,
+                                    role: choice_role,
                                     finish_reason: None,
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
@@ -263,6 +265,11 @@ impl DeltaAggregator {
                                     reasoning_content: None,
                                     content_parts: Vec::new(),
                                 });
+
+                        if state_choice.role.is_none() {
+                            state_choice.role = choice_role;
+                        }
+
                         // Handle content based on type
                         if let Some(content) = &choice.delta.content {
                             match content {
@@ -355,8 +362,8 @@ impl DeltaAggregator {
                 .filter_map(finalize_merged_tool_chunk)
                 .collect();
             // choice.tool_calls is always None at this point: or_insert
-            // initializes it to None, try_tool_call_parse_aggregate runs
-            // strictly after this loop. Unconditional assign is the only
+            // initializes it to None, try_tool_call_parse_aggregate_finalize
+            // runs strictly after this loop. Unconditional assign is the only
             // reachable path; no merge-with-existing needed.
             if !finalized.is_empty() {
                 choice.tool_calls = Some(finalized);
@@ -375,7 +382,9 @@ impl DeltaAggregator {
                 }
 
                 let (tool_calls, content) =
-                    match try_tool_call_parse_aggregate(&choice.text, Some(parser), None).await {
+                    match try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None)
+                        .await
+                    {
                         Ok(result) => result,
                         Err(error) => {
                             tracing::debug!(
@@ -388,7 +397,12 @@ impl DeltaAggregator {
                     };
 
                 if !tool_calls.is_empty() {
-                    choice.tool_calls = Some(tool_calls);
+                    choice.tool_calls = Some(
+                        tool_calls
+                            .into_iter()
+                            .map(super::tool_call_response_to_protocol)
+                            .collect(),
+                    );
                     choice.text = content.unwrap_or_default();
                 } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();
@@ -455,7 +469,9 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
 
         dynamo_protocols::types::ChatChoice {
             message: dynamo_protocols::types::ChatCompletionResponseMessage {
-                role: delta.role.expect("delta should have a Role"),
+                role: delta
+                    .role
+                    .unwrap_or(dynamo_protocols::types::Role::Assistant),
                 content,
                 tool_calls: delta.tool_calls,
                 refusal: None,
@@ -982,6 +998,41 @@ mod tests {
         assert_eq!(
             choice.logprobs.as_ref().unwrap().content.as_ref().unwrap()[1].logprob,
             -0.2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_stream_role_defaults_to_assistant_without_panic() {
+        let deltas = vec![
+            create_test_delta(0, "Hello,", None, None, None, None),
+            create_test_delta(
+                0,
+                " world!",
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+                None,
+            ),
+        ];
+        let stream = Box::pin(stream::iter(deltas));
+
+        let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregation should not panic or error when stream role is missing");
+
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.message.role,
+            dynamo_protocols::types::Role::Assistant
+        );
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Hello, world!".to_string())
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
         );
     }
 
