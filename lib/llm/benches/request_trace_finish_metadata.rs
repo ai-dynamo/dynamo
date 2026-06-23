@@ -136,6 +136,7 @@ async fn consume_postprocessor_stream(trace_finish_metadata: bool) -> usize {
         generator,
         ctx,
         false,
+        false,
         trace_finish_metadata.then(SharedFinishReasonMetadata::default),
     );
 

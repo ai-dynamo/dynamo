@@ -155,9 +155,7 @@ mod tests {
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
                 // Drive the full audit lifecycle (bus::init, spawn workers,
-                // mark_capture_active) so `create_handle` succeeds — direct
-                // `bus::init` + `spawn_workers_from_env` calls no longer mark
-                // capture active after the capture_enabled() tightening.
+                // mark_capture_active) so `create_handle` succeeds.
                 let shutdown = tokio_util::sync::CancellationToken::new();
                 init_from_env_with_shutdown(shutdown.clone()).await.unwrap();
                 time::sleep(Duration::from_millis(100)).await;
@@ -217,9 +215,7 @@ mod tests {
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
                 // Drive the full audit lifecycle (bus::init, spawn workers,
-                // mark_capture_active) so `create_handle` succeeds — direct
-                // `bus::init` + `spawn_workers_from_env` calls no longer mark
-                // capture active after the capture_enabled() tightening.
+                // mark_capture_active) so `create_handle` succeeds.
                 let shutdown = tokio_util::sync::CancellationToken::new();
                 init_from_env_with_shutdown(shutdown.clone()).await.unwrap();
                 time::sleep(Duration::from_millis(100)).await;

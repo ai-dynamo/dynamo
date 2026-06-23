@@ -562,7 +562,6 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
-                            pending_usage = None
                         response_nvext: dict[str, Any] = {}
                         if stop_reason is not None and nvext_extra_field_requested(
                             request, "stop_reason"
@@ -587,7 +586,6 @@ class SglangProcessor:
                             "object": "chat.completion.chunk",
                             "usage": pending_usage,
                         }
-                        pending_usage = None
                         yield dynamo_out
 
                     pending_token_ids = []

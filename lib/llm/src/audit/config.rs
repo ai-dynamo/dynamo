@@ -32,6 +32,8 @@ pub struct AuditPolicy {
     pub jsonl_flush_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub jsonl_gz_roll_lines: Option<u64>,
+    /// Max serialized bytes the OTLP sink exports before substituting an
+    /// incomplete-record marker. otel-only — other sinks have no cap (DEP #9461).
     pub otel_max_payload_bytes: usize,
 }
 
@@ -133,20 +135,13 @@ pub(crate) fn mark_capture_inactive() {
 }
 
 pub(crate) fn capture_enabled() -> bool {
-    // Require the explicit ACTIVE transition so that publishes happening before
-    // `init_from_env_with_shutdown` finishes — i.e. while the bus is still
-    // uninitialized — are skipped at the `create_handle` gate rather than
-    // silently dropped at `bus::publish`. Pre-init `create_handle` calls used
-    // to succeed and then lose their record on publish; with the request-side
-    // emit now firing synchronously at preprocessor entry, that race window is
-    // worth closing.
+    // Require the explicit ACTIVE transition: handles created before
+    // `init_from_env_with_shutdown` finishes are skipped at this gate rather
+    // than created and then dropped at `bus::publish`.
     let policy = policy();
     policy.enabled && CAPTURE_STATE.load(Ordering::Acquire) == CAPTURE_ACTIVE
 }
 
 pub(crate) fn otel_sink_capture_enabled() -> bool {
-    let policy = policy();
-    policy.enabled
-        && CAPTURE_STATE.load(Ordering::Acquire) == CAPTURE_ACTIVE
-        && policy.sinks.iter().any(|sink| sink == "otel")
+    capture_enabled() && policy().sinks.iter().any(|sink| sink == "otel")
 }
