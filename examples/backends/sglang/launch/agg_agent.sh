@@ -49,13 +49,21 @@ done
 GPU_MEM_FRACTION=$(build_sglang_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+DYN_REQUEST_TRACE="${DYN_REQUEST_TRACE:-1}"
+DYN_REQUEST_TRACE_SINKS="${DYN_REQUEST_TRACE_SINKS:-jsonl}"
+DYN_REQUEST_TRACE_OUTPUT_PATH="${DYN_REQUEST_TRACE_OUTPUT_PATH:-/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)-$$.jsonl}"
+DYNAMO_API_KEY="${DYNAMO_API_KEY:-dummy}"
+export DYN_REQUEST_TRACE DYN_REQUEST_TRACE_SINKS DYN_REQUEST_TRACE_OUTPUT_PATH DYNAMO_API_KEY
+
 print_launch_banner "Launching Aggregated + Session Control" "$MODEL" "$HTTP_PORT"
+echo "Request trace output: $DYN_REQUEST_TRACE_OUTPUT_PATH"
 
 # Frontend with KV routing and state reset
 # Session control activates automatically when requests carry nvext.session_control
 python3 -m dynamo.frontend \
   --router-mode kv \
-  --router-reset-states &
+  --router-reset-states \
+  --enable-anthropic-api &
 
 # Worker with streaming sessions, KV events, and metrics
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \

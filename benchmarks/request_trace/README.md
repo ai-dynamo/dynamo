@@ -24,14 +24,17 @@ glob pattern. The converter emits Chrome Trace Event JSON:
 - one tool slice per harness `tool_end`/`tool_error`; explicit
   `started_at_unix_ms`/`ended_at_unix_ms` are preferred, then `duration_ms`,
   then paired `tool_start` timing when both records are present
+- inferred tool slices from request `finish_reason_metadata.tool_calls` when
+  no matching tool event was traced; when the next same-trajectory request
+  starts after the tool-call response, the slice spans that gap, otherwise the
+  converter emits a short `duration_unknown` synthetic slice at the response
+  end, including when there is no following same-trajectory request
 - finish metadata on request slices, including final finish reason, backend
   finish reason, stop reason, per-choice finish summaries, and complete
   tool-call names
 - optional first-token markers with `--include-markers`
 
-Use `--no-stages` for a compact request-only view. Use
-`--separate-stage-tracks` to place stage slices on adjacent stage tracks when
-debugging Perfetto nesting or label rendering.
+Use `--no-stages` for a compact request-only view.
 
 Stage slice boundaries are normalized to avoid same-thread overlap caused by
 independent metric rounding. Raw timing fields remain available in event args.

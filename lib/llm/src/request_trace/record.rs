@@ -3,8 +3,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::openai::nvext::AgentContext;
 use crate::request_trace::{RequestReplayMetrics, RequestTraceEventSource};
 
 use super::{
@@ -209,8 +209,6 @@ mod tests {
             event_time_unix_ms: 2_000,
             event_source: Some(RequestTraceEventSource::Harness),
             agent_context: Some(AgentContext {
-                session_type_id: "agent_harness".to_string(),
-                session_id: "run-1".to_string(),
                 trajectory_id: "root".to_string(),
                 parent_trajectory_id: None,
                 trajectory_final: None,

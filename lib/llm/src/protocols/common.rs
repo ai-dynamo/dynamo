@@ -23,6 +23,7 @@ use dynamo_protocols::types::StopReason;
 /// Maximum nesting depth allowed in guided_grammar EBNF strings.
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
 
+pub mod extensions;
 pub mod llm_backend;
 pub mod postprocessor;
 pub mod preprocessor;

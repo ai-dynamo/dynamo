@@ -2889,7 +2889,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "clap 4.6.1",
+ "clap",
  "dynamo-backend-common",
  "dynamo-runtime",
  "futures",
@@ -5332,9 +5332,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.20.0"
+version = "2.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
+checksum = "cb3d648e68cea56d9858d535ee28f9538404e2dd8cb08ed0bd05dca379477f39"
 dependencies = [
  "indexmap 2.14.0",
  "memo-map",
@@ -5344,9 +5344,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.20.0"
+version = "2.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99df5123c54391e2a228014c1dbbd85a3dab08a25e776c810526f2f47542b3de"
+checksum = "85342f6fac0be8ccd5bd00d9066be538f34f393f577b75d81b17c8398a6b43bb"
 dependencies = [
  "minijinja",
  "serde",
@@ -6699,7 +6699,7 @@ checksum = "5d0e4f59085d47d8241c88ead0f274e8a0cb551f3625263c05eb8dd897c34218"
 dependencies = [
  "cfg-if",
  "concurrent-queue",
- "hermit-abi 0.5.2",
+ "hermit-abi",
  "pin-project-lite",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -10426,7 +10426,7 @@ dependencies = [
  "easy-ext",
  "enum-as-inner",
  "futures",
- "half 2.7.1",
+ "half",
  "hex",
  "itertools 0.14.0",
  "parking_lot",
@@ -10473,7 +10473,7 @@ version = "0.1.0"
 source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
 dependencies = [
  "anyhow",
- "clap 4.6.1",
+ "clap",
  "libc",
  "tokio",
  "tracing",

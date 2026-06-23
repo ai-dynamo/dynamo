@@ -33,8 +33,8 @@ tracing = { workspace = true }
 # alphabetically, diverging from Python frontends (vLLM/SGLang) which preserve
 # dict insertion order. serde_json already has its preserve_order enabled
 # (see above / lib/renderer); minijinja's map is the remaining sort point.
-minijinja = { version = "2.20.0", features = ["loader", "loop_controls", "preserve_order"] }
-minijinja-contrib = { version = "2.20.0", features = ["pycompat"] }
+minijinja = { version = "2.21.0", features = ["loader", "loop_controls", "preserve_order"] }
+minijinja-contrib = { version = "2.21.0", features = ["pycompat"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

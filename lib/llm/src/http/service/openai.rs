@@ -35,7 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
-    metadata::extract_metadata_from_http,
+    metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_response_and_observe_metrics,
@@ -45,8 +45,11 @@ use super::{
 };
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
+use crate::protocols::common::extensions::{
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, NvExt, agent_context_from_headers,
+    apply_header_routing_overrides, validate_nvext_semantics,
+};
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
@@ -70,7 +73,6 @@ use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
-const X_REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
@@ -490,22 +492,6 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, headers: &HeaderMap) {
-    if !crate::request_trace::is_enabled() {
-        return;
-    }
-
-    if let Some(x_request_id) = headers
-        .get(X_REQUEST_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-    {
-        request.insert(
-            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
-            x_request_id.to_string(),
-        );
-    }
-}
-
 fn context_from_headers<T: Send + Sync + 'static>(
     request: T,
     request_id: String,
@@ -515,29 +501,35 @@ fn context_from_headers<T: Send + Sync + 'static>(
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
+    if let Some(agent_context) = agent_context_from_headers(headers) {
+        request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+    }
     Ok(request)
 }
 
-fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
+fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
 ) {
-    if !crate::request_trace::is_enabled() {
-        return;
-    }
-
-    if let Ok(x_request_id) = source.get::<String>(crate::request_trace::X_REQUEST_ID_CONTEXT_KEY) {
+    if crate::request_trace::is_enabled()
+        && let Ok(x_request_id) =
+            source.get::<String>(crate::request_trace::X_REQUEST_ID_CONTEXT_KEY)
+    {
         target.insert(
             crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             x_request_id.as_ref().clone(),
         );
+    }
+
+    if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
+        target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
     }
 }
 
 /// Warn (once per request) when nvext data is dropped because the extension is
 /// disabled. Only called from the disabled branch, so the default path is free.
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
-    use crate::protocols::openai::nvext::{
+    use crate::protocols::common::extensions::{
         HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
         HEADER_WORKER_INSTANCE_ID,
     };
@@ -866,7 +858,7 @@ async fn completions_batch(
             unique_request_id,
             request.metadata().clone(),
         );
-        copy_x_request_id(&request, &mut single_request_context);
+        copy_context_metadata(&request, &mut single_request_context);
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
@@ -1911,6 +1903,15 @@ pub fn validate_completion_fields_generic(
     })
 }
 
+fn validate_openai_nvext(nvext: Option<&NvExt>) -> Result<(), ErrorResponse> {
+    validate_nvext_semantics(nvext).map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -2076,6 +2077,10 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    if let Err(err_response) = validate_openai_nvext(chat_request.nvext.as_ref()) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3159,6 +3164,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    use crate::protocols::common::extensions::NvExt;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -3192,6 +3198,44 @@ mod tests {
             },
             nvext: None,
         }
+    }
+
+    #[test]
+    fn test_openai_nvext_rejects_agent_context() {
+        let err = serde_json::from_value::<NvExt>(serde_json::json!({
+            "agent_context": {
+                "trajectory_id": "run-123"
+            }
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn test_copy_context_metadata_preserves_agent_context() {
+        let mut source = Context::new(());
+        source.insert(
+            AGENT_CONTEXT_CONTEXT_KEY,
+            AgentContext {
+                trajectory_id: "traj-123".to_string(),
+                parent_trajectory_id: Some("parent-456".to_string()),
+                trajectory_final: Some(true),
+            },
+        );
+
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+
+        let agent_context = target
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context copied");
+        assert_eq!(agent_context.trajectory_id, "traj-123");
+        assert_eq!(
+            agent_context.parent_trajectory_id.as_deref(),
+            Some("parent-456")
+        );
+        assert_eq!(agent_context.trajectory_final, Some(true));
     }
 
     #[test]
