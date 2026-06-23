@@ -15,6 +15,7 @@ use dynamo_runtime::{
 };
 
 use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
+use crate::session::SessionPushRouter;
 use crate::{
     discovery::ModelManager,
     kv_router::KvPushRouter,
@@ -174,7 +175,7 @@ impl PrefillRouter {
             )
             .await?;
 
-            InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
+            InnerPrefillRouter::SimpleRouter(Arc::new(SessionPushRouter::new(push_router)))
         };
 
         // Set the router (ignore error if already set).

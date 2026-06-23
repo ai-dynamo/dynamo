@@ -214,13 +214,9 @@ impl
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
-                .select_and_dispatch_prefill(
-                    prefill_context,
-                    preselected_worker,
-                    |request, worker_id, dp_rank| {
-                        self.prepare_prefill_dispatch(request, worker_id, dp_rank)
-                    },
-                )
+                .select_and_dispatch_prefill(prefill_context, |request, worker_id, dp_rank| {
+                    self.prepare_prefill_dispatch(request, worker_id, dp_rank)
+                })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {

@@ -206,6 +206,7 @@ llm-tokenizer = { version = "=1.3.2", optional = true }
 approx = "0.5"
 assert_matches = "1.5"
 criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { workspace = true, features = ["test-util"] }
 hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }

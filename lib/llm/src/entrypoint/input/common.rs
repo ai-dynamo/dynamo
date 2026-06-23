@@ -12,15 +12,14 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{
-        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
-    },
+    kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
+    session::SessionPushRouter,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -119,12 +118,12 @@ fn preprocessed_backend_engine(
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(DirectRoutingRouter::new(router)),
-        RouterMode::Random
+        RouterMode::Direct
+        | RouterMode::Random
         | RouterMode::RoundRobin
         | RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => Arc::new(router),
+        | RouterMode::DeviceAwareWeighted => Arc::new(SessionPushRouter::new(router)),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");

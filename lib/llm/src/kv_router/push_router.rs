@@ -17,14 +17,13 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, sticky::coordinator::StickySessionCoordinator,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData},
     },
+    session::{SessionCoordinator, SessionOperation, SessionTarget, explicit_target},
 };
 
 mod cancellation;
@@ -38,8 +37,7 @@ use selection::{RoutingRequestParts, WorkerSelection};
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    /// Sticky session routing. Lazily activated when requests carry session_control.
-    pub(super) sticky: Arc<StickySessionCoordinator>,
+    pub(super) sessions: SessionCoordinator,
 }
 
 impl KvPushRouter {
@@ -47,18 +45,18 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
+        let component = inner.component().clone();
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
-        RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        RouterRequestMetrics::from_component(&component);
 
-        let component = chooser.client().endpoint.component().clone();
-        let sticky = Arc::new(StickySessionCoordinator::new(component));
+        let sessions = SessionCoordinator::new(component);
 
         KvPushRouter {
             inner,
             chooser,
-            sticky,
+            sessions,
         }
     }
 
@@ -67,72 +65,22 @@ impl KvPushRouter {
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
+        session_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let routing_parts = RoutingRequestParts::new(request);
-        let sticky_worker = match self.sticky.worker_for_phase(request, phase) {
-            Some(worker)
-                if self.unbind_ineligible_sticky_worker_for_phase(
-                    &context_id,
-                    request,
-                    phase,
-                    worker,
-                ) =>
-            {
-                None
-            }
-            worker => worker,
-        };
         let request_context = request.context().clone();
         let mut selection_future = Box::pin(async {
-            match self
-                .select_worker(
-                    &context_id,
-                    request,
-                    routing_parts,
-                    phase,
-                    is_query_only,
-                    sticky_worker,
-                )
-                .instrument(tracing::info_span!("kv_router.select_worker"))
-                .await
-            {
-                Ok(selection) => {
-                    if sticky_worker.is_some() && !is_query_only {
-                        self.sticky.refresh_worker_for_phase(request, phase);
-                    }
-                    Ok(selection)
-                }
-                Err(error) if sticky_worker.is_some() => {
-                    if let Some(worker) = sticky_worker {
-                        let unbound = self.unbind_ineligible_sticky_worker_for_phase(
-                            &context_id,
-                            request,
-                            phase,
-                            worker,
-                        );
-                        tracing::warn!(
-                            request_id = %context_id,
-                            worker_id = worker.worker_id,
-                            dp_rank = worker.dp_rank,
-                            error = %error,
-                            unbound_due_to_ineligibility = unbound,
-                            "Sticky worker routing failed; falling back to normal routing"
-                        );
-                    }
-                    self.select_worker(
-                        &context_id,
-                        request,
-                        routing_parts,
-                        phase,
-                        is_query_only,
-                        None,
-                    )
-                    .instrument(tracing::info_span!("kv_router.select_worker_fallback"))
-                    .await
-                }
-                Err(error) => Err(error),
-            }
+            self.select_worker(
+                &context_id,
+                request,
+                routing_parts,
+                phase,
+                is_query_only,
+                session_worker,
+            )
+            .instrument(tracing::info_span!("kv_router.select_worker"))
+            .await
         });
         let selection_result = tokio::select! {
             biased;
@@ -155,6 +103,67 @@ impl KvPushRouter {
                 Err(cancelled_error(&context_id))
             }
         }
+    }
+
+    async fn select_with_session(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        is_query_only: bool,
+    ) -> Result<(WorkerSelection, Option<SessionOperation>), Error> {
+        let control = request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.session_control.clone());
+        if is_query_only {
+            let session_worker = match control.as_ref() {
+                Some(control) => self
+                    .sessions
+                    .query_target(control, explicit_target(request, phase)?)?
+                    .and_then(|target| {
+                        target
+                            .dp_rank
+                            .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
+                    }),
+                None => None,
+            };
+            let selection = self
+                .select_request(request, phase, true, session_worker)
+                .await?;
+            return Ok((selection, None));
+        }
+        let mut operation = if let Some(control) = control.as_ref() {
+            Some(
+                self.sessions
+                    .begin(control, explicit_target(request, phase)?, false)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let session_worker = operation
+            .as_ref()
+            .and_then(SessionOperation::target)
+            .and_then(|target| {
+                target
+                    .dp_rank
+                    .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
+            });
+        let selection = self
+            .select_request(request, phase, is_query_only, session_worker)
+            .await?;
+        if let Some(operation) = operation.as_mut() {
+            operation
+                .selected(
+                    SessionTarget {
+                        worker_id: selection.instance_id,
+                        dp_rank: Some(selection.dp_rank),
+                    },
+                    request.context().id(),
+                )
+                .await?;
+        }
+        Ok((selection, operation))
     }
 
     async fn track_selection(
@@ -261,24 +270,6 @@ impl KvPushRouter {
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
 
-        let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
-        let route_outcome = cancel_on_stop(
-            request_context.as_ref(),
-            &context_id,
-            self.sticky.on_routed(&request, worker, &context_id),
-        )
-        .await
-        .and_then(|result| result);
-        let route_outcome = match route_outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                guard.abort().await;
-                return Err(error);
-            }
-        };
-        guard.set_deferred_close(route_outcome.deferred_close);
-        let mut rollback = route_outcome.rollback;
-
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -312,9 +303,6 @@ impl KvPushRouter {
         let mut response_stream = match dispatch_result {
             Ok(stream) => stream,
             Err(error) => {
-                if let Some(rollback) = rollback.take() {
-                    self.sticky.rollback_routed(rollback, &context_id);
-                }
                 guard.abort().await;
                 return Err(error);
             }
@@ -361,7 +349,7 @@ impl KvPushRouter {
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let mut selection = self.select_request(&request, phase, false).await?;
+        let (mut selection, operation) = self.select_with_session(&request, phase, false).await?;
         let mut guard = self.track_selection(&request, &mut selection).await?;
         let metadata = match prepare(&mut request, selection.instance_id, Some(selection.dp_rank)) {
             Ok(metadata) => metadata,
@@ -374,6 +362,10 @@ impl KvPushRouter {
         let stream = self
             .dispatch_selection(request, selection, guard, true)
             .await?;
+        let stream = match operation {
+            Some(operation) => operation.into_stream(stream)?,
+            None => stream,
+        };
         Ok((metadata, stream))
     }
 }
@@ -413,7 +405,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let mut selection = self.select_request(&request, phase, is_query_only).await?;
+        let (mut selection, operation) = self
+            .select_with_session(&request, phase, is_query_only)
+            .await?;
         if is_query_only {
             let routing_parts = RoutingRequestParts::new(&request);
             if let Some(ref tracker) = request.tracker {
@@ -456,13 +450,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             };
             let response = Annotated::from_data(output);
             let stream = stream::iter(vec![response]);
-            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+            let stream = ResponseStream::new(Box::pin(stream), stream_context);
+            return match operation {
+                Some(operation) => operation.into_stream(stream),
+                None => Ok(stream),
+            };
         }
 
         let guard = self.track_selection(&request, &mut selection).await?;
         drop(route_guard);
-        self.dispatch_selection(request, selection, guard, false)
-            .await
+        let stream = self
+            .dispatch_selection(request, selection, guard, operation.is_some())
+            .await?;
+        match operation {
+            Some(operation) => operation.into_stream(stream),
+            None => Ok(stream),
+        }
     }
 }
 

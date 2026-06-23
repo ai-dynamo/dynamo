@@ -923,9 +923,10 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 return {
                     "status": "ok",
                     "session_id": session_id,
+                    "created": False,
                     "message": "Session already exists",
                 }
-            return {"status": "ok", "session_id": result}
+            return {"status": "ok", "session_id": result, "created": True}
         except Exception as e:
             logging.error(f"Failed to open session {session_id}: {e}")
             return {"status": "error", "message": str(e)}
@@ -944,7 +945,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         try:
             obj = CloseSessionReqInput(session_id=session_id)
             await self.engine.tokenizer_manager.close_session(obj, None)
-            return {"status": "ok", "session_id": session_id}
+            return {"status": "ok", "session_id": session_id, "closed": True}
         except Exception as e:
             logging.error(f"Failed to close session {session_id}: {e}")
             return {"status": "error", "message": str(e)}

@@ -63,7 +63,7 @@ pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 pub use scheduler_inputs::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-pub use sticky::{SessionLifecycleController, StickySessionRouter};
+pub use sticky::StickySessionRouter;
 
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
 use scheduler_inputs::{

@@ -16,10 +16,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
+use tokio::time::Instant;
 
 /// Interval between sweeps of the background reaper that removes expired entries.
 const REAPER_INTERVAL: Duration = Duration::from_secs(30);

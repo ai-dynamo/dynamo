@@ -92,7 +92,10 @@ pub struct MockEngine {
     _fpm_publisher: OnceCell<crate::fpm_publisher::FpmDirectPublisher>,
 }
 
-struct MockSessionControlEngine;
+#[derive(Default)]
+struct MockSessionControlEngine {
+    sessions: DashMap<String, ()>,
+}
 
 #[async_trait]
 impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
@@ -107,10 +110,20 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         let session_id = body.get("session_id").and_then(|value| value.as_str());
 
         let response = match (action, session_id) {
-            (Some("open_session" | "close_session"), Some(session_id)) => {
+            (Some("open_session"), Some(session_id)) => {
+                let created = self.sessions.insert(session_id.to_string(), ()).is_none();
                 serde_json::json!({
                     "status": "ok",
                     "session_id": session_id,
+                    "created": created,
+                })
+            }
+            (Some("close_session"), Some(session_id)) => {
+                let closed = self.sessions.remove(session_id).is_some();
+                serde_json::json!({
+                    "status": "ok",
+                    "session_id": session_id,
+                    "closed": closed,
                 })
             }
             (_, None) => {
@@ -236,7 +249,7 @@ impl MockEngine {
     }
 
     fn start_session_control_endpoint(component: Component) {
-        let ingress = match Ingress::for_engine(Arc::new(MockSessionControlEngine)) {
+        let ingress = match Ingress::for_engine(Arc::new(MockSessionControlEngine::default())) {
             Ok(ingress) => ingress,
             Err(e) => {
                 tracing::error!("Failed to build mocker session_control ingress: {e}");
