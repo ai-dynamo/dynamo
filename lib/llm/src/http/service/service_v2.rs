@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
+use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
@@ -64,9 +65,16 @@ async fn track_inflight_inference(
 ) -> axum::response::Response {
     use futures::StreamExt;
 
+    // Requests rejected during draining should not extend the drain window.
+    if !state.is_ready() {
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    }
+
     let permit = state.acquire_inflight();
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
+    // Keep the permit alive until the full response body, including streams,
+    // finishes or is dropped.
     let stream = body.into_data_stream().map(move |result| {
         let _permit = &permit;
         result
@@ -110,6 +118,16 @@ impl ServiceStage {
             0 => Self::Ready,
             1 => Self::Draining,
             _ => Self::Stopping,
+        }
+    }
+}
+
+impl std::fmt::Display for ServiceStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => f.write_str("ready"),
+            Self::Draining => f.write_str("draining"),
+            Self::Stopping => f.write_str("stopping"),
         }
     }
 }
@@ -202,6 +220,8 @@ impl ServiceObserver {
             loop {
                 let notified = self.inflight_zero.notified();
                 tokio::pin!(notified);
+                // Register before reading the count so a final permit drop
+                // cannot notify between the count check and the await.
                 notified.as_mut().enable();
                 if self.inflight_count() == 0 {
                     break;
@@ -1101,6 +1121,21 @@ mod tests {
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
+    async fn wait_for_service_stage(state: &State, expected: ServiceStage) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if state.service_stage() == expected {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "service did not enter {expected} before timeout; current stage is {}",
+                state.service_stage()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn test_liveness_endpoint_stays_live_while_draining() {
@@ -1126,7 +1161,7 @@ mod tests {
 
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 cancel_token.cancel();
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
 
                 let resp = reqwest::Client::new()
                     .get(format!("http://localhost:{}/live", port))
@@ -1168,7 +1203,7 @@ mod tests {
 
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 cancel_token.cancel();
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
 
                 assert_eq!(state.service_stage(), ServiceStage::Draining);
 

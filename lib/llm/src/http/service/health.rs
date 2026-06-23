@@ -68,7 +68,7 @@ async fn health_handler(
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "not_ready",
-                "stage": format!("{:?}", state.service_stage()),
+                "stage": state.service_stage().to_string(),
                 "message": "Service is not ready"
             })),
         );
