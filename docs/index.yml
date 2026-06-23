@@ -297,8 +297,8 @@ navigation:
             slug: agents
             path: agents/README.md
             contents:
-              - page: Trajectory IDs
-                path: agents/trajectory-ids.md
+              - page: Session IDs
+                path: agents/session-ids.md
               - page: Agent Tracing
                 path: agents/agent-tracing.md
               - page: Agent Simulation

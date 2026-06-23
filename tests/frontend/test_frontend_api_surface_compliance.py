@@ -769,8 +769,8 @@ def _trace_contains_agent_context(records: list[dict]) -> bool:
         if not agent_context:
             continue
 
-        trajectory_id = agent_context.get("trajectory_id")
-        if not trajectory_id:
+        session_id = agent_context.get("session_id")
+        if not session_id:
             continue
         return True
     return False
@@ -781,14 +781,14 @@ def _trace_contains_agent_parent_context(records: list[dict]) -> bool:
         agent_context = record.get("agent_context")
         if not agent_context:
             continue
-        parent_trajectory_id = agent_context.get("parent_trajectory_id")
-        if not parent_trajectory_id:
+        parent_session_id = agent_context.get("parent_session_id")
+        if not parent_session_id:
             continue
 
-        trajectory_id = agent_context.get("trajectory_id")
-        if not trajectory_id:
+        session_id = agent_context.get("session_id")
+        if not session_id:
             continue
-        if parent_trajectory_id == trajectory_id:
+        if parent_session_id == session_id:
             continue
         return True
     return False
@@ -800,11 +800,11 @@ def _trace_contains_claude_subagent_context(records: list[dict]) -> bool:
         if not agent_context:
             continue
 
-        trajectory_id = agent_context.get("trajectory_id")
-        parent_trajectory_id = agent_context.get("parent_trajectory_id")
-        if not trajectory_id or not parent_trajectory_id:
+        session_id = agent_context.get("session_id")
+        parent_session_id = agent_context.get("parent_session_id")
+        if not session_id or not parent_session_id:
             continue
-        if trajectory_id == parent_trajectory_id:
+        if session_id == parent_session_id:
             continue
         return True
     return False
@@ -1233,5 +1233,5 @@ def _run_opencode_smoke(
 
     pytest.fail(
         "opencode run exited before Dynamo traced an opencode child agent_context "
-        "with parent_trajectory_id"
+        "with parent_session_id"
     )
