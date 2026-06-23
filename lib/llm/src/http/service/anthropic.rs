@@ -885,7 +885,7 @@ mod tests {
     fn anthropic_nvext_rejects_agent_context() {
         let err = parse_nvext(Some(serde_json::json!({
             "agent_context": {
-                "trajectory_id": "run-123"
+                "session_id": "run-123"
             }
         })))
         .unwrap_err();
