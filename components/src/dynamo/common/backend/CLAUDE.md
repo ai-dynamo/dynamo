@@ -1,12 +1,17 @@
 # Backend Module
 
-Two-class abstraction: `Worker` (runtime integration) and
-`LLMEngine` (ABC for engine-specific logic). See `README.md` for full docs.
+`Worker` (runtime integration) drives a `BaseEngine` (ABC for
+engine-specific logic). `BaseEngine` owns the modality-agnostic lifecycle
+(`from_args`/`start`/`abort`/`drain`/`cleanup` + metrics/health hooks);
+the two modality subclasses add only their `generate` contract:
+`LLMEngine` (token pipeline: `token_ids` in/out, plus `kv_event_sources`)
+and `RawEngine` (raw media pipeline: OpenAI request dict in, response dict
+out; `DiffusionEngine` is a domain subclass). See `README.md` for full docs.
 
 ## Engine Lifecycle
 
 ```
-from_args -> start -> register_prometheus -> component_metrics_dp_ranks -> attach_snapshot_publisher -> generate/abort -> drain -> cleanup
+from_args -> start -> register_prometheus -> component_metrics_dp_ranks -> attach_snapshot_publisher -> generate/abort -> is_quiescent -> cleanup
      |          |              |                       |                              |                          |             |        |
   parse args, start engine, vendor registry      declare dp_ranks            engine stashes publisher,   serve requests  drain in-flight,
   return     return        bridge (optional)     for component gauges        pushes ComponentSnapshot    (concurrent)    then cleanup,
@@ -47,9 +52,12 @@ Python engine authors keep the split API.)
    written); `0.0` is a legitimate zero-hit measurement.
 6. `generate(request, context)` -- streaming inference, called concurrently.
 7. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-8. `drain()` -- backend-side drain before cleanup (optional, default no-op).
-   Called after the discovery unregister + grace period; use it for in-flight
-   NIXL transfers (issue #7319) that must complete while the runtime is alive.
+8. `is_quiescent()` -- whether in-flight KV transfers are done so GPU memory
+   can be released (default `None`). Polled only on **prefill workers**,
+   between the grace period and cleanup: `True` exits the drain early, `False`
+   and `None` (default) keep polling until the budget expires. Override only if
+   the engine can observe transfer completion; aggregated/decode are never
+   polled.
 9. `cleanup()` -- called exactly once. Runs after `start()` succeeded
    on shutdown, **and** after `start()` raised — so implementations
    must be null-safe against partial state (inner engine handle,
@@ -72,8 +80,13 @@ Python engine authors keep the split API.)
   When adding new features, always ask: "is this engine-specific or common?"
   If two or more engines would need the same code, it is common.
 
-- **Exactly two classes.** `Worker` owns runtime lifecycle.
-  `LLMEngine` owns inference. Do not add intermediate base classes or mixins.
+- **One `Worker`, one lifecycle base, one subclass per modality.** `Worker`
+  owns runtime lifecycle. `BaseEngine` owns the modality-agnostic lifecycle;
+  `LLMEngine` and `RawEngine` subclass it and differ *only* in the `generate`
+  contract (token vs. raw media). Do not add per-engine mixins or intermediate
+  bases between a modality ABC and its concrete backend (e.g. `VllmLLMEngine`).
+  A new media modality is a new `RawEngine` implementation, not a new
+  engine trait or lifecycle.
 
 - **`from_args()` returns `(engine, WorkerConfig)`.**  The tuple return
   makes the contract statically checkable -- a subclass that forgets to
@@ -87,9 +100,9 @@ Python engine authors keep the split API.)
   exception → `BackendError` mapping are handled by the bridge.
 
 - **`start()` returns `EngineConfig`.** The model class needs registration
-  metadata (`context_length`, `block_size`, `total_kv_blocks`) but must not
-  reach into engine internals. `start()` returns this metadata so the boundary
-  stays clean.
+  metadata (token-pipeline KV/DP fields live in the `llm=LlmRegistration(...)`
+  sub-record; `RawEngine`s leave `llm=None`) but must not reach into engine
+  internals. `start()` returns this metadata so the boundary stays clean.
 
 - **No hooks.** If behavior needs to be shared across engines, put it in
   `Worker` or a shared utility, not in a hook system.
@@ -152,10 +165,9 @@ What the **engine** does with the mode (consumed in each backend's
   engine's resume-from-KV-transfer call.
 - `Aggregated`: existing path, no branching.
 
-`drain()` is the prefill-shutdown hook: prefill engines should poll
-their scheduler until in-flight NIXL transfers finish before GPU
-memory is released (issue #7319). Aggregated/decode engines leave the
-default no-op.
+`is_quiescent()` lets a prefill worker exit the drain early once its KV
+transfers finish, before GPU memory is released. Engines that can't introspect
+leave the default `None` (wait the budget); aggregated/decode are never drained.
 
 `disagg.py` ships `enforce_prefill_max_tokens`, `extract_prefill_result`,
 and `require_prefill_result` — small helpers backends call from inside
@@ -266,7 +278,7 @@ spans should be.
 
 | File | What it does |
 |------|-------------|
-| `engine.py` | `LLMEngine` ABC -- the only interface engines must implement (includes `component_metrics_dp_ranks` + `attach_snapshot_publisher`). |
+| `engine.py` | `BaseEngine` lifecycle ABC + `LLMEngine` / `RawEngine` modality subclasses (`DiffusionEngine` is a `RawEngine` subclass) -- the interface engines implement. |
 | `publisher.py` | `ComponentSnapshot` dataclass (the push payload). The `SnapshotPublisher` itself is a Rust-owned object exposed as `dynamo._core.backend.SnapshotPublisher`. |
 | `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |

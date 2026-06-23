@@ -18,6 +18,20 @@ pub fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
     if let Some(arr) = tools.as_array() {
         for tool in arr {
             let mut tool = tool.clone();
+            if let Some(function) = tool.get_mut("function") {
+                // Backfill a missing/null `description`. It's optional in the
+                // OpenAI tool schema, but some chat templates (e.g. gpt-oss
+                // harmony) concatenate it unconditionally and fail on an
+                // `undefined`/null value.
+                if let Some(obj) = function.as_object_mut()
+                    && !matches!(obj.get("description"), Some(serde_json::Value::String(_)))
+                {
+                    obj.insert(
+                        "description".to_string(),
+                        serde_json::Value::String(String::new()),
+                    );
+                }
+            }
             if let Some(function) = tool.get_mut("function")
                 && let Some(parameters) = function.get_mut("parameters")
             {
@@ -530,6 +544,51 @@ mod tests {
     use dynamo_protocols::types::CreateChatCompletionRequest as NvCreateChatCompletionRequest;
     use minijinja::{Environment, context};
 
+    /// End-to-end guard for the minijinja stack-overflow fix, exercised through
+    /// Dynamo's real chat-template render path. A template that accumulates
+    /// messages via `ns.items = ns.items + [m]` and then takes `|length`
+    /// previously overflowed the native stack for long conversations (~1500+
+    /// turns on a worker thread), core-dumping the frontend. Runs on a 2 MiB
+    /// stack — the size of a Dynamo tokio worker thread — so a regression aborts
+    /// deterministically instead of depending on the platform default.
+    #[test]
+    fn test_render_long_conversation_does_not_overflow_stack() {
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let template_string = concat!(
+                    "{%- set ns = namespace(items=[]) -%}",
+                    "{%- for m in messages -%}",
+                    "{%- set ns.items = ns.items + [m] -%}",
+                    "{%- endfor -%}",
+                    "COUNT={{ ns.items | length }}"
+                );
+                let chat_template: ChatTemplate =
+                    serde_json::from_value(serde_json::json!({ "chat_template": template_string }))
+                        .unwrap();
+                let formatter =
+                    HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[]))
+                        .unwrap();
+
+                let n = 3000;
+                let messages: Vec<serde_json::Value> = (0..n)
+                    .map(|i| serde_json::json!({"role": "user", "content": format!("turn {i}")}))
+                    .collect();
+                let request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "model": "test",
+                        "messages": messages,
+                    }))
+                    .unwrap();
+
+                // The crash path: `|length` -> minijinja `Value::len()`.
+                let rendered = formatter.render(&request).unwrap();
+                assert_eq!(rendered.trim(), format!("COUNT={n}"));
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
     /// Dev utility (ignored by default): dump the prompt Dynamo's renderer
     /// produces for a tool-calling chat request, so it can be diffed against
     /// vLLM's `openai_harmony` rendering — to see whether the gpt-oss Jinja
@@ -886,6 +945,96 @@ mod tests {
             serde_json::Value::Object(Default::default())
         );
         assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_missing_description() {
+        // `description` is optional in the OpenAI tool schema, but some chat
+        // templates (e.g. gpt-oss harmony) concatenate it unconditionally and
+        // fail on an `undefined`/null value. It must be backfilled to "".
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "parameters": {
+                            "type": "object",
+                            "properties": { "x": { "type": "string" } },
+                            "required": ["x"],
+                            "additionalProperties": false
+                        },
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            serde_json::Value::String(String::new())
+        );
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_null_description() {
+        // An explicit null `description` must also be normalized to "".
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "description": null,
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            serde_json::Value::String(String::new())
+        );
+    }
+
+    #[test]
+    fn test_may_be_fix_tool_schema_preserves_description() {
+        // A present `description` must be left untouched.
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get the current weather in a given location",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": null
+                    }
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let tools = serde_json::to_value(request.tools()).unwrap();
+
+        assert_eq!(
+            tools[0]["function"]["description"],
+            "Get the current weather in a given location"
+        );
     }
 
     /// Tests that content arrays (containing only text parts) are correctly concatenated.
@@ -1429,10 +1578,11 @@ NORMAL MODE
             .render(context! { messages => messages.as_array().unwrap() })
             .unwrap();
 
-        // Should produce clean JSON without double-encoding
+        // Should produce clean JSON without double-encoding, with Python
+        // json.dumps separators (what transformers' tojson emits).
         assert_eq!(
             out,
-            r#"{"format":"celsius","location":"San Francisco, CA"}"#
+            r#"{"format": "celsius", "location": "San Francisco, CA"}"#
         );
     }
 

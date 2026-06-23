@@ -52,11 +52,11 @@ pub trait AsyncShardHandle: Send + Sync + 'static {
     ) -> Result<(), KvRouterError>;
 
     /// Read: find block matches starting from a previously installed anchor.
-    fn find_matches_from_anchor(
-        &self,
+    fn find_matches_from_anchor<'a>(
+        &'a self,
         anchor: AnchorRef,
-        suffix: Vec<LocalBlockHash>,
-    ) -> impl Future<Output = Result<OverlapScores, KvRouterError>> + Send;
+        suffix: &'a [LocalBlockHash],
+    ) -> impl Future<Output = Result<OverlapScores, KvRouterError>> + Send + 'a;
 
     /// Remove all state associated with a worker (fire-and-forget).
     fn remove_worker(&self, worker_id: WorkerId) -> impl Future<Output = ()> + Send;
@@ -116,12 +116,12 @@ impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
         ThreadPoolIndexer::enqueue_anchor(self, worker, anchor)
     }
 
-    async fn find_matches_from_anchor(
-        &self,
+    async fn find_matches_from_anchor<'a>(
+        &'a self,
         anchor: AnchorRef,
-        suffix: Vec<LocalBlockHash>,
+        suffix: &'a [LocalBlockHash],
     ) -> Result<OverlapScores, KvRouterError> {
-        self.backend().find_matches_from_anchor(anchor, &suffix)
+        self.backend().find_matches_from_anchor(anchor, suffix)
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {

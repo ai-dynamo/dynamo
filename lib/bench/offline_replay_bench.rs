@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
 use dynamo_mocker::loadgen::Trace;
 use dynamo_mocker::replay::{ReplayRouterMode, simulate_trace_workload_with_router_mode};
 
@@ -22,6 +22,23 @@ use dynamo_mocker::replay::{ReplayRouterMode, simulate_trace_workload_with_route
 enum RouterModeArg {
     RoundRobin,
     KvRouter,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum EngineTypeArg {
+    Vllm,
+    Sglang,
+    Trtllm,
+}
+
+impl From<EngineTypeArg> for EngineType {
+    fn from(value: EngineTypeArg) -> Self {
+        match value {
+            EngineTypeArg::Vllm => EngineType::Vllm,
+            EngineTypeArg::Sglang => EngineType::Sglang,
+            EngineTypeArg::Trtllm => EngineType::Trtllm,
+        }
+    }
 }
 
 impl From<RouterModeArg> for ReplayRouterMode {
@@ -48,6 +65,10 @@ struct Args {
     /// Number of aggregated workers
     #[arg(long, default_value_t = 4)]
     num_workers: usize,
+
+    /// Mock engine scheduling mode
+    #[arg(long, value_enum, default_value_t = EngineTypeArg::Vllm)]
+    engine_type: EngineTypeArg,
 
     /// Router mode for multi-worker replay
     #[arg(long, value_enum, default_value_t = RouterModeArg::KvRouter)]
@@ -95,8 +116,15 @@ struct Args {
 }
 
 fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
-    let mut builder = MockEngineArgs::builder();
-    builder = builder.block_size(args.block_size);
+    let mut builder = MockEngineArgs::builder()
+        .engine_type(args.engine_type.into())
+        .block_size(args.block_size);
+    if args.engine_type == EngineTypeArg::Sglang {
+        builder = builder.sglang(Some(SglangArgs {
+            page_size: Some(args.block_size),
+            ..Default::default()
+        }));
+    }
     if let Some(max_num_seqs) = args.max_num_seqs {
         builder = builder.max_num_seqs(Some(max_num_seqs));
     }

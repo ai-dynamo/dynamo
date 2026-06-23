@@ -112,6 +112,10 @@ def run_slot_tracker(args: List[str]) -> None:
     """Run the KV router slot tracker with the given arguments."""
     ...
 
+def run_select_service(args: List[str]) -> None:
+    """Run the Dynamo selection service with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -185,7 +189,7 @@ class DistributedRuntime:
         Register an async callback for /engine/{route_name} on the system status server.
 
         Args:
-            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            route_name: The route path (e.g., "control/start_profile" creates /engine/control/start_profile)
             callback: Async function with signature: async def(body: dict) -> dict
 
         Example:
@@ -193,7 +197,7 @@ class DistributedRuntime:
                 await engine.start_profile(**body)
                 return {"status": "ok", "message": "Profiling started"}
 
-            runtime.register_engine_route("start_profile", start_profile)
+            runtime.register_engine_route("control/start_profile", start_profile)
 
         The callback receives the JSON request body as a dict and should return
         a dict that will be serialized as the JSON response.
@@ -686,6 +690,113 @@ class WorkerMetricsPublisher:
         """
         ...
 
+class MultimodalEmbeddingCachePublisher:
+    """
+    A publisher for multimodal encode-worker cache state.
+    """
+
+    ...
+
+    def __init__(self) -> None:
+        """
+        Create a `MultimodalEmbeddingCachePublisher` object.
+        """
+
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
+        """
+        Initialize the NATS endpoint for publishing multimodal cache state.
+
+        Args:
+            endpoint: The endpoint to extract component information from.
+        """
+
+    def publish_delta(self, added_keys: list[str], removed_keys: list[str]) -> None:
+        """
+        Publish an incremental cache mutation for this worker.
+
+        Args:
+            added_keys: Newly cached embedding keys.
+            removed_keys: Cache keys no longer present on the worker.
+        """
+        ...
+
+class SelectionService:
+    """
+    In-process handle to a runtime-free Dynamo selection core.
+    """
+
+    def __init__(self, *, indexer_threads: int = 4) -> None:
+        """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Stop the service: cancel KV-event listeners and scheduling so that
+        in-flight and queued selections fail fast.
+
+        The KV indexer thread pool is released when the handle is dropped.
+        Idempotent, and also runs automatically on drop.
+        """
+        ...
+
+    async def upsert_worker(self, worker: JsonLike) -> JsonLike:
+        """Upsert a worker and subscribe to its live KV events; returns its catalog record."""
+        ...
+
+    async def delete_worker(self, worker_id: int) -> JsonLike:
+        """Remove a worker and tear down its KV-event listener; returns its catalog record."""
+        ...
+
+    def list_workers(
+        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> JsonLike:
+        """List catalog records, optionally filtered by model and tenant."""
+        ...
+
+    def ready(self) -> JsonLike:
+        """Readiness: whether at least one worker is schedulable, plus catalog state."""
+        ...
+
+    async def overlap_scores(self, request: JsonLike) -> JsonLike:
+        """Per-worker KV-overlap scores for a prompt."""
+        ...
+
+    async def select(self, request: JsonLike) -> JsonLike:
+        """Select the best worker by KV-overlap + load, without booking."""
+        ...
+
+    async def select_and_reserve(self, request: JsonLike) -> JsonLike:
+        """Select the best worker and book its load."""
+        ...
+
+    async def create_reservation(self, request: JsonLike) -> JsonLike:
+        """Book a request's load against a chosen worker."""
+        ...
+
+    async def prefill_complete(self, reservation_id: str) -> None:
+        """Mark a reservation's prefill complete; its load shifts prefill -> decode."""
+        ...
+
+    def add_output_block(
+        self, reservation_id: str, *, decay_fraction: Optional[float] = None
+    ) -> None:
+        """Record one decode output block for a reservation, advancing its decode load."""
+        ...
+
+    async def free_reservation(self, reservation_id: str) -> None:
+        """Free a finished reservation, releasing its tracked load."""
+        ...
+
+    def loads(
+        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> JsonLike:
+        """Current per-model active load (pending counts + per-worker potential loads)."""
+        ...
+
+    async def potential_loads(self, request: JsonLike) -> JsonLike:
+        """Per-worker potential loads for a prompt, without booking."""
+        ...
+
 class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information
@@ -706,6 +817,15 @@ class ModelDeploymentCard:
 
     def source_path(self) -> str:
         """Return the source path of this deployment card."""
+        ...
+
+    def local_dir(self) -> str:
+        """Resolved metadata directory (post-`download_config`). Raises
+        ValueError if the path contains non-UTF-8 bytes."""
+        ...
+
+    def name(self) -> str:
+        """Return the model name."""
         ...
 
     def runtime_config(self) -> Any:
@@ -823,13 +943,9 @@ class RadixTree:
     release the Python GIL.
     """
 
-    def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
+    def __init__(self) -> None:
         """
         Create a new RadixTree instance.
-
-        Args:
-            expiration_duration_secs: Optional expiration duration in seconds for cached blocks.
-                                    If None, blocks never expire.
         """
         ...
 
@@ -2127,6 +2243,8 @@ async def register_model(
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
     needs: Optional[List[List[WorkerType]]] = None,
+    self_host_metadata: Optional[bool] = None,
+    ignore_weights: bool = False,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2145,6 +2263,9 @@ async def register_model(
         peer dependencies. `needs` is a DNF list — each inner list is an
         AND-set, the outer list is OR. `worker_type` is required; backends
         declare it literally at each call site.
+
+    When `ignore_weights` is true, remote HuggingFace model resolution skips
+    weight files and downloads only the metadata needed for registration.
     """
     ...
 
@@ -2246,6 +2367,9 @@ def run_mocker_trace_replay(
     trace_num_prefix_groups: int = 0,
     report_jsonl_path: Optional[str | os.PathLike[str]] = None,
     max_sim_time_ms: Optional[float] = None,
+    sla_ttft_ms: Optional[float] = None,
+    sla_itl_ms: Optional[float] = None,
+    sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
 
@@ -2253,6 +2377,10 @@ def run_mocker_trace_replay(
     JSON object per request is written to that path. Each line includes
     arrival/admit/token timestamps, input/output lengths, the full per-token
     ITL series, and prefill/decode worker indices.
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+    (offline replay only). When any is set, the report carries ``goodput_*`` keys
+    classifying SLA-satisfying requests; with none set, goodput is omitted.
     """
     ...
 
@@ -2293,6 +2421,9 @@ class PlannerReplayBridge:
         router_config: Optional[KvRouterConfig] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
     ) -> None: ...
 
     @staticmethod
@@ -2306,6 +2437,9 @@ class PlannerReplayBridge:
         router_config: Optional[KvRouterConfig] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
     ) -> "PlannerReplayBridge": ...
 
     def advance_to(self, until_ms: float) -> Dict[str, Any]: ...
@@ -2678,6 +2812,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in hash computation
                            for MM-aware potential-load estimation.
+            lora_name: Optional LoRA adapter name used in block hash computation.
 
         Returns:
             A list of dictionaries, each containing:
@@ -2685,6 +2820,7 @@ class KvRouter:
                 - dp_rank: The data parallel rank
                 - potential_prefill_tokens: Number of tokens that would need prefill
                 - potential_decode_blocks: Number of blocks currently in decode phase
+                - active_requests: Number of active requests tracked on the worker
 
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.
@@ -2929,6 +3065,17 @@ class StreamIncomplete(DynamoException):
 
     ...
 
+class SelectionServiceError(DynamoException):
+    """
+    Raised by `SelectionService` for selector failures that are not malformed
+    input.
+    """
+
+    # Stable, machine-readable error category, e.g. "not_ready".
+    kind: str
+    # HTTP-style status code for the failure, e.g. 503.
+    status_code: int
+
 # ---------------------------------------------------------------------------
 # `dynamo._core.backend` submodule.
 #
@@ -2948,11 +3095,9 @@ class backend:
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
 
-    class EngineConfig:
+    class LlmRegistration:
         def __init__(
             self,
-            model: str,
-            served_model_name: Optional[str] = None,
             context_length: Optional[int] = None,
             kv_cache_block_size: Optional[int] = None,
             total_kv_blocks: Optional[int] = None,
@@ -2962,12 +3107,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
-            runtime_data: Optional[Dict[str, Any]] = None,
         ) -> None: ...
-        @property
-        def model(self) -> str: ...
-        @property
-        def served_model_name(self) -> Optional[str]: ...
         @property
         def context_length(self) -> Optional[int]: ...
         @property
@@ -2986,8 +3126,23 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
+            llm: Optional["backend.LlmRegistration"] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
         @property
         def runtime_data(self) -> Dict[str, Any]: ...
+        @property
+        def llm(self) -> Optional["backend.LlmRegistration"]: ...
 
     class RuntimeConfig:
         def __init__(
@@ -3028,5 +3183,6 @@ class backend:
             engine: Any,
             config: "backend.WorkerConfig",
             event_loop: Any,
+            raw: bool = False,
         ) -> None: ...
         def run(self) -> Awaitable[None]: ...
