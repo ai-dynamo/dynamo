@@ -3216,7 +3216,7 @@ mod tests {
     fn test_openai_nvext_rejects_agent_context() {
         let err = serde_json::from_value::<NvExt>(serde_json::json!({
             "agent_context": {
-                "trajectory_id": "run-123"
+                "session_id": "run-123"
             }
         }))
         .unwrap_err();
@@ -3230,9 +3230,9 @@ mod tests {
         source.insert(
             AGENT_CONTEXT_CONTEXT_KEY,
             AgentContext {
-                trajectory_id: "traj-123".to_string(),
-                parent_trajectory_id: Some("parent-456".to_string()),
-                trajectory_final: Some(true),
+                session_id: "session-123".to_string(),
+                parent_session_id: Some("parent-456".to_string()),
+                session_final: Some(true),
                 kv_hints: None,
             },
         );
@@ -3243,12 +3243,12 @@ mod tests {
         let agent_context = target
             .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
             .expect("agent context copied");
-        assert_eq!(agent_context.trajectory_id, "traj-123");
+        assert_eq!(agent_context.session_id, "session-123");
         assert_eq!(
-            agent_context.parent_trajectory_id.as_deref(),
+            agent_context.parent_session_id.as_deref(),
             Some("parent-456")
         );
-        assert_eq!(agent_context.trajectory_final, Some(true));
+        assert_eq!(agent_context.session_final, Some(true));
     }
 
     #[test]

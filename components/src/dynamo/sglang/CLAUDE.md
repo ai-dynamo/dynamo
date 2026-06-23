@@ -309,8 +309,8 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Trajectory radix cache**: With `--enable-session-radix-cache`, the handler
-  passes `agent_context.trajectory_id` to SGLang as `session_params.id`. Agent KV
+- **Session radix cache**: With `--enable-session-radix-cache`, the handler
+  passes `agent_context.session_id` to SGLang as `session_params.id`. Agent KV
   hints are forwarded as metadata but are not acted on by the SGLang backend.
   This path does not create router affinity.
 

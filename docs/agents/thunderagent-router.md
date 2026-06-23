@@ -5,7 +5,7 @@ title: ThunderAgent Program Scheduler
 subtitle: Program-level scheduling with tool-boundary pause/resume on top of KV-aware routing
 ---
 
-> **Experimental — not a released component.** Run it from a source checkout, not from a `pip install ai-dynamo`. The CLI flags, trajectory headers, and lifecycle hooks are all unstable and will change. Build and launch specifics live next to the code in [`components/src/dynamo/thunderagent_router/README.md`](../../components/src/dynamo/thunderagent_router/README.md).
+> **Experimental — not a released component.** Run it from a source checkout, not from a `pip install ai-dynamo`. The CLI flags, session headers, and lifecycle hooks are all unstable and will change. Build and launch specifics live next to the code in [`components/src/dynamo/thunderagent_router/README.md`](../../components/src/dynamo/thunderagent_router/README.md).
 
 `dynamo.thunderagent_router` is a standalone Dynamo router that schedules at the granularity of an agent run — the whole `LLM turn → tool call → next turn` loop — instead of individual requests. It wraps Dynamo's native KV router and adds a program-level scheduler with tool-boundary pause/resume on top of KV-aware routing, porting the scheduler from the [ThunderAgent](https://arxiv.org/abs/2602.13692) paper (Kang et al., 2026).
 
@@ -14,11 +14,11 @@ subtitle: Program-level scheduling with tool-boundary pause/resume on top of KV-
 Agentic workloads (SWE-bench, browser-use, anything with a tool loop) make many short LLM calls separated by non-GPU work: `docker exec`, `pytest`, `curl`, waiting on a subagent. Between turns the agent's KV cache stays resident, holding blocks while doing nothing. A request-level router (vLLM's, SGLang's, Dynamo's stock `KvRouter`) sees each turn but not the agent behind it, which costs you two ways:
 
 - **Cache-occupancy blowup.** With N agents at step K, the working set is `N × step_K_context`, most of it idle between turns. The engine evicts useful blocks under pressure or refuses admission, and every next turn pays a re-prefill tax.
-- **No tool-boundary backpressure.** The router can't defer a hot trajectory at a natural pause point — it can only cancel in-flight requests or queue them, both worse than waiting until the agent is between turns.
+- **No tool-boundary backpressure.** The router can't defer a hot session at a natural pause point — it can only cancel in-flight requests or queue them, both worse than waiting until the agent is between turns.
 
 ## The Scheduler
 
-The algorithm groups requests by `program_id` (the header-derived `trajectory_id`) and runs an outer scheduler that moves each program through `(REASONING | ACTING) × (ACTIVE | PAUSED)`. A program enters ACTING at a tool boundary. Under memory pressure the scheduler pauses ACTING programs — logically, with no decode preemption — so the engine is free to evict their KV. When utilization drops it resumes the smallest-token programs first, BFD-packing them back under threshold. The payoff is working-set accounting that counts programs rather than requests, plus pause/resume aimed at tool boundaries rather than arbitrary tokens.
+The algorithm groups requests by `program_id` (the header-derived `session_id`) and runs an outer scheduler that moves each program through `(REASONING | ACTING) × (ACTIVE | PAUSED)`. A program enters ACTING at a tool boundary. Under memory pressure the scheduler pauses ACTING programs — logically, with no decode preemption — so the engine is free to evict their KV. When utilization drops it resumes the smallest-token programs first, BFD-packing them back under threshold. The payoff is working-set accounting that counts programs rather than requests, plus pause/resume aimed at tool boundaries rather than arbitrary tokens.
 
 This is an in-path Dynamo service that owns a `KvRouter` directly and registers as a model handler, so there is no extra proxy hop, and it reads real `prompt_tokens + completion_tokens` off each response rather than estimating token counts from raw bytes.
 
@@ -39,7 +39,7 @@ Resume runs **before** pause on purpose (upstream ThunderAgent ordering): a prog
 
 ### Program Lifetime
 
-A program is created on its first turn, keyed by `trajectory_id`. Public trajectory identity is carried in headers such as `x-dynamo-trajectory-id`, `x-dynamo-parent-trajectory-id`, and `x-dynamo-trajectory-final`. Program bookkeeping must still be bounded by router policy, such as idle expiry or token-weight decay.
+A program is created on its first turn, keyed by `session_id`. Public session identity is carried in headers such as `x-dynamo-session-id`, `x-dynamo-parent-session-id`, and `x-dynamo-session-final`. Program bookkeeping must still be bounded by router policy, such as idle expiry or token-weight decay.
 
 ## Utilization-Driven Control Loop
 
@@ -72,11 +72,11 @@ All `KvRouter` flags from `dynamo.router` (`--router-temperature`, `--use-kv-eve
 ┌─────────────────────────────────────────────────────────────┐
 │ dynamo.frontend  (HTTP + auth + tracing sink)               │
 └────────────────────┬────────────────────────────────────────┘
-                     │  chat completions, with trajectory headers
+                     │  chat completions, with session headers
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ dynamo.thunderagent_router  (this service)                  │
-│  - ProgramTable: trajectory_id → ProgramState               │
+│  - ProgramTable: session_id → ProgramState                  │
 │  - admission gate: before_request → was_paused?             │
 │  - scheduler loop (every scheduler_interval_seconds):       │
 │      _apply_soft_demotes → _greedy_resume → _pause_until_safe│
@@ -134,6 +134,6 @@ The headline numbers (program-aware scheduling vs KV-routing-only on the same ha
 
 - ThunderAgent paper: [arxiv.org/abs/2602.13692](https://arxiv.org/abs/2602.13692)
 - Upstream ThunderAgent reference: [HaoKang-Timmy/ThunderAgent](https://github.com/HaoKang-Timmy/ThunderAgent)
-- Repro fork (mini-swe-agent + trajectory injector): [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
+- Repro fork (mini-swe-agent + session injector): [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
 - Dynamo KV router: [Router Guide](../components/router/router-guide.md)
-- [Trajectory IDs](trajectory-ids.md), [Agent Tracing](agent-tracing.md), and [Agent Hints](agent-hints.md)
+- [Session IDs](session-ids.md), [Agent Tracing](agent-tracing.md), and [Agent Hints](agent-hints.md)
