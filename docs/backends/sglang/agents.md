@@ -232,7 +232,7 @@ Include `session_control` with `action: "open"` on the first request:
 | ---------------------------- | --------- | ----------------------------------------------------------------------------- |
 | `session_control.session_id` | `string`  | Unique session identifier. Present on every turn.                             |
 | `session_control.action`     | `string`  | `"bind"`, `"open"`, or `"close"`. Omit on intermediate turns.                 |
-| `session_control.timeout`    | `integer` | Inactivity timeout in seconds (default 300). Used with `action: "bind"` and `action: "open"`. |
+| `session_control.timeout`    | `integer` | Inactivity timeout in seconds (default 300, maximum 31,536,000). Used with `action: "bind"` and `action: "open"`. |
 
 #### Subsequent turns
 

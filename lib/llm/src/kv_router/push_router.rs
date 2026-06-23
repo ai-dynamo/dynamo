@@ -31,7 +31,7 @@ mod request_guard;
 mod selection;
 
 use cancellation::{cancel_on_stop, cancelled_error};
-use request_guard::RequestGuard;
+use request_guard::{RequestCleanup, RequestGuard};
 use selection::{RoutingRequestParts, WorkerSelection};
 
 pub struct KvPushRouter {
@@ -153,15 +153,26 @@ impl KvPushRouter {
             .select_request(request, phase, is_query_only, session_worker)
             .await?;
         if let Some(operation) = operation.as_mut() {
-            operation
+            let context_id = request.context().id().to_string();
+            let mut cleanup = RequestCleanup::new(
+                self.chooser.clone(),
+                context_id.clone(),
+                selection.scheduler_tracked,
+            );
+            let selected = operation
                 .selected(
                     SessionTarget {
                         worker_id: selection.instance_id,
                         dp_rank: Some(selection.dp_rank),
                     },
-                    request.context().id(),
+                    &context_id,
                 )
-                .await?;
+                .await;
+            if let Err(error) = selected {
+                cleanup.finish().await;
+                return Err(error);
+            }
+            cleanup.disarm();
         }
         Ok((selection, operation))
     }

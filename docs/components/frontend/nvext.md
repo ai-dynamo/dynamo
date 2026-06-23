@@ -189,7 +189,7 @@ Open or bind a session before sending a continuation or close request. Continuat
 |-------|------|---------|-------------|
 | `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
 | `session_control.action` | `string` | omitted | Optional action: `"bind"`, `"open"`, or `"close"`. Omit on intermediate turns. |
-| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Used with `action: "bind"` and `action: "open"`. |
+| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds, from 1 through 31,536,000 (365 days). Used with `action: "bind"` and `action: "open"`. |
 
 ```json
 {

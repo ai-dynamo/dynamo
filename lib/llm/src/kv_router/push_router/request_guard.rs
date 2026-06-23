@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// Owns resources that must be released even when routing setup or streaming is cancelled.
-struct RequestCleanup {
+pub(super) struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
@@ -26,7 +26,7 @@ struct RequestCleanup {
 }
 
 impl RequestCleanup {
-    fn new(chooser: Arc<KvRouter>, context_id: String, scheduler_tracked: bool) -> Self {
+    pub(super) fn new(chooser: Arc<KvRouter>, context_id: String, scheduler_tracked: bool) -> Self {
         Self {
             chooser,
             context_id,
@@ -35,7 +35,7 @@ impl RequestCleanup {
         }
     }
 
-    async fn finish(&mut self) {
+    pub(super) async fn finish(&mut self) {
         if self.scheduler_tracked
             && let Err(error) = self.chooser.free(&self.context_id).await
         {
@@ -45,6 +45,10 @@ impl RequestCleanup {
                 "Failed to free request"
             );
         }
+        self.freed = true;
+    }
+
+    pub(super) fn disarm(&mut self) {
         self.freed = true;
     }
 }

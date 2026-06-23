@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 use tokio::{sync::Semaphore, time::Instant};
 
 use super::{
-    coordinator::{REAPER_INTERVAL, SessionTestHooks},
+    coordinator::{MAX_SESSION_TIMEOUT_SECS, REAPER_INTERVAL, SessionTestHooks},
     *,
 };
 use crate::{
@@ -645,12 +645,14 @@ async fn lazy_engine_expiry_starts_close_and_remains_unroutable() {
 async fn validation_contract_table() {
     enum Case {
         ZeroTimeout,
+        ExcessiveTimeout,
         DirectWithoutWorker,
         RankWithoutWorker,
         TargetMismatch,
     }
     for case in [
         Case::ZeroTimeout,
+        Case::ExcessiveTimeout,
         Case::DirectWithoutWorker,
         Case::RankWithoutWorker,
         Case::TargetMismatch,
@@ -660,6 +662,11 @@ async fn validation_contract_table() {
             Case::ZeroTimeout => {
                 let mut request = control(Some(SessionAction::Bind));
                 request.timeout = 0;
+                coordinator.begin(&request, None, false).await.map(|_| ())
+            }
+            Case::ExcessiveTimeout => {
+                let mut request = control(Some(SessionAction::Bind));
+                request.timeout = MAX_SESSION_TIMEOUT_SECS + 1;
                 coordinator.begin(&request, None, false).await.map(|_| ())
             }
             Case::DirectWithoutWorker => coordinator
@@ -699,6 +706,41 @@ async fn validation_contract_table() {
         };
         assert!(result.is_err());
     }
+}
+
+#[test]
+fn explicit_target_preserves_phase_worker_and_rank() {
+    let request = PreprocessedRequest::builder()
+        .model("model".to_string())
+        .token_ids(vec![1])
+        .stop_conditions(Default::default())
+        .sampling_options(Default::default())
+        .output_options(Default::default())
+        .routing(Some(RoutingHints {
+            backend_instance_id: Some(1),
+            prefill_worker_id: Some(2),
+            prefill_dp_rank: Some(3),
+            decode_worker_id: Some(4),
+            dp_rank: Some(5),
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        explicit_target(&request, RequestPhase::Prefill).unwrap(),
+        Some(SessionTarget {
+            worker_id: 2,
+            dp_rank: Some(3),
+        })
+    );
+    assert_eq!(
+        explicit_target(&request, RequestPhase::Decode).unwrap(),
+        Some(SessionTarget {
+            worker_id: 4,
+            dp_rank: Some(5),
+        })
+    );
 }
 
 #[tokio::test]

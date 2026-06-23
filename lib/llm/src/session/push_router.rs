@@ -68,14 +68,13 @@ impl SessionPushRouter {
             .as_ref()
             .and_then(|routing| routing.session_control.clone());
         if control.is_none() {
-            let pinned = request
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.prefill_worker_id);
+            let explicit = explicit_target(&request, RequestPhase::Prefill)?;
+            let pinned = explicit.map(|target| target.worker_id);
+            let rank = explicit.and_then(|target| target.dp_rank);
             return self
                 .inner
-                .select_and_dispatch_exact(request, pinned, |request, worker_id| {
-                    prepare(request, worker_id, None)
+                .select_and_dispatch_exact(request, pinned, move |request, worker_id| {
+                    prepare(request, worker_id, rank)
                 })
                 .await;
         }
@@ -139,12 +138,27 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error> for
             .and_then(|routing| routing.session_control.clone());
         if control.is_none() {
             if self.inner.is_direct_routing() {
-                let worker_id = request
-                    .routing
-                    .as_ref()
-                    .and_then(|routing| routing.decode_worker_id.or(routing.backend_instance_id))
+                let target = explicit_target(&request, RequestPhase::Decode)?
                     .ok_or_else(|| anyhow::anyhow!("worker ID required in Direct routing mode"))?;
-                return self.inner.direct(request, worker_id).await;
+                let rank = target.dp_rank;
+                let (_, stream) = self
+                    .inner
+                    .select_and_dispatch_exact(
+                        request,
+                        Some(target.worker_id),
+                        move |request, worker_id| {
+                            Self::record_target(
+                                request,
+                                SessionTarget {
+                                    worker_id,
+                                    dp_rank: rank,
+                                },
+                            );
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                return Ok(stream);
             }
             return self.inner.generate(request).await;
         }
@@ -213,9 +227,7 @@ pub fn explicit_target(
         RequestPhase::Aggregated => (routing.backend_instance_id, routing.dp_rank),
     };
     if worker_id.is_none() && dp_rank.is_some() {
-        return Err(invalid_argument(
-            "DP rank requires an explicit worker for session routing",
-        ));
+        return Err(invalid_argument("DP rank requires an explicit worker"));
     }
     Ok(worker_id.map(|worker_id| SessionTarget { worker_id, dp_rank }))
 }

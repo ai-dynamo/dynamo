@@ -30,6 +30,7 @@ use super::{
 use crate::protocols::common::extensions::{SessionAction, SessionControl};
 
 pub(super) const REAPER_INTERVAL: Duration = Duration::from_secs(30);
+pub(super) const MAX_SESSION_TIMEOUT_SECS: u64 = 365 * 24 * 60 * 60;
 
 pub(super) struct SessionCoordinatorInner {
     pub(super) sessions: DashMap<String, SessionState>,
@@ -561,6 +562,11 @@ fn validate_control(
         return Err(invalid_argument(
             "session timeout must be greater than zero",
         ));
+    }
+    if control.timeout > MAX_SESSION_TIMEOUT_SECS {
+        return Err(invalid_argument(format!(
+            "session timeout must not exceed {MAX_SESSION_TIMEOUT_SECS} seconds"
+        )));
     }
     if direct && explicit_target.is_none() {
         return Err(invalid_argument(

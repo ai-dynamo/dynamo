@@ -15,6 +15,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::{SESSION_TIMEOUT_FALLBACK_BUFFER, SessionTarget};
 
 const DEFAULT_SESSION_CAPACITY: u64 = 65_536;
+const SESSION_LIFECYCLE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 type EventPlaneClient = PushRouter<serde_json::Value, Annotated<serde_json::Value>>;
 
@@ -105,20 +106,28 @@ impl EventSessionLifecycle {
         action: &str,
     ) -> Result<Annotated<serde_json::Value>, LifecycleError> {
         let client = self.client().await?;
-        let mut stream = client
-            .dispatch_exact(SingleIn::new(request), target.worker_id)
-            .await
-            .map_err(|error| {
+        let response = tokio::time::timeout(SESSION_LIFECYCLE_RPC_TIMEOUT, async {
+            let mut stream = client
+                .dispatch_exact(SingleIn::new(request), target.worker_id)
+                .await
+                .map_err(|error| {
+                    LifecycleError::new(format!(
+                        "{action} RPC failed for session {session_id}: {error}"
+                    ))
+                })?;
+            stream.next().await.ok_or_else(|| {
                 LifecycleError::new(format!(
-                    "{action} RPC failed for session {session_id}: {error}"
+                    "{action} returned no response for session {session_id}"
                 ))
-            })?;
-        let response = stream.next().await.ok_or_else(|| {
+            })
+        })
+        .await
+        .map_err(|_| {
             LifecycleError::new(format!(
-                "{action} returned no response for session {session_id}"
+                "{action} timed out for session {session_id} after {} seconds",
+                SESSION_LIFECYCLE_RPC_TIMEOUT.as_secs()
             ))
-        })?;
-        while stream.next().await.is_some() {}
+        })??;
         tracing::info!(
             request_id = %context_id,
             worker_id = target.worker_id,
