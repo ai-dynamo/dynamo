@@ -1485,6 +1485,18 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	if operatorConfig.Checkpoint.Enabled &&
+		checkpointInfo != nil &&
+		checkpointInfo.Enabled &&
+		checkpointInfo.Ready &&
+		IsWorkerComponent(string(component.ComponentType)) {
+		if container.ReadinessProbe != nil {
+			container.ReadinessProbe.PeriodSeconds = 1
+		}
+		if container.StartupProbe != nil {
+			container.StartupProbe.PeriodSeconds = 1
+		}
+	}
 
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
