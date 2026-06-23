@@ -171,6 +171,7 @@ where
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         self.schedule_with_block_hashes(
             maybe_request_id,
+            None,
             isl_tokens,
             token_seq,
             None,
@@ -198,6 +199,7 @@ where
     pub async fn schedule_with_block_hashes(
         &self,
         maybe_request_id: Option<String>,
+        trajectory_id: Option<String>,
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
@@ -219,6 +221,7 @@ where
             .inner
             .schedule_with_block_hashes(
                 maybe_request_id,
+                trajectory_id,
                 isl_tokens,
                 token_seq,
                 block_hashes,

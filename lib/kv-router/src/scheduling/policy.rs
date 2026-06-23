@@ -204,6 +204,7 @@ mod tests {
             .collect();
         SchedulingRequest {
             maybe_request_id: None,
+            trajectory_id: None,
             token_seq: None,
             isl_tokens,
             tier_overlap_blocks: Default::default(),

@@ -85,6 +85,7 @@ pub struct SchedulingResponse {
 pub struct SchedulingRequest {
     // Request identity and payload.
     pub maybe_request_id: Option<String>,
+    pub trajectory_id: Option<String>,
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub lora_name: Option<String>,

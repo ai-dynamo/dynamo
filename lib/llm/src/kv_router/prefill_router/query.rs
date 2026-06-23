@@ -40,6 +40,7 @@ impl PrefillRouter {
                     .chooser
                     .find_best_match_details(
                         None,
+                        None,
                         token_ids,
                         block_mm_infos,
                         None,

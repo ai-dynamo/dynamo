@@ -161,6 +161,7 @@ impl PendingRequest {
             .collect();
         SchedulingRequest {
             maybe_request_id: Some(self.request_id()),
+            trajectory_id: None,
             token_seq: self.token_seq.clone(),
             isl_tokens: self.isl_tokens,
             tier_overlap_blocks: TierOverlapBlocks::default(),

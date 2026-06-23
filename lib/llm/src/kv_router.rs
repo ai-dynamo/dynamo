@@ -388,6 +388,7 @@ where
     pub async fn find_best_match_details(
         &self,
         context_id: Option<&str>,
+        trajectory_id: Option<String>,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
@@ -473,6 +474,7 @@ where
             .scheduler
             .schedule_with_block_hashes(
                 context_id.map(|s| s.to_string()),
+                trajectory_id,
                 isl_tokens,
                 maybe_seq_hashes,
                 block_hashes_for_refresh,
@@ -576,6 +578,7 @@ where
         let result = self
             .find_best_match_details(
                 context_id,
+                None,
                 tokens,
                 block_mm_infos,
                 router_config_override,
@@ -1001,6 +1004,7 @@ where
                 match self
                     .find_best_match_details(
                         Some(&context_id),
+                        None,
                         &tokens,
                         block_mm_infos.as_deref(),
                         None,
@@ -1168,6 +1172,7 @@ mod tests {
 
     struct InspectingSelector {
         expected_hits: Option<u32>,
+        expected_trajectory_id: Option<&'static str>,
         selected_worker: WorkerWithDpRank,
     }
 
@@ -1184,6 +1189,10 @@ mod tests {
                 .as_ref()
                 .map(|hits| hits.total_hits);
             assert_eq!(observed_hits, self.expected_hits);
+            assert_eq!(
+                request.trajectory_id.as_deref(),
+                self.expected_trajectory_id
+            );
 
             Ok(dynamo_kv_router::protocols::WorkerSelectionResult {
                 worker: self.selected_worker,
@@ -1269,6 +1278,7 @@ mod tests {
         let router = make_test_router(
             InspectingSelector {
                 expected_hits: Some(2),
+                expected_trajectory_id: None,
                 selected_worker: WorkerWithDpRank::from_worker_id(1),
             },
             Some(Box::new(FakeSharedCache {
@@ -1307,6 +1317,7 @@ mod tests {
         let router = make_test_router(
             InspectingSelector {
                 expected_hits: None,
+                expected_trajectory_id: None,
                 selected_worker: WorkerWithDpRank::from_worker_id(0),
             },
             Some(Box::new(FakeSharedCache {
@@ -1335,6 +1346,41 @@ mod tests {
 
         assert_eq!(worker, WorkerWithDpRank::from_worker_id(0));
         assert_eq!(overlap, 0);
+    }
+
+    #[tokio::test]
+    async fn test_find_best_match_details_passes_trajectory_id_to_scheduler() {
+        let router = make_test_router(
+            InspectingSelector {
+                expected_hits: None,
+                expected_trajectory_id: Some("trajectory-123"),
+                selected_worker: WorkerWithDpRank::from_worker_id(0),
+            },
+            None,
+        )
+        .await;
+
+        let outcome = router
+            .find_best_match_details(
+                None,
+                Some("trajectory-123".to_string()),
+                &[11, 12, 21, 22],
+                None,
+                None,
+                false,
+                false,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, FindBestMatchOutcome::Routed { .. }));
     }
 
     #[tokio::test]
@@ -1374,6 +1420,7 @@ mod tests {
         let router = make_test_router(
             InspectingSelector {
                 expected_hits: None,
+                expected_trajectory_id: None,
                 selected_worker: WorkerWithDpRank::from_worker_id(0),
             },
             None,
@@ -1383,6 +1430,7 @@ mod tests {
 
         let outcome = router
             .find_best_match_details(
+                None,
                 None,
                 &tokens,
                 None,
@@ -1427,6 +1475,7 @@ mod tests {
         let router = make_test_router(
             InspectingSelector {
                 expected_hits: None,
+                expected_trajectory_id: None,
                 selected_worker: WorkerWithDpRank::from_worker_id(0),
             },
             None,
@@ -1435,6 +1484,7 @@ mod tests {
 
         let outcome = router
             .find_best_match_details(
+                None,
                 None,
                 &[11, 12, 21, 22],
                 None,
@@ -1463,6 +1513,7 @@ mod tests {
         let router = make_test_router(
             InspectingSelector {
                 expected_hits: None,
+                expected_trajectory_id: None,
                 selected_worker: WorkerWithDpRank::from_worker_id(0),
             },
             Some(Box::new(FakeSharedCache {

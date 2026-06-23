@@ -1269,6 +1269,7 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
             maybe_request_id: Some(request_id.to_string()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens,
             tier_overlap_blocks: Default::default(),
@@ -1895,6 +1896,7 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
             maybe_request_id: Some("filter-0".to_string()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: isl,
             tier_overlap_blocks: Default::default(),

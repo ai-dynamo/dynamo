@@ -502,6 +502,7 @@ mod tests {
     fn base_request(isl_tokens: usize) -> SchedulingRequest {
         SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens,
             tier_overlap_blocks: Default::default(),
@@ -665,6 +666,7 @@ mod tests {
         ]);
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: 16,
             tier_overlap_blocks: Default::default(),
@@ -801,6 +803,7 @@ mod tests {
         )]);
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: 16,
             tier_overlap_blocks: Default::default(),
@@ -847,6 +850,7 @@ mod tests {
         ]);
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: 16,
             tier_overlap_blocks: Default::default(),
@@ -911,6 +915,7 @@ mod tests {
 
             let request = SchedulingRequest {
                 maybe_request_id: Some("test".into()),
+                trajectory_id: None,
                 token_seq: None,
                 isl_tokens: 16,
                 tier_overlap_blocks: Default::default(),
@@ -973,6 +978,7 @@ mod tests {
 
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: 16,
             tier_overlap_blocks: Default::default(),
@@ -1031,6 +1037,7 @@ mod tests {
 
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: 16,
             tier_overlap_blocks: Default::default(),
@@ -1105,6 +1112,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: isl,
             tier_overlap_blocks,
@@ -1170,6 +1178,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: isl,
             tier_overlap_blocks,
@@ -1318,6 +1327,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: isl,
             tier_overlap_blocks: Default::default(),
@@ -1368,6 +1378,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             maybe_request_id: Some("test".into()),
+            trajectory_id: None,
             token_seq: None,
             isl_tokens: isl,
             tier_overlap_blocks: Default::default(),

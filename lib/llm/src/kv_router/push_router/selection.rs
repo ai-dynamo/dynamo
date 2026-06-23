@@ -50,8 +50,16 @@ impl<'a> RoutingRequestParts<'a> {
     }
 }
 
+fn scheduler_trajectory_id(request: &PreprocessedRequest) -> Option<String> {
+    request
+        .agent_context
+        .as_ref()
+        .map(|ctx| ctx.trajectory_id.clone())
+}
+
 struct BestMatchArgs<'a> {
     context_id: &'a str,
+    trajectory_id: Option<String>,
     routing_parts: RoutingRequestParts<'a>,
     router_config_override: Option<&'a RouterConfigOverride>,
     update_states: bool,
@@ -72,6 +80,7 @@ impl KvPushRouter {
             .chooser
             .find_best_match_details(
                 Some(args.context_id),
+                args.trajectory_id,
                 args.routing_parts.token_ids,
                 args.routing_parts.block_mm_infos,
                 args.router_config_override,
@@ -139,6 +148,7 @@ impl KvPushRouter {
         let allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
         let return_routing_hashes =
             !is_query_only && self.chooser.indexer().records_routing_decisions();
+        let trajectory_id = scheduler_trajectory_id(request);
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
@@ -147,6 +157,7 @@ impl KvPushRouter {
             let selection = self
                 .select_best_match(BestMatchArgs {
                     context_id,
+                    trajectory_id,
                     routing_parts,
                     router_config_override: request.router_config_override.as_ref(),
                     update_states: !is_query_only,
@@ -216,6 +227,7 @@ impl KvPushRouter {
 
         self.select_best_match(BestMatchArgs {
             context_id,
+            trajectory_id,
             routing_parts,
             router_config_override: request.router_config_override.as_ref(),
             update_states: !is_query_only,
@@ -278,11 +290,49 @@ mod tests {
         scheduling::{RoutingEligibility, WorkerEligibilityError},
     };
 
-    use super::{pinned_worker_hint, resolve_pinned_worker_rank};
+    use super::{pinned_worker_hint, resolve_pinned_worker_rank, scheduler_trajectory_id};
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
-        protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
+        protocols::common::{
+            extensions::AgentContext,
+            preprocessor::{PreprocessedRequest, RoutingHints},
+            timing::RequestPhase,
+        },
     };
+
+    fn test_request(agent_context: Option<AgentContext>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .agent_context(agent_context)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn scheduler_trajectory_id_uses_agent_context_trajectory() {
+        let request = test_request(Some(AgentContext {
+            trajectory_id: "trajectory-123".to_string(),
+            parent_trajectory_id: Some("parent-456".to_string()),
+            trajectory_final: Some(true),
+            kv_hints: None,
+        }));
+
+        assert_eq!(
+            scheduler_trajectory_id(&request).as_deref(),
+            Some("trajectory-123")
+        );
+    }
+
+    #[test]
+    fn scheduler_trajectory_id_keeps_anonymous_requests_none() {
+        let request = test_request(None);
+
+        assert_eq!(scheduler_trajectory_id(&request), None);
+    }
 
     #[test]
     fn resolve_pinned_worker_rank_uses_explicit_rank_including_zero() {

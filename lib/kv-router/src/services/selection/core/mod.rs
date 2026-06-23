@@ -644,6 +644,7 @@ impl SelectionCore {
             }
             result = entry.scheduler.schedule_with_block_hashes(
                 scheduler_request_id,
+                None,
                 isl_tokens,
                 Some(sequence_hashes),
                 None,
