@@ -6,29 +6,6 @@ sidebar-title: Trace Formats
 subtitle: Inputs, converters, and replay constraints for DynoSim and AIPerf
 ---
 
-Choose an input from the matrix below. For an end-to-end agent replay, see
-[Agent Simulation](../agents/agent-replay.md).
-
-## Capture and Conversion Matrix
-
-| Source | Payloads in Artifact | Agent Structure | Conversion | Replay Consumer |
-|---|---:|---|---|---|
-| NVIDIA Dynamo request trace without trajectory context | No | Independent requests or sessions | `request_trace_to_mooncake` | DynoSim `mooncake`; AIPerf Mooncake loader |
-| Dynamo request trace with trajectory context | No | Request DAG inferred from trajectory and timing | `request_trace_to_mooncake --agentic` | DynoSim `agentic_mooncake` |
-| Dynamo request trace with trajectory context | No | One root and one child level | `aiperf synthesize dynamo-trace` | AIPerf Weka loader against a live endpoint |
-| Dynamo audit sink | Configurable request and response payloads | Request correlation only | None | Inspection; not replay-ready |
-| Local Claude Code session | No | Session timing; sidecar structure | `claude_trace_export` | DynoSim `mooncake`; AIPerf Mooncake loader |
-| Local Codex or OpenCode session | Not available | Not available | No local exporter | Not available |
-| Applied Compute agentic summary | No | Sequential session summary | None; load directly | DynoSim `applied_compute_agentic` |
-
-Set `DYN_REQUEST_TRACE` for both ordinary and agent requests. Dynamo adds `agent_context` when the
-request carries trajectory identity. Audit records may contain payloads, but no replay converter
-consumes them.
-
-When AIPerf loads ordinary Mooncake, set `--prompt-input-tokens-block-size` to the block size used by
-the converter or exporter. `request_trace_to_mooncake` prints this value; `claude_trace_export`
-accepts it through `--block-size`. AIPerf otherwise defaults to 512 tokens per `hash_id`.
-
 ## DynoSim Trace Formats
 
 Set `--trace-format` to one of these values:
