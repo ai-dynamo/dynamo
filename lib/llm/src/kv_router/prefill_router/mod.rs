@@ -5,6 +5,8 @@ use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
+use futures::StreamExt;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::{
@@ -14,8 +16,8 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     pipeline::{
-        AsyncEngineContextProvider, Context, ManyOut, Operator, RouterMode, ServerStreamingEngine,
-        SingleIn, async_trait,
+        AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
+        ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{EndpointId, annotated::Annotated},
 };
@@ -23,6 +25,7 @@ use dynamo_runtime::{
 use crate::{
     discovery::ModelManager,
     protocols::common::{
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
@@ -32,8 +35,10 @@ use crate::{
 mod activation;
 mod admission;
 mod query;
+mod session_kv_cache;
 
 use admission::InnerPrefillRouter;
+use session_kv_cache::SessionKvTransferCache;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -137,6 +142,7 @@ pub struct PrefillRouter {
     is_eagle: bool,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
+    session_kv_cache: Option<Arc<SessionKvTransferCache>>,
 }
 
 impl Drop for PrefillRouter {
@@ -165,6 +171,14 @@ impl
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
         let engine_ctx = context.context();
+        let session_affinity = context
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .ok()
+            .map(|session_affinity| session_affinity.as_ref().clone());
+        let session_cache_key = session_affinity
+            .as_ref()
+            .map(|session_affinity| session_affinity.as_str().to_string())
+            .or_else(|| metadata.get(SESSION_AFFINITY_CONTEXT_KEY).cloned());
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -190,6 +204,9 @@ impl
         // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
+        if let Some(session_id) = session_cache_key.as_deref() {
+            self.inject_cached_decode_kv_params(&mut prefill_req, session_id)?;
+        }
 
         // Try to resolve prefill worker upfront: if we can get bootstrap info early,
         // spawn prefill in background and proceed to decode immediately.
@@ -309,7 +326,8 @@ impl
         let existing_override = decode_req.router_config_override.take();
         decode_req.router_config_override = Some(build_decode_router_override(existing_override));
 
-        next.generate(context.map(|_| decode_req)).await
+        let decode_stream = next.generate(context.map(|_| decode_req)).await?;
+        Ok(self.wrap_decode_stream(decode_stream, session_cache_key))
     }
 }
 
@@ -373,6 +391,85 @@ impl PrefillRouter {
         self.model_manager
             .get_kv_transfer_routing_constraints(endpoint_id, worker_id)
     }
+
+    fn inject_cached_decode_kv_params(
+        &self,
+        request: &mut PreprocessedRequest,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(cache) = self.session_kv_cache.as_ref() else {
+            return Ok(());
+        };
+        let Some(mut kv_transfer_params) = cache.take(session_id) else {
+            return Ok(());
+        };
+
+        let Some(params) = kv_transfer_params.as_object_mut() else {
+            tracing::warn!(
+                session_id,
+                "cached vLLM NIXL KV transfer params were not a JSON object; skipping bidirectional prefill injection"
+            );
+            return Ok(());
+        };
+        params.insert("do_remote_decode".to_string(), Value::Bool(true));
+        params.insert("do_remote_prefill".to_string(), Value::Bool(false));
+
+        insert_kv_transfer_params(request, kv_transfer_params)?;
+        tracing::debug!(
+            session_id,
+            "injected cached decode KV transfer params into prefill request"
+        );
+        Ok(())
+    }
+
+    fn wrap_decode_stream(
+        &self,
+        decode_stream: ManyOut<Annotated<LLMEngineOutput>>,
+        session_cache_key: Option<String>,
+    ) -> ManyOut<Annotated<LLMEngineOutput>> {
+        let Some(cache) = self.session_kv_cache.clone() else {
+            return decode_stream;
+        };
+        let Some(session_id) = session_cache_key else {
+            return decode_stream;
+        };
+
+        let stream_context = decode_stream.context();
+        let observed_stream = decode_stream.map(move |output| {
+            if let Some(kv_transfer_params) = extract_kv_transfer_params(&output) {
+                cache.put(session_id.clone(), kv_transfer_params);
+                tracing::debug!(
+                    session_id,
+                    "cached decode KV transfer params for future bidirectional prefill"
+                );
+            }
+            output
+        });
+        ResponseStream::new(Box::pin(observed_stream), stream_context)
+    }
+}
+
+fn insert_kv_transfer_params(
+    request: &mut PreprocessedRequest,
+    kv_transfer_params: Value,
+) -> anyhow::Result<()> {
+    if request.extra_args.is_none() {
+        request.extra_args = Some(Value::Object(serde_json::Map::new()));
+    }
+    let Some(extra_args) = request.extra_args.as_mut().and_then(Value::as_object_mut) else {
+        anyhow::bail!("extra_args must be a JSON object to inject vLLM NIXL KV transfer params");
+    };
+    extra_args.insert("kv_transfer_params".to_string(), kv_transfer_params);
+    Ok(())
+}
+
+fn extract_kv_transfer_params(output: &Annotated<LLMEngineOutput>) -> Option<Value> {
+    output
+        .data
+        .as_ref()
+        .and_then(|data| data.disaggregated_params.as_ref())
+        .and_then(|params| params.get("kv_transfer_params"))
+        .cloned()
 }
 
 fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, random_room: u64) -> u64 {
@@ -534,6 +631,48 @@ mod tests {
                 assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
             }
         }
+    }
+
+    #[test]
+    fn insert_and_extract_kv_transfer_params() {
+        let mut request = PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        let kv_params = serde_json::json!({
+            "do_remote_decode": true,
+            "do_remote_prefill": false,
+            "remote_block_ids": [1, 2],
+        });
+
+        insert_kv_transfer_params(&mut request, kv_params.clone()).unwrap();
+
+        assert_eq!(
+            request
+                .extra_args
+                .as_ref()
+                .and_then(|extra_args| extra_args.get("kv_transfer_params")),
+            Some(&kv_params)
+        );
+
+        let output = Annotated::from_data(LLMEngineOutput {
+            disaggregated_params: Some(serde_json::json!({
+                "kv_transfer_params": kv_params,
+            })),
+            ..Default::default()
+        });
+        assert_eq!(
+            extract_kv_transfer_params(&output),
+            Some(serde_json::json!({
+                "do_remote_decode": true,
+                "do_remote_prefill": false,
+                "remote_block_ids": [1, 2],
+            }))
+        );
     }
 
     fn make_test_router(enforce_disagg: bool) -> Arc<PrefillRouter> {

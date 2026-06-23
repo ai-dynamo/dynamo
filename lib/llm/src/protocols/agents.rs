@@ -10,6 +10,7 @@ pub(crate) const HEADER_CLAUDE_CODE_AGENT_ID: &str = "x-claude-code-agent-id";
 pub(crate) const HEADER_CODEX_SESSION_ID: &str = "session-id";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
+pub(crate) const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
 pub(crate) const HEADER_DYNAMO_TRAJECTORY_ID: &str = "x-dynamo-trajectory-id";
 pub(crate) const HEADER_DYNAMO_PARENT_TRAJECTORY_ID: &str = "x-dynamo-parent-trajectory-id";
 pub(crate) const HEADER_DYNAMO_TRAJECTORY_FINAL: &str = "x-dynamo-trajectory-final";
@@ -57,6 +58,13 @@ fn header_value(headers: &HeaderMap, header_name: &str) -> Option<String> {
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
     let trajectory_final = header_bool(headers, HEADER_DYNAMO_TRAJECTORY_FINAL);
+    if let Some(trajectory_id) = header_value(headers, HEADER_DYNAMO_TRAJECTORY_ID) {
+        return Some(AgentContextHeaderValues {
+            trajectory_id,
+            parent_trajectory_id: header_value(headers, HEADER_DYNAMO_PARENT_TRAJECTORY_ID),
+            trajectory_final,
+        });
+    }
 
     for mapping in AGENT_HEADER_MAPPINGS {
         let Some(session_id) = header_value(headers, mapping.session_header) else {
@@ -80,13 +88,11 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             trajectory_final,
         });
     }
-    header_value(headers, HEADER_DYNAMO_TRAJECTORY_ID).map(|trajectory_id| {
-        AgentContextHeaderValues {
-            trajectory_id,
-            parent_trajectory_id: header_value(headers, HEADER_DYNAMO_PARENT_TRAJECTORY_ID),
-            trajectory_final,
-        }
-    })
+    None
+}
+
+pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
+    header_value(headers, HEADER_DYNAMO_SESSION_ID)
 }
 
 fn header_bool(headers: &HeaderMap, header_name: &str) -> Option<bool> {

@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::protocols::TokenIdType;
-use crate::protocols::agents::{AgentContextHeaderValues, agent_context_header_values};
+use crate::protocols::agents::{
+    AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
+};
 use crate::protocols::common::llm_backend::PromptLogprobs;
 use crate::protocols::common::timing::TimingInfo;
 
@@ -259,9 +261,27 @@ impl From<AgentContextHeaderValues> for AgentContext {
 }
 
 pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
+pub const SESSION_AFFINITY_CONTEXT_KEY: &str = "dynamo.llm.session_affinity";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAffinityId(String);
+
+impl SessionAffinityId {
+    pub(crate) fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
     agent_context_header_values(headers).map(AgentContext::from)
+}
+
+pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
+    session_affinity_header_value(headers).map(SessionAffinityId::new)
 }
 
 /// Apply HTTP routing header overrides to nvext.
@@ -592,8 +612,9 @@ mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID,
-        HEADER_DYNAMO_PARENT_TRAJECTORY_ID, HEADER_DYNAMO_TRAJECTORY_FINAL,
-        HEADER_DYNAMO_TRAJECTORY_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_PARENT_TRAJECTORY_ID, HEADER_DYNAMO_SESSION_ID,
+        HEADER_DYNAMO_TRAJECTORY_FINAL, HEADER_DYNAMO_TRAJECTORY_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[test]
@@ -860,6 +881,24 @@ mod tests {
 
         headers.insert(HEADER_DYNAMO_TRAJECTORY_FINAL, "false".parse().unwrap());
         assert_eq!(agent_context_from_headers(&headers).unwrap().kv_hints, None);
+    }
+
+    #[test]
+    fn session_affinity_requires_explicit_dynamo_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CLAUDE_CODE_SESSION_ID, "claude".parse().unwrap());
+        headers.insert(HEADER_CODEX_SESSION_ID, "codex".parse().unwrap());
+        headers.insert(HEADER_OPENCODE_SESSION_ID, "opencode".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "canonical"
+        );
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
     }
 
     #[test]
