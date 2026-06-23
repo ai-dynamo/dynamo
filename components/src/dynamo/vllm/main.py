@@ -107,6 +107,46 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     return config.model
 
 
+def _engine_args_use_fp8(engine_args: Any) -> bool:
+    quantization = getattr(engine_args, "quantization", None)
+    if quantization is not None and str(quantization).lower() == "fp8":
+        return True
+    kv_cache_dtype = getattr(engine_args, "kv_cache_dtype", None)
+    return kv_cache_dtype is not None and str(kv_cache_dtype).lower().startswith("fp8")
+
+
+def _maybe_init_mx_refit_fp8(engine_args: Any) -> bool:
+    """Apply Dynamo-owned FP8 refit patches before vLLM builds the engine."""
+    if os.environ.get("DYN_MX_REFIT_ENABLED") != "1":
+        return False
+    if not _engine_args_use_fp8(engine_args):
+        return False
+
+    from dynamo.vllm.mx_refit.fp8 import init_fp8
+
+    quantization = getattr(engine_args, "quantization", None)
+    kv_cache_dtype = getattr(engine_args, "kv_cache_dtype", None) or "auto"
+    tensor_parallel_size = int(getattr(engine_args, "tensor_parallel_size", 1) or 1)
+    use_deep_gemm = os.environ.get("VLLM_USE_DEEP_GEMM", "0") == "1"
+    init_fp8(
+        {
+            "precision": "fp8" if str(quantization).lower() == "fp8" else "",
+            "kv_cache_dtype": str(kv_cache_dtype),
+            "async_engine": True,
+            "use_deep_gemm": use_deep_gemm,
+        },
+        str(getattr(engine_args, "model", "")),
+        model_parallel_size=tensor_parallel_size,
+    )
+    logger.info(
+        "[mx-refit-fp8] enabled model=%s tp=%d kv_cache_dtype=%s",
+        getattr(engine_args, "model", ""),
+        tensor_parallel_size,
+        kv_cache_dtype,
+    )
+    return True
+
+
 def build_headless_namespace(config: Config) -> argparse.Namespace:
     """Build an argparse Namespace from engine_args for vLLM's run_headless().
 
@@ -604,6 +644,7 @@ def setup_vllm_engine(
             )
         engine_args.worker_extension_cls = mx_ext
         logger.info("[mx-refit] enabled; worker_extension_cls=%s", mx_ext)
+        _maybe_init_mx_refit_fp8(engine_args)
 
     # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
     # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.

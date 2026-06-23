@@ -114,7 +114,7 @@ def _param_for_loaded_weight(
 ) -> torch.Tensor | None:
     candidates = [name]
     if name.startswith("backbone."):
-        candidates.append(f"model.{name[len('backbone.'):]}")
+        candidates.append(f"model.{name[len('backbone.') :]}")
     for candidate in candidates:
         param = params.get(candidate)
         if param is not None:
@@ -214,6 +214,169 @@ def _maybe_expand_tp_local_weight(
     return expanded
 
 
+def _fp8_qkv_scale_target_name(name: str) -> str | None:
+    """Return the live vLLM Qwen attention scale parameter for a scale tensor."""
+    replacements = (
+        (".self_attn.attn.attn.q_scale", ".self_attn.attn.q_scale"),
+        (".self_attn.attn.q_scale", ".self_attn.attn.q_scale"),
+        (".self_attn.q_scale", ".self_attn.attn.q_scale"),
+        (".self_attn.attn.attn.k_scale", ".self_attn.attn.k_scale"),
+        (".self_attn.attn.k_scale", ".self_attn.attn.k_scale"),
+        (".self_attn.k_scale", ".self_attn.attn.k_scale"),
+        (".self_attn.attn.attn.v_scale", ".self_attn.attn.v_scale"),
+        (".self_attn.attn.v_scale", ".self_attn.attn.v_scale"),
+        (".self_attn.v_scale", ".self_attn.attn.v_scale"),
+    )
+    for old, new in replacements:
+        if name.endswith(old):
+            return f"{name[: -len(old)]}{new}"
+    return None
+
+
+def _copy_fp8_scale_tensor(
+    target: torch.Tensor,
+    source: torch.Tensor,
+) -> None:
+    if source.numel() != 1:
+        raise ValueError(
+            f"Expected singleton FP8 scale tensor, got shape {tuple(source.shape)}"
+        )
+    source = source.detach().to(device=target.device, dtype=target.dtype)
+    source = source.reshape(target.shape)
+    with torch.no_grad():
+        target.copy_(source, non_blocking=True)
+
+
+def _process_fp8_kv_cache_modules(
+    model: torch.nn.Module,
+    target_device: torch.device,
+) -> int:
+    from dynamo.vllm.mx_refit.fp8 import process_weights_after_loading_kv
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    from vllm.model_executor.model_loader.utils import device_loading_context
+
+    processed = 0
+    for _, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if not isinstance(quant_method, BaseKVCacheMethod):
+            continue
+        with device_loading_context(module, target_device):
+            process_weights_after_loading_kv(quant_method, module)
+        processed += 1
+    return processed
+
+
+def _ensure_fp8_prob_scale_parameter(
+    *,
+    module: torch.nn.Module,
+    module_name: str,
+    device: torch.device,
+    params: dict[str, torch.Tensor],
+) -> None:
+    existing = getattr(module, "prob_scale", None)
+    if isinstance(existing, torch.Tensor):
+        params[f"{module_name}.prob_scale"] = existing
+        return
+
+    parameter = torch.nn.Parameter(
+        torch.full((), -1.0, device=device, dtype=torch.float32),
+        requires_grad=False,
+    )
+    module.register_parameter("prob_scale", parameter)
+    params[f"{module_name}.prob_scale"] = parameter
+
+
+def _ensure_fp8_scale_parameter(
+    *,
+    model: torch.nn.Module,
+    target_name: str,
+    source: torch.Tensor,
+    params: dict[str, torch.Tensor],
+) -> torch.Tensor | None:
+    module_name, _, attr_name = target_name.rpartition(".")
+    module = dict(model.named_modules()).get(module_name)
+
+    target = params.get(target_name)
+    if target is not None:
+        if module is not None and attr_name in {"q_scale", "k_scale", "v_scale"}:
+            _ensure_fp8_prob_scale_parameter(
+                module=module,
+                module_name=module_name,
+                device=target.device,
+                params=params,
+            )
+        return target
+
+    if module is None or attr_name not in {"q_scale", "k_scale", "v_scale"}:
+        return None
+
+    existing = getattr(module, attr_name, None)
+    if isinstance(existing, torch.Tensor):
+        params[target_name] = existing
+        _ensure_fp8_prob_scale_parameter(
+            module=module,
+            module_name=module_name,
+            device=existing.device,
+            params=params,
+        )
+        return existing
+
+    parameter = torch.nn.Parameter(
+        torch.full((), -1.0, device=source.device, dtype=torch.float32),
+        requires_grad=False,
+    )
+    module.register_parameter(attr_name, parameter)
+    params[target_name] = parameter
+    _ensure_fp8_prob_scale_parameter(
+        module=module,
+        module_name=module_name,
+        device=parameter.device,
+        params=params,
+    )
+    return parameter
+
+
+def _load_fp8_qkv_scale_weights(
+    weights: list[tuple[str, torch.Tensor]],
+    model: torch.nn.Module,
+) -> list[tuple[str, torch.Tensor]]:
+    """Load FP8 Q/K/V scale tensors directly into vLLM attention modules."""
+    params = dict(model.named_parameters(remove_duplicate=False))
+    remaining = []
+    loaded_count = 0
+    unresolved: list[tuple[str, str]] = []
+    for name, tensor in weights:
+        target_name = _fp8_qkv_scale_target_name(name)
+        if target_name is None:
+            remaining.append((name, tensor))
+            continue
+
+        target = _ensure_fp8_scale_parameter(
+            model=model,
+            target_name=target_name,
+            source=tensor,
+            params=params,
+        )
+        if target is None:
+            unresolved.append((name, target_name))
+            remaining.append((name, tensor))
+        else:
+            _copy_fp8_scale_tensor(target, tensor)
+            loaded_count += 1
+
+    if loaded_count:
+        logger.info("[mx] directly loaded %d FP8 Q/K/V scale tensors", loaded_count)
+    if unresolved:
+        sample = ", ".join(f"{name}->{target}" for name, target in unresolved[:3])
+        logger.warning(
+            "[mx] could not directly load %d FP8 Q/K/V scale tensors; "
+            "leaving them for the vLLM loader (sample: %s)",
+            len(unresolved),
+            sample,
+        )
+    return remaining
+
+
 def _torch_dtype(dtype_name: str) -> torch.dtype:
     dtype_name = str(dtype_name).removeprefix("torch.")
     return {
@@ -233,13 +396,72 @@ class MxRefitWorkerExtension:
         if not hasattr(self, "state_dict_info"):
             self.state_dict_info = state_dict_info
 
+    def _mx_uses_fp8_quantization(self) -> bool:
+        vllm_config = getattr(self.model_runner, "vllm_config", None)
+        configs = (
+            vllm_config,
+            getattr(vllm_config, "model_config", None),
+            getattr(self.model_runner, "model_config", None),
+        )
+        for config in configs:
+            if config is None:
+                continue
+            quant_config = getattr(config, "quant_config", None)
+            if (
+                quant_config is not None
+                and quant_config.__class__.__name__ == "Fp8Config"
+            ):
+                return True
+            quantization = getattr(config, "quantization", None)
+            if quantization is not None and str(quantization).lower() == "fp8":
+                return True
+        return False
+
+    def _mx_get_fp8_module(self) -> Any:
+        from dynamo.vllm.mx_refit import fp8 as fp8_module
+
+        if getattr(fp8_module, "global_fp8_config", None) is None:
+            tp_size, _ = _target_tp(self)
+            cache_config = getattr(
+                getattr(self.model_runner, "vllm_config", None),
+                "cache_config",
+                None,
+            )
+            kv_cache_dtype = getattr(cache_config, "cache_dtype", "auto")
+            fp8_module.ensure_fp8_config(
+                model_parallel_size=tp_size,
+                kv_cache_dtype=str(kv_cache_dtype),
+                use_fp8_weights=True,
+            )
+            logger.info(
+                "[mx] initialized Dynamo FP8 loader config for refit "
+                "(tp_size=%d, kv_cache_dtype=%s)",
+                tp_size,
+                kv_cache_dtype,
+            )
+        return fp8_module
+
+    def _mx_load_fp8_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        fp8_module = self._mx_get_fp8_module()
+        model = self.model_runner.model
+        weights = _load_fp8_qkv_scale_weights(weights, model)
+        old_do_torchao_reload = getattr(model, "_do_torchao_reload", None)
+        if old_do_torchao_reload is not None:
+            model._do_torchao_reload = False
+        try:
+            fp8_module.load_weights(weights, self.model_runner)
+        finally:
+            if old_do_torchao_reload is not None:
+                model._do_torchao_reload = old_do_torchao_reload
+
     def _mx_load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
         tp_size, tp_rank = _target_tp(self)
+        uses_fp8_quantization = self._mx_uses_fp8_quantization()
         if tp_size > 1:
             params = dict(self.model_runner.model.named_parameters())
             adapted_weights = []
             for name, weight in weights:
-                if _maybe_copy_tp_local_weight(
+                if not uses_fp8_quantization and _maybe_copy_tp_local_weight(
                     name=name,
                     weight=weight,
                     params=params,
@@ -258,7 +480,11 @@ class MxRefitWorkerExtension:
                     )
                 )
             weights = adapted_weights
-        self.model_runner.model.load_weights(weights=weights)
+        if uses_fp8_quantization:
+            logger.info("[mx] loading refit tensors through Dynamo FP8 loader")
+            self._mx_load_fp8_weights(weights)
+        else:
+            self.model_runner.model.load_weights(weights=weights)
 
     def _mx_maybe_process_fp8_kv_cache(self) -> None:
         cache_config = getattr(self.model_runner.vllm_config, "cache_config", None)
@@ -266,16 +492,12 @@ class MxRefitWorkerExtension:
         if kv_cache_dtype is None or "fp8" not in str(kv_cache_dtype).lower():
             return
 
-        from vllm.model_executor.model_loader.utils import (
-            process_weights_after_loading,
-        )
-
         target_device = next(self.model_runner.model.parameters()).device
-        process_weights_after_loading(
+        processed = _process_fp8_kv_cache_modules(
             self.model_runner.model,
-            self.model_runner.model_config,
             target_device,
         )
+        logger.debug("[mx] processed FP8 KV cache scales on %d modules", processed)
 
     def _mx_init_receiver(self, mx_config: MxConfig) -> None:
         if getattr(self, "_mx_receiver", None):
@@ -417,10 +639,7 @@ class MxRefitWorkerExtension:
             ReceiveSpec,
             discover_megatron_context,
         )
-        from modelexpress.nemo_rl_v2 import (
-            ROLE_MEGATRON_VOCAB_PARALLEL,
-            TargetTpLayout,
-        )
+        from modelexpress.nemo_rl_v2 import TargetTpLayout
 
         cfg, name_map = discover_megatron_context(candidates)
         if cfg is None:
@@ -437,7 +656,9 @@ class MxRefitWorkerExtension:
                 if td.name in receive_specs or not td.megatron_role:
                     continue
                 lookup_name = (
-                    td.name[len("module."):] if td.name.startswith("module.") else td.name
+                    td.name[len("module.") :]
+                    if td.name.startswith("module.")
+                    else td.name
                 )
                 hf_names = name_map.get(lookup_name, name_map.get(td.name, [td.name]))
                 receive_specs[td.name] = ReceiveSpec(
@@ -612,7 +833,9 @@ class MxRefitWorkerExtension:
             )
         )
         if not weights:
-            logger.warning("[mx-megatron] no translated tensors for version %d", version)
+            logger.warning(
+                "[mx-megatron] no translated tensors for version %d", version
+            )
             return False
 
         self._mx_load_weights(weights)
