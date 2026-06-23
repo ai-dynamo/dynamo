@@ -364,7 +364,9 @@ def test_router_decisions_trtllm_disagg(
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
-@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
+# This test syncs two indexers and routinely runs ~120-160s in nightly (observed
+# 118s, 141s, 159s across runs), so the old 150s cap flaked. Give ~2x headroom.
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [
