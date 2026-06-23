@@ -37,11 +37,15 @@ use std::path::Path;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MooncakeRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, alias = "input_tokens")]
     pub input_length: Option<usize>,
     #[serde(default, alias = "output_tokens")]
     pub output_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<u32>>,
     #[serde(default)]
     pub hash_ids: Option<Vec<u64>>,
     #[serde(
@@ -77,6 +81,8 @@ pub struct AgenticMooncakeRow {
     pub input_length: Option<usize>,
     #[serde(default, alias = "output_tokens")]
     pub output_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<u32>>,
     #[serde(default)]
     pub hash_ids: Option<Vec<u64>>,
     #[serde(
