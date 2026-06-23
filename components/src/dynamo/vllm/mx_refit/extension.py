@@ -114,7 +114,7 @@ def _param_for_loaded_weight(
 ) -> torch.Tensor | None:
     candidates = [name]
     if name.startswith("backbone."):
-        candidates.append(f"model.{name[len('backbone.'):]}")
+        candidates.append(f"model.{name[len('backbone.') :]}")
     for candidate in candidates:
         param = params.get(candidate)
         if param is not None:
@@ -245,6 +245,25 @@ def _copy_fp8_scale_tensor(
     source = source.reshape(target.shape)
     with torch.no_grad():
         target.copy_(source, non_blocking=True)
+
+
+def _process_fp8_kv_cache_modules(
+    model: torch.nn.Module,
+    target_device: torch.device,
+) -> int:
+    from dynamo.vllm.mx_refit.fp8 import process_weights_after_loading_kv
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    from vllm.model_executor.model_loader.utils import device_loading_context
+
+    processed = 0
+    for _, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if not isinstance(quant_method, BaseKVCacheMethod):
+            continue
+        with device_loading_context(module, target_device):
+            process_weights_after_loading_kv(quant_method, module)
+        processed += 1
+    return processed
 
 
 def _ensure_fp8_prob_scale_parameter(
@@ -473,16 +492,12 @@ class MxRefitWorkerExtension:
         if kv_cache_dtype is None or "fp8" not in str(kv_cache_dtype).lower():
             return
 
-        from vllm.model_executor.model_loader.utils import (
-            process_weights_after_loading,
-        )
-
         target_device = next(self.model_runner.model.parameters()).device
-        process_weights_after_loading(
+        processed = _process_fp8_kv_cache_modules(
             self.model_runner.model,
-            self.model_runner.model_config,
             target_device,
         )
+        logger.debug("[mx] processed FP8 KV cache scales on %d modules", processed)
 
     def _mx_init_receiver(self, mx_config: MxConfig) -> None:
         if getattr(self, "_mx_receiver", None):
