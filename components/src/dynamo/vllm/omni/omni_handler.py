@@ -300,8 +300,13 @@ class OmniHandler(BaseOmniHandler):
         defaults = list(self.engine_client.default_sampling_params_list or [])
         result = []
         for i, default in enumerate(defaults):
-            metadata = self.engine_client.engine.get_stage_metadata(i)
-            stage_type = getattr(metadata, "stage_type", "llm")
+            stage_meta = self.engine_client.engine.get_stage_metadata(i)
+            # vllm-omni returns a StageRuntimeInfo dataclass (attribute access);
+            # older revisions returned a plain dict. Support both.
+            if isinstance(stage_meta, dict):
+                stage_type = stage_meta.get("stage_type", "llm")
+            else:
+                stage_type = getattr(stage_meta, "stage_type", "llm")
             if stage_type == "diffusion":
                 result.append(diffusion_sp)
             else:
