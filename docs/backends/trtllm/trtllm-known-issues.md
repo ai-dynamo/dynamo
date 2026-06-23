@@ -48,3 +48,11 @@ This is the symptom, not the cause — the cause is that the container image you
 - Either upgrade the host driver, or pull a lower-CUDA variant (e.g. `vllm-runtime:1.0.2` on driver `575+` instead of `vllm-runtime:1.0.2-cuda13` on driver `580+`).
 
 > The driver-mismatch error message itself is being improved — tracked as an engineering follow-up.
+
+## Amazon Linux 2023 hang with `--network host`
+
+**Issue:** On Amazon Linux 2023 (AL2023), running the TensorRT-LLM container locally with
+`docker run --network host ...` can hang due to an [mpi4py bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609).
+
+**Fix:** Replace `--network host` with explicit port mappings, exposing only the ports you need —
+e.g. `4222` (NATS), `2379`/`2380` (etcd), and `8000` (frontend).

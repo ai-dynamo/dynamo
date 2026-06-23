@@ -5,7 +5,7 @@ sidebar-title: 简介
 ---
 
 <p align="left">
-  <a href="./introduction.md" hreflang="en">English</a> | <strong>简体中文</strong>
+  <a href="./about.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
 
 # Dynamo 简介

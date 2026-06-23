@@ -64,6 +64,32 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**LoRA**](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/README.md) | ✅ | Dynamic loading/unloading from S3-compatible storage |
 | **GB200 Support** | ✅ | Container functional on main |
 
+## Feature Interactions
+
+vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, KV block management, LoRA adapters, and multimodal inference including video and audio. The matrix below shows which feature pairs are validated to work together.
+
+**Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
+
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
+| **KV Block Manager** | ✅ | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅ | ✅<sup>1</sup> | — | ✅ | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | ✅ | ✅ | — | | | | |
+| **Request Cancellation** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | | | |
+| **LoRA** | ✅ | ✅<sup>2</sup> | — | ✅ | — | ✅ | ✅ | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | — | ✅ | — |
+
+> **Notes:**
+> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend path supports model families handled by `llm-multimodal`; the Python chat-processor path delegates to vLLM's multimodal processor. ([Source](../../features/multimodal/multimodal-kv-routing.md))
+> 2. **KV-Aware LoRA Routing**: vLLM supports routing requests based on LoRA adapter affinity.
+> 3. **Audio Support**: vLLM supports audio models like Qwen2-Audio (experimental). ([Source](../../features/multimodal/multimodal-vllm.md))
+> 4. **Video Support**: vLLM supports video input with frame sampling. ([Source](../../features/multimodal/multimodal-vllm.md))
+> 5. **Speculative Decoding**: Eagle3 support documented. ([Source](../../features/speculative-decoding/speculative-decoding-vllm.md))
+
 ## Quick Start
 
 Start infrastructure services for local development:

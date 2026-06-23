@@ -16,8 +16,7 @@
 # yaml-language-server: $schema=https://schema.buildwithfern.dev/docs-yml.json
 
 instances:
-  - url: dynamo.docs.buildwithfern.com/dynamo
-    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com/dynamo]
+  - url: ai-dynamo.docs.buildwithfern.com/dynamo
 
 title: NVIDIA Dynamo Documentation
 
@@ -50,10 +49,15 @@ redirects:
     destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
   # Unversioned root redirects → dev (fixes broken links from docs.nvidia.com/dynamo)
   # See: https://github.com/ai-dynamo/dynamo/issues/7297
+  # support-matrix + feature-matrix were consolidated into reference/compatibility.
+  - source: "/dynamo/dev/reference/support-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/reference/feature-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/resources/support-matrix"
-    destination: "/dynamo/dev/resources/support-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/resources/feature-matrix"
-    destination: "/dynamo/dev/resources/feature-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/resources/release-artifacts"
     destination: "/dynamo/dev/resources/release-artifacts"
   - source: "/dynamo/resources/examples"
@@ -62,9 +66,9 @@ redirects:
   # Only for versions where these pages moved (dev, v1.0.0, v1.0.1, latest).
   # Older versions (v0.9.x and below) still have pages under getting-started.
   - source: "/dynamo/dev/getting-started/support-matrix"
-    destination: "/dynamo/dev/resources/support-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/dev/getting-started/feature-matrix"
-    destination: "/dynamo/dev/resources/feature-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/dev/getting-started/release-artifacts"
     destination: "/dynamo/dev/resources/release-artifacts"
   - source: "/dynamo/dev/getting-started/examples"
@@ -202,6 +206,16 @@ redirects:
     destination: "/dynamo/dev/digest/:slug*"
   - source: "/dynamo/blog"
     destination: "/dynamo/dev/digest"
+  # Tab split: docs tab divided into Home / User Guide / Reference / Blog tabs.
+  # These four pages changed section (and thus URL); everything else kept its URL.
+  - source: "/dynamo/dev/getting-started/introduction"
+    destination: "/dynamo/dev/introduction"
+  - source: "/dynamo/dev/getting-started/compatibility"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/getting-started/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/dev/additional-resources/kv-router-a-b-testing"
+    destination: "/dynamo/dev/benchmarks/kv-router-ab-testing"
 
 # GitHub repository link in navbar
 navbar-links:
