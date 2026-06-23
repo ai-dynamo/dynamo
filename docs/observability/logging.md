@@ -344,7 +344,7 @@ Audit is **opt-in** and independent of `OTEL_EXPORT_ENABLED` (which controls app
 ### How records are emitted
 
 - **One** audit record is published per request, carrying the request and — when the response completes — the response.
-- On client cancellation, gateway timeout, or aggregation failure, the record is still emitted with an **empty response**, so those cases remain auditable. A hard process crash before emission is the only case that loses a record.
+- On client cancellation, gateway timeout, or aggregation failure, the record is still emitted with the **`response` field omitted** (not an empty placeholder), so those cases remain auditable. A hard process crash before emission is the only case that loses a record.
 - Each record maps to one OTLP `LogRecord`: scope `dynamo.payload`, body `openai.chat_completion`, with attributes `rid`, `endpoint`, `model`, `streaming`, `audit_complete`, and `payload` (the audit record serialized as a JSON string). Redacted HTTP request headers are included inside `payload.http.request.headers` for the `otel` sink only — other sinks never serialize headers.
 
 ### Configuration
@@ -383,6 +383,9 @@ To also write audit JSON to the process's stderr (headers are `otel`-only, so th
 ```bash
 export DYN_AUDIT_SINKS=stderr,otel
 ```
+
+> [!NOTE]
+> The `stderr` sink writes each audit record as a raw JSON line directly to stderr (one record per line), not through the application `tracing` logger. This keeps the stderr copy a clean JSONL audit stream and, importantly, prevents a **duplicate OTLP export**: routing audit records through `tracing` would re-export them via the runtime's OTLP log bridge in addition to the `otel` sink. With the direct write, the `otel` sink is the only path that exports audit payloads over OTLP.
 
 ## Related Documentation
 
