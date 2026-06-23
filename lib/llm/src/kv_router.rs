@@ -18,7 +18,12 @@ use dynamo_kv_router::{
         RouterBackpressureReason, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
         TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
-    scheduling::OverloadedWorkerProvider,
+    scheduling::{
+        CacheHitEstimates, OverloadedWorkerProvider, effective_prefill_tokens,
+        overlap::{
+            cache_hit_estimates_from_tiered_matches, tier_overlap_blocks_from_tiered_matches,
+        },
+    },
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -62,9 +67,8 @@ pub use sticky::{SessionLifecycleController, StickySessionRouter};
 
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
 use scheduler_inputs::{
-    CacheHitEstimates, KvRouterOverlapRefresher, WorkerCacheHitEstimate,
-    cache_hit_estimates_from_tiered_matches, cache_hit_for_worker, shared_cache_overlap_score,
-    tier_overlap_blocks_from_tiered_matches,
+    KvRouterOverlapRefresher, WorkerCacheHitEstimate, cache_hit_for_worker,
+    shared_cache_overlap_score,
 };
 
 use crate::{
@@ -475,8 +479,11 @@ where
                 maybe_seq_hashes,
                 block_hashes_for_refresh,
                 tier_overlap_blocks,
-                cache_hit_estimates.effective_overlap_blocks,
-                cache_hit_estimates.cached_tokens,
+                cache_hit_estimates
+                    .effective_overlap_blocks
+                    .into_iter()
+                    .collect(),
+                cache_hit_estimates.cached_tokens.into_iter().collect(),
                 router_config_override,
                 update_states,
                 lora_name,
@@ -683,11 +690,11 @@ where
             return None;
         }
 
-        let prefix = cached_tokens.min(isl_tokens);
-        let effective_isl = isl_tokens.saturating_sub(prefix);
+        let effective_isl = effective_prefill_tokens(isl_tokens, cached_tokens);
         if effective_isl == 0 {
             return None;
         }
+        let prefix = isl_tokens - effective_isl;
 
         let expected_prefill_duration = match &self.prefill_load_estimator {
             Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
@@ -827,7 +834,7 @@ where
         Ok(self.scheduler.get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            cache_hit_estimates.cached_tokens,
+            cache_hit_estimates.cached_tokens.into_iter().collect(),
             track_prefill_tokens,
         ))
     }

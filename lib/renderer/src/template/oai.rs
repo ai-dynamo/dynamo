@@ -544,6 +544,51 @@ mod tests {
     use dynamo_protocols::types::CreateChatCompletionRequest as NvCreateChatCompletionRequest;
     use minijinja::{Environment, context};
 
+    /// End-to-end guard for the minijinja stack-overflow fix, exercised through
+    /// Dynamo's real chat-template render path. A template that accumulates
+    /// messages via `ns.items = ns.items + [m]` and then takes `|length`
+    /// previously overflowed the native stack for long conversations (~1500+
+    /// turns on a worker thread), core-dumping the frontend. Runs on a 2 MiB
+    /// stack — the size of a Dynamo tokio worker thread — so a regression aborts
+    /// deterministically instead of depending on the platform default.
+    #[test]
+    fn test_render_long_conversation_does_not_overflow_stack() {
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let template_string = concat!(
+                    "{%- set ns = namespace(items=[]) -%}",
+                    "{%- for m in messages -%}",
+                    "{%- set ns.items = ns.items + [m] -%}",
+                    "{%- endfor -%}",
+                    "COUNT={{ ns.items | length }}"
+                );
+                let chat_template: ChatTemplate =
+                    serde_json::from_value(serde_json::json!({ "chat_template": template_string }))
+                        .unwrap();
+                let formatter =
+                    HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[]))
+                        .unwrap();
+
+                let n = 3000;
+                let messages: Vec<serde_json::Value> = (0..n)
+                    .map(|i| serde_json::json!({"role": "user", "content": format!("turn {i}")}))
+                    .collect();
+                let request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "model": "test",
+                        "messages": messages,
+                    }))
+                    .unwrap();
+
+                // The crash path: `|length` -> minijinja `Value::len()`.
+                let rendered = formatter.render(&request).unwrap();
+                assert_eq!(rendered.trim(), format!("COUNT={n}"));
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
     /// Dev utility (ignored by default): dump the prompt Dynamo's renderer
     /// produces for a tool-calling chat request, so it can be diffed against
     /// vLLM's `openai_harmony` rendering — to see whether the gpt-oss Jinja

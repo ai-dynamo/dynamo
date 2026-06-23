@@ -83,6 +83,7 @@ impl PromptRequest {
             );
             return Ok(NormalizedReservation {
                 sequence_hashes: normalized.sequence_hashes,
+                isl_tokens: normalized.isl_tokens,
             });
         }
 
@@ -96,6 +97,7 @@ impl PromptRequest {
         }
         Ok(NormalizedReservation {
             sequence_hashes: signed_sequence_hashes(sequence_hashes),
+            isl_tokens: self.isl_tokens.expect("validated above"),
         })
     }
 
@@ -178,4 +180,5 @@ pub(super) struct NormalizedPrompt {
 
 pub(super) struct NormalizedReservation {
     pub(super) sequence_hashes: Vec<SequenceHash>,
+    pub(super) isl_tokens: usize,
 }

@@ -193,12 +193,12 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-{% if device == "xpu" %}
+{%- if device == "xpu" %}
     echo '. /opt/miniforge3/bin/activate sglang' >> /etc/bash.bashrc && \
     echo 'source /opt/intel/oneapi/setvars.sh --force' >> /etc/bash.bashrc && \
     mkdir -p /sgl-workspace && \
     ln -sf /workspace /sgl-workspace/dynamo
-{% else %}
+{%- else %}
     ln -s /workspace /sgl-workspace/dynamo && \
     NSYS_BIN=$(find /opt/nvidia/nsight-compute -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
     if [ -n "$NSYS_BIN" ]; then ln -sf "$NSYS_BIN" /usr/local/bin/nsys; \

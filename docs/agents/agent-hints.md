@@ -1,17 +1,13 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Agent Hints
 subtitle: Per-request serving hints for agentic workloads
 ---
 
-Agent hints are optional per-request metadata that a harness sends under
-`nvext.agent_hints`. Dynamo parses these hints in the frontend and passes them
-to the router and, where supported, backend runtimes.
+Agent hints are optional per-request metadata that a harness sends under `nvext.agent_hints`. Dynamo parses these hints in the frontend and passes them to the router and, where supported, backend runtimes.
 
-Use hints only for serving-relevant intent. Use
-[`nvext.agent_context`](agent-tracing.md#request-schema) for passive trace
-identity.
+Use hints only for serving-relevant intent. Use [trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for passive trace identity.
 
 ## Request Schema
 
@@ -48,15 +44,11 @@ flowchart LR
     Router --> Worker[Backend worker]
 ```
 
-The frontend parses `nvext.agent_hints`, the router uses hints for queueing and
-worker selection, and supported backends use forwarded hints for engine-level
-scheduling and cache policy. For priority-specific semantics, see
-[Priority Scheduling](priority-scheduling.md).
+The frontend parses `nvext.agent_hints`, the router uses hints for queueing and worker selection, and supported backends use forwarded hints for engine-level scheduling and cache policy. For priority-specific semantics, see [Priority Scheduling](priority-scheduling.md).
 
 ## Backend Support
 
-Backend support is runtime-specific. For SGLang flags and behavior, see
-[SGLang for Agentic Workloads](../backends/sglang/agents.md).
+Backend support is runtime-specific. For SGLang flags and behavior, see [SGLang for Agentic Workloads](../backends/sglang/agents.md).
 
 | Feature | vLLM | SGLang | TensorRT-LLM |
 |---------|:----:|:------:|:-------------:|
@@ -67,11 +59,9 @@ Backend support is runtime-specific. For SGLang flags and behavior, see
 
 ## Related Request Extensions
 
-`agent_hints` is separate from `agent_context`:
+`agent_hints` is separate from trajectory identity:
 
-- `agent_context` is passive identity for traces and joins.
-- `agent_hints` is active serving intent for routing, scheduling, and cache
-  behavior.
+- Trajectory IDs are passive identity for traces and joins.
+- `agent_hints` is active serving intent for routing, scheduling, and cache behavior.
 
-Session-control metadata for SGLang subagent KV isolation lives under
-`nvext.session_control`; see [NVIDIA Request Extensions](../components/frontend/nvext.md#session-control).
+Session-control metadata for SGLang subagent KV isolation lives under `nvext.session_control`; see [NVIDIA Request Extensions](../components/frontend/nvext.md#session-control).

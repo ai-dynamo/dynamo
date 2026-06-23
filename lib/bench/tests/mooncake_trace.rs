@@ -19,17 +19,18 @@ use std::time::Duration;
 #[cfg(feature = "mocker-kvbm-offload")]
 use dynamo_bench::kv_router_common::replay::generate_g2_replay_artifacts_with_capacity;
 use dynamo_bench::kv_router_common::replay::{
-    WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace,
+    WorkerReplayArtifacts, generate_replay_artifacts,
+    generate_replay_artifacts_with_args_and_visibility, process_mooncake_trace,
 };
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
-#[cfg(feature = "mocker-kvbm-offload")]
-use dynamo_kv_router::protocols::KvCacheEventData;
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, RouterEvent, StorageTier, TokensWithHashes, WorkerWithDpRank,
+    KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
+use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
 use dynamo_mocker::loadgen::{SessionTrace, Trace, TurnTrace};
+use dynamo_mocker::replay::ReplayKvEventVisibility;
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig, run_benchmark,
 };
@@ -40,12 +41,74 @@ const NUM_GPU_BLOCKS: usize = 16384;
 const NUM_UNIQUE_INFERENCE_WORKERS: usize = 10;
 const BENCHMARK_DURATION_MS: u64 = 2000;
 const NUM_EVENT_WORKERS: usize = 4;
+const PARITY_NUM_GPU_BLOCKS: usize = NUM_GPU_BLOCKS;
+const SGLANG_PARITY_PREFILL_TOKENS: usize = PARITY_NUM_GPU_BLOCKS * BLOCK_SIZE as usize;
 #[cfg(feature = "mocker-kvbm-offload")]
 const G2_TEST_NUM_GPU_BLOCKS: usize = 512;
 #[cfg(feature = "mocker-kvbm-offload")]
 const G2_TEST_NUM_G2_BLOCKS: usize = 16_384;
 
 type NormalizedOverlapScores = BTreeMap<WorkerWithDpRank, u32>;
+
+#[derive(Clone)]
+struct MockEngineReplayArtifacts {
+    engine_name: &'static str,
+    artifacts: Vec<WorkerReplayArtifacts>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MockEngineParityKind {
+    Vllm,
+    Sglang,
+    Trtllm,
+}
+
+impl MockEngineParityKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Vllm => "vllm",
+            Self::Sglang => "sglang",
+            Self::Trtllm => "trtllm",
+        }
+    }
+
+    fn engine_type(self) -> EngineType {
+        match self {
+            Self::Vllm => EngineType::Vllm,
+            Self::Sglang => EngineType::Sglang,
+            Self::Trtllm => EngineType::Trtllm,
+        }
+    }
+
+    fn kv_event_visibility_override(self) -> Option<ReplayKvEventVisibility> {
+        match self {
+            Self::Sglang => Some(ReplayKvEventVisibility::PassStart),
+            Self::Vllm | Self::Trtllm => None,
+        }
+    }
+
+    fn mock_engine_args(self) -> anyhow::Result<MockEngineArgs> {
+        let mut builder = MockEngineArgs::builder()
+            .engine_type(self.engine_type())
+            .num_gpu_blocks(PARITY_NUM_GPU_BLOCKS)
+            .block_size(BLOCK_SIZE as usize)
+            .speedup_ratio(10.0)
+            .enable_prefix_caching(true)
+            .max_num_batched_tokens(None)
+            .max_num_seqs(None);
+
+        if matches!(self, Self::Sglang) {
+            builder = builder.sglang(Some(SglangArgs {
+                page_size: Some(BLOCK_SIZE as usize),
+                max_prefill_tokens: Some(SGLANG_PARITY_PREFILL_TOKENS),
+                chunked_prefill_size: Some(SGLANG_PARITY_PREFILL_TOKENS),
+                ..Default::default()
+            }));
+        }
+
+        builder.build()?.normalized()
+    }
+}
 
 #[derive(Clone)]
 enum ReplayEntryKind {
@@ -117,6 +180,49 @@ fn collect_approx_replay_entries(traces: &[Trace]) -> anyhow::Result<Vec<ReplayE
     }
     entries.sort_by_key(|entry| (entry.timestamp_us, entry.kind_rank, entry.worker_id));
     Ok(entries)
+}
+
+fn count_removed_kv_events(artifacts: &[WorkerReplayArtifacts]) -> usize {
+    artifacts
+        .iter()
+        .flat_map(|artifact| artifact.kv_events.iter())
+        .filter(|event| matches!(&event.event.data, KvCacheEventData::Removed(_)))
+        .count()
+}
+
+fn assert_no_removed_kv_events(engine_name: &str, artifacts: &[WorkerReplayArtifacts]) {
+    assert_eq!(
+        count_removed_kv_events(artifacts),
+        0,
+        "{engine_name} parity artifacts should not contain Removed KV events; increase PARITY_NUM_GPU_BLOCKS if the fixture starts evicting cached blocks"
+    );
+}
+
+async fn generate_mock_engine_parity_artifacts(
+    traces: &[Trace],
+) -> anyhow::Result<Vec<MockEngineReplayArtifacts>> {
+    let mut artifact_sets = Vec::new();
+
+    for engine in [
+        MockEngineParityKind::Vllm,
+        MockEngineParityKind::Sglang,
+        MockEngineParityKind::Trtllm,
+    ] {
+        let artifacts = generate_replay_artifacts_with_args_and_visibility(
+            traces,
+            engine.mock_engine_args()?,
+            None,
+            engine.kv_event_visibility_override(),
+        )
+        .await?;
+        assert_no_removed_kv_events(engine.name(), &artifacts);
+        artifact_sets.push(MockEngineReplayArtifacts {
+            engine_name: engine.name(),
+            artifacts,
+        });
+    }
+
+    Ok(artifact_sets)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -199,17 +305,26 @@ async fn collect_overlap_scores_for_replay(
 async fn collect_overlap_scores_for_supported_modes(
     config: &MooncakeIndexerConfig,
     traces: &[Trace],
-    artifacts: &[WorkerReplayArtifacts],
+    artifact_sets: &[MockEngineReplayArtifacts],
 ) -> anyhow::Result<Vec<(String, Vec<NormalizedOverlapScores>)>> {
-    let mut results = vec![(
-        format!(
-            "{} ({})",
-            config.short_name(),
-            MooncakeReplayMode::KvEvents.name()
-        ),
-        collect_overlap_scores_for_replay(config, traces, artifacts, MooncakeReplayMode::KvEvents)
+    let mut results = Vec::new();
+    for artifact_set in artifact_sets {
+        results.push((
+            format!(
+                "{} {} ({})",
+                config.short_name(),
+                artifact_set.engine_name,
+                MooncakeReplayMode::KvEvents.name()
+            ),
+            collect_overlap_scores_for_replay(
+                config,
+                traces,
+                &artifact_set.artifacts,
+                MooncakeReplayMode::KvEvents,
+            )
             .await?,
-    )];
+        ));
+    }
     if config.supports_approximate() {
         results.push((
             format!(
@@ -217,13 +332,8 @@ async fn collect_overlap_scores_for_supported_modes(
                 config.short_name(),
                 MooncakeReplayMode::Approx.name()
             ),
-            collect_overlap_scores_for_replay(
-                config,
-                traces,
-                artifacts,
-                MooncakeReplayMode::Approx,
-            )
-            .await?,
+            collect_overlap_scores_for_replay(config, traces, &[], MooncakeReplayMode::Approx)
+                .await?,
         ));
     }
     Ok(results)
@@ -232,14 +342,14 @@ async fn collect_overlap_scores_for_supported_modes(
 async fn assert_overlap_score_parity(
     variants: &[MooncakeIndexerConfig],
     traces: &[Trace],
-    artifacts: &[WorkerReplayArtifacts],
+    artifact_sets: &[MockEngineReplayArtifacts],
 ) -> anyhow::Result<()> {
     let mut expected_name = None;
     let mut expected_scores = Vec::new();
 
     for config in variants {
         for (actual_name, actual_scores) in
-            collect_overlap_scores_for_supported_modes(config, traces, artifacts).await?
+            collect_overlap_scores_for_supported_modes(config, traces, artifact_sets).await?
         {
             if expected_name.is_none() {
                 expected_name = Some(actual_name);
@@ -503,7 +613,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
     let traces =
         process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
-    let artifacts = generate_replay_artifacts(&traces, NUM_GPU_BLOCKS, BLOCK_SIZE, None).await?;
+    let artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
 
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
@@ -513,13 +623,36 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
 
-    for mode in [MooncakeReplayMode::KvEvents, MooncakeReplayMode::Approx] {
-        for config in &variants {
-            if matches!(mode, MooncakeReplayMode::Approx) && !config.supports_approximate() {
-                continue;
-            }
+    for config in &variants {
+        let mut inputs = artifact_sets
+            .iter()
+            .map(|artifact_set| {
+                (
+                    format!(
+                        "{} {} ({})",
+                        config.short_name(),
+                        artifact_set.engine_name,
+                        MooncakeReplayMode::KvEvents.name()
+                    ),
+                    MooncakeBenchmarkInput::KvEvents(artifact_set.artifacts.clone()),
+                    MooncakeReplayMode::KvEvents,
+                )
+            })
+            .collect::<Vec<_>>();
+        if config.supports_approximate() {
+            inputs.push((
+                format!(
+                    "{} ({})",
+                    config.short_name(),
+                    MooncakeReplayMode::Approx.name()
+                ),
+                MooncakeBenchmarkInput::Approx(traces.clone()),
+                MooncakeReplayMode::Approx,
+            ));
+        }
+
+        for (label, input, mode) in inputs {
             support::reset_warning_count(&warning_count);
-            let label = format!("{} ({})", config.short_name(), mode.name());
 
             let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
             let indexer = match mode {
@@ -527,10 +660,6 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
                 MooncakeReplayMode::Approx => {
                     config.build_approximate(BLOCK_SIZE, Arc::clone(&metrics))?
                 }
-            };
-            let input = match mode {
-                MooncakeReplayMode::KvEvents => MooncakeBenchmarkInput::KvEvents(artifacts.clone()),
-                MooncakeReplayMode::Approx => MooncakeBenchmarkInput::Approx(traces.clone()),
             };
             let run = run_benchmark(
                 indexer,
@@ -570,7 +699,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
         }
     }
 
-    assert_overlap_score_parity(&variants, &traces, &artifacts).await?;
+    assert_overlap_score_parity(&variants, &traces, &artifact_sets).await?;
 
     Ok(())
 }
@@ -580,13 +709,13 @@ async fn mooncake_trace_branch_sharded_depth4_matches_baseline() -> anyhow::Resu
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
     let traces =
         process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
-    let artifacts = generate_replay_artifacts(&traces, NUM_GPU_BLOCKS, BLOCK_SIZE, None).await?;
+    let artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 4),
     ];
 
-    assert_overlap_score_parity(&variants, &traces, &artifacts).await
+    assert_overlap_score_parity(&variants, &traces, &artifact_sets).await
 }
 
 #[cfg(feature = "mocker-kvbm-offload")]

@@ -975,28 +975,29 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        runtime.register_engine_route("start_profile", self.start_profile)
-        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route("control/start_profile", self.start_profile)
+        runtime.register_engine_route("control/stop_profile", self.stop_profile)
         runtime.register_engine_route(
-            "release_memory_occupation", self.release_memory_occupation
+            "control/release_memory_occupation", self.release_memory_occupation
         )
         runtime.register_engine_route(
-            "resume_memory_occupation", self.resume_memory_occupation
+            "control/resume_memory_occupation", self.resume_memory_occupation
         )
         runtime.register_engine_route(
-            "update_weights_from_disk", self.update_weights_from_disk
+            "control/update_weights_from_disk", self.update_weights_from_disk
         )
         runtime.register_engine_route(
-            "update_weights_from_tensor", self.update_weights_from_tensor
+            "control/update_weights_from_tensor", self.update_weights_from_tensor
         )
         runtime.register_engine_route(
-            "update_weights_from_distributed", self.update_weights_from_distributed
+            "control/update_weights_from_distributed",
+            self.update_weights_from_distributed,
         )
         runtime.register_engine_route(
-            "update_weights_from_ipc", self.update_weights_from_ipc
+            "control/update_weights_from_ipc", self.update_weights_from_ipc
         )
         runtime.register_engine_route(
-            "update_weight_version", self.update_weight_version
+            "control/update_weight_version", self.update_weight_version
         )
         if getattr(self.config, "dynamo_args", None) and getattr(
             self.config.dynamo_args, "enable_rl", False

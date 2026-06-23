@@ -345,6 +345,8 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         model="Qwen/Qwen3-0.6B",
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
         component="backend",
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
     )
     worker_config = object()
 
@@ -1032,6 +1034,40 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     }
     sp = build_sampling_params(request, default_sampling_params={})
     assert sp.thinking_token_budget == 1024
+
+
+def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    model_max_len = 100
+    defaults = {"max_tokens": 32}
+
+    def make(stop_conditions):
+        return {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": stop_conditions,
+            "output_options": {},
+        }
+
+    remaining = model_max_len - 3
+
+    # omitted max_tokens → capped to configured default
+    sp = build_sampling_params(make({}), defaults, model_max_len)
+    assert sp.max_tokens == 32
+
+    # explicit max_tokens == remaining context → treated as explicit, not capped
+    sp = build_sampling_params(make({"max_tokens": remaining}), defaults, model_max_len)
+    assert sp.max_tokens == remaining
+
+    sp = build_sampling_params(make({"max_tokens": 10}), defaults, model_max_len)
+    assert sp.max_tokens == 10
+
+    sp = build_sampling_params(make({"max_tokens": 64}), defaults, model_max_len)
+    assert sp.max_tokens == 64
+
+    sp = build_sampling_params(make({}), {}, model_max_len)
+    assert sp.max_tokens == remaining
 
 
 def _make_dynamo_config(**overrides):

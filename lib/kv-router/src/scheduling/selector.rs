@@ -143,7 +143,10 @@ impl DefaultWorkerSelector {
                 Some(load) => {
                     let cached_tokens = request.effective_cached_tokens_for(worker);
                     // Preserve the legacy operation order when overlap exceeds the prompt.
-                    let uncached_tokens = request.isl_tokens.saturating_sub(cached_tokens);
+                    let uncached_tokens = super::prefill_load::effective_prefill_tokens(
+                        request.isl_tokens,
+                        cached_tokens,
+                    );
                     let projected_tokens = load.active_prefill_tokens + uncached_tokens;
                     projected_tokens.saturating_add(cached_tokens)
                 }
