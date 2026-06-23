@@ -16,7 +16,7 @@ spec:
     type: frontend
   - modelRef:
       name: Qwen/Qwen3-0.6B
-    name: VllmDecodeWorker
+    name: decode
     podTemplate:
       spec:
         containers:

@@ -46,7 +46,7 @@ spec:
   - compilationCache:
       mountPath: /home/dynamo/.cache/vllm
       pvcName: compilation-cache
-    name: VllmDecodeWorker
+    name: decode
     podTemplate:
       spec:
         affinity:
@@ -60,7 +60,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  nvidia.com/dynamo-component: VllmPrefillWorker
+                  nvidia.com/dynamo-component: prefill
               topologyKey: kubernetes.io/hostname
         containers:
         - command:
@@ -109,7 +109,7 @@ spec:
   - compilationCache:
       mountPath: /home/dynamo/.cache/vllm
       pvcName: compilation-cache
-    name: VllmPrefillWorker
+    name: prefill
     podTemplate:
       spec:
         affinity:
@@ -123,7 +123,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  nvidia.com/dynamo-component: VllmDecodeWorker
+                  nvidia.com/dynamo-component: decode
               topologyKey: kubernetes.io/hostname
         containers:
         - command:

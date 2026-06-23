@@ -32,7 +32,7 @@ spec:
               value: tcp
             - name: MODEL_PATH
               value: Qwen/Qwen3-VL-2B-Instruct
-    VllmWorker:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1

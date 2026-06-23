@@ -212,24 +212,20 @@ def parse_process_log(log_dir, process_name):
 
     Args:
         log_dir: Directory containing process log files
-        process_name: Name of process to look for (Frontend, VllmDecodeWorker, etc.)
+        process_name: Name of process to look for (Frontend, decode, etc.)
 
     Returns:
         Dictionary mapping replica names to list of (timestamp, message, relative_time) tuples
     """
     process_ready_pattern = {
         "Frontend": re.compile(r"added model"),
-        "VllmDecodeWorker": re.compile(
-            r"VllmWorker for (?P<model_name>.*?) has been initialized"
-        ),
-        "VllmPrefillWorker": re.compile(
-            r"VllmWorker for (?P<model_name>.*?) has been initialized"
-        ),
         "decode": re.compile(
-            r"Model registration succeeded|Decode worker handler initialized|Worker handler initialized"
+            r"worker for (?P<model_name>.*?) has been initialized"
+            r"|Model registration succeeded|Decode worker handler initialized|Worker handler initialized"
         ),
         "prefill": re.compile(
-            r"Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
+            r"worker for (?P<model_name>.*?) has been initialized"
+            r"|Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
         ),
         "TRTLLMWorker": re.compile(
             r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
@@ -322,8 +318,8 @@ def calculate_recovery_time(test_dir, failure_type, fault_time):
 
     processes = [
         "Frontend",
-        "VllmDecodeWorker",
-        "VllmPrefillWorker",
+        "decode",
+        "prefill",
         "decode",
         "prefill",
         "TRTLLMWorker",

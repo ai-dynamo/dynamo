@@ -23,7 +23,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    VllmWorker:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1

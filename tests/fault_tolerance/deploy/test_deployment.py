@@ -62,7 +62,7 @@ def get_model_from_deployment(
         try:
             model: Optional[str] = None
             if scenario.backend == "vllm":
-                model = deployment_spec["VllmDecodeWorker"].model
+                model = deployment_spec["decode"].model
             elif scenario.backend == "sglang":
                 model = deployment_spec["decode"].model
             elif scenario.backend == "trtllm":

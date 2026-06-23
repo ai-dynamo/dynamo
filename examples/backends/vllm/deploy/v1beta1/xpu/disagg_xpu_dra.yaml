@@ -31,7 +31,7 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -68,7 +68,7 @@ spec:
           resourceClaimTemplateName: gpu-template
     replicas: 1
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:

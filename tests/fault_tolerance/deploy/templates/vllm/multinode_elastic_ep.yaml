@@ -41,7 +41,7 @@ spec:
           karpenter.sh/nodepool: general-medium-storage
         mainContainer:
           image: ${IMAGE}
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1

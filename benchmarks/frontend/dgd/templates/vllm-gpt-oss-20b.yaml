@@ -76,7 +76,7 @@ ${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
             persistentVolumeClaim:
               claimName: model-cache
 
-    VllmWorker:
+    worker:
       componentType: worker
       replicas: ${WORKER_REPLICAS}
       extraPodSpec:

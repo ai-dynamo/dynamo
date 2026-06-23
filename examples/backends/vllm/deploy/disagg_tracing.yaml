@@ -27,7 +27,7 @@ spec:
           env:
             - name: OTEL_SERVICE_NAME
               value: "dynamo-frontend"
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -55,7 +55,7 @@ spec:
           env:
             - name: OTEL_SERVICE_NAME
               value: "dynamo-worker-decode"
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

@@ -161,7 +161,7 @@ deploy() {
       local sel_wk="nvidia.com/dynamo-graph-deployment-name=$DEPLOY_NAME,nvidia.com/dynamo-component-type=worker"
       echo "[deploy] waiting for DGD Frontend pod ..."
       $K wait --for=condition=Ready pod -l "$sel_fe" --timeout=900s
-      echo "[deploy] waiting for VllmWorker pod ..."
+      echo "[deploy] waiting for worker pod ..."
       $K wait --for=condition=Ready pod -l "$sel_wk" --timeout=1500s
       ;;
     *)

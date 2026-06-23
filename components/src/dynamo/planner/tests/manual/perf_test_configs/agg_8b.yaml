@@ -44,7 +44,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000"
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
