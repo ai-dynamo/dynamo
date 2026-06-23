@@ -2482,7 +2482,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.3.0"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdeae45f2465f48b0abc980a5745add4bc59be15701f87f604a97e1282c8db77"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2772,9 +2774,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.2.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "796a262ed47d1458a4b40d0ed831c927e6f54d5b9c1de2683bb4ac9b04f4c7cc"
+checksum = "1f38849fadd9e96f872be6549556d26b3e9f5135b6ac8b616205de554fdd4318"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
