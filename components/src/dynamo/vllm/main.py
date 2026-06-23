@@ -23,6 +23,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -42,7 +43,6 @@ from dynamo.llm import (
     ModelRuntimeConfig,
     ModelType,
     WorkerType,
-    fetch_model,
     register_model,
 )
 from dynamo.runtime import Endpoint
@@ -183,8 +183,8 @@ async def worker(argv: list[str] | None = None) -> None:
     if should_prefetch_model(config):
         await fetch_model(config.model)
 
-    # CHECKPOINT MODE: Load engine BEFORE runtime creation
-    # This allows checkpointing GPU state before runtime connections are established
+    # Snapshot mode: load engine before runtime creation so there are no
+    # runtime connections when CRIU captures GPU state.
     snapshot_controller = await prepare_snapshot_engine(
         config,
         setup_vllm_engine,
@@ -270,8 +270,8 @@ def setup_metrics_collection(
         )
 
         multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
-        # After CRIU restore to another node, env still has the checkpoint pod's path
-        # but that directory exists only on the checkpoint node; create it here if missing.
+        # After CRIU restore to another node, env still has the snapshot pod's path
+        # but that directory exists only on that node; create it here if missing.
         if multiproc_dir and not os.path.isdir(multiproc_dir):
             try:
                 os.makedirs(multiproc_dir, exist_ok=True)

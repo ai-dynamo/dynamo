@@ -156,7 +156,6 @@ opentelemetry-otlp = { version = "0.31.0", features = [
     "logs",
     "grpc-tonic",
     "http-proto",
-    "reqwest-client",
     "reqwest-rustls",
 ] }
 opentelemetry-appender-tracing = { version = "0.31.0" }

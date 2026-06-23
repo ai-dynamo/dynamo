@@ -21,6 +21,16 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 
 MODEL="Qwen/Qwen3-0.6B"
 
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+# Strip --unified via the shared helper, then parse the remaining flags.
+# `--unified` routes workers through dynamo.sglang.unified_main (the Rust
+# backend-common Worker, which owns the prefill drain loop); default stays
+# on the legacy main. Done before the arg loop so it isn't rejected as an
+# unknown option.
+pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
+
 # --model overrides the default (e.g. a VLM for the multimodal P/D test).
 # --single-gpu is a no-op kept for parity with the other launch scripts.
 while [[ $# -gt 0 ]]; do
@@ -38,9 +48,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--model <name>] [--single-gpu]"
+            echo "Usage: $0 [--model <name>] [--single-gpu] [--unified]"
             echo "  --model <name>  Model to serve (default: $MODEL)"
             echo "  --single-gpu    Accepted no-op; both workers already share GPU 0"
+            echo "  --unified       Use the unified_main entry point (Rust Worker)"
             exit 0
             ;;
         *)
@@ -70,13 +81,6 @@ MEM_SAVER_ARGS="--enable-memory-saver --delete-ckpt-after-loading"
 if [[ "${DYN_SGLANG_DISABLE_MEMORY_SAVER:-0}" == "1" ]]; then
     MEM_SAVER_ARGS=""
 fi
-
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
-# Select legacy vs unified worker entry point. `--unified` routes workers
-# through dynamo.sglang.unified_main (the Rust backend-common Worker, which
-# owns the prefill drain loop); default stays on the legacy main.
-pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
 
 DISAGG_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-12345}"
 
