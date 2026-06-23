@@ -28,9 +28,10 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /usr/bin/uv
 COPY --from=dynamo_base /bin/uvx /usr/bin/uvx
 
-{% if target == "runtime" %}
+{% if target in ("runtime", "dev", "local-dev") %}
 # Renamed `runtime` → `runtime_full` so the final stage can re-FROM upstream
-# and overlay our changes as a single layer (cuts depth for downstream wrappers).
+# and overlay our changes as a single layer (cuts depth for downstream wrappers,
+# incl. the dev image, which otherwise overflows overlay2's ~128-layer cap).
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_full
 {% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
@@ -181,7 +182,7 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 ENTRYPOINT []
 CMD ["/bin/bash"]
 
-{% if target == "runtime" %}
+{% if target in ("runtime", "dev", "local-dev") %}
 # Rebase on upstream so this stage inherits upstream's image config
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
@@ -194,6 +195,16 @@ COPY --from=runtime_full / /
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
+# dev/local-dev create their own venv in a later stage, so the venv ENV is left
+# out for them — keeps this config identical to the unsquashed dev path.
+{% if target in ("dev", "local-dev") %}
+ENV DYNAMO_HOME=/workspace \
+    HOME=/home/dynamo \
+    PATH=/usr/local/bin/etcd:${PATH} \
+    IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+{% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
@@ -201,6 +212,7 @@ ENV DYNAMO_HOME=/workspace \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+{% endif %}
 
 WORKDIR /workspace
 
