@@ -131,6 +131,7 @@ jobs:
         uses: ./.github/actions/build-deploy-component
         with:
           component: power-agent
+          target: runtime  # push the slim shipped stage, not the test stage
           image_tag: ${{ github.sha }}-power-agent
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -140,6 +141,43 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-power-agent
+
+  power-agent-test:
+    name: Power Agent  # group under the same UI umbrella as the build job
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Run unit tests inside the container image
+        # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
+        # the suite against the exact shipped image (Python 3.12 + baked deps),
+        # validating the container itself rather than a pip-installed runner env.
+        run: docker build --target test -f deploy/power-agent/Dockerfile deploy/power-agent
+
+  power-agent-helm-tests:
+    name: Power Agent  # group under the same UI umbrella as the build job
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        with:
+          version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
+      - name: Lint and render (production + dev)
+        run: |
+          CHART=deploy/helm/charts/power-agent
+          helm lint "$CHART" --set image.tag=ci-test
+          # Production DaemonSet render (default daemonset.enabled=true).
+          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
+          # Dev-pod render: uses dev.image.* and must NOT require the production
+          # image.tag (regression guard for the daemonset-gated validation).
+          helm template power-agent "$CHART" \
+            --set daemonset.enabled=false \
+            --set dev.enabled=true \
+            --set dev.nodeName=ci-node >/dev/null
 
   # ============================================================================
   # BUILD JOBS

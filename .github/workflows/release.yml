@@ -392,20 +392,9 @@ jobs:
             SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
             SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
             copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
-
-            # ---- Power Agent image (amd64-only DaemonSet built by post-merge power-agent job) ----
-            # Source tag matches the power-agent build in pr.yaml / post-merge-ci.yml
-            # (${COMMIT_SHA}-power-agent). NGC repo matches the chart default in
-            # deploy/helm/charts/power-agent/values.yaml (ai-dynamo/power-agent),
-            # so released `helm install --set image.tag=<NGC_VERSION_TAG>` resolves.
-            echo ""
-            echo "=== Power Agent Image ==="
-            POWER_AGENT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-power-agent"
-            POWER_AGENT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/power-agent:${NGC_VERSION_TAG}"
-            copy_image "${POWER_AGENT_SOURCE}" "${POWER_AGENT_TARGET}" "power-agent:${NGC_VERSION_TAG}"
           else
             echo ""
-            echo "=== Skipping EFA / frontend / operator / planner / snapshot / power-agent (not built by nightly) ==="
+            echo "=== Skipping EFA / frontend / operator / planner / snapshot (not built by nightly) ==="
           fi
 
           # ---- Summary ----
@@ -468,22 +457,6 @@ jobs:
           helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
           echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
 
-          # Standalone power-agent chart (no subchart deps, so no `helm dep build`).
-          # Versioned to HELM_CHART_VERSION for parity with the platform chart;
-          # the agent image is pinned separately via `--set image.tag` at install.
-          POWER_AGENT_CHART_DIR="deploy/helm/charts/power-agent"
-          PA_CHART_NAME=$(awk '/^name:/ {print $2}' "${POWER_AGENT_CHART_DIR}/Chart.yaml")
-          echo "Packaging ${PA_CHART_NAME} with version ${HELM_CHART_VERSION}..."
-          helm package \
-            --version "${HELM_CHART_VERSION}" \
-            --app-version "${HELM_CHART_VERSION}" \
-            "${POWER_AGENT_CHART_DIR}"
-
-          PA_CHART_FILE="${PA_CHART_NAME}-${HELM_CHART_VERSION}.tgz"
-          echo "Pushing ${PA_CHART_FILE} to NGC Helm registry..."
-          helm cm-push "${PA_CHART_FILE}" "${REPO_ALIAS}"
-          echo "- \`${PA_CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
-
           helm repo remove "${REPO_ALIAS}"
 
       - name: Create release summary
@@ -543,15 +516,11 @@ jobs:
             echo "Planner image:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Power Agent image:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`power-agent:${NGC_VERSION_TAG}\` (amd64)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
             echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Helm charts:" >> $GITHUB_STEP_SUMMARY
+            echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
-            echo "- \`power-agent:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
           fi
 
   # ============================================================================

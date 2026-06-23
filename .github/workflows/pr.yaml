@@ -224,6 +224,7 @@ jobs:
         uses: ./.github/actions/build-deploy-component
         with:
           component: power-agent
+          target: runtime  # push the slim shipped stage, not the test stage
           image_tag: ${{ github.sha }}-power-agent
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -232,27 +233,21 @@ jobs:
   power-agent-test:
     needs: changed-files
     if: needs.changed-files.outputs.power_agent == 'true'
-    name: Power Agent Tests
+    name: Power Agent  # group under the same UI umbrella as the build job
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          # Mirrors deploy/power-agent/Dockerfile runtime deps plus pytest.
-          pip install pytest pynvml==12.0.* kubernetes==30.* prometheus-client==0.20.*
-      - name: Run unit tests
-        run: python -m pytest deploy/power-agent/tests/ -v
+      - name: Run unit tests inside the container image
+        # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
+        # the suite against the exact shipped image (Python 3.12 + baked deps),
+        # validating the container itself rather than a pip-installed runner env.
+        run: docker build --target test -f deploy/power-agent/Dockerfile deploy/power-agent
 
   power-agent-helm-tests:
     needs: changed-files
     if: needs.changed-files.outputs.power_agent == 'true'
-    name: Power Agent Helm Tests
+    name: Power Agent  # group under the same UI umbrella as the build job
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

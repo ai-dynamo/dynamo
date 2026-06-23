@@ -6,8 +6,18 @@
 # and built by the `power-agent` CI job (.github/workflows/pr.yaml,
 # post-merge-ci.yml).
 #
-#   docker build -t power-agent:dev -f deploy/power-agent/Dockerfile \
+# Two stages:
+#   * `runtime` — the slim, shipped image (built/pushed with `--target runtime`).
+#   * `test`    — `FROM runtime` + pytest + tests; its `RUN pytest` executes the
+#                 unit suite *inside the shipped image layers* so CI validates
+#                 the container itself (same Python 3.12 + same baked deps), not
+#                 a separately pip-installed runner env. Never pushed.
+#
+#   # shipped image:
+#   docker build --target runtime -t power-agent:dev -f deploy/power-agent/Dockerfile \
 #       deploy/power-agent
+#   # run unit tests inside the image (CI `power-agent-test` job):
+#   docker build --target test -f deploy/power-agent/Dockerfile deploy/power-agent
 
 # DOCKER_PROXY lets CI route the base image through the ECR Docker Hub mirror
 # (e.g. <acct>.dkr.ecr.<region>.amazonaws.com/dockerhub/). Empty by default so
@@ -17,7 +27,7 @@ ARG DOCKER_PROXY=
 # Slim base — the NVIDIA Container Toolkit injects libnvidia-ml.so at runtime
 # via runtimeClassName: nvidia (set by the Helm chart), so the image does NOT
 # bake pynvml's native dependency. nvmlInit() resolves the host driver lib.
-FROM ${DOCKER_PROXY}python:3.11-slim-bookworm AS runtime
+FROM ${DOCKER_PROXY}python:3.12-slim-bookworm AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -43,3 +53,20 @@ USER 0
 # the image directly outside the chart (dev / debugging).
 ENTRYPOINT ["python", "/app/power_agent.py"]
 CMD ["--help"]
+
+# ---------------------------------------------------------------------------
+# test stage — CI-only. Builds FROM the shipped `runtime` image so the unit
+# suite runs against the exact Python 3.12 + baked pynvml/kubernetes/
+# prometheus-client versions that ship, then fails the build if any test fails.
+# Not referenced by `--target runtime`, so it never lands in the pushed image.
+# ---------------------------------------------------------------------------
+FROM runtime AS test
+
+RUN pip install --no-cache-dir pytest
+
+# pytest.ini sets pythonpath=. so `from power_agent import …` resolves against
+# /app (WORKDIR) where power_agent.py already lives in the runtime layer.
+COPY pytest.ini /app/pytest.ini
+COPY tests/ /app/tests/
+
+RUN python -m pytest tests -v
