@@ -64,9 +64,9 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         KvSchedulerError::NoEndpoints
         | KvSchedulerError::SubscriberShutdown
         | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::Backpressure { .. }
-        | KvSchedulerError::AllEligibleWorkersOverloaded
+        KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
+        KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
         KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
     }
@@ -84,6 +84,17 @@ fn sequence_error_status(error: &SequenceError) -> StatusCode {
 
 impl IntoResponse for SelectionError {
     fn into_response(self) -> Response {
+        if let Self::Scheduler(KvSchedulerError::QueueRejected(rejection)) = &self {
+            return (
+                self.status(),
+                Json(serde_json::json!({
+                    "error": self.to_string(),
+                    "details": rejection,
+                })),
+            )
+                .into_response();
+        }
+
         (
             self.status(),
             Json(serde_json::json!({"error": self.to_string()})),

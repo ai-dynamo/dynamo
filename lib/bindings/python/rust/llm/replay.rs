@@ -734,7 +734,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -757,6 +757,7 @@ pub fn run_mocker_trace_replay(
     trace_num_prefix_groups: usize,
     report_jsonl_path: Option<PathBuf>,
     max_sim_time_ms: Option<f64>,
+    model_name: Option<String>,
     sla_ttft_ms: Option<f64>,
     sla_itl_ms: Option<f64>,
     sla_e2e_ms: Option<f64>,
@@ -778,7 +779,7 @@ pub fn run_mocker_trace_replay(
         router_config.as_ref(),
         aic_perf_config,
     )?;
-    let router_config = load_replay_router_config(router_config);
+    let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
     if report_jsonl_path.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
@@ -983,7 +984,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1007,6 +1008,7 @@ pub fn run_mocker_synthetic_trace_replay(
     shared_prefix_ratio: f64,
     num_prefix_groups: usize,
     inter_turn_delay_ms: f64,
+    model_name: Option<String>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -1024,7 +1026,7 @@ pub fn run_mocker_synthetic_trace_replay(
         router_config.as_ref(),
         aic_perf_config,
     )?;
-    let router_config = load_replay_router_config(router_config);
+    let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
     let block_size = match &args_selection {
         ReplayArgsSelection::Aggregated(args) => args.block_size.max(1),
@@ -1389,8 +1391,13 @@ fn populate_missing_offload_kv_bytes_per_token(
 
 fn load_replay_router_config(
     router_config: Option<KvRouterConfig>,
-) -> Option<dynamo_kv_router::config::KvRouterConfig> {
-    router_config.map(|config| config.inner())
+    model_name: Option<String>,
+) -> PyResult<Option<dynamo_kv_router::config::KvRouterConfig>> {
+    if model_name.as_ref().is_some_and(|name| name.is_empty()) {
+        return Err(PyValueError::new_err("model_name must be non-empty"));
+    }
+
+    Ok(router_config.map(|config| config.inner().with_policy_model_name(model_name)))
 }
 
 fn load_replay_prefill_load_estimator(
@@ -1667,7 +1674,7 @@ pub struct PlannerReplayBridge {
 impl PlannerReplayBridge {
     /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
     #[new]
-    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
+    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         trace_file: PathBuf,
@@ -1675,6 +1682,7 @@ impl PlannerReplayBridge {
         num_workers: usize,
         router_mode: &str,
         router_config: Option<KvRouterConfig>,
+        model_name: Option<String>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
         sla_ttft_ms: Option<f64>,
@@ -1685,7 +1693,7 @@ impl PlannerReplayBridge {
         let args =
             Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
         let router_mode = parse_replay_router_mode(router_mode)?;
-        let router_config = load_replay_router_config(router_config);
+        let router_config = load_replay_router_config(router_config, model_name)?;
         validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
         validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
         validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
@@ -1717,7 +1725,7 @@ impl PlannerReplayBridge {
 
     /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
     #[staticmethod]
-    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
+    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_disagg(
         trace_file: PathBuf,
@@ -1727,6 +1735,7 @@ impl PlannerReplayBridge {
         num_decode_workers: usize,
         router_mode: &str,
         router_config: Option<KvRouterConfig>,
+        model_name: Option<String>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
         sla_ttft_ms: Option<f64>,
@@ -1745,7 +1754,7 @@ impl PlannerReplayBridge {
             num_decode_workers,
         };
         let router_mode = parse_replay_router_mode(router_mode)?;
-        let router_config = load_replay_router_config(router_config);
+        let router_config = load_replay_router_config(router_config, model_name)?;
         validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
         validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
         validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
@@ -1781,7 +1790,7 @@ impl PlannerReplayBridge {
     /// `num_prefix_groups` control prefix-cache sharing; `turns_per_session` > 1
     /// makes each session multi-turn (total requests = request_count * turns).
     #[staticmethod]
-    #[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, replay_concurrency=None, arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, model_name=None, replay_concurrency=None, arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
     #[allow(clippy::too_many_arguments)]
     fn from_synthetic(
         input_tokens: usize,
@@ -1791,6 +1800,7 @@ impl PlannerReplayBridge {
         num_workers: usize,
         router_mode: &str,
         router_config: Option<KvRouterConfig>,
+        model_name: Option<String>,
         replay_concurrency: Option<isize>,
         arrival_speedup_ratio: f64,
         arrival_interval_ms: f64,
@@ -1805,7 +1815,7 @@ impl PlannerReplayBridge {
         let args =
             Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
         let router_mode = parse_replay_router_mode(router_mode)?;
-        let router_config = load_replay_router_config(router_config);
+        let router_config = load_replay_router_config(router_config, model_name)?;
         validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
         validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
         validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
@@ -1856,7 +1866,7 @@ impl PlannerReplayBridge {
     /// Create a bridge for a disaggregated **synthetic** workload. See
     /// [`PlannerReplayBridge::from_synthetic`] for the load-shape parameters.
     #[staticmethod]
-    #[pyo3(signature = (input_tokens, output_tokens, request_count, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, replay_concurrency=None, arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[pyo3(signature = (input_tokens, output_tokens, request_count, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, model_name=None, replay_concurrency=None, arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
     #[allow(clippy::too_many_arguments)]
     fn from_synthetic_disagg(
         input_tokens: usize,
@@ -1868,6 +1878,7 @@ impl PlannerReplayBridge {
         num_decode_workers: usize,
         router_mode: &str,
         router_config: Option<KvRouterConfig>,
+        model_name: Option<String>,
         replay_concurrency: Option<isize>,
         arrival_speedup_ratio: f64,
         arrival_interval_ms: f64,
@@ -1890,7 +1901,7 @@ impl PlannerReplayBridge {
             num_decode_workers,
         };
         let router_mode = parse_replay_router_mode(router_mode)?;
-        let router_config = load_replay_router_config(router_config);
+        let router_config = load_replay_router_config(router_config, model_name)?;
         validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
         validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
         validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;

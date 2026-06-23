@@ -1552,6 +1552,7 @@ dependencies = [
  "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
+ "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

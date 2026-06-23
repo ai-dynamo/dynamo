@@ -14,9 +14,9 @@ use dynamo_kv_router::{
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint,
-        RouterBackpressureReason, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
-        TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
+        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
         CacheHitEstimates, OverloadedWorkerProvider, effective_prefill_tokens,
@@ -86,10 +86,8 @@ pub enum FindBestMatchOutcome {
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
     },
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        max_queued_isl_tokens: Option<usize>,
+    QueueRejected {
+        rejection: scheduling::QueueRejection,
     },
 }
 
@@ -271,6 +269,7 @@ where
             prefill_load_estimator.clone(),
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
+            model_name.as_deref(),
             worker_type,
         )
         .await?;
@@ -402,6 +401,43 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            priority_jump,
+            strict_priority,
+            None,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_details_with_policy_class(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -472,7 +508,7 @@ where
 
         let response = match self
             .scheduler
-            .schedule_with_block_hashes(
+            .schedule_with_policy_class_and_block_hashes(
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
@@ -488,6 +524,7 @@ where
                 lora_name,
                 priority_jump,
                 strict_priority,
+                policy_class,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -498,16 +535,8 @@ where
             .await
         {
             Ok(response) => response,
-            Err(KvSchedulerError::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            }) => {
-                return Ok(FindBestMatchOutcome::Backpressure {
-                    reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens,
-                });
+            Err(KvSchedulerError::QueueRejected(rejection)) => {
+                return Ok(FindBestMatchOutcome::QueueRejected { rejection });
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
@@ -597,13 +626,7 @@ where
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            FindBestMatchOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => Err(anyhow::anyhow!(
-                "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
-            )),
+            FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
     }
 
@@ -989,6 +1012,7 @@ where
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
         let context_id = ctx.context().id().to_string();
+        let policy_class = ctx.metadata().get("policy-class").cloned();
         // Handle different request types
         let response = match request {
             RouterRequest::New {
@@ -1000,7 +1024,7 @@ where
                 lora_name,
             } => {
                 match self
-                    .find_best_match_details(
+                    .find_best_match_details_with_policy_class(
                         Some(&context_id),
                         &tokens,
                         block_mm_infos.as_deref(),
@@ -1010,6 +1034,7 @@ where
                         lora_name,
                         priority_jump,
                         strict_priority,
+                        policy_class,
                         None,
                         None,
                         None,
@@ -1026,15 +1051,9 @@ where
                         dp_rank: worker.dp_rank,
                         overlap_blocks,
                     },
-                    Ok(FindBestMatchOutcome::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    }) => RouterResponse::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    },
+                    Ok(FindBestMatchOutcome::QueueRejected { rejection }) => {
+                        RouterResponse::QueueRejected { rejection }
+                    }
                     Err(error) => return Err(error),
                 }
             }

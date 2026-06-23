@@ -58,12 +58,20 @@ impl KvPushRouter {
         is_query_only: bool,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
+        let policy_class = request.metadata().get("policy-class").cloned();
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let mut selection_future = Box::pin(async {
-            self.select_worker(&context_id, request, routing_parts, phase, is_query_only)
-                .instrument(tracing::info_span!("kv_router.select_worker"))
-                .await
+            self.select_worker(
+                &context_id,
+                request,
+                routing_parts,
+                phase,
+                is_query_only,
+                policy_class,
+            )
+            .instrument(tracing::info_span!("kv_router.select_worker"))
+            .await
         });
         let selection_result = tokio::select! {
             biased;

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -39,6 +40,26 @@ class PlannerProfileDataResult(Protocol):
 _DEFAULT_AIC_SYSTEM = "h200_sxm"
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 _DEFAULT_VLLM_BLOCK_SIZE = 64
+
+
+def _load_router_config(
+    router_config_json: str | None,
+    router_policy_config: str | None,
+):
+    if router_policy_config is None:
+        return (
+            KvRouterConfig.from_json(router_config_json)
+            if router_config_json is not None
+            else None
+        )
+
+    values = json.loads(router_config_json) if router_config_json is not None else {}
+    if not isinstance(values, dict):
+        raise ValueError("--router-config must contain a JSON object")
+    values["router_policy_config"] = router_policy_config
+    return KvRouterConfig.from_json(json.dumps(values))
+
+
 _DEFAULT_SGLANG_BLOCK_SIZE = 1
 _DEFAULT_TRTLLM_BLOCK_SIZE = 32
 
@@ -342,6 +363,7 @@ def _run_planner_replay(
     arrival_speedup_ratio: float,
     trace_block_size: int,
     planner_config_arg: str,
+    model_name: str | None = None,
     benchmark_granularity: int = 8,
     sla_ttft_ms: float | None = None,
     sla_itl_ms: float | None = None,
@@ -389,6 +411,7 @@ def _run_planner_replay(
                 num_workers=num_workers,
                 router_mode=router_mode,
                 router_config=router_config,
+                model_name=model_name,
                 replay_concurrency=replay_concurrency,
                 arrival_speedup_ratio=arrival_speedup_ratio,
                 arrival_interval_ms=synthetic.arrival_interval_ms,
@@ -409,6 +432,7 @@ def _run_planner_replay(
                 num_workers=num_workers,
                 router_mode=router_mode,
                 router_config=router_config,
+                model_name=model_name,
                 arrival_speedup_ratio=arrival_speedup_ratio,
                 trace_block_size=trace_block_size,
                 replay_concurrency=replay_concurrency,
@@ -434,6 +458,7 @@ def _run_planner_replay(
                 num_decode_workers=num_decode_workers,
                 router_mode=router_mode,
                 router_config=router_config,
+                model_name=model_name,
                 replay_concurrency=replay_concurrency,
                 arrival_speedup_ratio=arrival_speedup_ratio,
                 arrival_interval_ms=synthetic.arrival_interval_ms,
@@ -456,6 +481,7 @@ def _run_planner_replay(
                 num_decode_workers=num_decode_workers,
                 router_mode=router_mode,
                 router_config=router_config,
+                model_name=model_name,
                 arrival_speedup_ratio=arrival_speedup_ratio,
                 trace_block_size=trace_block_size,
                 replay_concurrency=replay_concurrency,
@@ -610,6 +636,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--prefill-engine-args")
     parser.add_argument("--decode-engine-args")
     parser.add_argument("--router-config")
+    parser.add_argument(
+        "--router-policy-config",
+        default=os.environ.get("DYN_ROUTER_POLICY_CONFIG"),
+        help=(
+            "startup-only policy-family and cache-bucket queue YAML path; "
+            "overrides router_policy_config inside --router-config"
+        ),
+    )
+    parser.add_argument(
+        "--model-name",
+        help="model profile to select from --router-policy-config",
+    )
     parser.add_argument("--aic-backend")
     parser.add_argument("--aic-system")
     parser.add_argument("--aic-backend-version")
@@ -792,10 +830,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     extra_engine_args = _load_engine_args(args.extra_engine_args)
     prefill_engine_args = _load_engine_args(args.prefill_engine_args)
     decode_engine_args = _load_engine_args(args.decode_engine_args)
-    router_config = (
-        KvRouterConfig.from_json(args.router_config)
-        if args.router_config is not None
-        else None
+    router_config = _load_router_config(
+        args.router_config,
+        args.router_policy_config,
     )
     try:
         aic_perf_config = _load_aic_perf_config(args)
@@ -835,6 +872,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             arrival_speedup_ratio=args.arrival_speedup_ratio,
             trace_block_size=args.trace_block_size,
             planner_config_arg=args.planner_config,
+            model_name=args.model_name,
             benchmark_granularity=args.benchmark_granularity,
             sla_ttft_ms=args.sla_ttft_ms,
             sla_itl_ms=args.sla_itl_ms,
@@ -888,6 +926,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace_num_prefix_groups=args.trace_num_prefix_groups,
             report_jsonl_path=args.report_jsonl,
             max_sim_time_ms=max_sim_time_ms,
+            model_name=args.model_name,
         )
     else:
         report = run_synthetic_trace_replay(
@@ -911,6 +950,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             shared_prefix_ratio=args.shared_prefix_ratio,
             num_prefix_groups=args.num_prefix_groups,
             inter_turn_delay_ms=args.inter_turn_delay_ms,
+            model_name=args.model_name,
         )
 
     report_path = write_report_json(report, args.report_json)
