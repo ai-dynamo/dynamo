@@ -114,7 +114,7 @@ git clone https://github.com/ai-dynamo/dynamo.git
 cd dynamo
 ```
 
-Inspect [examples/deployments/GKE/vllm/v1beta1/agg.yaml](../../../../examples/deployments/GKE/vllm/v1beta1/agg.yaml).
+Inspect `examples/deployments/GKE/vllm/v1beta1/agg.yaml`.
 
 It contains
 [DynamoGraphDeployment](https://docs.nvidia.com/dynamo/latest/kubernetes-deployment/start-here/kubernetes-quickstart#understand-dynamo-deployment-resources)
