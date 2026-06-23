@@ -17,6 +17,7 @@ limitations under the License.
 package dynamo_kv_scorer
 
 import (
+	"reflect"
 	"testing"
 
 	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
@@ -60,5 +61,31 @@ func TestBuildOpenAIRequest_ForwardsAgentHintsPriority(t *testing.T) {
 	}
 	if got := hints["priority"]; got != 7 {
 		t.Fatalf("expected priority=7 forwarded to FFI body, got %v", got)
+	}
+}
+
+func TestBuildOpenAIRequest_CompletionsTokenPromptUsesPromptIDs(t *testing.T) {
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{TokenIDs: []uint32{101, 102, 103}},
+			},
+		},
+	}
+
+	body, err := BuildOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
+	}
+
+	if _, ok := body["messages"]; ok {
+		t.Fatalf("did not expect token-id completions to synthesize messages: %v", body["messages"])
+	}
+	if got := body["prompt"]; !reflect.DeepEqual(got, []uint32{101, 102, 103}) {
+		t.Fatalf("expected prompt token IDs, got %#v", got)
+	}
+	if got := body["model"]; got != "test-model" {
+		t.Fatalf("expected model=test-model, got %v", got)
 	}
 }
