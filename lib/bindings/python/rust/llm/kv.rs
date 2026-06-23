@@ -131,6 +131,18 @@ struct KvIndexerCli {
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
     peers: Option<String>,
+
+    /// Write access log (JSON lines) to this file
+    #[arg(long)]
+    access_log: Option<std::path::PathBuf>,
+
+    /// HTTP header name to extract trace-id from
+    #[arg(long, default_value = "x-trace-id")]
+    trace_id_header: String,
+
+    /// Use local timezone for access log timestamps (default: UTC)
+    #[arg(long)]
+    access_log_local_time: bool,
 }
 
 pub fn run_kv_indexer_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -145,6 +157,12 @@ where
                 .chain(args.into_iter().map(Into::into)),
         )?;
 
+        let trace_id_header =
+            dynamo_kv_router::services::indexer::logging::parse_header_name(&cli.trace_id_header)
+                .map_err(|e| {
+                anyhow::anyhow!("invalid --trace-id-header '{}': {e}", cli.trace_id_header)
+            })?;
+
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
@@ -156,6 +174,9 @@ where
             model_name: cli.model_name,
             tenant_id: cli.tenant_id,
             peers: cli.peers,
+            access_log: cli.access_log,
+            trace_id_header,
+            access_log_local_time: cli.access_log_local_time,
         }))
     }
 
@@ -683,6 +704,46 @@ impl WorkerMetricsPublisher {
     ) -> PyResult<()> {
         self.inner
             .publish(dp_rank, active_decode_blocks, kv_used_blocks)
+            .map_err(to_pyerr)
+    }
+}
+
+#[pyclass]
+pub(crate) struct MultimodalEmbeddingCachePublisher {
+    inner: Arc<llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher>,
+}
+
+#[pymethods]
+impl MultimodalEmbeddingCachePublisher {
+    #[new]
+    fn new() -> Self {
+        let inner = llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher::new();
+        Self {
+            inner: inner.into(),
+        }
+    }
+
+    #[pyo3(signature = (endpoint))]
+    fn create_endpoint<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: Endpoint,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let rs_publisher = self.inner.clone();
+        let rs_component = endpoint.inner.component().clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            rs_publisher
+                .create_endpoint(rs_component)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature = (added_keys, removed_keys))]
+    fn publish_delta(&self, added_keys: Vec<String>, removed_keys: Vec<String>) -> PyResult<()> {
+        self.inner
+            .publish_delta(added_keys, removed_keys)
             .map_err(to_pyerr)
     }
 }
@@ -1546,6 +1607,7 @@ impl KvRouter {
                     |infos| llm_rs::protocols::common::preprocessor::MmRoutingInfo {
                         routing_token_ids: token_ids.clone(),
                         block_mm_infos: infos,
+                        expanded_prompt_len: token_ids.len(),
                     },
                 )
             };

@@ -52,8 +52,6 @@ func buildCheckpointJob(
 	}
 	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{targetContainerName})
 
-	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
-
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
@@ -67,7 +65,6 @@ func buildCheckpointJob(
 	if targetContainer == nil {
 		return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", targetContainerName)
 	}
-	checkpoint.EnsurePodInfoMount(targetContainer)
 	checkpoint.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, targetContainer, ckpt.Spec.Job.SharedMemory)
 	// NewCheckpointJob handles control volume + readiness probe from the
 	// snapshot contract.

@@ -7,15 +7,12 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::{RoutingEligibility, WorkerEligibilityError},
+    scheduling::RoutingEligibility,
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
-    kv_router::{
-        FindBestMatchOutcome, push_router::KvPushRouter,
-        sticky::coordinator::sticky_allowed_for_phase,
-    },
+    kv_router::{FindBestMatchOutcome, push_router::KvPushRouter},
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -109,7 +106,6 @@ impl KvPushRouter {
     }
 
     /// Select a worker using either a phase-specific pin or KV overlap.
-    #[expect(clippy::too_many_arguments)]
     pub(super) async fn select_worker(
         &self,
         context_id: &str,
@@ -117,7 +113,6 @@ impl KvPushRouter {
         routing_parts: RoutingRequestParts<'_>,
         phase: RequestPhase,
         is_query_only: bool,
-        sticky_worker: Option<WorkerWithDpRank>,
         policy_class: Option<String>,
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
@@ -136,10 +131,7 @@ impl KvPushRouter {
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
-        let sticky_pin = sticky_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
-        let Some((pinned_worker_id, requested_dp_rank)) =
-            pinned_worker_hint(phase, routing).or(sticky_pin)
-        else {
+        let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
@@ -230,58 +222,6 @@ impl KvPushRouter {
         })
         .await
     }
-
-    fn sticky_worker_ineligibility_for_phase(
-        &self,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-        worker: WorkerWithDpRank,
-    ) -> Option<WorkerEligibilityError> {
-        let routing = request.routing.as_ref()?;
-        if !sticky_allowed_for_phase(phase, Some(routing)) {
-            return None;
-        }
-
-        let default_constraints = RoutingConstraints::default();
-        let routing_constraints = routing
-            .routing_constraints
-            .as_ref()
-            .unwrap_or(&default_constraints);
-        let configs = self.chooser.workers_with_configs.borrow();
-        let eligibility = RoutingEligibility::new(
-            routing.allowed_worker_ids.as_ref(),
-            None,
-            Some(worker),
-            routing_constraints,
-        );
-        eligibility.validate_worker_rank(&configs, worker).err()
-    }
-
-    pub(crate) fn unbind_ineligible_sticky_worker_for_phase(
-        &self,
-        context_id: &str,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-        worker: WorkerWithDpRank,
-    ) -> bool {
-        let Some(reason) = self.sticky_worker_ineligibility_for_phase(request, phase, worker)
-        else {
-            return false;
-        };
-
-        let Some((session_id, _binding)) = self.sticky.unbind_for_phase(request, phase) else {
-            return false;
-        };
-        tracing::warn!(
-            request_id = %context_id,
-            %session_id,
-            worker_id = worker.worker_id,
-            dp_rank = worker.dp_rank,
-            reason = %reason,
-            "Sticky worker is no longer eligible; removing session affinity"
-        );
-        true
-    }
 }
 
 fn resolve_pinned_worker_rank(
@@ -322,18 +262,10 @@ fn pinned_worker_hint(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
-
-    use dynamo_kv_router::{
-        protocols::{RoutingConstraints, WorkerWithDpRank},
-        scheduling::{RoutingEligibility, WorkerEligibilityError},
-    };
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
 
     use super::{pinned_worker_hint, resolve_pinned_worker_rank};
-    use crate::{
-        local_model::runtime_config::ModelRuntimeConfig,
-        protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
-    };
+    use crate::protocols::common::{preprocessor::RoutingHints, timing::RequestPhase};
 
     #[test]
     fn resolve_pinned_worker_rank_uses_explicit_rank_including_zero() {
@@ -399,29 +331,6 @@ mod tests {
         assert_eq!(
             pinned_worker_hint(RequestPhase::Aggregated, Some(&routing)),
             Some((9, Some(7)))
-        );
-    }
-
-    #[test]
-    fn sticky_validation_style_ignores_transient_overload() {
-        let worker = WorkerWithDpRank::new(7, 0);
-        let configs = HashMap::from([(7, ModelRuntimeConfig::default())]);
-        let constraints = RoutingConstraints::default();
-        let overloaded = HashSet::from([7]);
-        let scheduling_eligibility =
-            RoutingEligibility::new(None, Some(&overloaded), Some(worker), &constraints);
-        let sticky_eligibility = RoutingEligibility::new(None, None, Some(worker), &constraints);
-
-        assert_eq!(
-            scheduling_eligibility
-                .validate_worker_rank(&configs, worker)
-                .err(),
-            Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
-        );
-        assert!(
-            sticky_eligibility
-                .validate_worker_rank(&configs, worker)
-                .is_ok()
         );
     }
 }

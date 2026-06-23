@@ -51,6 +51,9 @@ else:
         trace_shared_prefix_ratio=0.0,
         trace_num_prefix_groups=0,
         model_name=None,
+        sla_ttft_ms=None,
+        sla_itl_ms=None,
+        sla_e2e_ms=None,
     ):
         return _run_mocker_trace_replay(
             trace_file,
@@ -66,6 +69,10 @@ else:
             trace_shared_prefix_ratio=trace_shared_prefix_ratio,
             trace_num_prefix_groups=trace_num_prefix_groups,
             model_name=model_name,
+            # Goodput SLA (offline only): report carries goodput_* when set.
+            sla_ttft_ms=sla_ttft_ms,
+            sla_itl_ms=sla_itl_ms,
+            sla_e2e_ms=sla_e2e_ms,
         )
 
 

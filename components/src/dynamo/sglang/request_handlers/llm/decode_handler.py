@@ -397,7 +397,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
-
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     decode,

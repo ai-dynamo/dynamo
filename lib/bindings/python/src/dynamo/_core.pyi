@@ -690,6 +690,36 @@ class WorkerMetricsPublisher:
         """
         ...
 
+class MultimodalEmbeddingCachePublisher:
+    """
+    A publisher for multimodal encode-worker cache state.
+    """
+
+    ...
+
+    def __init__(self) -> None:
+        """
+        Create a `MultimodalEmbeddingCachePublisher` object.
+        """
+
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
+        """
+        Initialize the NATS endpoint for publishing multimodal cache state.
+
+        Args:
+            endpoint: The endpoint to extract component information from.
+        """
+
+    def publish_delta(self, added_keys: list[str], removed_keys: list[str]) -> None:
+        """
+        Publish an incremental cache mutation for this worker.
+
+        Args:
+            added_keys: Newly cached embedding keys.
+            removed_keys: Cache keys no longer present on the worker.
+        """
+        ...
+
 class SelectionService:
     """
     In-process handle to a runtime-free Dynamo selection core.
@@ -2335,6 +2365,9 @@ def run_mocker_trace_replay(
     report_jsonl_path: Optional[str | os.PathLike[str]] = None,
     max_sim_time_ms: Optional[float] = None,
     model_name: Optional[str] = None,
+    sla_ttft_ms: Optional[float] = None,
+    sla_itl_ms: Optional[float] = None,
+    sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
 
@@ -2342,6 +2375,10 @@ def run_mocker_trace_replay(
     JSON object per request is written to that path. Each line includes
     arrival/admit/token timestamps, input/output lengths, the full per-token
     ITL series, and prefill/decode worker indices.
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+    (offline replay only). When any is set, the report carries ``goodput_*`` keys
+    classifying SLA-satisfying requests; with none set, goodput is omitted.
     """
     ...
 

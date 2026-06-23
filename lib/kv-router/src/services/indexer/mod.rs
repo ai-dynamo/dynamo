@@ -25,11 +25,13 @@
 
 pub mod backend;
 pub mod listener;
+pub mod logging;
 pub mod metrics;
 pub mod recovery;
 pub mod registry;
 pub mod server;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +40,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::min_initial_workers_from_env;
 use crate::services::common::zmq::validate_endpoint as validate_zmq_endpoint;
+use axum::http::header::HeaderName;
+use logging::AccessLogSink;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 
@@ -49,6 +53,9 @@ pub struct IndexerConfig {
     pub model_name: String,
     pub tenant_id: String,
     pub peers: Option<String>,
+    pub access_log: Option<PathBuf>,
+    pub trace_id_header: HeaderName,
+    pub access_log_local_time: bool,
 }
 
 pub(super) fn validate_listener_endpoints(
@@ -128,10 +135,20 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
         "Starting standalone KV cache indexer (HTTP-only mode)"
     );
 
-    let state = Arc::new(AppState::new_with_cancel_token(
-        config.threads,
-        cancel_token.clone(),
-    )?);
+    let mut state = AppState::new_with_cancel_token(config.threads, cancel_token.clone())?;
+    state.access_log_sink = match config.access_log {
+        Some(ref path) => {
+            let s = AccessLogSink::new(
+                path,
+                config.trace_id_header.clone(),
+                config.access_log_local_time,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to open access log {}: {e}", path.display()))?;
+            Some(Arc::new(s))
+        }
+        None => None,
+    };
+    let state = Arc::new(state);
     run_common(&config, state, cancel_token).await
 }
 

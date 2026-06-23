@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 #[cfg(feature = "metrics")]
@@ -43,8 +43,11 @@ fn test_endpoints_enabled() -> bool {
     )
 }
 
+use super::logging::{AccessLogModel, AccessLogSink};
+
 pub struct AppState {
     pub registry: Arc<WorkerRegistry>,
+    pub access_log_sink: Option<Arc<AccessLogSink>>,
     #[cfg(feature = "metrics")]
     pub prom_registry: prometheus::Registry,
 }
@@ -69,6 +72,7 @@ impl AppState {
                     indexer_metrics,
                     root_cancel_token,
                 )),
+                access_log_sink: None,
                 prom_registry,
             });
         }
@@ -79,6 +83,7 @@ impl AppState {
                 indexer_threads,
                 root_cancel_token,
             )),
+            access_log_sink: None,
         })
     }
 }
@@ -160,17 +165,21 @@ struct ScoreResponse {
 async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let model = req.model_name.clone();
     if let Err(error) =
         super::validate_listener_endpoints(&req.endpoint, req.replay_endpoint.as_deref())
     {
-        return (
+        let mut resp = (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": error.to_string()})),
-        );
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
     }
 
-    match state
+    let resp = match state
         .registry
         .register(
             req.instance_id,
@@ -186,18 +195,24 @@ async fn register(
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"status": "ok"})),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+        )
+            .into_response(),
+    };
+    let mut resp = resp;
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
 }
 
 async fn unregister(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UnregisterRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let model = req.model_name.clone();
     let result = match req.tenant_id {
         Some(tenant_id) => match req.dp_rank {
             Some(dp_rank) => {
@@ -220,13 +235,16 @@ async fn unregister(
                 .await
         }
     };
-    match result {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+    let mut resp = match result {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+        )
+            .into_response(),
+    };
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
 }
 
 /// Optional query parameters for `GET /workers`.
@@ -297,21 +315,22 @@ async fn run_tiered_query(
     }
 }
 
-async fn query(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<QueryRequest>,
-) -> impl IntoResponse {
+async fn query(State(state): State<Arc<AppState>>, Json(req): Json<QueryRequest>) -> Response {
+    let model = req.model_name.clone();
     let key = IndexerKey {
         model_name: req.model_name,
         tenant_id: req.tenant_id,
     };
     let Some(ie) = state.registry.get_indexer(&key) else {
-        return (
+        let mut resp = (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!("no indexer for model={} tenant={}", key.model_name, key.tenant_id)
             })),
-        );
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
     };
     let block_size = ie.block_size;
     let indexer = ie.indexer.clone();
@@ -325,24 +344,31 @@ async fn query(
             ..Default::default()
         },
     );
-    run_tiered_query(&indexer, block_hashes, block_size).await
+    let (status, json) = run_tiered_query(&indexer, block_hashes, block_size).await;
+    let mut resp = (status, json).into_response();
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
 }
 
 async fn query_by_hash(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryByHashRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let model = req.model_name.clone();
     let key = IndexerKey {
         model_name: req.model_name,
         tenant_id: req.tenant_id,
     };
     let Some(ie) = state.registry.get_indexer(&key) else {
-        return (
+        let mut resp = (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!("no indexer for model={} tenant={}", key.model_name, key.tenant_id)
             })),
-        );
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
     };
     let block_size = ie.block_size;
     let indexer = ie.indexer.clone();
@@ -353,7 +379,10 @@ async fn query_by_hash(
         .iter()
         .map(|h| LocalBlockHash(*h as u64))
         .collect();
-    run_tiered_query(&indexer, block_hashes, block_size).await
+    let (status, json) = run_tiered_query(&indexer, block_hashes, block_size).await;
+    let mut resp = (status, json).into_response();
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
 }
 
 #[derive(Deserialize)]
@@ -483,6 +512,20 @@ async fn handle_health() -> StatusCode {
     StatusCode::OK
 }
 
+async fn reopen_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Some(ref sink) = state.access_log_sink {
+        match sink.reopen() {
+            Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            ),
+        }
+    } else {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    }
+}
+
 #[cfg(feature = "metrics")]
 async fn handle_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     state.registry.refresh_metrics();
@@ -508,6 +551,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 /// Mounts the listener-control test endpoints only when `test_endpoints` is
 /// true; the explicit parameter lets tests exercise both states.
 fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
+    let access_log_sink = state.access_log_sink.clone();
+
     let router = Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
@@ -521,7 +566,8 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
         .route("/peers", get(list_peers))
-        .route("/health", get(handle_health));
+        .route("/health", get(handle_health))
+        .route("/reopen_logs", post(reopen_logs));
 
     let mut router = router;
     if test_endpoints {
@@ -535,6 +581,11 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
             .route("/test/resume_listener", post(test_resume_listener));
     }
     let router = router.with_state(state.clone());
+
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        access_log_sink,
+        super::logging::access_log_middleware,
+    ));
 
     #[cfg(feature = "metrics")]
     let router = {
@@ -686,6 +737,7 @@ mod tests {
     async fn query_rejects_request_bodies_over_limit() {
         let app = create_router(Arc::new(AppState {
             registry: Arc::new(WorkerRegistry::new(1)),
+            access_log_sink: None,
             #[cfg(feature = "metrics")]
             prom_registry: prometheus::Registry::new(),
         }));
@@ -709,6 +761,7 @@ mod tests {
         build_router(
             Arc::new(AppState {
                 registry: Arc::new(WorkerRegistry::new(1)),
+                access_log_sink: None,
                 #[cfg(feature = "metrics")]
                 prom_registry: prometheus::Registry::new(),
             }),
@@ -802,6 +855,7 @@ mod tests {
 
         let app = create_router(Arc::new(AppState {
             registry,
+            access_log_sink: None,
             #[cfg(feature = "metrics")]
             prom_registry: prometheus::Registry::new(),
         }));
@@ -879,5 +933,96 @@ mod tests {
             .unwrap();
         let empty: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reopen_logs_returns_ok_without_writers() {
+        let app = empty_indexer_router(false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/reopen_logs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn access_log_middleware_records_fields_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let sink = Arc::new(
+            super::super::logging::AccessLogSink::new(
+                &log_path,
+                axum::http::header::HeaderName::from_static("x-trace-id"),
+                false,
+            )
+            .unwrap(),
+        );
+
+        let registry = Arc::new(WorkerRegistry::new(1));
+        registry.signal_ready();
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:5557".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let state = Arc::new(AppState {
+            registry,
+            access_log_sink: Some(sink),
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        });
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-trace-id", "test-trace-123")
+                    .body(Body::from(
+                        r#"{"token_ids":[1,2,3,4],"model_name":"test-model"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1, "expected exactly one access log entry");
+
+        let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(entry["trace_id"], "test-trace-123");
+        assert_eq!(entry["method"], "POST");
+        assert_eq!(entry["path"], "/query");
+        assert_eq!(entry["model"], "test-model");
+        assert_eq!(entry["status"], 200);
+        assert!(entry["ts"].as_str().unwrap().contains("Z"));
+        assert!(entry["duration_ms"].as_f64().unwrap() >= 0.0);
     }
 }

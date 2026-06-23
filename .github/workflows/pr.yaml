@@ -57,7 +57,8 @@ jobs:
       - operator
       - helm-chart-tests
       - snapshot-agent
-      - snapshot-placeholder
+      - snapshot-placeholder-vllm
+      - snapshot-placeholder-sglang
       - vllm-build
       - vllm-dev-build
       - vllm-test
@@ -88,7 +89,23 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, snapshot-placeholder, frontend-copy-to-acr, deploy-test-checkpoint, deploy-cleanup]
+    needs:
+      - deploy-operator
+      - deploy-test-vllm
+      - deploy-test-sglang
+      - deploy-test-trtllm
+      - deploy-operator-checkpoint-vllm
+      - deploy-operator-checkpoint-sglang
+      - deploy-snapshot-agent-checkpoint-vllm
+      - deploy-snapshot-agent-checkpoint-sglang
+      - snapshot-placeholder-vllm
+      - snapshot-placeholder-sglang
+      - frontend-copy-to-acr
+      - deploy-test-checkpoint-vllm
+      - deploy-test-checkpoint-sglang
+      - deploy-cleanup
+      - deploy-cleanup-checkpoint-vllm
+      - deploy-cleanup-checkpoint-sglang
     if: always()
     steps:
       - name: Check all deploy test jobs
@@ -234,7 +251,14 @@ jobs:
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # `operator` and `snapshot` are here because DynamoCheckpoint deploy tests
+    # build a snapshot placeholder from the CI-built SGLang runtime image.
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -639,8 +663,8 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
-  snapshot-placeholder:
-    name: Snapshot Placeholder
+  snapshot-placeholder-vllm:
+    name: vLLM Snapshot Placeholder
     needs: [changed-files, vllm-copy-to-acr]
     if: |
       always() && !cancelled() &&
@@ -675,7 +699,11 @@ jobs:
     needs: [changed-files, sglang-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true') &&
       needs.sglang-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -684,6 +712,37 @@ jobs:
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
+
+  snapshot-placeholder-sglang:
+    name: SGLang Snapshot Placeholder
+    needs: [changed-files, sglang-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-sglang-placeholder
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
@@ -710,8 +769,6 @@ jobs:
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
-       needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
@@ -735,8 +792,6 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          checkpoint_enabled: ${{ (needs.changed-files.outputs.operator == 'true' || needs.changed-files.outputs.snapshot == 'true' || needs.changed-files.outputs.deploy == 'true') && 'true' || 'false' }}
-          checkpoint_storage_size: 64Gi
 
   deploy-test-vllm:
     name: vllm Deploy Test
@@ -786,15 +841,79 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
-  deploy-snapshot-agent:
-    name: Snapshot Agent Deploy Setup
-    needs: [changed-files, deploy-operator, snapshot-agent]
+  deploy-operator-checkpoint-vllm:
+    name: vLLM DynamoCheckpoint Operator Setup
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
+      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+    needs: [changed-files, operator]
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
+          vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+
+  deploy-operator-checkpoint-sglang:
+    name: SGLang DynamoCheckpoint Operator Setup
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+    needs: [changed-files, operator]
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
+          vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+
+  deploy-snapshot-agent-checkpoint-vllm:
+    name: vLLM DynamoCheckpoint Snapshot Agent Setup
+    needs: [changed-files, deploy-operator-checkpoint-vllm, snapshot-agent]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      needs.deploy-operator-checkpoint-vllm.result == 'success' &&
       needs.snapshot-agent.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 15
@@ -803,22 +922,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
         with:
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: ./.github/actions/setup-dynamo-operator
         with:
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
@@ -828,8 +945,8 @@ jobs:
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
         with:
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Install snapshot-agent
         uses: ./.github/actions/setup-snapshot-agent
         with:
@@ -837,16 +954,65 @@ jobs:
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
 
-  deploy-test-checkpoint:
-    name: DynamoCheckpoint Deploy Test
-    needs: [changed-files, deploy-operator, deploy-snapshot-agent, snapshot-placeholder, frontend-copy-to-acr]
+  deploy-snapshot-agent-checkpoint-sglang:
+    name: SGLang DynamoCheckpoint Snapshot Agent Setup
+    needs: [changed-files, deploy-operator-checkpoint-sglang, snapshot-agent]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-snapshot-agent.result == 'success' &&
-      needs.snapshot-placeholder.result == 'success' &&
+      needs.deploy-operator-checkpoint-sglang.result == 'success' &&
+      needs.snapshot-agent.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Install snapshot-agent
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  deploy-test-checkpoint-vllm:
+    name: vLLM DynamoCheckpoint Deploy Test
+    needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
+      needs.snapshot-placeholder-vllm.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -855,22 +1021,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
         with:
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: ./.github/actions/setup-dynamo-operator
         with:
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
@@ -880,8 +1044,8 @@ jobs:
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
         with:
-          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Install snapshot-agent (rerun bootstrap)
         if: steps.vcluster-check.outputs.exists != 'true'
         uses: ./.github/actions/setup-snapshot-agent
@@ -895,19 +1059,87 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
-          test_name: checkpoint_dgd_restore
+          test_name: checkpoint_dgd_restore_vllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           extra_pytest_args: >-
             -m dynamocheckpoint
+            --checkpoint-backend=vllm
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+
+  deploy-test-checkpoint-sglang:
+    name: SGLang DynamoCheckpoint Deploy Test
+    needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
+      needs.snapshot-placeholder-sglang.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Install snapshot-agent (rerun bootstrap)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+      - name: Run DynamoCheckpoint Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
+          framework: checkpoint
+          profile: dgd_restore
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-placeholder
+          test_name: checkpoint_dgd_restore_sglang
+          test_file: tests/deploy/test_dynamocheckpoint.py
+          extra_pytest_args: >-
+            -m dynamocheckpoint
+            --checkpoint-backend=sglang
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, deploy-test-checkpoint]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -920,6 +1152,40 @@ jobs:
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
+  deploy-cleanup-checkpoint-vllm:
+    name: vLLM DynamoCheckpoint Cleanup
+    if: |
+      always() &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
+    needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
+    runs-on: prod-deploy-tester-v1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Teardown vCluster
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
+          vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
+
+  deploy-cleanup-checkpoint-sglang:
+    name: SGLang DynamoCheckpoint Cleanup
+    if: |
+      always() &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
+    needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
+    runs-on: prod-deploy-tester-v1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Teardown vCluster
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
+          vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
+
   clean-k8s-builder:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
@@ -928,7 +1194,8 @@ jobs:
       - changed-files
       - operator
       - snapshot-agent
-      - snapshot-placeholder
+      - snapshot-placeholder-vllm
+      - snapshot-placeholder-sglang
       - planner-test
       - vllm-copy-to-acr
       - vllm-multi-gpu-test
@@ -981,7 +1248,8 @@ jobs:
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
-      - deploy-test-checkpoint
+      - deploy-test-checkpoint-vllm
+      - deploy-test-checkpoint-sglang
     if: false
     # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
     # if: ${{ !cancelled() }}

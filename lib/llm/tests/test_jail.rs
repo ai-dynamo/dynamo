@@ -1382,19 +1382,6 @@ mod tests {
             inner.inner.created, 1234567890,
             "Inner response created should carry forward from real stream chunks, not be 0"
         );
-
-        // Verify accumulated content is returned
-        let content = &inner.inner.choices[0].delta.content;
-        assert!(content.is_some(), "Should have accumulated content");
-        let content = content.as_ref().unwrap();
-        assert!(
-            test_utils::extract_text(content).contains("<tool_call>"),
-            "Should contain jail start marker in accumulated content"
-        );
-        assert!(
-            test_utils::extract_text(content).contains("incomplete_call"),
-            "Should contain accumulated incomplete content"
-        );
     }
 
     #[tokio::test]

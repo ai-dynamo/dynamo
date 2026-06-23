@@ -734,7 +734,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -758,6 +758,9 @@ pub fn run_mocker_trace_replay(
     report_jsonl_path: Option<PathBuf>,
     max_sim_time_ms: Option<f64>,
     model_name: Option<String>,
+    sla_ttft_ms: Option<f64>,
+    sla_itl_ms: Option<f64>,
+    sla_e2e_ms: Option<f64>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -797,6 +800,26 @@ pub fn run_mocker_trace_replay(
             ));
         }
     }
+    // Goodput SLA: when set, the collector classifies SLA-satisfying requests and
+    // the report carries goodput_* keys. Offline replay only (the online/live
+    // entrypoints don't take it) — reject it for non-offline modes rather than
+    // silently dropping it, matching report_jsonl_path / max_sim_time_ms. With none
+    // set, goodput is omitted as before.
+    validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+    validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+    validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+    if replay_mode != "offline"
+        && (sla_ttft_ms.is_some() || sla_itl_ms.is_some() || sla_e2e_ms.is_some())
+    {
+        return Err(PyValueError::new_err(
+            "sla_ttft_ms, sla_itl_ms, and sla_e2e_ms only support replay_mode='offline'",
+        ));
+    }
+    let sla = dynamo_mocker::replay::SlaThresholds {
+        ttft_ms: sla_ttft_ms,
+        itl_ms: sla_itl_ms,
+        e2e_ms: sla_e2e_ms,
+    };
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
@@ -824,6 +847,7 @@ pub fn run_mocker_trace_replay(
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
                             record_per_request, max_sim_time_ms,
+                            sla,
                         )
                     }
                     ("offline", None) => {
@@ -840,6 +864,7 @@ pub fn run_mocker_trace_replay(
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
                             record_per_request, max_sim_time_ms,
+                            sla,
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -893,6 +918,7 @@ pub fn run_mocker_trace_replay(
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
                         record_per_request, max_sim_time_ms,
+                        sla,
                     )
                 }
                 ("offline", None) => {
@@ -908,6 +934,7 @@ pub fn run_mocker_trace_replay(
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
                         record_per_request, max_sim_time_ms,
+                        sla,
                     )
                 }
                 ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),

@@ -45,6 +45,11 @@ The `graceful_shutdown()` function:
 5. Waits for in-flight requests (based on `graceful_shutdown` per endpoint)
 6. Returns to allow cleanup to proceed
 
+The aggregate wait in `runtime.shutdown()` is bounded by
+`DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, which defaults to 900 seconds
+(15 minutes). If endpoint draining exceeds this timeout, Dynamo logs the
+remaining graceful endpoint count and proceeds with runtime teardown.
+
 ## Endpoint Draining
 
 After the grace period, `runtime.shutdown()` invalidates endpoints so no new requests are accepted. The behavior for in-flight requests depends on the `graceful_shutdown` parameter when serving the endpoint.
@@ -64,7 +69,7 @@ generate_endpoint.serve_endpoint(
 
 | `graceful_shutdown` | Behavior |
 |---------------------|----------|
-| `True` | Wait for all in-flight requests to complete before returning |
+| `True` | Wait for all in-flight requests to complete, bounded by `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` |
 | `False` | Return immediately without waiting for requests |
 
 ### Component-Specific Behavior
