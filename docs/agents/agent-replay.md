@@ -28,15 +28,11 @@ flowchart LR
     A["Agent workload through Dynamo"] --> T["Dynamo request trace"]
     T --> C["request_trace_to_mooncake --agentic"]
     C --> D["DynoSim offline replay"]
-    T --> F["Trace with final markers"]
-    F --> W["aiperf synthesize dynamo-trace"]
+    T --> W["aiperf synthesize dynamo-trace"]
     W --> P["AIPerf live replay"]
     P --> M["Mocker-backed endpoint"]
     P --> R["Real model endpoint"]
 ```
-
-The live AIPerf path requires a terminal marker on each trajectory. The offline DynoSim path does
-not.
 
 See [Trace Format Reference](../dynosim/trace-formats.md) for other inputs and mode constraints.
 
@@ -140,16 +136,10 @@ This path requires:
 
 - an AIPerf build with `aiperf synthesize dynamo-trace` and
   `--use-dynamo-conv-aware-routing`
-- a Dynamo build that derives backend session lifecycle from trajectory headers
+- a Dynamo build that accepts trajectory headers
 
 Older Dynamo builds that require client-generated `nvext.session_control` are not compatible with
 this header-only path.
-
-> [!IMPORTANT]
-> The AIPerf converter requires exactly one request with `trajectory_final=true` at the end of each
-> trajectory. Set `x-dynamo-trajectory-final: true` on the final request. Native Claude Code,
-> Codex, and OpenCode identity headers do not supply this marker, so use DynoSim for those captures
-> unless the harness adds it.
 
 The AIPerf converter reads uncompressed JSONL. Merge the captured segments, then convert them to a
 Weka trace directory. The output directory must be absent or empty.
@@ -177,11 +167,11 @@ aiperf profile \
 ```
 
 Set `AIPERF_DATASET_WEKA_SPLIT_FLATTENED_AGENTS=false` to preserve trajectory boundaries.
-`--use-dynamo-conv-aware-routing` sends trajectory, parent, and final markers as headers without
+`--use-dynamo-conv-aware-routing` sends trajectory and parent markers as headers without
 changing request bodies. Point `--url` at a Mocker-backed frontend or a real model deployment.
 
-The converter requires one final request per trajectory. It supports one level of child trajectories
-and rejects deeper trees.
+The converter infers the final turn from the last request in each trajectory. It supports one level
+of child trajectories and rejects deeper trees.
 
 ## How the Request DAG Is Built
 

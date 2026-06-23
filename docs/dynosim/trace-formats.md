@@ -15,7 +15,7 @@ Choose an input from the matrix below. For an end-to-end agent replay, see
 |---|---:|---|---|---|
 | NVIDIA Dynamo request trace without trajectory context | No | Independent requests or sessions | `request_trace_to_mooncake` | DynoSim `mooncake`; AIPerf Mooncake loader |
 | Dynamo request trace with trajectory context | No | Request DAG inferred from trajectory and timing | `request_trace_to_mooncake --agentic` | DynoSim `agentic_mooncake` |
-| Dynamo request trace with trajectory context | No | One root and one child level; terminal marker required | `aiperf synthesize dynamo-trace` | AIPerf Weka loader against a live endpoint |
+| Dynamo request trace with trajectory context | No | One root and one child level | `aiperf synthesize dynamo-trace` | AIPerf Weka loader against a live endpoint |
 | Dynamo audit sink | Configurable request and response payloads | Request correlation only | None | Inspection; not replay-ready |
 | Local Claude Code session | No | Session timing; sidecar structure | `claude_trace_export` | DynoSim `mooncake`; AIPerf Mooncake loader |
 | Local Codex or OpenCode session | Not available | Not available | No local exporter | Not available |
