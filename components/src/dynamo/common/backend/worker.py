@@ -11,7 +11,7 @@ in Rust (``dynamo_backend_common::Worker``). This module only:
     ``from_runtime_config`` helper, and
   * drives the Rust ``Worker`` for a given ``LLMEngine`` instance.
 
-Engine semantics (``start``/``generate``/``abort``/``drain``/``cleanup``)
+Engine semantics (``start``/``generate``/``abort``/``is_quiescent``/``cleanup``)
 remain the only thing engine authors implement.
 """
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import warnings
 from dataclasses import dataclass, field
 from enum import Enum
@@ -33,6 +34,33 @@ from .engine import BaseEngine, RawEngine
 from .health_check import parse_health_check_payload_cli
 
 logger = logging.getLogger(__name__)
+
+
+def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
+    """Suppress engine ``loop.add_signal_handler`` calls for SIGTERM/SIGINT.
+
+    The Rust ``Worker`` owns graceful shutdown via its own OS signal handlers;
+    engines must do teardown in ``cleanup()``, not a signal handler. Some
+    engines register loop handlers during ``start()`` anyway (e.g. SGLang's
+    tokenizer manager), which would reinstall the process ``sigaction`` and
+    override the Worker. Only SIGTERM/SIGINT are suppressed — other signals
+    (e.g. SGLang's SIGQUIT watchdog) pass through.
+    """
+    orig_add_signal_handler = loop.add_signal_handler
+    owned = frozenset({signal.SIGINT, signal.SIGTERM})
+
+    def add_signal_handler(sig, callback, *args):
+        if sig in owned:
+            logger.info(
+                "Suppressed engine loop.add_signal_handler(%s); the Rust Worker "
+                "owns graceful shutdown.",
+                sig,
+            )
+            return None
+        return orig_add_signal_handler(sig, callback, *args)
+
+    loop.add_signal_handler = add_signal_handler  # type: ignore[assignment]
+
 
 # Map the user-facing `dynamo.common.constants.DisaggregationMode` (which
 # carries 4 modes including ENCODE) to the 3-mode Rust enum. ENCODE is not
@@ -239,6 +267,7 @@ class Worker:
         )
 
         loop = asyncio.get_running_loop()
+        _guard_loop_signal_handlers(loop)
         # A RawEngine (e.g. DiffusionEngine) drives the raw media pipeline
         # (JSON request adapter); everything else is a token-pipeline
         # LLMEngine. The Rust Worker validates model_input against the kind.

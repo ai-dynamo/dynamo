@@ -78,10 +78,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Match legacy `trtllm/main.py` so prefill drain behaves the same.
-_DRAIN_TIMEOUT_S = 30.0
-_DRAIN_POLL_INTERVAL_S = 0.5
-
 # 1021 is the largest 10-bit prime — spreads machine_ids more evenly
 # under modulo than 1024 would. Matches legacy
 # `workers/llm_worker.py: connection_id() % 1021`.
@@ -1058,51 +1054,11 @@ class TrtllmLLMEngine(LLMEngine):
             extras={"priority": 1.0},
         )
 
-    async def drain(self) -> None:
-        """Prefill-only: poll until in-flight requests finish so a
-        decode peer's NIXL pull doesn't see freed GPU memory (#7319).
-        Mirrors legacy `_make_drain_callback`."""
-        if (
-            self._engine is None
-            or self.disaggregation_mode != DisaggregationMode.PREFILL
-        ):
-            return
-
-        deadline = asyncio.get_running_loop().time() + _DRAIN_TIMEOUT_S
-        logger.info(
-            "Draining in-flight requests on prefill worker (timeout=%.1fs)",
-            _DRAIN_TIMEOUT_S,
-        )
-        # The stats stream can raise asyncio.TimeoutError when the engine
-        # has nothing fresh to report, or StopAsyncIteration when the
-        # underlying iterator is exhausted — both are benign and just mean
-        # "no signal this tick, try again". A wider `Exception` would
-        # swallow code bugs introduced later; the test stub raises
-        # RuntimeError to exercise the retry path.
-        _BENIGN_POLL = (asyncio.TimeoutError, StopAsyncIteration, RuntimeError)
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                stats_iter = self._engine.llm.get_stats_async(timeout=2)
-                stat = await anext(stats_iter)
-                active = stat.get("numActiveRequests", 0)
-                queued = stat.get("numQueuedRequests", 0)
-                if active + queued == 0:
-                    logger.info("All in-flight requests drained")
-                    return
-                logger.info(
-                    "Waiting for %d in-flight request(s) (active=%d, queued=%d)",
-                    active + queued,
-                    active,
-                    queued,
-                )
-            except _BENIGN_POLL as e:
-                logger.debug("Stats poll failed during drain: %s", e)
-            await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
-        logger.warning(
-            "Drain timeout (%.1fs) reached; proceeding with shutdown — "
-            "some NIXL transfers may still be in flight",
-            _DRAIN_TIMEOUT_S,
-        )
+    # TRT-LLM deliberately does not override is_quiescent (inherits None: wait
+    # the full drain budget). It has no signal for "pending KV transfers done":
+    # iteration stats stop arriving once the worker is idle, so active == 0 is
+    # never observed; and _active_requests is popped at handoff, before decode
+    # pulls the KV. The budget alone gives decode time to drain.
 
     async def cleanup(self) -> None:
         # Stop the publisher threads BEFORE engine shutdown so they don't
@@ -1116,6 +1072,15 @@ class TrtllmLLMEngine(LLMEngine):
         self._metrics_thread = None
         self._kv_publishers.clear()
         self._pause_controller = None
+        # Abort any still-tracked requests so llm.shutdown() runs on an idle
+        # engine. Mostly a no-op for prefill (popped at handoff); matters for
+        # decode/aggregated workers mid-generation.
+        for result in list(self._active_requests.values()):
+            try:
+                result.abort()
+            except Exception:
+                logger.debug("abort during cleanup failed", exc_info=True)
+        self._active_requests.clear()
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")
