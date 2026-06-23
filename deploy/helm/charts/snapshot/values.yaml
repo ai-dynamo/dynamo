@@ -124,7 +124,10 @@ daemonset:
   # Init container configuration
   initContainer:
     # Busybox image for seccomp profile deployment
-    image: busybox:latest
+    image:
+      repository: busybox
+      tag: latest
+      pullPolicy: Always
 
 # Seccomp profile configuration
 # CRIU can't checkpoint io_uring; this gates the block-iouring ConfigMap and
