@@ -79,7 +79,22 @@ runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
 ## Run
 
 ```bash
-kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml, adjust httpRoute there per your setup
+# 1. adjust httpRoute there per your setup
+# 2. for Agg:
+kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml
+
+# 3.
+# for Disag make sure you add the NIXL setting to your worker:
+          # env:
+          #   # The NIXL side channel must advertise the pod's routable IP, not the
+          #   # default 127.0.0.1 — otherwise the remote worker connects to itself
+          #   # and the KV transfer fails with "Remote NIXL agent engine ID
+          #   # mismatch". The Dynamo operator sets this automatically; for raw
+          #   # vLLM we wire it from the Downward API.
+          #   - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+          #     valueFrom:
+          #       fieldRef:
+          #         fieldPath: status.podIP
 
 # terminal 1
 kubectl -n agentgateway-system port-forward svc/inference-gateway 8000:80

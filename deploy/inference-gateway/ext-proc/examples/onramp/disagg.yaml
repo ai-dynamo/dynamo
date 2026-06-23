@@ -80,6 +80,15 @@ spec:
             - name: kv-events
               containerPort: 5557
           env:
+            # The NIXL side channel must advertise the pod's routable IP, not the
+            # default 127.0.0.1 — otherwise the remote worker connects to itself
+            # and the KV transfer fails with "Remote NIXL agent engine ID
+            # mismatch". The Dynamo operator sets this automatically; for raw
+            # vLLM we wire it from the Downward API.
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: UCX_TLS
               value: "tcp,self"
             - name: UCX_RNDV_THRESH
@@ -159,6 +168,15 @@ spec:
             - name: kv-events
               containerPort: 5557
           env:
+            # The NIXL side channel must advertise the pod's routable IP, not the
+            # default 127.0.0.1 — otherwise the remote worker connects to itself
+            # and the KV transfer fails with "Remote NIXL agent engine ID
+            # mismatch". The Dynamo operator sets this automatically; for raw
+            # vLLM we wire it from the Downward API.
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: UCX_TLS
               value: "tcp,self"
             - name: UCX_RNDV_THRESH
