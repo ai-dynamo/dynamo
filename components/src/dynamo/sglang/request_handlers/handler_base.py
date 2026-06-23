@@ -663,6 +663,9 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
+        self.enable_session_radix_cache = getattr(
+            config.server_args, "enable_session_radix_cache", False
+        )
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
@@ -960,7 +963,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         }
 
     def _trajectory_id(self, request: Dict[str, Any]) -> Optional[str]:
-        if not getattr(self.config.server_args, "enable_session_radix_cache", False):
+        if not self.enable_session_radix_cache:
             return None
         trajectory_id = (request.get("agent_context") or {}).get("trajectory_id")
         return (
@@ -972,19 +975,17 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         return {"session_params": {"id": trajectory_id}} if trajectory_id else {}
 
     def _wrap_trajectory_stream(
-        self, stream: AsyncIterator[ResponseT], request: Dict[str, Any]
-    ) -> AsyncIterator[ResponseT]:
+        self, stream: AsyncGenerator[ResponseT, None], request: Dict[str, Any]
+    ) -> AsyncGenerator[ResponseT, None]:
         trajectory_id = self._trajectory_id(request)
-        if (
-            trajectory_id is None
-            or (request.get("agent_context") or {}).get("trajectory_final") is not True
-        ):
+        kv_hints = (request.get("agent_context") or {}).get("kv_hints") or {}
+        if trajectory_id is None or kv_hints.get("evict_trajectory") is not True:
             return stream
         return self._close_trajectory_after_stream(stream, trajectory_id)
 
     async def _close_trajectory_after_stream(
-        self, stream: AsyncIterator[ResponseT], trajectory_id: str
-    ) -> AsyncIterator[ResponseT]:
+        self, stream: AsyncGenerator[ResponseT, None], trajectory_id: str
+    ) -> AsyncGenerator[ResponseT, None]:
         try:
             async for item in stream:
                 yield item
@@ -996,7 +997,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                     CloseSessionReqInput(session_id=trajectory_id), None
                 )
             except Exception:
-                logging.exception("Failed to close trajectory %s", trajectory_id)
+                logger.exception("Failed to close trajectory %s", trajectory_id)
 
     @staticmethod
     def _get_guided_decoding_params(

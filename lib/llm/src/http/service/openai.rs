@@ -3208,6 +3208,7 @@ mod tests {
                 trajectory_id: "traj-123".to_string(),
                 parent_trajectory_id: Some("parent-456".to_string()),
                 trajectory_final: Some(true),
+                kv_hints: None,
             },
         );
 

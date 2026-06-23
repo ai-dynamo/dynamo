@@ -212,6 +212,7 @@ mod tests {
                 trajectory_id: "root".to_string(),
                 parent_trajectory_id: None,
                 trajectory_final: None,
+                kv_hints: None,
             }),
             request: None,
             tool: Some(RequestTraceToolEvent {

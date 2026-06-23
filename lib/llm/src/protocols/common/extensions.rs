@@ -59,6 +59,13 @@ where
     Ok(url.to_string())
 }
 
+/// Internal KV cache hints derived from agent lifecycle metadata.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KvHints {
+    pub evict_trajectory: bool,
+}
+
 /// Identity metadata for agentic workloads.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +82,10 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trajectory_final: Option<bool>,
+
+    #[builder(default, setter(strip_option))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_hints: Option<KvHints>,
 }
 
 impl AgentContext {
@@ -233,10 +244,14 @@ const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
+        let kv_hints = (values.trajectory_final == Some(true)).then_some(KvHints {
+            evict_trajectory: true,
+        });
         Self {
             trajectory_id: values.trajectory_id,
             parent_trajectory_id: values.parent_trajectory_id,
             trajectory_final: values.trajectory_final,
+            kv_hints,
         }
     }
 }
@@ -734,6 +749,7 @@ mod tests {
                 expected_parent_trajectory_id
             );
             assert_eq!(agent_context.trajectory_final, None);
+            assert_eq!(agent_context.kv_hints, None);
         }
     }
 
@@ -773,6 +789,15 @@ mod tests {
             Some("generic-parent")
         );
         assert_eq!(agent_context.trajectory_final, Some(true));
+        assert_eq!(
+            agent_context.kv_hints,
+            Some(KvHints {
+                evict_trajectory: true
+            })
+        );
+
+        headers.insert(HEADER_DYNAMO_TRAJECTORY_FINAL, "false".parse().unwrap());
+        assert_eq!(agent_context_from_headers(&headers).unwrap().kv_hints, None);
     }
 
     #[test]

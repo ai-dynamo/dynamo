@@ -104,7 +104,7 @@ Topology:
 
 Features enabled for full Grafana coverage:
   - hierarchical KV cache (host RAM tier)        -> HiCache row
-  - streaming session retention                  -> streaming-session held tokens
+  - trajectory radix cache                       -> eager final-turn KV cleanup
   - per-scheduler metrics + MFU metrics
   - mem-fraction-static=$MEM_FRACTION, max-running-requests=$MAX_RUNNING
   - page-size=$PAGE_SIZE, chunked-prefill-size=$CHUNKED_PREFILL

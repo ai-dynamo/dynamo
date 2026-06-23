@@ -18,9 +18,7 @@ pytestmark = [
 
 def _handler(*, enabled: bool = True):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
-    handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(enable_session_radix_cache=enabled)
-    )
+    handler.enable_session_radix_cache = enabled
     return handler
 
 
@@ -35,7 +33,7 @@ def test_trajectory_id_becomes_sglang_session_tag():
 
 
 @pytest.mark.asyncio
-async def test_only_final_trajectory_closes_after_stream():
+async def test_only_evict_trajectory_hint_closes_after_stream():
     closed = []
 
     async def close_session(request, _context):
@@ -50,10 +48,16 @@ async def test_only_final_trajectory_closes_after_stream():
         tokenizer_manager=SimpleNamespace(close_session=close_session)
     )
 
-    nonfinal = handler._wrap_trajectory_stream(
-        source(), {"agent_context": {"trajectory_id": "still-running"}}
+    without_hint = handler._wrap_trajectory_stream(
+        source(),
+        {
+            "agent_context": {
+                "trajectory_id": "still-running",
+                "trajectory_final": True,
+            }
+        },
     )
-    assert [item async for item in nonfinal] == ["first", "last"]
+    assert [item async for item in without_hint] == ["first", "last"]
     assert closed == []
 
     final = handler._wrap_trajectory_stream(
@@ -62,6 +66,7 @@ async def test_only_final_trajectory_closes_after_stream():
             "agent_context": {
                 "trajectory_id": "trajectory-final",
                 "trajectory_final": True,
+                "kv_hints": {"evict_trajectory": True},
             }
         },
     )
