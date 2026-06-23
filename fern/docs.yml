@@ -34,8 +34,6 @@ products:
         path: ../docs/index.yml
 
 redirects:
-  - source: "/dynamo/dev/agents/trajectory-ids"
-    destination: "/dynamo/dev/agents/session-ids"
   - source: "/dynamo/index.html"
     destination: "/dynamo/"
   - source: "/dynamo/dev/index.html"
