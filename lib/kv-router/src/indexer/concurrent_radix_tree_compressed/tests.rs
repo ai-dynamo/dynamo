@@ -37,6 +37,19 @@ fn local_hashes(query: &[u64]) -> Vec<LocalBlockHash> {
     query.iter().copied().map(LocalBlockHash).collect()
 }
 
+fn remove_hashes_with_parent(
+    prefix_hashes: &[u64],
+    local_hashes: &[u64],
+) -> Vec<ExternalSequenceBlockHash> {
+    match make_remove_event_with_parent(0, prefix_hashes, local_hashes)
+        .event
+        .data
+    {
+        KvCacheEventData::Removed(op) => op.block_hashes,
+        _ => unreachable!("make_remove_event_with_parent must create a remove event"),
+    }
+}
+
 fn apply_direct(
     index: &ConcurrentRadixTreeCompressed,
     lookup: &mut DirectLookup,
@@ -287,46 +300,6 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker3, 6);
         }
 
-        #[test]
-        fn remove_multiple_hashes_from_same_compressed_edge() {
-            let index = Arc::new(ConcurrentRadixTreeCompressed::new());
-            let worker0 = worker(0);
-            let worker1 = worker(1);
-            let mut lookup0 = direct_lookup();
-            let mut lookup1 = direct_lookup();
-
-            apply_direct(
-                &index,
-                &mut lookup0,
-                make_store_event(0, &[1, 2, 3, 4, 5, 6]),
-            );
-            apply_direct(
-                &index,
-                &mut lookup1,
-                make_store_event(1, &[1, 2, 3, 4, 5, 6]),
-            );
-
-            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
-            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
-
-            apply_direct(
-                &index,
-                &mut lookup0,
-                make_remove_event_with_parent(0, &[1, 2], &[3, 4, 5]),
-            );
-
-            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
-            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
-
-            apply_direct(
-                &index,
-                &mut lookup0,
-                make_store_event_with_parent(0, &[1, 2], &[3, 4, 5, 6]),
-            );
-
-            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
-            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
-        }
     }
 
     mod cleanup {
@@ -485,6 +458,104 @@ mod race_tests {
                 }
             }
         }
+    }
+}
+
+mod remove_tests {
+    use super::*;
+
+    #[test]
+    fn remove_multiple_hashes_from_same_compressed_edge() {
+        let index = Arc::new(ConcurrentRadixTreeCompressed::new());
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_remove_event_with_parent(0, &[1, 2], &[3, 4, 5]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2], &[3, 4, 5, 6]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+    }
+
+    #[test]
+    fn batched_remove_processes_hashes_moved_by_split_before_restore() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+        );
+        let remove_hashes = remove_hashes_with_parent(&[1, 2], &[3, 4, 5]);
+        let group_node = lookup0
+            .get(&worker0)
+            .and_then(|worker_lookup| worker_lookup.get(&remove_hashes[0]))
+            .cloned()
+            .expect("remove hash should point to the pre-split group node");
+
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3], &[7]),
+        );
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(
+                &[1, 2, 3],
+                vec![edge_topology(&[4, 5, 6], vec![]), edge_topology(&[7], vec![])],
+            )],
+        );
+
+        index.apply_removed_group(&mut lookup0, worker0, Some(group_node), remove_hashes, 42);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2], &[3]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 3);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(3));
     }
 }
 

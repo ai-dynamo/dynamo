@@ -61,11 +61,12 @@ impl ConcurrentRadixTreeCompressed {
         let mut group_hashes: Vec<ExternalSequenceBlockHash> = Vec::new();
 
         for block_hash in op.block_hashes {
-            if let Some(node) = group_node.as_ref() {
-                if node.contains_edge_hash(block_hash) {
-                    group_hashes.push(block_hash);
-                    continue;
-                }
+            if group_node
+                .as_ref()
+                .is_some_and(|node| node.contains_edge_hash(block_hash))
+            {
+                group_hashes.push(block_hash);
+                continue;
             }
 
             self.apply_removed_group(
@@ -103,7 +104,7 @@ impl ConcurrentRadixTreeCompressed {
         Ok(())
     }
 
-    fn apply_removed_group(
+    pub(super) fn apply_removed_group(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
@@ -111,12 +112,48 @@ impl ConcurrentRadixTreeCompressed {
         block_hashes: Vec<ExternalSequenceBlockHash>,
         id: u64,
     ) {
-        let Some(mut cur_node) = node else {
+        let Some(cur_node) = node else {
             return;
         };
         if block_hashes.is_empty() {
             return;
         }
+
+        match cur_node.remove_worker_for_hashes(worker, &block_hashes) {
+            Some(outcome) => {
+                Self::remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
+                for block_hash in outcome.unmatched_hashes {
+                    self.apply_removed_hash(lookup, worker, block_hash, id);
+                }
+            }
+            None => {
+                for block_hash in block_hashes {
+                    self.apply_removed_hash(lookup, worker, block_hash, id);
+                }
+            }
+        }
+    }
+
+    fn apply_removed_hash(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+        id: u64,
+    ) {
+        let Some(mut cur_node) =
+            self.resolve_lookup(lookup, worker, block_hash, LookupRepairDirection::TowardHead)
+        else {
+            tracing::debug!(
+                worker_id = worker.worker_id.to_string(),
+                dp_rank = worker.dp_rank,
+                id,
+                block_hash = ?block_hash,
+                "Block not found during batched remove fallback; skipping"
+            );
+            Self::remove_lookup_hashes(lookup, worker, [block_hash]);
+            return;
+        };
 
         loop {
             // TODO(CORRECTNESS): Invalidate this worker throughout the descendant
@@ -125,17 +162,13 @@ impl ConcurrentRadixTreeCompressed {
             // reactivated by restoring only the removed block, or emitted by dumps
             // without a valid worker-specific parent. Preserve CRTC's locking and
             // snapshot guarantees when implementing the traversal.
-            match cur_node.remove_worker_for_hashes(worker, &block_hashes) {
+            match cur_node.remove_worker_for_hashes(worker, std::slice::from_ref(&block_hash)) {
                 Some(outcome) => {
-                    if let Some(wl) = lookup.get_mut(&worker) {
-                        for hash in outcome.stale_hashes {
-                            wl.remove(&hash);
-                        }
-                    }
+                    debug_assert!(outcome.unmatched_hashes.is_empty());
+                    Self::remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
                     return;
                 }
                 None => {
-                    let block_hash = block_hashes[0];
                     // Hash was moved to a descendant by a concurrent split.
                     match Self::find_in_subtree(&cur_node, block_hash) {
                         Some(resolved) => {
@@ -153,23 +186,31 @@ impl ConcurrentRadixTreeCompressed {
                             // Retry the loop with the resolved node.
                         }
                         None => {
-                            // Hashes not found anywhere -- evicted by a concurrent clear.
+                            // Hash not found anywhere -- evicted by a concurrent clear.
                             tracing::debug!(
                                 worker_id = worker.worker_id.to_string(),
                                 dp_rank = worker.dp_rank,
                                 id,
                                 block_hash = ?block_hash,
-                                "Block not found in subtree during batched remove; skipping group"
+                                "Block not found in subtree during batched remove; skipping"
                             );
-                            if let Some(wl) = lookup.get_mut(&worker) {
-                                for hash in block_hashes {
-                                    wl.remove(&hash);
-                                }
-                            }
+                            Self::remove_lookup_hashes(lookup, worker, [block_hash]);
                             return;
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn remove_lookup_hashes(
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker: WorkerWithDpRank,
+        hashes: impl IntoIterator<Item = ExternalSequenceBlockHash>,
+    ) {
+        if let Some(wl) = lookup.get_mut(&worker) {
+            for hash in hashes {
+                wl.remove(&hash);
             }
         }
     }
