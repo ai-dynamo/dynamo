@@ -2172,7 +2172,11 @@ impl OpenAIPreprocessor {
                         // final ANNOTATION_LLM_METRICS usage chunk so EventConverter can
                         // suppress its data from the client stream. Setting event on every
                         // content chunk would cause EventConverter to strip all content data.
-                        response.comment = metrics_annotated.comment;
+                        // Guard on event.is_none() so a pre-existing event's comment
+                        // (e.g. an error annotation) is not clobbered.
+                        if response.event.is_none() {
+                            response.comment = metrics_annotated.comment;
+                        }
                     }
 
                     // Mark if we've seen a finish_reason
