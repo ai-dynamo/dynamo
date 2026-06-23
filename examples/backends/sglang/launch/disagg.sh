@@ -18,13 +18,24 @@ pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
 set -- "${REMAINING_ARGS[@]}"
 
 ENABLE_OTEL=false
+MODEL="Qwen/Qwen3-0.6B"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --enable-otel) ENABLE_OTEL=true; shift ;;
+        --model)
+            if [[ $# -lt 2 || "$2" == -* ]]; then
+                echo "Missing value for --model"
+                echo "Use --help for usage information"
+                exit 1
+            fi
+            MODEL="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --model <name>       Model to serve (default: $MODEL)"
             echo "  --unified            Use the unified backend entry point"
             echo "                       (python -m dynamo.sglang.unified_main)"
             echo "  -h, --help           Show this help message"
@@ -46,8 +57,6 @@ if [ "$ENABLE_OTEL" = true ]; then
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
-
-MODEL="Qwen/Qwen3-0.6B"
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 

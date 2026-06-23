@@ -44,8 +44,12 @@ Worker dispatch (main.py:60-132):
   --image-diffusion-worker    -> init_diffusion.init_image_diffusion()
   --video-generation-worker   -> init_diffusion.init_video_diffusion()
   --embedding-worker          -> init_embedding.init_embedding()
-  --multimodal-encode-worker  -> init_multimodal.init_multimodal_encode_worker()
-  --multimodal-worker         -> init_multimodal.init_multimodal_worker() or _prefill_worker()
+  --enable-multimodal --disaggregation-mode encode
+                              -> init_multimodal.init_multimodal_encode_worker()
+  --enable-multimodal --dedicated-mm-encoder --disaggregation-mode pd/decode
+                              -> init_multimodal.init_multimodal_worker()
+  --enable-multimodal --dedicated-mm-encoder --disaggregation-mode prefill
+                              -> init_multimodal.init_multimodal_prefill_worker()
   --dllm-algorithm <algo>     -> init_diffusion.init_llm_diffusion()
   (default, prefill mode)     -> init_llm.init_prefill()
   (default, decode/agg mode)  -> init_llm.init_decode()
@@ -57,7 +61,7 @@ Worker dispatch (main.py:60-132):
 
 **Two config paths:**
 
-1. **LLM workers** (decode, prefill, embedding, multimodal-worker, dllm): Creates full
+1. **LLM workers** (decode, prefill, embedding, internal multimodal, dllm): Creates full
    `sglang.srt.server_args.ServerArgs` via `ServerArgs.from_cli_args()`. This triggers
    model config loading, tokenizer detection, etc.
 
@@ -68,7 +72,7 @@ Worker dispatch (main.py:60-132):
 
 **DynamoConfig** combines `DynamoRuntimeConfig` (common flags like `--namespace`,
 `--output-modalities`, `--media-output-fs-url`) with `DynamoSGLangConfig` (sglang-specific
-flags like `--multimodal-encode-worker`, `--embedding-worker`).
+flags like `--enable-multimodal`, `--dedicated-mm-encoder`, `--embedding-worker`).
 
 Key gotcha: `--output-modalities` defaults to `["text"]` globally. Image/video diffusion
 workers override this in their init functions to `["image"]`/`["video"]` to ensure correct
@@ -117,8 +121,8 @@ BaseGenerativeHandler (handler_base.py)
 | Worker | Engine | Notes |
 |--------|--------|-------|
 | decode, prefill, dllm, embedding | `sgl.Engine` | Full SGLang inference engine |
-| multimodal-worker, multimodal-prefill | `sgl.Engine` | Plus EmbeddingsProcessor |
-| multimodal-encode-worker | None | `MMEncoder` from SGLang, pre-tokenized input |
+| internal multimodal worker / prefill | `sgl.Engine` | `--dedicated-mm-encoder`; plus EmbeddingsProcessor |
+| multimodal encode worker | None | `--disaggregation-mode encode`; `MMEncoder` from SGLang, pre-tokenized input |
 | image-diffusion-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 | video-generation-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 
