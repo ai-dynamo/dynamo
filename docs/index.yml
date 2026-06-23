@@ -305,8 +305,6 @@ navigation:
                 path: agents/agent-replay.md
               - page: Agent Hints
                 path: agents/agent-hints.md
-              - page: Priority Scheduling
-                path: agents/priority-scheduling.md
               - page: Agent Harnesses
                 path: agents/agent-harnesses.md
               - page: ThunderAgent Program Scheduler
@@ -414,6 +412,8 @@ navigation:
                 path: components/router/router-concepts.md
               - page: Configuration and Tuning
                 path: components/router/router-configuration.md
+              - page: Priority Scheduling
+                path: components/router/priority-scheduling.md
               - page: Disaggregated Serving
                 path: components/router/router-disaggregated-serving.md
               - page: Topology-Aware KV Transfer

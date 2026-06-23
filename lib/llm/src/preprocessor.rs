@@ -860,7 +860,6 @@ impl OpenAIPreprocessor {
                 priority,
                 lora_name,
                 allowed_worker_ids: None,
-                session_control: nvext.session_control.clone(),
                 routing_constraints: nvext
                     .routing_constraints
                     .clone()

@@ -59,6 +59,13 @@ where
     Ok(url.to_string())
 }
 
+/// Internal KV cache hints derived from agent lifecycle metadata.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KvHints {
+    pub evict_trajectory: bool,
+}
+
 /// Identity metadata for agentic workloads.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +82,10 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trajectory_final: Option<bool>,
+
+    #[builder(default, setter(strip_option))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_hints: Option<KvHints>,
 }
 
 impl AgentContext {
@@ -111,33 +122,6 @@ pub struct AgentHints {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_sensitivity: Option<f64>,
-}
-
-fn default_session_timeout() -> u64 {
-    300
-}
-
-/// Session control for subagent KV isolation and sticky routing.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct SessionControl {
-    /// Unique session identifier. Present on every turn for sticky routing.
-    pub session_id: String,
-    /// Lifecycle action: `"open"`, `"bind"`, or `"close"`. Omit on intermediate turns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<SessionAction>,
-    /// Inactivity timeout in seconds.
-    #[serde(default = "default_session_timeout")]
-    pub timeout: u64,
-}
-
-/// Session lifecycle actions.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionAction {
-    Open,
-    Bind,
-    Close,
 }
 
 /// Dynamo's LLM request extension envelope.
@@ -206,10 +190,6 @@ pub struct NvExt {
 
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_control: Option<SessionControl>,
-
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_constraints: Option<RoutingConstraints>,
 
     #[builder(default, setter(strip_option))]
@@ -260,14 +240,20 @@ pub const HEADER_DP_RANK: &str = "x-dp-rank";
 /// Alias for data-parallel rank routing.
 pub const HEADER_DP_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
+pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
+        let kv_hints = (values.trajectory_final == Some(true)).then_some(KvHints {
+            evict_trajectory: true,
+        });
         Self {
             trajectory_id: values.trajectory_id,
             parent_trajectory_id: values.parent_trajectory_id,
             trajectory_final: values.trajectory_final,
+            kv_hints,
         }
     }
 }
@@ -285,6 +271,8 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
 /// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
+/// - `x-dynamo-request-priority` -> `agent_hints.priority`
+/// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -311,7 +299,22 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
-    if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
+    let priority = headers
+        .get(HEADER_REQUEST_PRIORITY)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i32>().ok());
+
+    let strict_priority = headers
+        .get(HEADER_REQUEST_STRICT_PRIORITY)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    if worker_id.is_none()
+        && prefill_id.is_none()
+        && dp_rank.is_none()
+        && prefill_dp_rank.is_none()
+        && priority.is_none()
+        && strict_priority.is_none()
     {
         return nvext;
     }
@@ -330,6 +333,15 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     if let Some(rank) = prefill_dp_rank {
         ext.prefill_dp_rank = Some(rank);
     }
+    if priority.is_some() || strict_priority.is_some() {
+        let hints = ext.agent_hints.get_or_insert_with(AgentHints::default);
+        if let Some(priority) = priority {
+            hints.priority = Some(priority);
+        }
+        if let Some(strict_priority) = strict_priority {
+            hints.strict_priority = Some(strict_priority);
+        }
+    }
     Some(ext)
 }
 
@@ -339,29 +351,6 @@ pub trait NvExtProvider {
     fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
         None
     }
-}
-
-/// Validate Dynamo extension semantics after protocol parsing.
-pub fn validate_nvext_semantics(nvext: Option<&NvExt>) -> anyhow::Result<()> {
-    let Some(nvext) = nvext else {
-        return Ok(());
-    };
-
-    if let Some(session_control) = nvext.session_control.as_ref() {
-        validate_non_empty(
-            &session_control.session_id,
-            "nvext.session_control.session_id",
-        )?;
-    }
-
-    Ok(())
-}
-
-fn validate_non_empty(value: &str, field: &str) -> anyhow::Result<()> {
-    if value.trim().is_empty() {
-        anyhow::bail!("{field} must not be empty");
-    }
-    Ok(())
 }
 
 pub fn routing_constraints_to_kv(
@@ -623,7 +612,6 @@ mod tests {
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
-        assert_eq!(nv_ext.session_control, None);
         assert_eq!(nv_ext.routing_constraints, None);
     }
 
@@ -695,31 +683,6 @@ mod tests {
     }
 
     #[test]
-    fn session_control_defaults_timeout() {
-        let sc: SessionControl =
-            serde_json::from_str(r#"{"session_id":"s","action":"open"}"#).expect("session_control");
-        assert_eq!(sc.action, Some(SessionAction::Open));
-        assert_eq!(sc.timeout, 300);
-    }
-
-    #[test]
-    fn session_control_round_trips_actions() {
-        let sc: SessionControl =
-            serde_json::from_str(r#"{"session_id":"sub-1","action":"bind"}"#).unwrap();
-        assert_eq!(sc.action, Some(SessionAction::Bind));
-        assert_eq!(sc.timeout, 300);
-
-        let original = SessionControl {
-            session_id: "test-session".to_string(),
-            action: Some(SessionAction::Close),
-            timeout: 90,
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let deser: SessionControl = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser, original);
-    }
-
-    #[test]
     fn metadata_upload_parses_url() {
         let nvext: NvExt = serde_json::from_value(serde_json::json!({
             "metadata_upload": {
@@ -775,6 +738,40 @@ mod tests {
     }
 
     #[test]
+    fn apply_header_routing_overrides_sets_priorities() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_REQUEST_PRIORITY, "-3".parse().unwrap());
+        headers.insert(HEADER_REQUEST_STRICT_PRIORITY, "7".parse().unwrap());
+
+        let hints = apply_header_routing_overrides(None, &headers)
+            .unwrap()
+            .agent_hints
+            .unwrap();
+
+        assert_eq!(hints.priority, Some(-3));
+        assert_eq!(hints.strict_priority, Some(7));
+
+        headers.remove(HEADER_REQUEST_STRICT_PRIORITY);
+        let nvext = NvExt {
+            agent_hints: Some(AgentHints {
+                priority: Some(1),
+                strict_priority: Some(2),
+                osl: Some(99),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let hints = apply_header_routing_overrides(Some(nvext), &headers)
+            .unwrap()
+            .agent_hints
+            .unwrap();
+
+        assert_eq!(hints.priority, Some(-3));
+        assert_eq!(hints.strict_priority, Some(2));
+        assert_eq!(hints.osl, Some(99));
+    }
+
+    #[test]
     fn agent_context_from_headers_derives_agent_context_table() {
         use axum::http::{HeaderMap, HeaderName};
 
@@ -814,6 +811,7 @@ mod tests {
                 expected_parent_trajectory_id
             );
             assert_eq!(agent_context.trajectory_final, None);
+            assert_eq!(agent_context.kv_hints, None);
         }
     }
 
@@ -853,6 +851,15 @@ mod tests {
             Some("generic-parent")
         );
         assert_eq!(agent_context.trajectory_final, Some(true));
+        assert_eq!(
+            agent_context.kv_hints,
+            Some(KvHints {
+                evict_trajectory: true
+            })
+        );
+
+        headers.insert(HEADER_DYNAMO_TRAJECTORY_FINAL, "false".parse().unwrap());
+        assert_eq!(agent_context_from_headers(&headers).unwrap().kv_hints, None);
     }
 
     #[test]

@@ -255,6 +255,7 @@ impl From<RequestTraceToolEventIngress> for RequestTraceRecord {
                 trajectory_id: ingress.trajectory_id,
                 parent_trajectory_id: ingress.parent_trajectory_id,
                 trajectory_final: None,
+                kv_hints: None,
             }),
             request: None,
             tool: Some(ingress.tool),

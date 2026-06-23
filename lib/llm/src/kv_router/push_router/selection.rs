@@ -7,7 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::{RoutingEligibility, WorkerEligibilityError},
+    scheduling::RoutingEligibility,
 };
 use dynamo_runtime::{
     dynamo_nvtx_range,
@@ -16,10 +16,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{
-        FindBestMatchOutcome, push_router::KvPushRouter,
-        sticky::coordinator::sticky_allowed_for_phase,
-    },
+    kv_router::{FindBestMatchOutcome, push_router::KvPushRouter},
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -128,7 +125,6 @@ impl KvPushRouter {
         routing_parts: RoutingRequestParts<'_>,
         phase: RequestPhase,
         is_query_only: bool,
-        sticky_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
@@ -146,10 +142,7 @@ impl KvPushRouter {
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
-        let sticky_pin = sticky_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
-        let Some((pinned_worker_id, requested_dp_rank)) =
-            pinned_worker_hint(phase, routing).or(sticky_pin)
-        else {
+        let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
@@ -237,58 +230,6 @@ impl KvPushRouter {
             scheduler_tracked: !is_query_only,
         })
         .await
-    }
-
-    fn sticky_worker_ineligibility_for_phase(
-        &self,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-        worker: WorkerWithDpRank,
-    ) -> Option<WorkerEligibilityError> {
-        let routing = request.routing.as_ref()?;
-        if !sticky_allowed_for_phase(phase, Some(routing)) {
-            return None;
-        }
-
-        let default_constraints = RoutingConstraints::default();
-        let routing_constraints = routing
-            .routing_constraints
-            .as_ref()
-            .unwrap_or(&default_constraints);
-        let configs = self.chooser.workers_with_configs.borrow();
-        let eligibility = RoutingEligibility::new(
-            routing.allowed_worker_ids.as_ref(),
-            None,
-            Some(worker),
-            routing_constraints,
-        );
-        eligibility.validate_worker_rank(&configs, worker).err()
-    }
-
-    pub(crate) fn unbind_ineligible_sticky_worker_for_phase(
-        &self,
-        context_id: &str,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-        worker: WorkerWithDpRank,
-    ) -> bool {
-        let Some(reason) = self.sticky_worker_ineligibility_for_phase(request, phase, worker)
-        else {
-            return false;
-        };
-
-        let Some((session_id, _binding)) = self.sticky.unbind_for_phase(request, phase) else {
-            return false;
-        };
-        tracing::warn!(
-            request_id = %context_id,
-            %session_id,
-            worker_id = worker.worker_id,
-            dp_rank = worker.dp_rank,
-            reason = %reason,
-            "Sticky worker is no longer eligible; removing session affinity"
-        );
-        true
     }
 }
 

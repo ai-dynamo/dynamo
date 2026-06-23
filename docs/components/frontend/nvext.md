@@ -42,7 +42,6 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
 | `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
-| `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
 Related root-level Dynamo output option:
 
@@ -92,7 +91,7 @@ important" across Dynamo.
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
 For layer-by-layer behavior and backend requirements, see
-[Priority Scheduling](../../agents/priority-scheduling.md).
+[Priority Scheduling](../router/priority-scheduling.md).
 
 ```json
 {
@@ -178,31 +177,6 @@ Backend details:
     }
 }
 ```
-
-## Session Control
-
-`session_control` enables sticky routing by `session_id`. Use `action: "bind"` for router-only sticky affinity without backend engine RPCs. Use `action: "open"` / `"close"` for backend streaming-session lifecycle when the engine supports it.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
-| `session_control.action` | `string` | omitted | Optional action: `"bind"`, `"open"`, or `"close"`. Omit on intermediate turns. |
-| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Used with `action: "bind"` and `action: "open"`. |
-
-```json
-{
-    "nvext": {
-        "session_control": {
-            "session_id": "subagent-1",
-            "action": "open",
-            "timeout": 300
-        }
-    }
-}
-```
-
-Requires `--router-mode=kv` on the frontend. Router-only sticky routing uses `action: "bind"` and does not require backend session support. Engine-backed session lifecycle requires backend support; see [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for SGLang streaming-session setup details.
-
 
 ## Response Extensions
 
