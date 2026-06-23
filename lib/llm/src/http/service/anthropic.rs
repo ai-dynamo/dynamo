@@ -42,7 +42,7 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
-    NvExt, apply_header_routing_overrides, validate_nvext_semantics,
+    AGENT_CONTEXT_CONTEXT_KEY, agent_context_from_headers, apply_header_routing_overrides,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -54,7 +54,7 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::SanitizedError;
-use super::metadata::extract_metadata_from_http;
+use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
 
 // ---------------------------------------------------------------------------
@@ -168,7 +168,11 @@ async fn handler_anthropic_messages(
             &err.to_string(),
         )
     })?;
-    let request = Context::with_id_and_metadata(request, request_id, metadata);
+    let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    attach_x_request_id(&mut request, &headers);
+    if let Some(agent_context) = agent_context_from_headers(&headers) {
+        request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+    }
     let context = request.context();
 
     // Create connection handles
@@ -292,10 +296,6 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
-    if let Some(response) = validate_anthropic_nvext(chat_request.nvext.as_ref()) {
-        return Err(response);
-    }
-
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
@@ -788,16 +788,6 @@ fn apply_anthropic_header_routing_overrides(
     }
 }
 
-fn validate_anthropic_nvext(nvext: Option<&NvExt>) -> Option<Response> {
-    validate_nvext_semantics(nvext).err().map(|e| {
-        anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            &format!("Invalid nvext: {e}"),
-        )
-    })
-}
-
 /// Build an Anthropic-formatted error response from a canonical
 /// [`SanitizedError`] variant. The status, public message, and Anthropic
 /// `error_type` all come from the variant; `details` are logged
@@ -855,7 +845,7 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Respo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::extensions::{AgentContext, parse_nvext};
+    use crate::protocols::common::extensions::parse_nvext;
 
     fn request_with_nvext() -> AnthropicCreateMessageRequest {
         serde_json::from_value(serde_json::json!({
@@ -863,10 +853,8 @@ mod tests {
             "max_tokens": 16,
             "messages": [{"role": "user", "content": "hi"}],
             "nvext": {
-                "agent_context": {
-                    "session_type_id": "deep_research:v1",
-                    "session_id": "run-123",
-                    "trajectory_id": "run-123:researcher-0"
+                "agent_hints": {
+                    "priority": 5
                 }
             }
         }))
@@ -880,14 +868,8 @@ mod tests {
         let nvext = parse_nvext(request.nvext).unwrap();
 
         assert_eq!(
-            nvext.and_then(|ext| ext.agent_context),
-            Some(AgentContext {
-                session_type_id: Some("deep_research:v1".to_string()),
-                session_id: Some("run-123".to_string()),
-                trajectory_id: "run-123:researcher-0".to_string(),
-                parent_trajectory_id: None,
-                trajectory_final: None,
-            })
+            nvext.and_then(|ext| ext.agent_hints.and_then(|hints| hints.priority)),
+            Some(5)
         );
     }
 
@@ -900,15 +882,15 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_nvext_validation_rejects_invalid_context() {
-        let mut request = request_with_nvext();
-        request.nvext.as_mut().unwrap()["agent_context"]["trajectory_id"] =
-            serde_json::Value::String(String::new());
-        let nvext = parse_nvext(request.nvext).unwrap();
+    fn anthropic_nvext_rejects_agent_context() {
+        let err = parse_nvext(Some(serde_json::json!({
+            "agent_context": {
+                "trajectory_id": "run-123"
+            }
+        })))
+        .unwrap_err();
 
-        let response = validate_anthropic_nvext(nvext.as_ref()).unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(err.to_string().contains("unknown field `agent_context`"));
     }
 
     #[test]

@@ -57,13 +57,11 @@ pub mod scheduler;
 mod scheduler_inputs;
 pub mod sequence;
 pub mod shared_cache;
-pub mod sticky;
 
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 pub use scheduler_inputs::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-pub use sticky::{SessionLifecycleController, StickySessionRouter};
 
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
 use scheduler_inputs::{
@@ -103,6 +101,7 @@ pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
+pub const MULTIMODAL_EMBEDDING_CACHE_SUBJECT: &str = "multimodal_embedding_cache";
 
 // for inter-router comms
 pub const PREFILL_SUBJECT: &str = "prefill_events";
