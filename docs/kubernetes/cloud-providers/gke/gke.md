@@ -13,7 +13,7 @@ title: Google Kubernetes Engine (GKE)
 [NVIDIA Kubernetes Device Plugin](https://github.com/NVIDIA/k8s-device-plugin) or
 [DRA Driver for NVIDIA GPUs](https://dra-driver-nvidia-gpu.sigs.k8s.io/docs/).
 
-Follow the instuctions in the next section to create an example GKE cluster or proceed to
+Follow the instructions in the next section to create an example GKE cluster or proceed to
 the [Install Dynamo Kubernetes Platform](#install-dynamo-kubernetes-platform) section.
 
 ## Create an example GKE cluster
@@ -105,7 +105,7 @@ export HF_TOKEN=<your Hugging Face token>
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN} -n ${INFERENCE_NAMESPACE}
 ```
 
-### Inspect the Gragh Deployment
+### Inspect the Graph Deployment
 
 Clone the Dynamo GitHub repository:
 
@@ -125,7 +125,7 @@ You might want to download and edit it, or you can just apply the above manifest
 Points to note in the container spec of `VllmDecodeWorker`:
 - the `args` field contains `LD_LIBRARY_PATH` and `PATH` to let GKE [find the correct GPU driver](https://cloud.google.com/kubernetes-engine/docs/how-to/gpus).
 - the `resources` field uses the `nvidia.com/gpu` resource type to request one GPU.
-Modify this feild if you use other resource type to designate the GPUs in your cluster or if you use
+Modify this field if you use other resource type to designate the GPUs in your cluster or if you use
 [DRA](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/).
 
 Verify that your cluster has nodes with GPUs and GPU allocation is configured:
@@ -153,7 +153,7 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
     kubectl wait --for=condition=Ready dgd/vllm-agg -n ${INFERENCE_NAMESPACE} --timeout=30m
     ```
 
-    Once the inference graph is ready, you get the following output from the comamnd above:
+    Once the inference graph is ready, you get the following output from the command above:
 
     ```bash
     dynamographdeployment.nvidia.com/vllm-agg condition met
