@@ -310,12 +310,12 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    if let Some(v) = &value {
-        if !v.is_object() {
-            return Err(serde::de::Error::custom(
-                "encoder_result must be a JSON object",
-            ));
-        }
+    if let Some(v) = &value
+        && !v.is_object()
+    {
+        return Err(serde::de::Error::custom(
+            "encoder_result must be a JSON object",
+        ));
     }
     Ok(value)
 }
