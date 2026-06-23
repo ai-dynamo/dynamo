@@ -38,15 +38,6 @@ use super::config::AuditPolicy;
 use super::handle::{AuditHttpRequestHeaders, AuditRecord};
 use super::sink::AuditSink;
 
-/// Bounded dedicated rayon pool size for off-runtime audit-record
-/// serialization. Two threads is enough at our measured publish rate
-/// (~2 records per chat completion) while small enough to never become
-/// a CPU hog when the host is saturated. Configurable via
-/// `DYN_AUDIT_OTEL_SERDE_THREADS` if a future deployment needs to tune
-/// this (e.g. heavier audit payloads, more sinks).
-const DEFAULT_OTEL_SERDE_THREADS: usize = 2;
-const ENV_OTEL_SERDE_THREADS: &str = "DYN_AUDIT_OTEL_SERDE_THREADS";
-
 const DEFAULT_OTLP_HTTP_LOGS_ENDPOINT: &str = "http://localhost:4318/v1/logs";
 const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";
 const DEFAULT_HTTP_HEADER_VALUE_MAX_BYTES: usize = 4 * 1024;
@@ -91,13 +82,6 @@ pub struct OtelSink {
     provider: SdkLoggerProvider,
     logger: SdkLogger,
     max_payload_bytes: usize,
-    /// Bounded dedicated rayon pool for serializing `AuditRecord` to JSON
-    /// off the tokio runtime. Without this, the heavy serde walk over the
-    /// full `Arc<NvCreateChatCompletionRequest>` (typically ~30 KB JSON) runs
-    /// on a tokio worker shared with HTTP request futures, and cooperative
-    /// scheduling lets it starve the request future for the duration of the
-    /// walk. Moving the walk to dedicated OS threads removes that contention.
-    serde_pool: Arc<rayon::ThreadPool>,
     header_policy: Arc<OtelHeaderPolicy>,
 }
 
@@ -257,7 +241,6 @@ impl OtelSink {
     fn new(
         provider: SdkLoggerProvider,
         max_payload_bytes: usize,
-        serde_pool: Arc<rayon::ThreadPool>,
         header_policy: Arc<OtelHeaderPolicy>,
     ) -> Self {
         let logger = provider.logger(AUDIT_INSTRUMENTATION_SCOPE);
@@ -265,29 +248,8 @@ impl OtelSink {
             provider,
             logger,
             max_payload_bytes,
-            serde_pool,
             header_policy,
         }
-    }
-
-    /// Build the bounded rayon pool for off-runtime serialization. The thread
-    /// count defaults to `DEFAULT_OTEL_SERDE_THREADS` and is overridable via
-    /// `DYN_AUDIT_OTEL_SERDE_THREADS`. Returns an error (rather than panicking)
-    /// if `ThreadPoolBuilder::build` fails — e.g. OS-level thread spawn limits.
-    fn build_serde_pool() -> Result<Arc<rayon::ThreadPool>> {
-        let num_threads = std::env::var(ENV_OTEL_SERDE_THREADS)
-            .ok()
-            .and_then(|raw| raw.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_OTEL_SERDE_THREADS);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .thread_name(|i| format!("otel-audit-serde-{i}"))
-            .build()
-            .with_context(|| {
-                format!("building OTEL audit serde rayon pool ({num_threads} threads)")
-            })?;
-        Ok(Arc::new(pool))
     }
 
     pub async fn from_policy(policy: &AuditPolicy) -> Result<Self> {
@@ -320,13 +282,11 @@ impl OtelSink {
             .with_resource(resource)
             .build();
 
-        let serde_pool = Self::build_serde_pool()?;
         let header_policy = OtelHeaderPolicy::from_env();
 
         Ok(Self::new(
             provider,
             policy.otel_max_payload_bytes,
-            serde_pool,
             header_policy,
         ))
     }
@@ -355,9 +315,8 @@ impl OtelSink {
 
     /// Serialize an `AuditRecord` into the `payload` attribute string.
     ///
-    /// Pure-CPU and the bulk of `OtelSink::emit`'s cost. Designed to be called
-    /// from `self.serde_pool` so it executes off the tokio runtime — see
-    /// `emit`.
+    /// Pure-CPU and the bulk of `OtelSink::emit`'s cost. Called on the audit
+    /// worker task (the bus consumer), off the request hot path — see `emit`.
     fn payload_for_limit(
         rec: &AuditRecord,
         max_payload_bytes: usize,
@@ -419,46 +378,27 @@ impl AuditSink for OtelSink {
 
     async fn emit(&self, rec: &AuditRecord) {
         // OTLP Timestamp = when the event actually occurred (captured on the
-        // producing thread at request-receive / response-completion); set below
-        // from `rec.event_time`. ObservedTimestamp = now, when this sink drained
-        // the record off the audit bus. The gap between them is bus + sink-task
-        // latency, which is exactly what we no longer want folded into Timestamp.
+        // producing thread at request arrival); set below from `rec.event_time`.
+        // ObservedTimestamp = now, when this sink drained the record off the
+        // audit bus. The gap between them is bus + sink-task latency, which is
+        // exactly what we no longer want folded into Timestamp.
         let observed_timestamp = SystemTime::now();
 
-        // Keep the full payload JSON walk off Tokio worker threads. The OTEL
-        // SDK emit below remains on this sink task; it only enqueues to the
-        // BatchLogProcessor.
-        let max = self.max_payload_bytes;
-        let header_policy = self.header_policy.clone();
-        let rec_for_serde = rec.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.serde_pool.spawn(move || {
-            let start = std::time::Instant::now();
-            let result = Self::payload_for_limit(&rec_for_serde, max, &header_policy);
-            let elapsed_us = start.elapsed().as_micros() as u64;
-            let payload_len = result.as_ref().map(|(p, _, _)| p.len()).unwrap_or(0);
-            tracing::debug!(
-                target: "dynamo.audit.otel.serde",
-                request_id = %rec_for_serde.request_id,
-                elapsed_us,
-                payload_len,
-                "OTEL audit payload serialized off-runtime"
-            );
-            let _ = tx.send(result);
-        });
-
-        let payload_result = match rx.await {
-            Ok(result) => result,
-            Err(err) => {
-                tracing::warn!(
-                    target: "dynamo_llm::audit",
-                    request_id = %rec.request_id,
-                    error = %err,
-                    "audit otel: rayon serde worker dropped sender (likely panic in payload_for_limit); skipping record"
-                );
-                return;
-            }
-        };
+        // Serialize the payload on the audit worker task. This runs on the bus
+        // consumer, which is independent of the request future (inference has
+        // already returned to the client by the time we drain the record), so
+        // it does not block the request hot path. The OTEL SDK emit below only
+        // enqueues to the BatchLogProcessor.
+        let start = std::time::Instant::now();
+        let payload_result =
+            Self::payload_for_limit(rec, self.max_payload_bytes, &self.header_policy);
+        tracing::debug!(
+            target: "dynamo.audit.otel.serde",
+            request_id = %rec.request_id,
+            elapsed_us = start.elapsed().as_micros() as u64,
+            payload_len = payload_result.as_ref().map(|(p, _, _)| p.len()).unwrap_or(0),
+            "OTEL audit payload serialized"
+        );
         let Some((payload, audit_complete, audit_drop_reason)) = payload_result else {
             return;
         };
