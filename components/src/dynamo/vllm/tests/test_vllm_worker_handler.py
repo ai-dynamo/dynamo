@@ -906,17 +906,48 @@ def _make_prefill_handler(model: str = "test-model") -> mod.PrefillWorkerHandler
     return handler
 
 
+def _multi_nixl_offload_vllm_config():
+    return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "cpu_bytes_to_use": 128849018880,
+                            "store_threshold": 2,
+                            "max_tracker_size": 262144,
+                            "eviction_policy": "arc",
+                            "offload_prompt_only": True,
+                        },
+                    },
+                ]
+            },
+        )
+    )
+
+
 class TestPrefillKvTransferParams:
     @pytest.mark.asyncio
-    async def test_prefill_merges_cached_nixl_kv_transfer_params(self):
+    @pytest.mark.parametrize(
+        "vllm_config",
+        [
+            SimpleNamespace(
+                kv_transfer_config=SimpleNamespace(kv_connector="NixlConnector")
+            ),
+            _multi_nixl_offload_vllm_config(),
+        ],
+    )
+    async def test_prefill_merges_cached_nixl_kv_transfer_params(self, vllm_config):
         handler = _make_prefill_handler()
         handler.config.enable_rl = False
         handler.default_sampling_params = {}
         handler.model_max_len = None
         handler.engine_client = MagicMock()
-        handler.engine_client.vllm_config = SimpleNamespace(
-            kv_transfer_config=SimpleNamespace(kv_connector="NixlConnector")
-        )
+        handler.engine_client.vllm_config = vllm_config
         handler._get_mm_processor_kwargs = MagicMock(return_value={})
         handler._extract_multimodal_data = AsyncMock(return_value=None)
         handler._build_prompt_from_request = MagicMock(

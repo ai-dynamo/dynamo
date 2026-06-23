@@ -76,6 +76,7 @@ from .handlers import (
     build_sampling_params,
     get_dp_range_for_worker,
 )
+from .kv_connector_protocols import kv_transfer_config_has_connector
 from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
@@ -83,9 +84,7 @@ from .logits_processing import (
 
 
 def _is_nixl_kv_connector(vllm_config: Any) -> bool:
-    kv_cfg = getattr(vllm_config, "kv_transfer_config", None)
-    connector = getattr(kv_cfg, "kv_connector", None) if kv_cfg is not None else None
-    return connector == "NixlConnector"
+    return kv_transfer_config_has_connector(vllm_config, "NixlConnector")
 
 
 if TYPE_CHECKING:

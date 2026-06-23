@@ -249,11 +249,32 @@ _PD_KVBM_NIXL = {
     ]
 }
 
+_MULTI_NIXL_OFFLOAD = {
+    "connectors": [
+        {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+        {
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "cpu_bytes_to_use": 128849018880,
+                "store_threshold": 2,
+                "max_tracker_size": 262144,
+                "eviction_policy": "arc",
+                "offload_prompt_only": True,
+            },
+        },
+    ]
+}
+
 
 def test_uses_nixl_connector_direct_and_nested():
-    """Test _uses_nixl_connector for direct, nested-in-PdConnector, and absent cases."""
+    """Test _uses_nixl_connector for direct, nested, and absent cases."""
     assert _uses_nixl_connector(_make_engine_cfg("NixlConnector")) is True
     assert _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
+    assert (
+        _uses_nixl_connector(_make_engine_cfg("MultiConnector", _MULTI_NIXL_OFFLOAD))
+        is True
+    )
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheMPConnector")) is False
     assert _uses_nixl_connector(_make_engine_cfg("FlexKVConnectorV1")) is False
@@ -261,7 +282,7 @@ def test_uses_nixl_connector_direct_and_nested():
 
 
 def test_uses_dynamo_connector_direct_and_nested():
-    """Test _uses_dynamo_connector for direct, nested-in-PdConnector, and absent cases."""
+    """Test _uses_dynamo_connector for direct, nested, and absent cases."""
     assert _uses_dynamo_connector(_make_engine_cfg("DynamoConnector")) is True
     assert (
         _uses_dynamo_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
