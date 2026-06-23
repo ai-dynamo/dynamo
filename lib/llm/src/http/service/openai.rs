@@ -531,7 +531,7 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
     use crate::protocols::common::extensions::{
         HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
-        HEADER_WORKER_INSTANCE_ID,
+        HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, HEADER_WORKER_INSTANCE_ID,
     };
     let header_present = [
         HEADER_WORKER_INSTANCE_ID,
@@ -539,6 +539,8 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
         HEADER_DP_RANK,
         HEADER_DP_RANK_ALIAS,
         HEADER_PREFILL_DP_RANK,
+        HEADER_REQUEST_PRIORITY,
+        HEADER_REQUEST_STRICT_PRIORITY,
     ]
     .iter()
     .any(|h| headers.contains_key(*h));

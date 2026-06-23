@@ -240,6 +240,8 @@ pub const HEADER_DP_RANK: &str = "x-dp-rank";
 /// Alias for data-parallel rank routing.
 pub const HEADER_DP_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
+pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 impl From<AgentContextHeaderValues> for AgentContext {
@@ -269,6 +271,8 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
 /// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
+/// - `x-dynamo-request-priority` -> `agent_hints.priority`
+/// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -295,7 +299,22 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
-    if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
+    let priority = headers
+        .get(HEADER_REQUEST_PRIORITY)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i32>().ok());
+
+    let strict_priority = headers
+        .get(HEADER_REQUEST_STRICT_PRIORITY)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    if worker_id.is_none()
+        && prefill_id.is_none()
+        && dp_rank.is_none()
+        && prefill_dp_rank.is_none()
+        && priority.is_none()
+        && strict_priority.is_none()
     {
         return nvext;
     }
@@ -313,6 +332,15 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     }
     if let Some(rank) = prefill_dp_rank {
         ext.prefill_dp_rank = Some(rank);
+    }
+    if priority.is_some() || strict_priority.is_some() {
+        let hints = ext.agent_hints.get_or_insert_with(AgentHints::default);
+        if let Some(priority) = priority {
+            hints.priority = Some(priority);
+        }
+        if let Some(strict_priority) = strict_priority {
+            hints.strict_priority = Some(strict_priority);
+        }
     }
     Some(ext)
 }
@@ -707,6 +735,40 @@ mod tests {
         assert_eq!(result.prefill_worker_id, Some(456));
         assert_eq!(result.dp_rank, Some(3));
         assert_eq!(result.prefill_dp_rank, Some(5));
+    }
+
+    #[test]
+    fn apply_header_routing_overrides_sets_priorities() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_REQUEST_PRIORITY, "-3".parse().unwrap());
+        headers.insert(HEADER_REQUEST_STRICT_PRIORITY, "7".parse().unwrap());
+
+        let hints = apply_header_routing_overrides(None, &headers)
+            .unwrap()
+            .agent_hints
+            .unwrap();
+
+        assert_eq!(hints.priority, Some(-3));
+        assert_eq!(hints.strict_priority, Some(7));
+
+        headers.remove(HEADER_REQUEST_STRICT_PRIORITY);
+        let nvext = NvExt {
+            agent_hints: Some(AgentHints {
+                priority: Some(1),
+                strict_priority: Some(2),
+                osl: Some(99),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let hints = apply_header_routing_overrides(Some(nvext), &headers)
+            .unwrap()
+            .agent_hints
+            .unwrap();
+
+        assert_eq!(hints.priority, Some(-3));
+        assert_eq!(hints.strict_priority, Some(2));
+        assert_eq!(hints.osl, Some(99));
     }
 
     #[test]
