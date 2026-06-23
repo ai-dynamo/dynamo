@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.benchmark import benchmark_config
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 pytestmark = [
@@ -27,6 +28,7 @@ async def test_benchmark_mode_enabled_from_env(monkeypatch, mock_sglang_cli):
     """Dynamo should map benchmark env vars onto native SGLang args."""
     monkeypatch.setenv("DYN_BENCHMARK_MODE", "prefill")
     monkeypatch.setenv("DYN_BENCHMARK_PREFILL_GRANULARITY", "32")
+    monkeypatch.setenv("DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY", "4")
     monkeypatch.setenv("DYN_BENCHMARK_TIMEOUT", "17")
     mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
 
@@ -34,23 +36,29 @@ async def test_benchmark_mode_enabled_from_env(monkeypatch, mock_sglang_cli):
     assert config.server_args.benchmark_mode == "prefill"
     assert config.server_args.enable_forward_pass_metrics is True
     assert config.server_args.benchmark_prefill_granularity == 32
+    assert config.server_args.benchmark_prefill_kv_read_granularity == 4
     assert config.server_args.benchmark_timeout == 17
+    assert benchmark_config(config.server_args)["prefill_kv_read_granularity"] == 4
 
 
 @pytest.mark.asyncio
 async def test_benchmark_cli_overrides_env(monkeypatch, mock_sglang_cli):
     """Explicit SGLang benchmark CLI flags should win over Dynamo env defaults."""
     monkeypatch.setenv("DYN_BENCHMARK_MODE", "prefill")
+    monkeypatch.setenv("DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY", "4")
     monkeypatch.setenv("DYN_BENCHMARK_TIMEOUT", "17")
     mock_sglang_cli(
         "--model",
         "Qwen/Qwen3-0.6B",
         "--benchmark-mode",
         "decode",
+        "--benchmark-prefill-kv-read-granularity",
+        "9",
         "--benchmark-timeout",
         "23",
     )
 
     config = await parse_args(sys.argv[1:])
     assert config.server_args.benchmark_mode == "decode"
+    assert config.server_args.benchmark_prefill_kv_read_granularity == 9
     assert config.server_args.benchmark_timeout == 23

@@ -40,6 +40,13 @@ def apply_benchmark_env(parsed_args: Any, cli_args: list[str]) -> None:
     _apply_int_env(
         parsed_args,
         cli_args,
+        "benchmark_prefill_kv_read_granularity",
+        "--benchmark-prefill-kv-read-granularity",
+        "DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY",
+    )
+    _apply_int_env(
+        parsed_args,
+        cli_args,
         "benchmark_decode_length_granularity",
         "--benchmark-decode-length-granularity",
         "DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
@@ -93,6 +100,9 @@ def benchmark_config(server_args: Any) -> Optional[dict[str, Any]]:
         "mode": mode,
         "prefill_isl_granularity": getattr(
             server_args, "benchmark_prefill_granularity", 16
+        ),
+        "prefill_kv_read_granularity": getattr(
+            server_args, "benchmark_prefill_kv_read_granularity", 1
         ),
         "decode_length_granularity": getattr(
             server_args, "benchmark_decode_length_granularity", 6
