@@ -173,7 +173,7 @@ bs62 = { version = "0.1" }
 # alphabetically, diverging from Python frontends (vLLM/SGLang) which preserve
 # dict insertion order. serde_json already has its preserve_order enabled
 # (see above / lib/renderer); minijinja's map is the remaining sort point.
-minijinja = { version = "2.20.0", features = ["loader", "loop_controls", "preserve_order"] }
+minijinja = { version = "2.21.0", features = ["loader", "loop_controls", "preserve_order"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor
