@@ -690,6 +690,36 @@ class WorkerMetricsPublisher:
         """
         ...
 
+class MultimodalEmbeddingCachePublisher:
+    """
+    A publisher for multimodal encode-worker cache state.
+    """
+
+    ...
+
+    def __init__(self) -> None:
+        """
+        Create a `MultimodalEmbeddingCachePublisher` object.
+        """
+
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
+        """
+        Initialize the NATS endpoint for publishing multimodal cache state.
+
+        Args:
+            endpoint: The endpoint to extract component information from.
+        """
+
+    def publish_delta(self, added_keys: list[str], removed_keys: list[str]) -> None:
+        """
+        Publish an incremental cache mutation for this worker.
+
+        Args:
+            added_keys: Newly cached embedding keys.
+            removed_keys: Cache keys no longer present on the worker.
+        """
+        ...
+
 class SelectionService:
     """
     In-process handle to a runtime-free Dynamo selection core.
