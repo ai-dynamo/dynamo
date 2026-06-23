@@ -114,7 +114,7 @@ impl ConcurrentRadixTreeCompressed {
             return;
         }
 
-        match cur_node.remove_worker_for_hashes(worker, &block_hashes) {
+        match cur_node.remove_worker_for_hashes(worker, block_hashes) {
             Some(outcome) => {
                 Self::remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
                 for block_hash in outcome.unmatched_hashes {
