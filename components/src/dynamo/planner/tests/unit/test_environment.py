@@ -88,8 +88,8 @@ async def test_initialize_uses_backend_names_and_resolves_namespace_before_state
     await environment.initialize()
 
     controller.validate_deployment.assert_awaited_once_with(
-        prefill_component_name="VllmPrefillWorker",
-        decode_component_name="VllmDecodeWorker",
+        prefill_component_name="prefill",
+        decode_component_name="decode",
         require_prefill=True,
         require_decode=True,
     )

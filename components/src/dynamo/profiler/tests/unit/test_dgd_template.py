@@ -70,8 +70,8 @@ def test_production_frontend_has_hf_token_secret(backend: str, mode: str) -> Non
 def test_vllm_decode_blueprint_does_not_enable_kv_transfer() -> None:
     config = load_dgd_template("vllm", "disagg")
 
-    assert "--kv-transfer-config" not in _component_args(config, "VllmDecodeWorker")
-    assert "--kv-transfer-config" in _component_args(config, "VllmPrefillWorker")
+    assert "--kv-transfer-config" not in _component_args(config, "decode")
+    assert "--kv-transfer-config" in _component_args(config, "prefill")
 
 
 def test_mocker_blueprint_does_not_reference_unmounted_profile_data() -> None:

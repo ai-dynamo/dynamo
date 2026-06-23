@@ -74,7 +74,7 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
             containers:
             - name: main
               image: ${RUNTIME_IMAGE}
-      - name: VllmDecodeWorker
+      - name: decode
         type: decode
         replicas: 1
         podTemplate:
@@ -205,7 +205,7 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
         Port-forward the worker system port and POST to `/v1/loras`:
 
         ```bash
-        kubectl port-forward svc/vllm-agg-lora-vllmdecodeworker 9090:9090 -n ${NAMESPACE}
+        kubectl port-forward svc/vllm-agg-lora-decode 9090:9090 -n ${NAMESPACE}
         ```
 
         ```bash

@@ -1156,8 +1156,8 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{ComponentName: "Frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
 				{ComponentName: "Planner", ComponentType: v1beta1.ComponentTypePlanner, Replicas: ptr.To(int32(1))},
-				{ComponentName: "VllmDecodeWorker", ComponentType: v1beta1.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
-				{ComponentName: "VllmPrefillWorker", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+				{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
+				{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
 			},
 		},
 	}
@@ -1170,9 +1170,9 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 					{
-						Name: "vllmprefillworker",
+						Name: "prefill",
 						Labels: map[string]string{
-							commonconsts.KubeLabelDynamoComponent:        "VllmPrefillWorker",
+							commonconsts.KubeLabelDynamoComponent:        "prefill",
 							commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
 							commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypePrefill,
 						},
@@ -1182,9 +1182,9 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 					},
 					{Name: "frontend"},
 					{
-						Name: "vllmdecodeworker",
+						Name: "decode",
 						Labels: map[string]string{
-							commonconsts.KubeLabelDynamoComponent:        "VllmDecodeWorker",
+							commonconsts.KubeLabelDynamoComponent:        "decode",
 							commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
 							commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypeDecode,
 						},
@@ -1208,27 +1208,27 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 	generatedPCS, err := renderer.Render(ctx, dgd, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	renderDGD := groveRenderDeployment(dgd, generatedPCS)
-	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
+	g.Expect(dgd.GetComponentByName("decode").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
 
-	prefill := renderDGD.GetComponentByName("VllmPrefillWorker")
+	prefill := renderDGD.GetComponentByName("prefill")
 	if prefill == nil {
 		t.Fatal("expected rendered prefill component")
 	}
 	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
 	g.Expect(prefill.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
 
-	decode := renderDGD.GetComponentByName("VllmDecodeWorker")
+	decode := renderDGD.GetComponentByName("decode")
 	if decode == nil {
 		t.Fatal("expected rendered decode component")
 	}
 	g.Expect(decode.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
 	g.Expect(decode.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypeDecode))
 
-	g.Expect(generatedPCS.Spec.Template.Cliques[0].Name).To(gomega.Equal("vllmprefillworker"))
+	g.Expect(generatedPCS.Spec.Template.Cliques[0].Name).To(gomega.Equal("prefill"))
 
 	var prefillClique *grovev1alpha1.PodCliqueTemplateSpec
 	for _, clique := range generatedPCS.Spec.Template.Cliques {
-		if clique.Name == "vllmprefillworker" {
+		if clique.Name == "prefill" {
 			prefillClique = clique
 			break
 		}
@@ -1241,13 +1241,13 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 	g.Expect(prefillClique.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]).To(gomega.Equal("1.1.0"))
 
 	decodeService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-		ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
+		ServiceName:     dynamo.GetDCDResourceName(renderDGD, "decode", ""),
 		Namespace:       renderDGD.Namespace,
 		ComponentType:   string(decode.ComponentType),
 		DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decode),
-		ComponentName:   "VllmDecodeWorker",
-		Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decode),
-		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decode),
+		ComponentName:   "decode",
+		Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "decode", decode),
+		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "decode", decode),
 		IsK8sDiscovery:  true,
 	})
 	g.Expect(err).NotTo(gomega.HaveOccurred())

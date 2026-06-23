@@ -41,7 +41,7 @@ spec:
                 - {name: TRANSFORMERS_OFFLINE, value: "1"}
               volumeMounts:
                 - {name: model-cache, mountPath: /model-cache, readOnly: true}
-    - name: VllmDecodeWorker
+    - name: decode
       type: decode
       replicas: 1
       multinode:

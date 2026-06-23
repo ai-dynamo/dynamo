@@ -89,7 +89,7 @@ spec:
         containers:
         - name: main
           image: ${RUNTIME_IMAGE}
-  - name: VllmWorker
+  - name: worker
     type: worker
     replicas: 1
     podTemplate:
@@ -276,7 +276,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
   components:
   - name: Frontend
     type: frontend
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -295,7 +295,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
   components:
   - name: Frontend
     type: frontend
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     sharedMemorySize: 16Gi
     podTemplate:
@@ -310,7 +310,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
           - prefill
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     sharedMemorySize: 16Gi
     podTemplate:
@@ -382,7 +382,7 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 <Tab title="vLLM" language="vllm">
 
 ```yaml
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -546,7 +546,7 @@ spec:
         containers:
         - name: main
           image: ${RUNTIME_IMAGE}             # export: vllm-runtime image + tag
-  - name: VllmWorker
+  - name: worker
     type: worker
     replicas: 8                               # substitute: scale out for throughput
     podTemplate:

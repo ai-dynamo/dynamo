@@ -561,12 +561,12 @@ spec:
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-						"VllmDecodeWorker": {
+						"decode": {
 							ComponentType:    commonconsts.ComponentTypeWorker,
 							SubComponentType: commonconsts.ComponentTypeDecode,
 							Replicas:         ptr.To(int32(1)),
 						},
-						"VllmPrefillWorker": {
+						"prefill": {
 							ComponentType:    commonconsts.ComponentTypeWorker,
 							SubComponentType: commonconsts.ComponentTypePrefill,
 							Replicas:         ptr.To(int32(1)),
@@ -584,19 +584,19 @@ spec:
   replicas: 1
   template:
     cliques:
-    - name: vllmprefillworker
+    - name: prefill
       labels:
-        nvidia.com/dynamo-component: VllmPrefillWorker
+        nvidia.com/dynamo-component: prefill
         nvidia.com/dynamo-component-type: worker
         nvidia.com/dynamo-graph-deployment-name: vllm-disagg-planner
         nvidia.com/dynamo-namespace: jsm-vllm-disagg-planner
         nvidia.com/dynamo-sub-component-type: prefill
         nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: vllm-disagg-planner-vllmprefillworker
+        nvidia.com/selector: vllm-disagg-planner-prefill
       annotations:
         nvidia.com/dynamo-operator-origin-version: 1.1.0
       spec:
-        roleName: vllmprefillworker
+        roleName: prefill
         podSpec:
           volumes:
           - name: shared-memory
@@ -685,19 +685,19 @@ spec:
             fsGroup: 1000
         replicas: 1
         minAvailable: 1
-    - name: vllmdecodeworker
+    - name: decode
       labels:
-        nvidia.com/dynamo-component: VllmDecodeWorker
+        nvidia.com/dynamo-component: decode
         nvidia.com/dynamo-component-type: worker
         nvidia.com/dynamo-graph-deployment-name: vllm-disagg-planner
         nvidia.com/dynamo-namespace: jsm-vllm-disagg-planner
         nvidia.com/dynamo-sub-component-type: decode
         nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: vllm-disagg-planner-vllmdecodeworker
+        nvidia.com/selector: vllm-disagg-planner-decode
       annotations:
         nvidia.com/dynamo-operator-origin-version: 1.1.0
       spec:
-        roleName: vllmdecodeworker
+        roleName: decode
         podSpec:
           volumes:
           - name: shared-memory
@@ -810,16 +810,16 @@ spec:
 					renderDGD := groveRenderDeployment(dgd, pcs)
 
 					t.Log("generate the decode service selector from the same prepared Grove component")
-					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
+					decodeComponent := renderDGD.GetComponentByName("decode")
 					require.NotNil(t, decodeComponent)
 					service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-						ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
+						ServiceName:     dynamo.GetDCDResourceName(renderDGD, "decode", ""),
 						Namespace:       renderDGD.Namespace,
 						ComponentType:   string(decodeComponent.ComponentType),
 						DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decodeComponent),
-						ComponentName:   "VllmDecodeWorker",
-						Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decodeComponent),
-						Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decodeComponent),
+						ComponentName:   "decode",
+						Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "decode", decodeComponent),
+						Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "decode", decodeComponent),
 						IsK8sDiscovery:  true,
 					})
 					require.NoError(t, err)
@@ -829,8 +829,8 @@ spec:
 					t.Helper()
 					pcs := obj.(*grovev1alpha1.PodCliqueSet)
 					return map[string]map[string]string{
-						"prefill": requireGroveClique(t, pcs, "vllmprefillworker").Labels,
-						"decode":  requireGroveClique(t, pcs, "vllmdecodeworker").Labels,
+						"prefill": requireGroveClique(t, pcs, "prefill").Labels,
+						"decode":  requireGroveClique(t, pcs, "decode").Labels,
 					}
 				},
 				expectedWorkerSites: map[string]string{

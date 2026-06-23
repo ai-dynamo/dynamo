@@ -117,7 +117,7 @@ spec:
               cpu: "100m"
               memory: 256Mi
               ephemeral-storage: 1Gi
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     sharedMemorySize: 2Gi
@@ -174,7 +174,7 @@ spec:
         - effect: NoSchedule
           key: nvidia.com/gpu
           operator: Exists
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 1
     sharedMemorySize: 2Gi

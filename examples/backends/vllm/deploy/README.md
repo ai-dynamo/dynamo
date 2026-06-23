@@ -227,7 +227,7 @@ The operator enables the worker system server on port `9090`. Select one vLLM wo
 
 ```bash
 export WORKER_POD=$(kubectl get pods -n "$NAMESPACE" \
-  -l nvidia.com/dynamo-component=VllmDecodeWorker \
+  -l nvidia.com/dynamo-component=decode \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl port-forward -n "$NAMESPACE" pod/"$WORKER_POD" 9090:9090
 ```

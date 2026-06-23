@@ -137,7 +137,7 @@ Add `NIXL_TELEMETRY_ENABLE` to each worker that should expose transfer metrics:
 ```yaml
 spec:
   services:
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       extraPodSpec:
         mainContainer:
@@ -299,7 +299,7 @@ spec:
     - create: false
       name: fpm-traces
   services:
-    VllmWorker:
+    worker:
       volumeMounts:
         - name: fpm-traces
           mountPoint: /var/log/dynamo
@@ -312,7 +312,7 @@ spec:
               value: /var/log/dynamo/fpm
 ```
 
-Replace `VllmWorker` with every worker service that should write scheduler telemetry.
+Replace `worker` with every worker service that should write scheduler telemetry.
 
 </Step>
 <Step title="Collect the trace files" id="collect-fpm-trace-files">
@@ -392,7 +392,7 @@ metadata:
   name: my-deployment
 spec:
   components:
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:

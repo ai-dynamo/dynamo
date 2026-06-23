@@ -10724,9 +10724,9 @@ func TestPCSNameForDGD(t *testing.T) {
 			name:    "old long vllm service names get truncated more aggressively",
 			dgdName: "my-deployment-dgd",
 			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				multinodeComponent("VllmPrefillWorker"),
+				multinodeComponent("prefill"),
 			},
-			// VllmPrefillWorker multinode: PCSG=17, PCLQ=17+1+3=21 → budget=38, pcsBudget=45-38=7
+			// prefill multinode: PCSG=17, PCLQ=17+1+3=21 → budget=38, pcsBudget=45-38=7
 			// 7 < minPCSNameLength(8), so clamped to 8
 			wantLen: 8,
 		},

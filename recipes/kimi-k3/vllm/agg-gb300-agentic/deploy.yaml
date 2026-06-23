@@ -43,7 +43,7 @@ spec:
                 - kv
                 - --http-port
                 - "8000"
-    - name: VllmDecodeWorker
+    - name: decode
       type: decode
       replicas: 2          # 2 agg replicas (each 2-node TP8) for KV-aware routing
       multinode:

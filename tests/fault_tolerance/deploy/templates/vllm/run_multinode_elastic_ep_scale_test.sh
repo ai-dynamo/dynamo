@@ -45,10 +45,10 @@ echo ""
 
 # ── Pod lookup helpers ────────────────────────────────────────────────────────
 
-# All running VllmDecodeWorker pods (both nodes)
+# All running decode pods (both nodes)
 all_worker_pods() {
   kubectl get pods -n "$NS" \
-    -l "nvidia.com/dynamo-component=VllmDecodeWorker,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
+    -l "nvidia.com/dynamo-component=decode,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
     --field-selector=status.phase=Running \
     -o jsonpath='{.items[*].metadata.name}' 2>/dev/null
 }
@@ -57,7 +57,7 @@ all_worker_pods() {
 # Only the leader exposes port 9090 (scale API)
 head_pod() {
   kubectl get pods -n "$NS" \
-    -l "nvidia.com/dynamo-component=VllmDecodeWorker,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
+    -l "nvidia.com/dynamo-component=decode,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
     --field-selector=status.phase=Running \
     --sort-by='.metadata.name' \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
@@ -73,7 +73,7 @@ frontend_pod() {
 # Verify pods are present
 INITIAL_HEAD=$(head_pod)
 if [ -z "$INITIAL_HEAD" ]; then
-  echo "ERROR: no running VllmDecodeWorker pod found in namespace $NS" >&2
+  echo "ERROR: no running decode pod found in namespace $NS" >&2
   exit 1
 fi
 echo "Leader pod (at start): $INITIAL_HEAD"

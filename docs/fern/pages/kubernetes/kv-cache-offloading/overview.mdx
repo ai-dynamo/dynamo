@@ -16,7 +16,7 @@ Offloading is configured **on the worker**, not the Frontend. For vLLM workers, 
 ```yaml
 spec:
   components:
-  - name: VllmDecodeWorker
+  - name: decode
     type: worker
     podTemplate:
       spec:
@@ -58,7 +58,7 @@ This aggregated Qwen3-32B worker offloads KV blocks to 100 GB of host memory. It
 ```yaml
 spec:
   components:
-  - name: VllmDecodeWorker
+  - name: decode
     type: worker
     replicas: 1
     podTemplate:

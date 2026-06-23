@@ -220,7 +220,7 @@ def enable_vllm_benchmark_mode(config_dict: dict) -> None:
     """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
 
     Mutates ``config_dict`` in place. Each recognised worker component
-    (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
+    (``prefill`` / ``decode`` / ``worker``) gets the
     mode matching its role so its startup self-benchmark publishes
     ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
 
@@ -228,7 +228,7 @@ def enable_vllm_benchmark_mode(config_dict: dict) -> None:
     overrides) the existing entry is replaced with the role-correct value.
 
     A single generic ``type: worker`` component is aggregate even when its
-    planner-facing name is ``VllmDecodeWorker``.
+    planner-facing name is ``decode``.
     """
     worker_roles = _vllm_worker_roles()
     components = config_dict.get("spec", {}).get("components", [])

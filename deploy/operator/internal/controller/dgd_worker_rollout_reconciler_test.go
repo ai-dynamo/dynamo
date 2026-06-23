@@ -452,7 +452,7 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"VllmDecodeWorker": {
+				"decode": {
 					ComponentType:    consts.ComponentTypeWorker,
 					SubComponentType: consts.ComponentTypeDecode,
 					Envs:             []corev1.EnvVar{{Name: "MODEL_PATH", Value: "Qwen/Qwen3-0.6B"}},
@@ -488,8 +488,8 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 
 	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, rollingCtx)
 	require.NoError(t, err)
-	require.Equal(t, "qwen-vllmdecodeworker-"+legacyHash, dcds["VllmDecodeWorker"].Name)
-	require.NotEqual(t, "qwen-vllmdecodeworker-"+v2Hash, dcds["VllmDecodeWorker"].Name)
+	require.Equal(t, "qwen-decode-"+legacyHash, dcds["decode"].Name)
+	require.NotEqual(t, "qwen-decode-"+v2Hash, dcds["decode"].Name)
 }
 
 func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *testing.T) {

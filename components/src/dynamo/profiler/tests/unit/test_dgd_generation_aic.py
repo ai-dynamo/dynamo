@@ -606,15 +606,15 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component("Frontend", "frontend"),
-                    _component("VllmPrefillWorker", "prefill"),
-                    _component("VllmDecodeWorker", "decode"),
+                    _component("prefill", "prefill"),
+                    _component("decode", "decode"),
                 ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
         components = _component_map(cfg)
-        assert _benchmark_mode(components["VllmPrefillWorker"]) == "prefill"
-        assert _benchmark_mode(components["VllmDecodeWorker"]) == "decode"
+        assert _benchmark_mode(components["prefill"]) == "prefill"
+        assert _benchmark_mode(components["decode"]) == "decode"
         assert "env" not in _main_container(components["Frontend"])
 
     def test_agg_sets_single_worker(self):
@@ -622,12 +622,12 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component("Frontend", "frontend"),
-                    _component("VllmWorker", "worker"),
+                    _component("worker", "worker"),
                 ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        assert _benchmark_mode(_component_map(cfg)["VllmWorker"]) == "agg"
+        assert _benchmark_mode(_component_map(cfg)["worker"]) == "agg"
 
     def test_agg_template_sets_single_generic_worker(self):
         cfg = load_dgd_template("vllm", "agg")
@@ -639,7 +639,7 @@ class TestEnableVllmBenchmarkMode:
             for component in cfg["spec"]["components"]
             if component["type"] == "worker"
         )
-        assert worker["name"] == "VllmDecodeWorker"
+        assert worker["name"] == "decode"
         assert _benchmark_mode(worker) == "agg"
 
     def test_idempotent_replaces_existing_value(self):
@@ -649,7 +649,7 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component(
-                        "VllmDecodeWorker",
+                        "decode",
                         "decode",
                         env=[
                             {"name": "SOMETHING_ELSE", "value": "keep"},
@@ -660,7 +660,7 @@ class TestEnableVllmBenchmarkMode:
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        component = _component_map(cfg)["VllmDecodeWorker"]
+        component = _component_map(cfg)["decode"]
         env = _main_container(component)["env"]
         names = [e["name"] for e in env]
         assert names.count("DYN_BENCHMARK_MODE") == 1
@@ -687,7 +687,7 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component(
-                        "VllmPrefillWorker",
+                        "prefill",
                         "prefill",
                         image="nvcr.io/foo:1.0",
                         args=["--model-path", "x"],
@@ -696,7 +696,7 @@ class TestEnableVllmBenchmarkMode:
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        component = _component_map(cfg)["VllmPrefillWorker"]
+        component = _component_map(cfg)["prefill"]
         mc = _main_container(component)
         assert mc["image"] == "nvcr.io/foo:1.0"
         assert mc["args"] == ["--model-path", "x"]

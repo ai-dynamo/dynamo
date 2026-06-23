@@ -9,7 +9,7 @@ subtitle: Definitions of core Dynamo terms covering disaggregated serving, KV ca
 **Block** - A fixed-size chunk of tokens (typically 16 or 64 tokens) used for efficient KV cache management and memory allocation, serving as the fundamental unit for techniques like PagedAttention.
 
 ## C
-**Component** - The fundamental deployable unit in Dynamo. A discoverable service entity that can host multiple endpoints and typically maps to a Docker container (such as VllmWorker, Router, Processor).
+**Component** - The fundamental deployable unit in Dynamo. A discoverable service entity that can host multiple endpoints and typically maps to a Docker container (such as worker, Router, Processor).
 
 **Conditional Disaggregation** - Dynamo's router policy within disaggregated serving that decides whether a request should use remote prefill or run local prefill+decode on a decode worker based on decode-side KV overlap, effective ISL, and prefill/decode load signals.
 

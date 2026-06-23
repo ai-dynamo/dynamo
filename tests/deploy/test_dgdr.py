@@ -34,7 +34,7 @@ PLANNER_MOCKER_PROFILE_DATA = (
     "H200_TP1P_TP1D"
 )
 REMOTE_CODE_WORKERS = {
-    "vllm": ("VllmDecodeWorker", "VllmPrefillWorker"),
+    "vllm": ("decode", "prefill"),
     "sglang": ("decode", "prefill", "SglangDecodeWorker", "SglangPrefillWorker"),
 }
 

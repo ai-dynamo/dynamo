@@ -228,13 +228,13 @@ class CUDAFaultInjector:
             deployment_name: Name of the deployment
             namespace: Kubernetes namespace
             force_delete_pods: If True, force delete pods to apply clean spec
-            service_names: Service names to check (default: ["VllmDecodeWorker", "VllmPrefillWorker"])
+            service_names: Service names to check (default: ["decode", "prefill"])
 
         Returns:
             True if cleanup succeeded
         """
         if service_names is None:
-            service_names = ["VllmDecodeWorker", "VllmPrefillWorker"]
+            service_names = ["decode", "prefill"]
         print("\n[→] Cleaning up CUDA fault injection...")
 
         sys.path.insert(0, str(self.lib_dir))
@@ -322,17 +322,17 @@ class CUDAFaultInjector:
 
                     if not has_artifacts:
                         print(
-                            f"    ✓ Deployment spec verified clean after {(attempt+1)*5}s"
+                            f"    ✓ Deployment spec verified clean after {(attempt + 1) * 5}s"
                         )
                         spec_cleaned = True
                         break
                     else:
                         print(
-                            f"    ... {(attempt+1)*5}s: Artifacts: {', '.join(artifact_details)}"
+                            f"    ... {(attempt + 1) * 5}s: Artifacts: {', '.join(artifact_details)}"
                         )
 
                 except Exception as e:
-                    print(f"    ... {(attempt+1)*5}s: Error checking spec: {e}")
+                    print(f"    ... {(attempt + 1) * 5}s: Error checking spec: {e}")
 
             if not spec_cleaned:
                 print("    ⚠ Could not verify spec is clean, continuing anyway...")
@@ -604,7 +604,7 @@ class CUDAFaultInjector:
                 )
 
                 # Check both worker services
-                for service_name in ["VllmDecodeWorker", "VllmPrefillWorker"]:
+                for service_name in ["decode", "prefill"]:
                     if service_name in dgd["spec"]["services"]:
                         service = dgd["spec"]["services"][service_name]
                         env_vars = (
