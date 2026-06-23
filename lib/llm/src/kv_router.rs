@@ -129,6 +129,14 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         .into()
 }
 
+fn cancelled_error(context_id: &str) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::Cancelled)
+        .message(format!("Request {context_id} was cancelled"))
+        .build()
+        .into()
+}
+
 /// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
 /// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
 pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
@@ -999,24 +1007,42 @@ where
                 strict_priority,
                 lora_name,
             } => {
-                match self
-                    .find_best_match_details(
-                        Some(&context_id),
-                        &tokens,
-                        block_mm_infos.as_deref(),
-                        None,
-                        true,
-                        false,
-                        lora_name,
-                        priority_jump,
-                        strict_priority,
-                        None,
-                        None,
-                        None,
-                        routing_constraints,
-                    )
-                    .await
-                {
+                let request_context = ctx.context();
+                let mut schedule = Box::pin(self.find_best_match_details(
+                    Some(&context_id),
+                    &tokens,
+                    block_mm_infos.as_deref(),
+                    None,
+                    true,
+                    false,
+                    lora_name,
+                    priority_jump,
+                    strict_priority,
+                    None,
+                    None,
+                    None,
+                    routing_constraints,
+                ));
+                let outcome = tokio::select! {
+                    biased;
+
+                    _ = request_context.stopped() => None,
+                    _ = request_context.killed() => None,
+                    outcome = &mut schedule => Some(outcome),
+                };
+                drop(schedule);
+
+                let Some(outcome) = outcome else {
+                    if let Err(error) = self.free(&context_id).await {
+                        tracing::warn!(
+                            request_id = %context_id,
+                            %error,
+                            "Failed to free scheduler state after RouterRequest::New cancellation"
+                        );
+                    }
+                    return Err(cancelled_error(&context_id));
+                };
+                match outcome {
                     Ok(FindBestMatchOutcome::Routed {
                         worker,
                         overlap_blocks,
