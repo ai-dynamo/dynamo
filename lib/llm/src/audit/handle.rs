@@ -29,33 +29,23 @@ impl AuditHttpRequestHeaders {
     }
 }
 
-/// Distinguishes the two record types emitted per chat completion.
-///
-/// Request and response are published as separate `AuditRecord`s sharing the same
-/// `request_id`. Downstream consumers correlate by `request_id`; the request emit
-/// is scheduled before the worker dispatches, the response record is emitted after
-/// the response stream completes successfully. On client cancel mid-stream (or
-/// aggregation failure) only the request record is emitted.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum AuditEventType {
-    Request,
-    Response,
-}
-
+/// One audit record per chat completion, carrying the request and — when the
+/// response completed — the response. On client cancel / gateway timeout /
+/// aggregation failure the record is still emitted with `response = None`, so
+/// those cases remain auditable. Only a hard process crash before emit loses
+/// the record. Existing sinks (stderr/nats/jsonl) see this single combined
+/// record; `OtelSink` maps it to one OTLP `LogRecord`.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AuditRecord {
     pub schema_version: u32,
-    pub event_type: AuditEventType,
     pub request_id: String,
     pub requested_streaming: bool,
     pub model: String,
-    /// When the audited event actually occurred — request received (before
-    /// worker dispatch) or response completed (after stream aggregation) —
-    /// captured on the producing thread. Used as the OTLP `LogRecord` Timestamp
-    /// so the logged time reflects the event itself, not when the sink task
-    /// drained it off the audit bus. `#[serde(skip)]`: it is metadata about the
-    /// record, not part of the audited payload, and `OtelSink` reads it directly.
+    /// When the audited request was received (captured at handle creation, on
+    /// the producing thread). Used as the OTLP `LogRecord` Timestamp so the
+    /// logged time reflects the request itself, not when the sink task drained
+    /// it off the audit bus. `#[serde(skip)]`: it is metadata about the record,
+    /// not part of the audited payload, and `OtelSink` reads it directly.
     #[serde(skip, default = "std::time::SystemTime::now")]
     pub event_time: SystemTime,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,11 +56,12 @@ pub struct AuditRecord {
     pub otel_http_headers: Option<Arc<AuditHttpRequestHeaders>>,
 }
 
-#[derive(Clone)]
 pub struct AuditHandle {
     requested_streaming: bool,
     request_id: String,
     model: String,
+    event_time: SystemTime,
+    request: Arc<NvCreateChatCompletionRequest>,
     otel_http_headers: Option<Arc<AuditHttpRequestHeaders>>,
 }
 
@@ -83,47 +74,20 @@ impl AuditHandle {
         &self.request_id
     }
 
-    /// Publish a `Request` event record on the audit bus. Call once after the
-    /// request is captured. The preprocessor schedules this before worker
-    /// dispatch so downstream observers can see hung / canceled requests that
-    /// never produce a response record.
-    pub fn emit_request(
-        &self,
-        request: Arc<NvCreateChatCompletionRequest>,
-        event_time: SystemTime,
-    ) {
+    /// Publish the combined audit record on the bus. Consumes the handle to
+    /// enforce exactly one record per request. `response` is `None` on client
+    /// cancel / gateway timeout / aggregation failure — the record still
+    /// carries the request so those cases remain auditable.
+    pub fn emit(self, response: Option<Arc<NvCreateChatCompletionResponse>>) {
         let rec = AuditRecord {
             schema_version: 1,
-            event_type: AuditEventType::Request,
-            request_id: self.request_id.clone(),
-            requested_streaming: self.requested_streaming,
-            model: self.model.clone(),
-            event_time,
-            request: Some(request),
-            response: None,
-            otel_http_headers: self.otel_http_headers.clone(),
-        };
-        bus::publish(rec);
-    }
-
-    /// Publish a `Response` event record on the audit bus. Consumes the handle to
-    /// enforce one-response-per-request at the type level. The response record does
-    /// not duplicate the request payload — downstream JOINs on `request_id`.
-    pub fn emit_response(
-        self,
-        response: Arc<NvCreateChatCompletionResponse>,
-        event_time: SystemTime,
-    ) {
-        let rec = AuditRecord {
-            schema_version: 1,
-            event_type: AuditEventType::Response,
             request_id: self.request_id,
             requested_streaming: self.requested_streaming,
             model: self.model,
-            event_time,
-            request: None,
-            response: Some(response),
-            otel_http_headers: None,
+            event_time: self.event_time,
+            request: Some(self.request),
+            response,
+            otel_http_headers: self.otel_http_headers,
         };
         bus::publish(rec);
     }
@@ -168,6 +132,11 @@ fn create_handle_with_config(
         requested_streaming,
         request_id: request_id.to_string(),
         model,
+        // Snapshot the pristine inbound request (before the preprocessor
+        // overrides stream/usage) and stamp arrival time on the producing
+        // thread, so the record reflects what the client sent and when.
+        event_time: SystemTime::now(),
+        request: Arc::new(req.clone()),
         otel_http_headers,
     })
 }
@@ -256,53 +225,51 @@ mod tests {
     }
 
     #[test]
-    fn request_record_carries_request_only() {
+    fn audit_record_serializes_request_and_response() {
         let record = AuditRecord {
             schema_version: 1,
-            event_type: AuditEventType::Request,
             request_id: "req-123".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
             event_time: SystemTime::now(),
             request: Some(Arc::new(create_test_request_with_agent_context())),
-            response: None,
-            otel_http_headers: None,
-        };
-
-        let value = serde_json::to_value(&record).unwrap();
-        assert_eq!(value["event_type"], "request");
-        assert_eq!(value["request_id"], "req-123");
-        assert_eq!(
-            value["request"]["nvext"]["agent_context"]["session_id"],
-            "run-123"
-        );
-        // Response side must be absent (skip_serializing_if).
-        assert!(value.get("response").is_none());
-    }
-
-    #[test]
-    fn response_record_carries_response_only() {
-        let record = AuditRecord {
-            schema_version: 1,
-            event_type: AuditEventType::Response,
-            request_id: "req-123".to_string(),
-            requested_streaming: true,
-            model: "test-model".to_string(),
-            event_time: SystemTime::now(),
-            request: None,
             response: Some(Arc::new(create_test_response("final answer"))),
             otel_http_headers: None,
         };
 
         let value = serde_json::to_value(&record).unwrap();
-        assert_eq!(value["event_type"], "response");
         assert_eq!(value["request_id"], "req-123");
+        assert_eq!(
+            value["request"]["nvext"]["agent_context"]["session_id"],
+            "run-123"
+        );
         assert_eq!(
             value["response"]["choices"][0]["message"]["content"],
             "final answer"
         );
-        // Request side must be absent (skip_serializing_if). Downstream JOINs on request_id.
-        assert!(value.get("request").is_none());
+        // No event_type discriminator anymore; headers are serde-skipped.
+        assert!(value.get("event_type").is_none());
+        assert!(value.get("otel_http_headers").is_none());
+    }
+
+    #[test]
+    fn audit_record_omits_response_when_absent() {
+        // Cancel/timeout case: the record still carries the request, response
+        // is omitted via skip_serializing_if.
+        let record = AuditRecord {
+            schema_version: 1,
+            request_id: "req-456".to_string(),
+            requested_streaming: false,
+            model: "test-model".to_string(),
+            event_time: SystemTime::now(),
+            request: Some(Arc::new(create_test_request("test-model", true))),
+            response: None,
+            otel_http_headers: None,
+        };
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert!(value["request"].is_object());
+        assert!(value.get("response").is_none());
     }
 
     /// Test-only constructor. `create_handle` gates on env vars + a cached
@@ -313,6 +280,8 @@ mod tests {
                 requested_streaming: streaming,
                 request_id: request_id.to_string(),
                 model: model.to_string(),
+                event_time: SystemTime::now(),
+                request: Arc::new(create_test_request(model, true)),
                 otel_http_headers: None,
             }
         }
@@ -320,20 +289,16 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn emit_request_and_response_publish_two_records_in_order() {
-        // Exercises the end-to-end contract: emit_request + emit_response each
-        // publish exactly one record to the audit bus, in that order, with the
-        // expected `event_type` discriminant and request/response payload
-        // exclusivity (request record has no response, and vice versa).
+    async fn emit_publishes_one_combined_record_with_and_without_response() {
+        // Exercises the contract: `emit` publishes exactly one record. With a
+        // response present the record carries both request and response; with
+        // `None` (cancel/timeout) it carries the request only.
         bus::init(8);
         let mut rx = bus::subscribe();
 
-        let request = create_test_request("test-model", true);
-        let response = create_test_response("hello");
-
-        let handle = AuditHandle::for_test("req-test-emit", "test-model", true);
-        handle.emit_request(Arc::new(request), SystemTime::now());
-        handle.emit_response(Arc::new(response), SystemTime::now());
+        AuditHandle::for_test("req-ok", "test-model", true)
+            .emit(Some(Arc::new(create_test_response("hello"))));
+        AuditHandle::for_test("req-cancel", "test-model", true).emit(None);
 
         let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
@@ -344,14 +309,12 @@ mod tests {
             .expect("second record arrives before timeout")
             .expect("second record receives ok");
 
-        assert_eq!(first.event_type, AuditEventType::Request);
-        assert_eq!(first.request_id, "req-test-emit");
+        assert_eq!(first.request_id, "req-ok");
         assert!(first.request.is_some());
-        assert!(first.response.is_none());
+        assert!(first.response.is_some());
 
-        assert_eq!(second.event_type, AuditEventType::Response);
-        assert_eq!(second.request_id, "req-test-emit");
-        assert!(second.request.is_none());
-        assert!(second.response.is_some());
+        assert_eq!(second.request_id, "req-cancel");
+        assert!(second.request.is_some());
+        assert!(second.response.is_none());
     }
 }

@@ -2906,9 +2906,10 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if no DYN_AUDIT_SINKS). The request record
-        // emit is scheduled before worker dispatch, so downstream observers can
-        // see hung or canceled requests that never produce a response.
+        // Build audit handle (None if no DYN_AUDIT_SINKS / not audit-eligible).
+        // The handle snapshots the pristine request and its arrival time here;
+        // the single combined record is published once at stream completion
+        // (or with an empty response on cancel/timeout), off the request path.
         let audit_http_headers = if crate::audit::config::otel_sink_capture_enabled() {
             context
                 .get::<crate::audit::handle::AuditHttpRequestHeaders>(
@@ -2920,18 +2921,6 @@ impl
         };
         let audit_handle =
             crate::audit::handle::create_handle(&request, &request_id, audit_http_headers);
-
-        // Schedule request-side audit records on a detached task so audit bus
-        // fan-out and sink wakeups do not delay worker dispatch.
-        if let Some(h) = audit_handle.clone() {
-            let audit_request = std::sync::Arc::new(request.clone());
-            // Stamp the request event time here (before the detached spawn) so it
-            // reflects request arrival, not when the spawned task happens to run.
-            let audit_event_time = std::time::SystemTime::now();
-            tokio::spawn(async move {
-                h.emit_request(audit_request, audit_event_time);
-            });
-        }
 
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses
@@ -3028,21 +3017,21 @@ impl
                 crate::audit::stream::fold_aggregate_with_future(transformed_stream)
             };
 
-            // Spawn the response-side audit task. The future resolves to None on
-            // client cancel or aggregation failure; in that case the request
-            // record (scheduled above) stands alone and we skip the response
-            // emit.
+            // Spawn the audit emit off the request path. `agg_fut` resolves to
+            // None on client cancel / gateway timeout / aggregation failure; we
+            // still emit the combined record with an empty response so those
+            // cases remain auditable. The record carries the request snapshot
+            // and arrival time captured at handle creation.
             tokio::spawn(async move {
                 match agg_fut.await {
-                    // Stamp response event time at aggregation completion (the
-                    // moment the response is fully formed), not at sink drain.
-                    Some(final_resp) => {
-                        audit.emit_response(Arc::new(final_resp), std::time::SystemTime::now())
+                    Some(final_resp) => audit.emit(Some(Arc::new(final_resp))),
+                    None => {
+                        tracing::debug!(
+                            request_id = %audit.request_id(),
+                            "audit: response aggregation incomplete (client cancel / timeout); emitting request-only record"
+                        );
+                        audit.emit(None);
                     }
-                    None => tracing::debug!(
-                        request_id = %audit.request_id(),
-                        "audit: response record skipped (client cancel or aggregation error)"
-                    ),
                 }
             });
 

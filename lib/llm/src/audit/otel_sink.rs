@@ -33,7 +33,7 @@ use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use serde_json::json;
 
 use super::config::AuditPolicy;
-use super::handle::{AuditEventType, AuditHttpRequestHeaders, AuditRecord};
+use super::handle::{AuditHttpRequestHeaders, AuditRecord};
 use super::sink::AuditSink;
 
 /// Bounded dedicated rayon pool size for off-runtime audit-record
@@ -329,7 +329,7 @@ impl OtelSink {
         rec: &AuditRecord,
         header_policy: &OtelHeaderPolicy,
     ) -> serde_json::Result<String> {
-        if rec.event_type != AuditEventType::Request || rec.otel_http_headers.is_none() {
+        if rec.otel_http_headers.is_none() {
             return serde_json::to_string(rec);
         }
 
@@ -379,13 +379,6 @@ impl OtelSink {
     }
 }
 
-fn event_type_attr(event_type: AuditEventType) -> &'static str {
-    match event_type {
-        AuditEventType::Request => "request",
-        AuditEventType::Response => "response",
-    }
-}
-
 fn marker_payload(rec: &AuditRecord, reason: String) -> Option<(String, bool, Option<String>)> {
     tracing::warn!(
         target: "dynamo_llm::audit",
@@ -396,7 +389,6 @@ fn marker_payload(rec: &AuditRecord, reason: String) -> Option<(String, bool, Op
 
     let payload = json!({
         "schema_version": rec.schema_version,
-        "event_type": event_type_attr(rec.event_type),
         "request_id": &rec.request_id,
         "requested_streaming": rec.requested_streaming,
         "model": &rec.model,
@@ -442,7 +434,6 @@ impl AuditSink for OtelSink {
             tracing::debug!(
                 target: "dynamo.audit.otel.serde",
                 request_id = %rec_for_serde.request_id,
-                event_type = event_type_attr(rec_for_serde.event_type),
                 elapsed_us,
                 payload_len,
                 "OTEL audit payload serialized off-runtime"
@@ -471,18 +462,8 @@ impl AuditSink for OtelSink {
         record.set_observed_timestamp(observed_timestamp);
         record.set_severity_number(Severity::Info);
         record.set_severity_text("INFO");
-        record.set_body(AnyValue::String(
-            match rec.event_type {
-                AuditEventType::Request => "openai.request",
-                AuditEventType::Response => "openai.response",
-            }
-            .into(),
-        ));
+        record.set_body(AnyValue::String("openai.chat_completion".into()));
         record.add_attribute("rid", AnyValue::String(rec.request_id.clone().into()));
-        record.add_attribute(
-            "event_type",
-            AnyValue::String(event_type_attr(rec.event_type).into()),
-        );
         record.add_attribute(
             "endpoint",
             AnyValue::String(AUDIT_ENDPOINT_CHAT_COMPLETION.into()),
@@ -525,7 +506,6 @@ mod tests {
     fn sample_record() -> AuditRecord {
         AuditRecord {
             schema_version: 1,
-            event_type: AuditEventType::Request,
             request_id: "req-otel-1".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
@@ -584,7 +564,6 @@ mod tests {
             serde_json::from_value(request_json).expect("construct test request");
         AuditRecord {
             schema_version: 1,
-            event_type: AuditEventType::Request,
             request_id: "req-otel-with-floats".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
@@ -628,7 +607,6 @@ mod tests {
             serde_json::from_value(response_json).expect("construct test response");
         AuditRecord {
             schema_version: 1,
-            event_type: AuditEventType::Response,
             request_id: "req-otel-response-fields".to_string(),
             requested_streaming,
             model: "test-model".to_string(),
@@ -660,7 +638,6 @@ mod tests {
         assert_eq!(decoded.request_id, rec.request_id);
         assert_eq!(decoded.requested_streaming, rec.requested_streaming);
         assert_eq!(decoded.model, rec.model);
-        assert_eq!(decoded.event_type, rec.event_type);
 
         // Round-trip the record through the JSON Value form to compare
         // structurally — sidesteps any field-ordering differences and proves
@@ -707,7 +684,6 @@ mod tests {
             assert!(drop_reason.is_none());
 
             let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(decoded["event_type"], "response");
             assert_eq!(decoded["requested_streaming"], requested_streaming);
             assert!(decoded.get("request").is_none());
 
@@ -766,13 +742,12 @@ mod tests {
     }
 
     #[test]
-    fn payload_for_limit_skips_http_headers_on_response_records() {
-        let mut headers = HeaderMap::new();
-        headers.insert("accept", HeaderValue::from_static("application/json"));
-
-        let mut rec = sample_record();
-        rec.event_type = AuditEventType::Response;
-        rec.otel_http_headers = Some(Arc::new(AuditHttpRequestHeaders::new(Arc::new(headers))));
+    fn payload_for_limit_omits_http_when_no_headers_captured() {
+        // When header capture is inactive (otel_http_headers = None) the payload
+        // must not carry an `http` object — non-otel sinks and header-disabled
+        // requests never emit headers.
+        let rec = sample_record_with_request();
+        assert!(rec.otel_http_headers.is_none());
 
         let header_policy = OtelHeaderPolicy::default();
         let (payload, complete, drop_reason) =

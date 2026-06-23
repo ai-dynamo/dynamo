@@ -162,51 +162,35 @@ mod tests {
                 init_from_env_with_shutdown(shutdown.clone()).await.unwrap();
                 time::sleep(Duration::from_millis(100)).await;
 
-                // Emit a request + response pair as two separate records.
+                // Emit a single combined request+response record.
                 let request = create_test_request("nemotron", true);
                 let handle = handle::create_handle(&request, "test-req-1", None)
                     .expect("Failed to create audit handle");
-                handle.emit_request(Arc::new(request.clone()), std::time::SystemTime::now());
-                handle.emit_response(
-                    Arc::new(create_test_response("nemotron", "test response")),
-                    std::time::SystemTime::now(),
-                );
+                handle.emit(Some(Arc::new(create_test_response(
+                    "nemotron",
+                    "test response",
+                ))));
 
                 time::sleep(Duration::from_millis(200)).await;
 
-                // Verify both records in NATS.
+                // Verify the single combined record in NATS.
                 let messages = consume_messages(
                     &client,
                     &stream_name,
                     "test-consumer",
-                    2,
+                    1,
                     Duration::from_secs(2),
                 )
                 .await;
 
-                assert_eq!(
-                    messages.len(),
-                    2,
-                    "Should receive request + response records"
-                );
-                let req_record = messages
-                    .iter()
-                    .find(|m| m["event_type"] == "request")
-                    .expect("request record missing");
-                let resp_record = messages
-                    .iter()
-                    .find(|m| m["event_type"] == "response")
-                    .expect("response record missing");
+                assert_eq!(messages.len(), 1, "Should receive one combined record");
+                let record = &messages[0];
 
-                assert_eq!(req_record["schema_version"], 1);
-                assert_eq!(req_record["request_id"], "test-req-1");
-                assert_eq!(req_record["model"], "nemotron");
-                assert!(req_record["request"].is_object());
-                assert!(req_record.get("response").is_none());
-
-                assert_eq!(resp_record["request_id"], "test-req-1");
-                assert!(resp_record["response"].is_object());
-                assert!(resp_record.get("request").is_none());
+                assert_eq!(record["schema_version"], 1);
+                assert_eq!(record["request_id"], "test-req-1");
+                assert_eq!(record["model"], "nemotron");
+                assert!(record["request"].is_object());
+                assert!(record["response"].is_object());
 
                 client.jetstream().delete_stream(&stream_name).await.ok();
                 shutdown.cancel();
@@ -243,8 +227,7 @@ mod tests {
                 // Request with store=true (should be audited)
                 let request_true = create_test_request("nemotron", true);
                 if let Some(handle) = handle::create_handle(&request_true, "store-true", None) {
-                    handle
-                        .emit_request(Arc::new(request_true.clone()), std::time::SystemTime::now());
+                    handle.emit(None);
                 }
 
                 // Request with store=false (should NOT be audited)
@@ -267,10 +250,10 @@ mod tests {
                 assert_eq!(
                     messages.len(),
                     1,
-                    "Should only emit the request record for the store=true case"
+                    "Should only emit the record for the store=true case"
                 );
                 assert_eq!(messages[0]["request_id"], "store-true");
-                assert_eq!(messages[0]["event_type"], "request");
+                assert!(messages[0]["request"].is_object());
 
                 client.jetstream().delete_stream(&stream_name).await.ok();
                 shutdown.cancel();
