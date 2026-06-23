@@ -8,6 +8,7 @@ import importlib
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast
@@ -311,8 +312,25 @@ def _generate_aic_decode_fpms(
     return decode_fpms
 
 
+@dataclass
+class SyntheticWorkload:
+    """A synthetic workload for planner replay: ``request_count`` sessions of fixed
+    ``input_tokens``/``output_tokens``. ``turns_per_session`` > 1 makes each session
+    multi-turn (total requests = ``request_count * turns_per_session``).
+    ``shared_prefix_ratio`` / ``num_prefix_groups`` control prefix-cache sharing."""
+
+    input_tokens: int
+    output_tokens: int
+    request_count: int
+    arrival_interval_ms: float = 1.0
+    turns_per_session: int = 1
+    shared_prefix_ratio: float = 0.0
+    num_prefix_groups: int = 0
+    inter_turn_delay_ms: float = 0.0
+
+
 def _run_planner_replay(
-    trace_file: str,
+    trace_file: str | None,
     extra_engine_args: MockEngineArgs | None,
     prefill_engine_args: MockEngineArgs | None,
     decode_engine_args: MockEngineArgs | None,
@@ -328,6 +346,8 @@ def _run_planner_replay(
     sla_ttft_ms: float | None = None,
     sla_itl_ms: float | None = None,
     sla_e2e_ms: float | None = None,
+    replay_concurrency: int | None = None,
+    synthetic: SyntheticWorkload | None = None,
 ):
     """Run an offline replay with planner-in-the-loop (agg or disagg).
 
@@ -352,21 +372,50 @@ def _run_planner_replay(
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
 
+    if (trace_file is None) == (synthetic is None):
+        raise ValueError(
+            "planner replay requires exactly one of trace_file or synthetic"
+        )
+
     if planner_config.mode == "agg":
         if extra_engine_args is None:
             extra_engine_args = MockEngineArgs()
-        bridge = PlannerReplayBridge(
-            trace_file=trace_file,
-            extra_engine_args=extra_engine_args,
-            num_workers=num_workers,
-            router_mode=router_mode,
-            router_config=router_config,
-            arrival_speedup_ratio=arrival_speedup_ratio,
-            trace_block_size=trace_block_size,
-            sla_ttft_ms=sla_ttft_ms,
-            sla_itl_ms=sla_itl_ms,
-            sla_e2e_ms=sla_e2e_ms,
-        )
+        if synthetic is not None:
+            bridge = PlannerReplayBridge.from_synthetic(
+                input_tokens=synthetic.input_tokens,
+                output_tokens=synthetic.output_tokens,
+                request_count=synthetic.request_count,
+                extra_engine_args=extra_engine_args,
+                num_workers=num_workers,
+                router_mode=router_mode,
+                router_config=router_config,
+                replay_concurrency=replay_concurrency,
+                arrival_speedup_ratio=arrival_speedup_ratio,
+                arrival_interval_ms=synthetic.arrival_interval_ms,
+                turns_per_session=synthetic.turns_per_session,
+                shared_prefix_ratio=synthetic.shared_prefix_ratio,
+                num_prefix_groups=synthetic.num_prefix_groups,
+                inter_turn_delay_ms=synthetic.inter_turn_delay_ms,
+                sla_ttft_ms=sla_ttft_ms,
+                sla_itl_ms=sla_itl_ms,
+                sla_e2e_ms=sla_e2e_ms,
+            )
+        else:
+            if trace_file is None:  # guaranteed by the trace/synthetic check above
+                raise ValueError("planner replay needs trace_file in trace mode")
+            bridge = PlannerReplayBridge(
+                trace_file=trace_file,
+                extra_engine_args=extra_engine_args,
+                num_workers=num_workers,
+                router_mode=router_mode,
+                router_config=router_config,
+                arrival_speedup_ratio=arrival_speedup_ratio,
+                trace_block_size=trace_block_size,
+                replay_concurrency=replay_concurrency,
+                sla_ttft_ms=sla_ttft_ms,
+                sla_itl_ms=sla_itl_ms,
+                sla_e2e_ms=sla_e2e_ms,
+            )
         capabilities = WorkerCapabilities(decode=_engine_caps(extra_engine_args))
 
     elif planner_config.mode == "disagg":
@@ -374,20 +423,46 @@ def _run_planner_replay(
             raise ValueError(
                 "disagg planner replay requires --prefill-engine-args and --decode-engine-args"
             )
-        bridge = PlannerReplayBridge.create_disagg(
-            trace_file=trace_file,
-            prefill_engine_args=prefill_engine_args,
-            decode_engine_args=decode_engine_args,
-            num_prefill_workers=num_prefill_workers,
-            num_decode_workers=num_decode_workers,
-            router_mode=router_mode,
-            router_config=router_config,
-            arrival_speedup_ratio=arrival_speedup_ratio,
-            trace_block_size=trace_block_size,
-            sla_ttft_ms=sla_ttft_ms,
-            sla_itl_ms=sla_itl_ms,
-            sla_e2e_ms=sla_e2e_ms,
-        )
+        if synthetic is not None:
+            bridge = PlannerReplayBridge.from_synthetic_disagg(
+                input_tokens=synthetic.input_tokens,
+                output_tokens=synthetic.output_tokens,
+                request_count=synthetic.request_count,
+                prefill_engine_args=prefill_engine_args,
+                decode_engine_args=decode_engine_args,
+                num_prefill_workers=num_prefill_workers,
+                num_decode_workers=num_decode_workers,
+                router_mode=router_mode,
+                router_config=router_config,
+                replay_concurrency=replay_concurrency,
+                arrival_speedup_ratio=arrival_speedup_ratio,
+                arrival_interval_ms=synthetic.arrival_interval_ms,
+                turns_per_session=synthetic.turns_per_session,
+                shared_prefix_ratio=synthetic.shared_prefix_ratio,
+                num_prefix_groups=synthetic.num_prefix_groups,
+                inter_turn_delay_ms=synthetic.inter_turn_delay_ms,
+                sla_ttft_ms=sla_ttft_ms,
+                sla_itl_ms=sla_itl_ms,
+                sla_e2e_ms=sla_e2e_ms,
+            )
+        else:
+            if trace_file is None:  # guaranteed by the trace/synthetic check above
+                raise ValueError("planner replay needs trace_file in trace mode")
+            bridge = PlannerReplayBridge.create_disagg(
+                trace_file=trace_file,
+                prefill_engine_args=prefill_engine_args,
+                decode_engine_args=decode_engine_args,
+                num_prefill_workers=num_prefill_workers,
+                num_decode_workers=num_decode_workers,
+                router_mode=router_mode,
+                router_config=router_config,
+                arrival_speedup_ratio=arrival_speedup_ratio,
+                trace_block_size=trace_block_size,
+                replay_concurrency=replay_concurrency,
+                sla_ttft_ms=sla_ttft_ms,
+                sla_itl_ms=sla_itl_ms,
+                sla_e2e_ms=sla_e2e_ms,
+            )
         capabilities = WorkerCapabilities(
             prefill=_engine_caps(prefill_engine_args),
             decode=_engine_caps(decode_engine_args),
@@ -731,13 +806,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.planner_config is not None:
         if args.replay_mode != "offline":
             parser.error("--planner-config only supports --replay-mode=offline")
-        if not using_trace_file:
-            parser.error("--planner-config requires a trace file (not synthetic)")
-        if args.trace_format != "mooncake":
+        if using_trace_file and args.trace_format != "mooncake":
             parser.error("--planner-config only supports --trace-format=mooncake")
 
+        synthetic = None
+        if not using_trace_file:
+            synthetic = SyntheticWorkload(
+                input_tokens=args.input_tokens,
+                output_tokens=args.output_tokens,
+                request_count=args.request_count,
+                arrival_interval_ms=args.arrival_interval_ms,
+                turns_per_session=args.turns_per_session,
+                shared_prefix_ratio=args.shared_prefix_ratio,
+                num_prefix_groups=args.num_prefix_groups,
+                inter_turn_delay_ms=args.inter_turn_delay_ms,
+            )
+
         planner_report = _run_planner_replay(
-            trace_file=args.trace_file,
+            trace_file=args.trace_file if using_trace_file else None,
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -753,6 +839,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             sla_ttft_ms=args.sla_ttft_ms,
             sla_itl_ms=args.sla_itl_ms,
             sla_e2e_ms=args.sla_e2e_ms,
+            replay_concurrency=args.replay_concurrency,
+            synthetic=synthetic,
         )
         report = planner_report.trace_report
         if planner_report.scaling_events:

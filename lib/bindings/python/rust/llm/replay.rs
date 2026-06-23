@@ -1667,7 +1667,7 @@ pub struct PlannerReplayBridge {
 impl PlannerReplayBridge {
     /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
     #[new]
-    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         trace_file: PathBuf,
@@ -1677,6 +1677,127 @@ impl PlannerReplayBridge {
         router_config: Option<KvRouterConfig>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
+        replay_concurrency: Option<isize>,
+    ) -> PyResult<Self> {
+        let args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
+        let router_mode = parse_replay_router_mode(router_mode)?;
+        let router_config = load_replay_router_config(router_config);
+        validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+        validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+        validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+        let sla = dynamo_mocker::replay::SlaThresholds {
+            ttft_ms: sla_ttft_ms,
+            itl_ms: sla_itl_ms,
+            e2e_ms: sla_e2e_ms,
+        };
+
+        let max_in_flight = parse_replay_concurrency(replay_concurrency).map_err(to_pyerr)?;
+        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file(
+            args,
+            router_config,
+            None,
+            &trace_file,
+            trace_block_size,
+            num_workers,
+            arrival_speedup_ratio,
+            max_in_flight,
+            router_mode,
+            sla,
+        )
+        .map_err(to_pyerr)?;
+
+        Ok(Self {
+            handle: Some(handle),
+        })
+    }
+
+    /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
+    #[staticmethod]
+    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_disagg(
+        trace_file: PathBuf,
+        prefill_engine_args: &MockEngineArgs,
+        decode_engine_args: &MockEngineArgs,
+        num_prefill_workers: usize,
+        num_decode_workers: usize,
+        router_mode: &str,
+        router_config: Option<KvRouterConfig>,
+        arrival_speedup_ratio: f64,
+        trace_block_size: usize,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
+        replay_concurrency: Option<isize>,
+    ) -> PyResult<Self> {
+        let prefill_args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, prefill_engine_args.clone()))?;
+        let decode_args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, decode_engine_args.clone()))?;
+        let config = dynamo_mocker::replay::OfflineDisaggReplayConfig {
+            prefill_args,
+            decode_args,
+            num_prefill_workers,
+            num_decode_workers,
+        };
+        let router_mode = parse_replay_router_mode(router_mode)?;
+        let router_config = load_replay_router_config(router_config);
+        validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+        validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+        validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+        let sla = dynamo_mocker::replay::SlaThresholds {
+            ttft_ms: sla_ttft_ms,
+            itl_ms: sla_itl_ms,
+            e2e_ms: sla_e2e_ms,
+        };
+
+        let max_in_flight = parse_replay_concurrency(replay_concurrency).map_err(to_pyerr)?;
+        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file_disagg(
+            config,
+            router_config,
+            None,
+            &trace_file,
+            trace_block_size,
+            arrival_speedup_ratio,
+            max_in_flight,
+            router_mode,
+            sla,
+        )
+        .map_err(to_pyerr)?;
+
+        Ok(Self {
+            handle: Some(handle),
+        })
+    }
+
+    /// Create a bridge for an aggregated **synthetic** workload: `request_count`
+    /// sessions of fixed `input_tokens`/`output_tokens`. `replay_concurrency =
+    /// Some(n)` runs closed-loop (cap n in flight); `None` replays open-loop at a
+    /// fixed rate (`arrival_interval_ms` -> QPS). `shared_prefix_ratio` /
+    /// `num_prefix_groups` control prefix-cache sharing; `turns_per_session` > 1
+    /// makes each session multi-turn (total requests = request_count * turns).
+    #[staticmethod]
+    #[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, replay_concurrency=None, arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_synthetic(
+        input_tokens: usize,
+        output_tokens: usize,
+        request_count: usize,
+        extra_engine_args: &MockEngineArgs,
+        num_workers: usize,
+        router_mode: &str,
+        router_config: Option<KvRouterConfig>,
+        replay_concurrency: Option<isize>,
+        arrival_speedup_ratio: f64,
+        arrival_interval_ms: f64,
+        turns_per_session: usize,
+        shared_prefix_ratio: f64,
+        num_prefix_groups: usize,
+        inter_turn_delay_ms: f64,
         sla_ttft_ms: Option<f64>,
         sla_itl_ms: Option<f64>,
         sla_e2e_ms: Option<f64>,
@@ -1693,15 +1814,35 @@ impl PlannerReplayBridge {
             itl_ms: sla_itl_ms,
             e2e_ms: sla_e2e_ms,
         };
+        let max_in_flight = parse_replay_concurrency(replay_concurrency).map_err(to_pyerr)?;
 
-        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file(
+        let block_size = args.block_size.max(1);
+        let mut trace = build_synthetic_workload(
+            block_size,
+            input_tokens,
+            output_tokens,
+            request_count,
+            arrival_interval_ms,
+            turns_per_session,
+            shared_prefix_ratio,
+            num_prefix_groups,
+            inter_turn_delay_ms,
+        )
+        .map_err(to_pyerr)?;
+        // Arrival speedup only applies in arrival mode; closed-loop ignores timing.
+        if max_in_flight.is_none() {
+            trace = trace
+                .speed_up_timing(arrival_speedup_ratio)
+                .map_err(to_pyerr)?;
+        }
+
+        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace(
             args,
             router_config,
             None,
-            &trace_file,
-            trace_block_size,
+            trace,
             num_workers,
-            arrival_speedup_ratio,
+            max_in_flight,
             router_mode,
             sla,
         )
@@ -1712,20 +1853,28 @@ impl PlannerReplayBridge {
         })
     }
 
-    /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
+    /// Create a bridge for a disaggregated **synthetic** workload. See
+    /// [`PlannerReplayBridge::from_synthetic`] for the load-shape parameters.
     #[staticmethod]
-    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[pyo3(signature = (input_tokens, output_tokens, request_count, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, replay_concurrency=None, arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
     #[allow(clippy::too_many_arguments)]
-    fn create_disagg(
-        trace_file: PathBuf,
+    fn from_synthetic_disagg(
+        input_tokens: usize,
+        output_tokens: usize,
+        request_count: usize,
         prefill_engine_args: &MockEngineArgs,
         decode_engine_args: &MockEngineArgs,
         num_prefill_workers: usize,
         num_decode_workers: usize,
         router_mode: &str,
         router_config: Option<KvRouterConfig>,
+        replay_concurrency: Option<isize>,
         arrival_speedup_ratio: f64,
-        trace_block_size: usize,
+        arrival_interval_ms: f64,
+        turns_per_session: usize,
+        shared_prefix_ratio: f64,
+        num_prefix_groups: usize,
+        inter_turn_delay_ms: f64,
         sla_ttft_ms: Option<f64>,
         sla_itl_ms: Option<f64>,
         sla_e2e_ms: Option<f64>,
@@ -1750,14 +1899,33 @@ impl PlannerReplayBridge {
             itl_ms: sla_itl_ms,
             e2e_ms: sla_e2e_ms,
         };
+        let max_in_flight = parse_replay_concurrency(replay_concurrency).map_err(to_pyerr)?;
 
-        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file_disagg(
+        let block_size = config.prefill_args.block_size.max(1);
+        let mut trace = build_synthetic_workload(
+            block_size,
+            input_tokens,
+            output_tokens,
+            request_count,
+            arrival_interval_ms,
+            turns_per_session,
+            shared_prefix_ratio,
+            num_prefix_groups,
+            inter_turn_delay_ms,
+        )
+        .map_err(to_pyerr)?;
+        if max_in_flight.is_none() {
+            trace = trace
+                .speed_up_timing(arrival_speedup_ratio)
+                .map_err(to_pyerr)?;
+        }
+
+        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_disagg(
             config,
             router_config,
             None,
-            &trace_file,
-            trace_block_size,
-            arrival_speedup_ratio,
+            trace,
+            max_in_flight,
             router_mode,
             sla,
         )
