@@ -16,7 +16,7 @@ import logging
 import os
 import socket
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -34,9 +34,7 @@ class MxConfig:
     same_rank_only: bool = True
     tree_scale_out: bool = True
     moe_expert_filter: bool = True
-    register_self_buffers: list[str] = field(default_factory=list)
     nic_pin: str = "auto"
-    retain_latest_k: int = 1
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "MxConfig":
@@ -49,9 +47,7 @@ class MxConfig:
             same_rank_only=bool(d.get("same_rank_only", True)),
             tree_scale_out=bool(d.get("tree_scale_out", True)),
             moe_expert_filter=bool(d.get("moe_expert_filter", True)),
-            register_self_buffers=list(d.get("register_self_buffers", []) or []),
             nic_pin=str(d.get("nic_pin", "auto")),
-            retain_latest_k=int(d.get("retain_latest_k", 1)),
         )
 
 
@@ -488,11 +484,6 @@ def _trim_draft_vocab_padding(
 
 class MxRefitWorkerExtension:
     """Methods injected into vLLM's Worker via ``worker_extension_cls``."""
-
-    def prepare_refit_info(self, state_dict_info: dict[str, Any]) -> None:
-        self._mx_state_dict_info = state_dict_info
-        if not hasattr(self, "state_dict_info"):
-            self.state_dict_info = state_dict_info
 
     def _mx_uses_fp8_quantization(self) -> bool:
         vllm_config = getattr(self.model_runner, "vllm_config", None)

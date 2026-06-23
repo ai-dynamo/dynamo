@@ -432,12 +432,7 @@ class WorkerFactory:
             mx_refit_endpoint = runtime.endpoint(
                 f"{config.namespace}.{config.component}.update_weights_via_mx"
             )
-            prepare_refit_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.prepare_refit_info"
-            )
-            shutdown_endpoints.extend(
-                [mx_refit_endpoint, prepare_refit_endpoint]
-            )
+            shutdown_endpoints.append(mx_refit_endpoint)
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -680,10 +675,6 @@ class WorkerFactory:
                     [
                         mx_refit_endpoint.serve_endpoint(
                             handler.update_weights_via_mx,
-                            metrics_labels=model_metrics_labels,
-                        ),
-                        prepare_refit_endpoint.serve_endpoint(
-                            handler.prepare_refit_info,
                             metrics_labels=model_metrics_labels,
                         ),
                     ]

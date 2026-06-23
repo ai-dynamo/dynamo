@@ -45,6 +45,86 @@ export DYN_TOKENIZER=fastokens
 python -m dynamo.frontend
 ```
 
+## HTTP Endpoints
+
+The frontend exposes tokenizer utilities at the root OpenAI service:
+
+- `POST /tokenize`
+- `POST /detokenize`
+
+These routes use the same model card, prompt formatter, tokenizer backend, and
+chat-template behavior as normal inference requests. `model` is optional when
+the frontend is serving exactly one model.
+
+### Completion Tokenization
+
+Use `prompt` for completion-style tokenization:
+
+```json
+{
+  "model": "Qwen/Qwen3-4B-Thinking-2507",
+  "prompt": "Solve 2 + 2.",
+  "add_special_tokens": true,
+  "return_token_strs": true
+}
+```
+
+The response includes the token IDs, token count, model context length, and
+optional token strings:
+
+```json
+{
+  "count": 5,
+  "max_model_len": 32768,
+  "tokens": [50, 12435, 220, 17, 13],
+  "token_strs": ["Solve", " 2", " +", " 2", "."]
+}
+```
+
+### Chat Tokenization
+
+Use `messages` for chat-template tokenization:
+
+```json
+{
+  "model": "Qwen/Qwen3-4B-Thinking-2507",
+  "messages": [
+    {"role": "user", "content": "Solve 2 + 2."}
+  ],
+  "add_generation_prompt": true,
+  "return_token_strs": false,
+  "chat_template_kwargs": {
+    "enable_thinking": true
+  }
+}
+```
+
+Supported chat-tokenization fields include `tools`, `chat_template`,
+`chat_template_kwargs`, `continue_final_message`, `add_special_tokens`,
+`media_io_kwargs`, `mm_processor_kwargs`, and `required_prefix_token_ids`.
+`continue_final_message` and `add_generation_prompt` cannot both be true.
+
+`required_prefix_token_ids` is useful for prefix-reuse workflows: the frontend
+renders the chat prompt and replaces the reusable prefix token span with the
+provided token IDs using the model's prefix-reuse EOS metadata.
+
+### Detokenization
+
+Use `/detokenize` to convert token IDs back to text:
+
+```json
+{
+  "model": "Qwen/Qwen3-4B-Thinking-2507",
+  "tokens": [50, 12435, 220, 17, 13]
+}
+```
+
+```json
+{
+  "prompt": "Solve 2 + 2."
+}
+```
+
 ## Dynamo Frontend Behavior
 
 When `DYN_TOKENIZER=fastokens` is set:

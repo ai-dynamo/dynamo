@@ -61,9 +61,80 @@ services:
             value: modelexpress
 ```
 
-<Note>
-Use the load format supported by your runtime image. ModelExpress v0.3 and newer document the unified `mx` loader. Some older Dynamo images expose `mx-source` and `mx-target` loader names instead.
-</Note>
+> [!NOTE]
+> Use the load format supported by your runtime image. ModelExpress v0.3 and
+> newer document the unified `mx` loader. Some older Dynamo images expose
+> `mx-source` and `mx-target` loader names instead.
+
+## Mid-Training Weight Refit
+
+Dynamo's vLLM backend can also receive trainer-published weights from
+ModelExpress during an RL training run. This is separate from cold-start model
+distribution: the worker is already running, and an external trainer publishes a
+new version of model weights to the ModelExpress server.
+
+Use a runtime image that includes:
+
+- `modelexpress`
+- NIXL with the UCX backend required by the cluster fabric
+- `dynamo.vllm.mx_refit.extension.MxRefitWorkerExtension`
+
+Enable the receiver in the DGD worker with `DYN_MX_REFIT_ENABLED=1` and use the
+ModelExpress target load format supported by that image:
+
+```yaml
+services:
+  VllmWorker:
+    extraPodSpec:
+      mainContainer:
+        image: <vllm-runtime-image-with-modelexpress-refit>
+        command: ["python3", "-m", "dynamo.vllm"]
+        args:
+          - --model
+          - Qwen/Qwen3-4B-Thinking-2507
+          - --load-format
+          - mx-target
+        env:
+          - name: DYN_MX_REFIT_ENABLED
+            value: "1"
+          - name: MODEL_EXPRESS_URL
+            value: modelexpress-server.default.svc.cluster.local:8001
+          - name: UCX_TLS
+            value: rc,cuda_copy
+          - name: NIXL_UCX_TLS
+            value: rc,cuda_copy
+          - name: UCX_IB_GPU_DIRECT_RDMA
+            value: "yes"
+          - name: UCX_CUDA_COPY_DMABUF
+            value: "yes"
+          - name: MX_RDMA_NIC_PIN
+            value: auto
+```
+
+When `DYN_MX_REFIT_ENABLED=1`, Dynamo registers an engine admin route named
+`update_weights_via_mx`. A trainer or orchestration layer can call:
+
+```http
+POST /engine/update_weights_via_mx
+Content-Type: application/json
+
+{
+  "version": 12,
+  "mx_config": {
+    "mx_server_url": "modelexpress-server.default.svc.cluster.local:8001",
+    "timeout_seconds": 300.0,
+    "same_rank_only": true,
+    "tree_scale_out": true,
+    "moe_expert_filter": false,
+    "nic_pin": "auto"
+  }
+}
+```
+
+After a successful refit, call `POST /engine/flush_cache` so prefix-cache entries
+created with the old weights are discarded. There is no separate prepare step;
+the refit receiver reads the versioned tensor metadata published through
+ModelExpress.
 
 ## Stream Without Shared Storage
 

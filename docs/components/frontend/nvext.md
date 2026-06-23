@@ -35,7 +35,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided with `backend_instance_id`, tokenization is skipped. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
-| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for agent traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
@@ -211,7 +211,14 @@ When the client requests response metadata via `extra_fields`, the response incl
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Routed expert capture payload returned by SGLang-backed requests. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
 | `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
+| `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs emitted by the backend. Streaming chunks carry delta token IDs; aggregated responses concatenate them. This field requires exactly one generated choice. |
+| `prompt_logprobs` | `extra_fields: ["prompt_logprobs"]` | Prompt-token logprobs emitted on the final chunk when the backend provides them. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
+
+`completion_token_ids` is separate from `return_tokens_as_token_ids`.
+`return_tokens_as_token_ids` changes logprob token display strings, while
+`completion_token_ids` returns the generated token ID sequence under response
+`nvext`.
 
 ### Example response `nvext`
 
@@ -227,7 +234,8 @@ When the client requests response metadata via `extra_fields`, the response incl
         "timing": {
             "ttft_ms": 45.2,
             "itl_ms": 12.1
-        }
+        },
+        "completion_token_ids": [9906, 0]
     }
 }
 ```
