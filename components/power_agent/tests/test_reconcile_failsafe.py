@@ -54,6 +54,34 @@ class TestListPodsExplicitResult(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result, [])
 
+    def test_cluster_scoped_list_served_from_watch_cache(self):
+        """The cluster-scoped LIST passes resource_version="0" so the apiserver
+        can serve it from its watch cache instead of an etcd read (PR #9682
+        scale mitigation)."""
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.return_value = MagicMock(items=[])
+        agent = _make_agent(core_v1)
+
+        agent._list_pods_on_node()
+
+        _, kwargs = core_v1.list_pod_for_all_namespaces.call_args
+        self.assertEqual(kwargs.get("resource_version"), "0")
+        core_v1.list_namespaced_pod.assert_not_called()
+
+    def test_namespaced_list_served_from_watch_cache(self):
+        """The namespace-scoped LIST also passes resource_version="0"."""
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.return_value = MagicMock(items=[])
+        agent = _make_agent(core_v1)
+        agent.k8s_namespace = "dynamo"
+
+        agent._list_pods_on_node()
+
+        _, kwargs = core_v1.list_namespaced_pod.call_args
+        self.assertEqual(kwargs.get("resource_version"), "0")
+        self.assertEqual(kwargs.get("namespace"), "dynamo")
+        core_v1.list_pod_for_all_namespaces.assert_not_called()
+
 
 class TestReconcileFailSafe(unittest.TestCase):
     def test_listing_failure_skips_reconcile_and_preserves_caps(self):

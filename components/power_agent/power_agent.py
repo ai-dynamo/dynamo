@@ -560,14 +560,37 @@ class PowerAgent:
             field_selector = (
                 f"spec.nodeName={self.node_name}" if self.node_name else None
             )
+            # TODO(#9682 follow-up): this polls a full pod LIST per agent every
+            # RECONCILE_INTERVAL_S. Even with the node field-selector that is one
+            # apiserver request per node per cycle, so aggregate request rate
+            # grows linearly with cluster size (~N/interval LISTs/s fleet-wide:
+            # ~66/s at 1000 nodes, ~330/s at 5000). It will not surface in tests
+            # or small clusters, only at production scale. The real fix is a
+            # watch/informer-backed local pod cache (one initial LIST + a
+            # streamed watch per node, as kubelet does) so steady-state cost is
+            # N idle watch connections instead of N LISTs every cycle. Tracked
+            # for a follow-up PR; see PR #9682 @sttts review.
+            #
+            # Interim mitigation: resource_version="0" lets the apiserver serve
+            # the LIST from its watch cache instead of reading through to etcd,
+            # which relieves etcd pressure (it does NOT change the request-rate
+            # shape). The tradeoff is "Any" list consistency: the result may be
+            # slightly stale and is not a quorum-consistent "most recent" read
+            # (https://kubernetes.io/docs/reference/using-api/api-concepts/#semantics-for-list-and-watch).
+            # That is acceptable for this MVP because reconcile is periodic, live
+            # GPU ownership is still checked from host PIDs each cycle, and a
+            # stale pod view delays convergence rather than changing the
+            # failure-path contract.
             if self.k8s_namespace:
                 result = self._core_v1.list_namespaced_pod(
                     namespace=self.k8s_namespace,
                     field_selector=field_selector,
+                    resource_version="0",
                 )
             else:
                 result = self._core_v1.list_pod_for_all_namespaces(
                     field_selector=field_selector,
+                    resource_version="0",
                 )
             return result.items
         except Exception as e:
