@@ -1222,6 +1222,8 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	assert.False(t, hasTopologyLabelVolume(cliques["frontend"].Spec.PodSpec.Volumes))
 }
 
+const testPodTemplateAnnotationValue = "from-pod-template"
+
 func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
 	alpha := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1250,18 +1252,58 @@ func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *tes
 	service := beta.GetComponentByName("worker")
 	require.NotNil(t, service)
 	component := service
-	ensurePodTemplate(component).Annotations["pod-template-annotation"] = "from-pod-template"
+	ensurePodTemplate(component).Annotations["pod-template-annotation"] = testPodTemplateAnnotationValue
 
 	labels, err := generateLabels(component, beta, "worker", DiscoveryContext{})
 	require.NoError(t, err)
 	assert.Equal(t, "kept", labels["legacy-label"])
 	assert.Equal(t, "legacy-sub", labels[commonconsts.KubeLabelDynamoSubComponentType])
 
-	annotations, err := generateAnnotations(component, beta, "worker")
-	require.NoError(t, err)
+	annotations := generateAnnotations(component, beta, "worker")
 	assert.Equal(t, "from-dgd", annotations["dgd-annotation"])
 	assert.Equal(t, "kept", annotations["legacy-annotation"])
-	assert.Equal(t, "from-pod-template", annotations["pod-template-annotation"])
+	assert.Equal(t, testPodTemplateAnnotationValue, annotations["pod-template-annotation"])
+}
+
+func TestGetDGDComponentResourceAnnotations(t *testing.T) {
+	alpha := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{
+				"dgd-only": "from-dgd",
+				"shared":   "from-dgd",
+			},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Annotations: map[string]string{
+						"legacy-only": "from-legacy",
+						"shared":      "from-legacy",
+					},
+				},
+			},
+		},
+	}
+	beta := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, alpha.ConvertTo(beta))
+
+	component := beta.GetComponentByName("worker")
+	require.NotNil(t, component)
+	podTemplate := ensurePodTemplate(component)
+	podTemplate.Annotations["pod-template-only"] = testPodTemplateAnnotationValue
+	podTemplate.Annotations["shared"] = testPodTemplateAnnotationValue
+
+	annotations := GetDGDComponentResourceAnnotations(beta, "worker", component)
+
+	assert.Equal(t, map[string]string{
+		"dgd-only":          "from-dgd",
+		"legacy-only":       "from-legacy",
+		"pod-template-only": testPodTemplateAnnotationValue,
+		"shared":            testPodTemplateAnnotationValue,
+	}, annotations)
 }
 
 // TestGenerateComponentContext tests the generateComponentContext function

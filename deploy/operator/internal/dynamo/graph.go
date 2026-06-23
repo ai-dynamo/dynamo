@@ -501,6 +501,18 @@ func GetDGDComponentResourceLabels(dgd *v1beta1.DynamoGraphDeployment, component
 	return labels
 }
 
+// GetDGDComponentResourceAnnotations returns annotations that should be applied
+// to resources created directly for a DGD component.
+func GetDGDComponentResourceAnnotations(dgd *v1beta1.DynamoGraphDeployment, componentName string, component *v1beta1.DynamoComponentDeploymentSharedSpec) map[string]string {
+	annotations := map[string]string{}
+	if dgd != nil {
+		maps.Copy(annotations, dgd.Spec.Annotations)
+		maps.Copy(annotations, getDGDComponentAlphaAnnotations(dgd, componentName))
+	}
+	maps.Copy(annotations, GetPodTemplateAnnotations(component))
+	return annotations
+}
+
 // GetDGDComponentPreservedIngressSpec returns an alpha component ingress spec that
 // was preserved during conversion to v1beta1.
 func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, componentName string) (IngressSpec, bool) {
@@ -2167,10 +2179,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryEnabled)
 	}
 
-	annotations, err := generateAnnotations(p.component, p.dynamoDeployment, p.componentName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate annotations: %w", err)
-	}
+	annotations := generateAnnotations(p.component, p.dynamoDeployment, p.componentName)
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
 		delete(annotations, annotationKey)
 	}
@@ -2606,25 +2615,8 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 	return append([]v1alpha1.PVC(nil), alpha.Spec.PVCs...)
 }
 
-func generateAnnotations(component *v1beta1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1beta1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
-	annotations := make(map[string]string)
-	if dynamoDeployment.Spec.Annotations != nil {
-		if err := mergo.Merge(&annotations, dynamoDeployment.Spec.Annotations, mergo.WithOverride); err != nil {
-			return nil, fmt.Errorf("failed to merge DGD annotations: %w", err)
-		}
-	}
-	if componentAnnotations := getDGDComponentAlphaAnnotations(dynamoDeployment, componentName); componentAnnotations != nil {
-		if err := mergo.Merge(&annotations, componentAnnotations, mergo.WithOverride); err != nil {
-			return nil, fmt.Errorf("failed to merge preserved component annotations: %w", err)
-		}
-	}
-	if podTemplateAnnotations := GetPodTemplateAnnotations(component); podTemplateAnnotations != nil {
-		err := mergo.Merge(&annotations, podTemplateAnnotations, mergo.WithOverride)
-		if err != nil {
-			return nil, fmt.Errorf("failed to merge annotations: %w", err)
-		}
-	}
-	return annotations, nil
+func generateAnnotations(component *v1beta1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1beta1.DynamoGraphDeployment, componentName string) map[string]string {
+	return GetDGDComponentResourceAnnotations(dynamoDeployment, componentName, component)
 }
 
 // detectBackendFrameworkFromArgs detects the backend framework from command/args

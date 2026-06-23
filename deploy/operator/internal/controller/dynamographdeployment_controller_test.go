@@ -2655,6 +2655,73 @@ func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T)
 	g.Expect(service.Labels["legacy-label"]).To(gomega.Equal("kept"))
 }
 
+func Test_reconcileGroveResources_PropagatesComponentServiceAnnotations(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Annotations: map[string]string{
+				"prometheus.io/probe_skip": "true",
+				"shared":                   "from-dgd",
+			},
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "VllmDecodeWorker",
+					ComponentType: v1beta1.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Annotations: map[string]string{
+								"component-only": "kept",
+								"shared":         "from-component",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dgd).
+		Build()
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:   fakeKubeClient,
+		Recorder: record.NewFakeRecorder(100),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{
+				Backend: configv1alpha1.DiscoveryBackendKubernetes,
+			},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		ScaleClient:   &mockScaleClient{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
+	}
+
+	_, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	service := &corev1.Service{}
+	serviceName := dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", "")
+	g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: "default"}, service)).NotTo(gomega.HaveOccurred())
+	g.Expect(service.Annotations["prometheus.io/probe_skip"]).To(gomega.Equal("true"))
+	g.Expect(service.Annotations["component-only"]).To(gomega.Equal("kept"))
+	g.Expect(service.Annotations["shared"]).To(gomega.Equal("from-component"))
+}
+
 func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesLegacyWorkerSelectors(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
