@@ -251,11 +251,11 @@ mod tests {
             .stop_conditions(Default::default())
             .sampling_options(Default::default())
             .output_options(Default::default())
-            .annotations(
-                query_only
-                    .then(|| vec!["query_instance_id:true".to_string()])
-                    .unwrap_or_default(),
-            )
+            .annotations(if query_only {
+                vec!["query_instance_id:true".to_string()]
+            } else {
+                Vec::new()
+            })
             .routing(worker_id.map(|worker_id| RoutingHints {
                 backend_instance_id: Some(worker_id),
                 ..Default::default()

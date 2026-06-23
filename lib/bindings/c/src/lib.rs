@@ -25,6 +25,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::entrypoint::DEFAULT_SESSION_AFFINITY_TTL_SECS;
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
@@ -819,6 +820,7 @@ pub unsafe extern "C" fn create_routers(
             Some(prefill_config),
             None,
             enforce_disagg,
+            DEFAULT_SESSION_AFFINITY_TTL_SECS,
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,
