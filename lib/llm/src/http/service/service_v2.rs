@@ -71,6 +71,13 @@ async fn track_inflight_inference(
     }
 
     let permit = state.acquire_inflight();
+    // Close the race where shutdown starts after the readiness check but
+    // before this request is counted as inflight.
+    if !state.is_ready() {
+        drop(permit);
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    }
+
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
     // Keep the permit alive until the full response body, including streams,
