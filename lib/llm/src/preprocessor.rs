@@ -2039,10 +2039,9 @@ impl OpenAIPreprocessor {
                 // terminate before we ever emit the client chunk.
                 if let Some(client_chunk) = inner.pending_client_usage.take() {
                     inner.finished = true;
-                    // Respect cancellation even for the trailing usage chunk.
-                    if inner.cancelled {
-                        return None;
-                    }
+                    // Emit unconditionally to match the non-audit path below; the
+                    // chunk is only buffered after a finish_reason, so auditing must
+                    // not alter the client SSE tail.
                     return Some((client_chunk, inner));
                 }
 
