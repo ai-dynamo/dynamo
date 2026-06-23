@@ -501,7 +501,7 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
-        # Expose engine to the drain callback installed by main.py (#7319).
+        # Expose engine to the drain callback installed by main.py.
         # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)

@@ -20,7 +20,6 @@ import pytest
 
 from tests.router.common import (
     _test_busy_threshold_endpoint,
-    _test_disagg_background_prefill_sticky_routing,
     _test_disagg_direct_mode,
     _test_disagg_router_overload_503,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
@@ -52,7 +51,6 @@ from tests.router.mocker_process import (
     MockerProcess,
     launch_disagg_workers,
 )
-from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
@@ -988,74 +986,6 @@ def test_mocker_disagg_router_overload_503(
             max_tokens=overload_case["max_tokens"],
             **overload_case["thresholds"],
         )
-
-
-@pytest.mark.timeout(180)
-@pytest.mark.parametrize("discovery_backend", ["etcd"], indirect=True)
-@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)
-def test_disagg_background_prefill_sticky(
-    request,
-    runtime_services_dynamic_ports,
-    predownload_tokenizers,
-    discovery_backend,
-    request_plane,
-    durable_kv_events,
-):
-    """Sticky session affinity pins disagg background prefill on TCP/NATS."""
-    _ = (runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events)
-
-    namespace_suffix = generate_random_suffix()
-    shared_namespace = f"test-namespace-{namespace_suffix}"
-    prefill_mocker_args = {
-        "speedup_ratio": SPEEDUP_RATIO,
-        "block_size": BLOCK_SIZE,
-        "dp_size": 2,
-    }
-    decode_mocker_args = {
-        "speedup_ratio": SPEEDUP_RATIO,
-        "block_size": BLOCK_SIZE,
-    }
-
-    frontend_port = allocate_frontend_ports(request, 1)[0]
-    with FrontendRouterProcess(
-        request,
-        BLOCK_SIZE,
-        frontend_port,
-        shared_namespace,
-        discovery_backend,
-        enforce_disagg=True,
-        request_plane=request_plane,
-        event_plane="nats",
-        durable_kv_events=False,
-    ):
-        with launch_disagg_workers(
-            request,
-            shared_namespace,
-            "prefill_first",
-            prefill_mocker_args=prefill_mocker_args,
-            decode_mocker_args=decode_mocker_args,
-            num_prefill_mockers=3,
-            num_decode_mockers=2,
-            enable_disagg_bootstrap=True,
-            store_backend=discovery_backend,
-            request_plane=request_plane,
-            event_plane="nats",
-        ) as (prefill_workers, decode_workers):
-            _test_disagg_background_prefill_sticky_routing(
-                prefill_workers=prefill_workers,
-                decode_workers=decode_workers,
-                block_size=BLOCK_SIZE,
-                request=request,
-                frontend_port=frontend_port,
-                model_name=MODEL_NAME,
-                store_backend=discovery_backend,
-                request_plane=request_plane,
-                event_plane="nats",
-                frontend_already_running=True,
-            )
 
 
 @pytest.mark.timeout(180)

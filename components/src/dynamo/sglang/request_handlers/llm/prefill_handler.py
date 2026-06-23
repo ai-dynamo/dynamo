@@ -165,7 +165,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             lora_path=lora_path,
             **self._priority_kwargs(priority),
         )
-
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.
             # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).

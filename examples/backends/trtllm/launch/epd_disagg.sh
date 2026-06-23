@@ -19,7 +19,6 @@ export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"4,5,6,7"}
 export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"0"}
 export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.encode.generate"}
-export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
 export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 
@@ -35,7 +34,7 @@ CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$ENCODE_ENGINE_ARGS" \
-  --modality "$MODALITY" \
+  --enable-multimodal \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode encode &
@@ -45,7 +44,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
-  --modality "$MODALITY" \
+  --enable-multimodal \
   --disaggregation-mode prefill \
   --encode-endpoint "$ENCODE_ENDPOINT" &
 
@@ -54,7 +53,7 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
-  --modality "$MODALITY" \
+  --enable-multimodal \
   --disaggregation-mode decode &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

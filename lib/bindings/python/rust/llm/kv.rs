@@ -709,6 +709,46 @@ impl WorkerMetricsPublisher {
 }
 
 #[pyclass]
+pub(crate) struct MultimodalEmbeddingCachePublisher {
+    inner: Arc<llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher>,
+}
+
+#[pymethods]
+impl MultimodalEmbeddingCachePublisher {
+    #[new]
+    fn new() -> Self {
+        let inner = llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher::new();
+        Self {
+            inner: inner.into(),
+        }
+    }
+
+    #[pyo3(signature = (endpoint))]
+    fn create_endpoint<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: Endpoint,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let rs_publisher = self.inner.clone();
+        let rs_component = endpoint.inner.component().clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            rs_publisher
+                .create_endpoint(rs_component)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature = (added_keys, removed_keys))]
+    fn publish_delta(&self, added_keys: Vec<String>, removed_keys: Vec<String>) -> PyResult<()> {
+        self.inner
+            .publish_delta(added_keys, removed_keys)
+            .map_err(to_pyerr)
+    }
+}
+
+#[pyclass]
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
     kv_block_size: usize,

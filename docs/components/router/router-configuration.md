@@ -18,7 +18,7 @@ This page collects the main router flags for frontend-embedded and standalone de
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 16.0). The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../agents/priority-scheduling.md) for how router priority differs from backend engine priority.
+- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 16.0). The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`).
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](router-filtering.md).
@@ -107,15 +107,6 @@ Do not combine this setting with `--no-router-kv-events`, including when the app
 
 To implement KV event publishing for custom inference engines, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints).
-
-### Session Control and Sticky Routing
-
-When a request carries `nvext.session_control`, the KV router can activate two session-related components:
-
-- **StickySessionRouter**: Maintains an in-memory `session_id -> (worker_id, dp_rank)` affinity map with sliding-window TTL. `action: "bind"` creates router-only affinity without backend engine RPCs. Subsequent requests with the same `session_id` are routed to the pinned worker/rank, bypassing KV overlap scoring.
-- **AgentController**: Sends session lifecycle RPCs (`open_session`, `close_session`) to the worker's `session_control` endpoint when `action` is `"open"` or `"close"`. The event-plane client is lazily initialized on the first lifecycle request.
-
-These activate automatically with `--router-mode kv` -- no additional flags are needed. Requests without `session_control` are unaffected and follow the standard KV-aware routing path. Router-only sticky routing only requires `action: "bind"`; engine-backed session lifecycle currently requires the SGLang backend with `--enable-streaming-session`. See [SGLang for Agentic Workloads -- Session Control](../../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental) for details.
 
 ## Tuning Guidelines
 
