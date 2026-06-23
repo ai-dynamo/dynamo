@@ -365,9 +365,14 @@ metadata:
   name: qwen-route
 spec:
   parentRefs:
+    # The shared cluster gateway lives in its own namespace, so the parentRef
+    # MUST set `namespace` (a parentRef without one defaults to THIS route's
+    # namespace and silently fails to attach) plus the listener `sectionName`.
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: inference-gateway
+      namespace: agentgateway-system
+      sectionName: http
   rules:
     - backendRefs:
         - group: inference.networking.k8s.io

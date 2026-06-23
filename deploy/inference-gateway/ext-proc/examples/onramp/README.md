@@ -79,8 +79,7 @@ runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
 ## Run
 
 ```bash
-kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml
-kubectl apply  -n <ns> -f http-route.yaml # adjust per your namespace
+kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml, adjust httpRoute there per your setup
 
 # terminal 1
 kubectl -n agentgateway-system port-forward svc/inference-gateway 8000:80
