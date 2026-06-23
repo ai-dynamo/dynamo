@@ -35,9 +35,11 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 
 ## Session Affinity
 
-Send `X-Dynamo-Session-ID` to keep related requests on one worker. Native coding
-harness session headers continue to provide session identity and do not enable
-hard affinity.
+Session affinity is disabled by default. On the frontend, set
+`--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
+a value from `1` through `31536000` to enable it, then send
+`X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
+without the TTL option provides session identity but does not enable router affinity.
 
 The first successfully dispatched request binds the session ID to its selected
 worker and, when available, data-parallel rank. Later requests exact-dispatch to
@@ -47,10 +49,9 @@ error, or cancellation, the idle timer restarts. A missing bound worker or a
 non-cancellation selection, setup, dispatch, or target-validation failure invalidates
 the binding.
 
-Set `--router-session-affinity-ttl-secs` or
-`DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to configure the idle timeout. The default
-is `300`; the accepted range is `1` through `31536000` seconds. This timeout is
-independent of `--router-ttl-secs` and `--router-predicted-ttl-secs`.
+The configured value is the idle timeout. It is independent of
+`--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
+option to keep affinity disabled.
 
 If the bound worker disappears, Dynamo invalidates the binding so a subsequent
 selection can bind an available worker. Router restart clears all bindings. Bindings

@@ -75,7 +75,7 @@ class RouterConfigBase(ConfigBase):
     router_mode: str
     min_initial_workers: int
     enforce_disagg: bool
-    session_affinity_ttl_secs: int
+    session_affinity_ttl_secs: Optional[int]
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -242,9 +242,10 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--router-session-affinity-ttl-secs",
             env_var="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
-            default=300,
+            default=None,
             help=(
-                "Idle time in seconds before router-local session affinity expires. "
+                "Enable router-local session affinity with this idle TTL in seconds. "
+                "Affinity is disabled when this option is omitted. "
                 "This is independent of KV prediction TTL settings."
             ),
             arg_type=int,

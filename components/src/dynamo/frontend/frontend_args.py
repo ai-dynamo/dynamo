@@ -110,7 +110,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
-        if not 1 <= self.session_affinity_ttl_secs <= _MAX_SESSION_AFFINITY_TTL_SECS:
+        if self.session_affinity_ttl_secs is not None and not (
+            1 <= self.session_affinity_ttl_secs <= _MAX_SESSION_AFFINITY_TTL_SECS
+        ):
             raise ValueError(
                 "--router-session-affinity-ttl-secs must be between 1 and "
                 f"{_MAX_SESSION_AFFINITY_TTL_SECS}"

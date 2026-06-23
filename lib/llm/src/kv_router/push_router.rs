@@ -39,16 +39,18 @@ use selection::{RoutingRequestParts, WorkerSelection};
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    affinity: AffinityCoordinator,
+    affinity: Option<AffinityCoordinator>,
 }
 
 impl KvPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
-        session_affinity_ttl: Duration,
+        session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
-        let affinity = AffinityCoordinator::new(session_affinity_ttl)?;
+        let affinity = session_affinity_ttl
+            .map(AffinityCoordinator::new)
+            .transpose()?;
 
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -113,6 +115,13 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
+        let Some(affinity) = self.affinity.as_ref() else {
+            return Ok((
+                self.select_request(request, phase, is_query_only, None)
+                    .await?,
+                None,
+            ));
+        };
         let Some(session_id) = affinity_id(request)? else {
             return Ok((
                 self.select_request(request, phase, is_query_only, None)
@@ -122,7 +131,7 @@ impl KvPushRouter {
         };
         let explicit = explicit_target(request, phase)?;
         if is_query_only {
-            let target = self.affinity.query_target(&session_id, explicit)?;
+            let target = affinity.query_target(&session_id, explicit)?;
             let worker = target.and_then(affinity_worker);
             return Ok((
                 self.select_request(request, phase, true, worker).await?,
@@ -131,8 +140,7 @@ impl KvPushRouter {
         }
 
         let request_context = request.context();
-        let operation = self
-            .affinity
+        let operation = affinity
             .acquire_with_context(&session_id, explicit, request_context.as_ref())
             .await?;
         let worker = operation.target().and_then(affinity_worker);
@@ -143,8 +151,7 @@ impl KvPushRouter {
             }
             Err(_) if operation.target().is_some() && explicit.is_none() => {
                 operation.invalidate();
-                let retry = self
-                    .affinity
+                let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
                     .await?;
                 match self.select_request(request, phase, false, None).await {
@@ -593,7 +600,7 @@ mod tests {
             .unwrap()
     }
 
-    async fn router() -> (KvPushRouter, Runtime) {
+    async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -632,20 +639,34 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::KV)
             .await
             .unwrap();
-        let router = KvPushRouter::new(inner, Arc::new(chooser), Duration::from_secs(10)).unwrap();
+        let router = KvPushRouter::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
         (router, runtime)
     }
 
     #[tokio::test]
+    async fn session_affinity_disabled_does_not_create_coordinator() {
+        let (router, runtime) = router(None).await;
+        assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn session_affinity_existing_selection_cancellation_preserves_binding_without_retry() {
-        let (router, runtime) = router().await;
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
         let session_id = SessionAffinityId::new("cancelled-selection");
         let original_target = AffinityTarget {
             worker_id: 7,
             dp_rank: Some(0),
         };
-        let AffinityAcquire::Initialize(initializer) =
-            router.affinity.acquire(&session_id, None).await.unwrap()
+        let AffinityAcquire::Initialize(initializer) = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id, None)
+            .await
+            .unwrap()
         else {
             panic!("first request must initialize");
         };
@@ -668,12 +689,22 @@ mod tests {
             &[]
         ));
         assert_eq!(
-            router.affinity.query_target(&session_id, None).unwrap(),
+            router
+                .affinity
+                .as_ref()
+                .unwrap()
+                .query_target(&session_id, None)
+                .unwrap(),
             Some(original_target)
         );
 
-        let AffinityAcquire::Bound { target, lease } =
-            router.affinity.acquire(&session_id, None).await.unwrap()
+        let AffinityAcquire::Bound { target, lease } = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id, None)
+            .await
+            .unwrap()
         else {
             panic!("cancellation must preserve the existing binding");
         };

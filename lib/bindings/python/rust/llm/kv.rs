@@ -1474,15 +1474,15 @@ impl KvRouter {
     /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
     /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=300))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
         aic_perf_config: Option<&AicPerfConfig>,
-        session_affinity_ttl_secs: u64,
+        session_affinity_ttl_secs: Option<u64>,
     ) -> PyResult<Self> {
-        if !(1..=31_536_000).contains(&session_affinity_ttl_secs) {
+        if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
@@ -1537,7 +1537,7 @@ impl KvRouter {
             let kv_push_router = RsKvPushRouter::new(
                 push_router,
                 kv_router,
-                Duration::from_secs(session_affinity_ttl_secs),
+                session_affinity_ttl_secs.map(Duration::from_secs),
             )
             .map_err(to_pyerr)?;
 

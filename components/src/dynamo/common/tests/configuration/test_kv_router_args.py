@@ -513,7 +513,7 @@ def test_admission_control_token_capacity_preserves_busy_thresholds(
         "active_prefill_tokens_threshold": 10_000_000,
         "active_prefill_tokens_threshold_frac": 64.0,
         "enforce_disagg": False,
-        "session_affinity_ttl_secs": 300,
+        "session_affinity_ttl_secs": None,
     }
 
 
@@ -552,7 +552,7 @@ def test_admission_control_token_capacity_with_custom_thresholds(
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
         "enforce_disagg": False,
-        "session_affinity_ttl_secs": 300,
+        "session_affinity_ttl_secs": None,
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
@@ -584,6 +584,14 @@ def test_admission_control_explicit_none_with_threshold_raises(
 
 
 def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+    assert config.session_affinity_ttl_secs is None
+    assert config.router_kwargs()["session_affinity_ttl_secs"] is None
+
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "600")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)

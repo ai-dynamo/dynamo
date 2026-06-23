@@ -1016,7 +1016,7 @@ mod tests {
             std::sync::Arc::new(crate::discovery::ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
-            crate::entrypoint::DEFAULT_SESSION_AFFINITY_TTL_SECS,
+            None,
         );
         pr.mark_active_for_test();
         pr.deactivate();

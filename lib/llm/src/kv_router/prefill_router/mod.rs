@@ -130,7 +130,7 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
-    session_affinity_ttl: std::time::Duration,
+    session_affinity_ttl: Option<std::time::Duration>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name (used for logging / lifecycle messages).
     model_name: String,
@@ -549,7 +549,7 @@ mod tests {
             Arc::new(crate::discovery::ModelManager::new()),
             RouterMode::RoundRobin,
             enforce_disagg,
-            crate::entrypoint::DEFAULT_SESSION_AFFINITY_TTL_SECS,
+            None,
         )
     }
 

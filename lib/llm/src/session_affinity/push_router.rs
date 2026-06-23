@@ -20,19 +20,19 @@ use crate::{
 
 pub struct SessionAffinityPushRouter {
     inner: PushRouter<PreprocessedRequest, LlmResponse>,
-    affinity: AffinityCoordinator,
+    affinity: Option<AffinityCoordinator>,
     direct: bool,
 }
 
 impl SessionAffinityPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, LlmResponse>,
-        ttl: Duration,
+        ttl: Option<Duration>,
         direct: bool,
     ) -> Result<Self, Error> {
         Ok(Self {
             inner,
-            affinity: AffinityCoordinator::new(ttl)?,
+            affinity: ttl.map(AffinityCoordinator::new).transpose()?,
             direct,
         })
     }
@@ -82,8 +82,11 @@ impl SessionAffinityPushRouter {
         explicit: Option<AffinityTarget>,
         request_context: &dyn AsyncEngineContext,
     ) -> Result<super::AffinityAcquire, Error> {
-        let operation = self
+        let affinity = self
             .affinity
+            .as_ref()
+            .expect("affinity acquisition requires an enabled coordinator");
+        let operation = affinity
             .acquire_with_context(session_id, explicit, request_context)
             .await?;
         let Some(target) = operation.target() else {
@@ -99,7 +102,7 @@ impl SessionAffinityPushRouter {
         }
 
         operation.invalidate();
-        self.affinity
+        affinity
             .acquire_with_context(session_id, explicit, request_context)
             .await
     }
@@ -112,7 +115,11 @@ impl SessionAffinityPushRouter {
     where
         F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M, Error>,
     {
-        let session_id = affinity_id(&request)?;
+        let session_id = if self.affinity.is_some() {
+            affinity_id(&request)?
+        } else {
+            None
+        };
         if !self.direct && session_id.is_none() {
             let pinned_worker = phase_worker_id(&request, RequestPhase::Prefill);
             return self
@@ -145,6 +152,8 @@ impl SessionAffinityPushRouter {
         if is_query_only {
             let selected = self
                 .affinity
+                .as_ref()
+                .expect("affinity query requires an enabled coordinator")
                 .query_target(&session_id, explicit)?
                 .or(explicit);
             let rank = selected.and_then(|target| target.dp_rank);
@@ -206,7 +215,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<LlmResponse>, Error> {
         let phase = Self::phase(&request);
-        let session_id = affinity_id(&request)?;
+        let session_id = if self.affinity.is_some() {
+            affinity_id(&request)?
+        } else {
+            None
+        };
         if !self.direct && session_id.is_none() {
             return self.inner.generate(request).await;
         }
@@ -224,6 +237,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         if is_query_only {
             let target = self
                 .affinity
+                .as_ref()
+                .expect("affinity query requires an enabled coordinator")
                 .query_target(&session_id, explicit)?
                 .or(explicit);
             let rank = target.and_then(|target| target.dp_rank);
@@ -338,6 +353,40 @@ mod tests {
         request
     }
 
+    fn affinity(router: &SessionAffinityPushRouter) -> &AffinityCoordinator {
+        router
+            .affinity
+            .as_ref()
+            .expect("test router must enable affinity")
+    }
+
+    #[tokio::test]
+    async fn session_affinity_disabled_simple_router_has_no_coordinator() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let client = distributed
+            .namespace("session_affinity_disabled".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate")
+            .client()
+            .await
+            .unwrap();
+        let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let router = SessionAffinityPushRouter::new(inner, None, false).unwrap();
+
+        assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
     #[tokio::test]
     async fn session_affinity_simple_modes_rollback_failed_initialization() {
         let runtime = Runtime::from_current().unwrap();
@@ -366,7 +415,7 @@ mod tests {
             let inner = PushRouter::from_client(client, mode).await.unwrap();
             let router = SessionAffinityPushRouter::new(
                 inner,
-                Duration::from_secs(10),
+                Some(Duration::from_secs(10)),
                 mode.is_direct_routing(),
             )
             .unwrap();
@@ -379,7 +428,7 @@ mod tests {
                     .is_err()
             );
             assert_eq!(
-                router.affinity.entry_count(),
+                affinity(&router).entry_count(),
                 0,
                 "failed {mode:?} dispatch must release initialization"
             );
@@ -408,16 +457,17 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
             .await
             .unwrap();
-        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), false).unwrap();
+        let router =
+            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), false).unwrap();
         assert!(router.generate(affinity_request(None, true)).await.is_err());
-        assert_eq!(router.affinity.entry_count(), 0);
+        assert_eq!(affinity(&router).entry_count(), 0);
         assert!(
             router
                 .select_and_dispatch_prefill(affinity_request(None, true), |_, _, _| Ok(()))
                 .await
                 .is_err()
         );
-        assert_eq!(router.affinity.entry_count(), 0);
+        assert_eq!(affinity(&router).entry_count(), 0);
 
         let client = component
             .endpoint("direct".to_string())
@@ -427,13 +477,14 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::Direct)
             .await
             .unwrap();
-        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), true).unwrap();
+        let router =
+            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), true).unwrap();
         let error = router
             .generate(affinity_request(None, false))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("worker ID required"));
-        assert_eq!(router.affinity.entry_count(), 0);
+        assert_eq!(affinity(&router).entry_count(), 0);
 
         let error = router
             .generate(Context::new(request(None, false)))
@@ -453,7 +504,7 @@ mod tests {
                 .to_string()
                 .contains("worker ID required for prefill request in Direct routing mode")
         );
-        assert_eq!(router.affinity.entry_count(), 0);
+        assert_eq!(affinity(&router).entry_count(), 0);
 
         let mut decode_only = request(None, false);
         decode_only.routing_mut().decode_worker_id = Some(99);
@@ -483,10 +534,11 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
             .await
             .unwrap();
-        let router = SessionAffinityPushRouter::new(inner, Duration::from_secs(10), false).unwrap();
+        let router =
+            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), false).unwrap();
         let session_id = SessionAffinityId::new("adapter-session");
         let AffinityAcquire::Initialize(initializer) =
-            router.affinity.acquire(&session_id, None).await.unwrap()
+            affinity(&router).acquire(&session_id, None).await.unwrap()
         else {
             panic!("first request must initialize");
         };
@@ -506,7 +558,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            router.affinity.query_target(&session_id, None).unwrap(),
+            affinity(&router).query_target(&session_id, None).unwrap(),
             None
         );
 

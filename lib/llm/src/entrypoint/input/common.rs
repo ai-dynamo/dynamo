@@ -145,7 +145,7 @@ fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
-    session_affinity_ttl: Duration,
+    session_affinity_ttl: Option<Duration>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     let engine: ServiceEngine<_, _> = match router_mode {
@@ -180,7 +180,7 @@ pub async fn build_preprocessed_routing(
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enable_multimodal_cache_indexer: bool,
     enforce_disagg: bool,
-    session_affinity_ttl_secs: u64,
+    session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
@@ -230,7 +230,7 @@ pub async fn build_preprocessed_routing(
         router,
         router_mode,
         chooser,
-        Duration::from_secs(session_affinity_ttl_secs),
+        session_affinity_ttl_secs.map(Duration::from_secs),
     )?;
 
     Ok(PreprocessedRouting {
