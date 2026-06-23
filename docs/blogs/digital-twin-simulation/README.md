@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Tentative author list: Yongming Ding, Rudy Pei, Hongkuan Zhou, Ryan Olson, Dan Gil, Vikram Sharma Mailthody
 
-[placeholder: final hero/lead image if needed]
+![DynoSim configuration space: simulated throughput-vs-interactivity Pareto across deployment topologies, backends, and scheduling policies.](./images/fig-1-hero-config-space.svg)
 
 Before investing millions, or even billions, of dollars in data center
 infrastructure, teams want a clear view of the value that infrastructure is
@@ -91,29 +91,6 @@ One of those components is the [Planner](../../components/planner/planner-guide.
 Dynamo's autoscaling component. It computes scaling targets from live metrics,
 profiles, and SLA goals.
 
-```mermaid
-flowchart TD
-    subgraph SEC[Single Engine Core]
-        subgraph SCH[Scheduler Modeling]
-            F[Fwd Pass Modeling]
-        end
-    end
-
-    KV[KV Transfer + Offloading Simulation]
-    KR[KV Router Simulation]
-    P[Planner Autoscaling Simulation]
-
-    SES[Single Engine Simulation]
-    MES[Multi Engine Simulation]
-
-    SES --> SEC
-
-    MES --> SEC
-    MES --> KV
-    MES --> KR
-    MES --> P
-```
-
 The **Single Engine Core** models one worker: scheduler behavior plus
 forward-pass timing. The **Single Engine Simulation** wraps that core as one
 modeled execution stream. The **Multi Engine Simulation** composes many workers
@@ -122,6 +99,8 @@ routing, KV movement, queueing, imbalance, and Planner decisions.
 
 KVBM and distributed cache simulation are treated as near-future component work
 in this draft rather than as a fully hooked-up claim today.
+
+![DynoSim architecture: load driver, trace collector, and the DES core with simulated Router, Planner, engine schedulers, and KV/cache components.](./images/fig-2-architecture-map.svg)
 
 ### 1.1 DES Basics: LLM Inference As Events
 
@@ -160,20 +139,6 @@ router decision affects the worker's queue, a Planner scaling decision delays
 capacity, and a KV movement decision can change when decode begins.
 
 ### 1.3 Replay Harness: Driving The Twin
-
-```mermaid
-flowchart LR
-    LD[Load Driver] --> H[Replay Harness]
-
-    H --> SES[Single Engine Simulation]
-    H --> MES[Multi Engine Simulation]
-
-    SES --> H
-    MES --> H
-
-    H --> TC[Trace Collector]
-    H -. "completion feedback" .-> LD
-```
 
 The replay harness connects workload generation to the simulated components and
 then back to metrics. The load side can be a recorded trace or a synthetic
@@ -215,7 +180,7 @@ fidelity to real silicon for engine-side performance, especially for throughput
 and token time. But TTFT is sensitive to how requests wait, batch, chunk, and
 enter prefill under high concurrency.
 
-![TPS/GPU, TPS/User, TPOT, and TTFT vs. concurrency for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K.](./images/hw_mocker_aic_4panel.png)
+![TPS/GPU, TPS/User, TPOT, and TTFT vs. concurrency for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K.](./images/fig-3-fidelity.svg)
 
 The model tested is MiniMax-M2.5 FP8 on B200, with TP=4, ISL=1K, OSL=1K, at
 concurrencies from 8 to 64. Mocker tracks the hardware trend across throughput
@@ -265,7 +230,7 @@ As a concrete routing example, the figure below compares round-robin routing
 with the KV Router. G2 offload is disabled, so the difference comes from routing
 and cache placement:
 
-![Mocker simulation, round-robin vs KV Router with 8 workers. Left: mean TTFT vs concurrency (log y), where KV Router reduces TTFT at every load point. Right: throughput-vs-interactivity Pareto; KV Router increases prefix reuse and shifts throughput per GPU upward while trading some per-user interactivity at higher concurrency.](./images/kv_router_exp.png)
+![Mocker simulation, round-robin vs KV Router with 8 workers. Left: mean TTFT vs concurrency (log y), where KV Router reduces TTFT at every load point. Right: throughput-vs-interactivity Pareto; KV Router increases prefix reuse and shifts throughput per GPU upward while trading some per-user interactivity at higher concurrency.](./images/fig-7-router-experiment.svg)
 
 The KV Router raises prefix reuse from about 0.38 to 0.44-0.45. That produces
 higher throughput per GPU and much lower TTFT across the sweep: at c=256, 171
@@ -287,7 +252,7 @@ rest of the serving harness.
 The KVBM example below shows what the mocker predicts when the G2 host-memory
 tier is enabled and sized at 32,768 blocks:
 
-![Mocker simulation, baseline vs G2-enabled (32K blocks). Left: mean TTFT vs concurrency (log y), with 8.5–19.3% reduction across c=8 to c=64. Right: throughput-vs-interactivity Pareto; G2 weakly dominates the baseline at every concurrency.](./images/kvbm_g2_exp.png)
+![Mocker simulation, baseline vs G2-enabled (32K blocks). Left: mean TTFT vs concurrency (log y), with 8.5–19.3% reduction across c=8 to c=64. Right: throughput-vs-interactivity Pareto; G2 weakly dominates the baseline at every concurrency.](./images/fig-8-kvbm-g2.svg)
 
 Mean TTFT improves the most at c=32 (-19.3%), where prefill cost still
 dominates and host-memory KV hits skip prefill work; the benefit narrows at
@@ -343,11 +308,6 @@ still small and locally smooth enough for coarse coordinate search to find usefu
 candidates. As the search space grows, the same replay scoring loop can be
 connected to richer black-box optimizers such as Hyperopt-style Bayesian search,
 genetic algorithms, or [Vizier](https://github.com/google/vizier).
-
-```mermaid
-flowchart LR
-    A["TP search<br/>choose TP shape<br/>(prefill_tp, decode_tp)<br/>under GPU budget"] --> B["Worker search<br/>choose worker split<br/>(prefill_workers, decode_workers)<br/>for the chosen TP"] --> C["Router search<br/>choose routing mode<br/>and overlap_score_weight"] --> A
-```
 
 The point is joint search. The best parallel mapping depends on the worker
 layout, and the best worker layout depends on the router policy. The same
@@ -428,7 +388,7 @@ planner runs (`optimization_target` ∈ {throughput, latency, sla}) on the
 resulting Pareto plane. The SLA runs use a representative target of
 TTFT=1500 ms, ITL=50 ms.
 
-![Planner experiment 1 — setup tradeoffs](images/planner_exp_1.png)
+![Planner experiment 1 — setup tradeoffs.](./images/fig-4-planner-setup-tradeoffs.svg)
 
 The agg SLA planner sits below the static-deployment Pareto curve on TTFT —
 roughly the same GPU-hours as a 4-GPU static deployment, but with p90 TTFT
@@ -444,7 +404,7 @@ scaling disabled, `load_adjustment_interval` is the only knob driving fast
 reactions. Sweeping it across {1, 2, 5, 10, 20, 30, 60, 120, 300} s with
 instantaneous engine startup isolates the responsiveness-vs-flap tradeoff.
 
-![Planner experiment 2 — load adjustment interval](images/planner_exp_2.png)
+![Planner experiment 2 — load adjustment interval.](./images/fig-5-planner-load-interval.svg)
 
 p90 TTFT is essentially flat between 1 s and 10 s intervals (~3.1–3.6 s),
 while the total number of scaling events drops from **1,529 to 233** over
@@ -462,7 +422,7 @@ instant; a fresh engine pod takes seconds to minutes to become usable. The
 mocker's `startup_time` parameter injects this delay and lets us measure
 how the planner copes.
 
-![Planner experiment 3 — engine cold-start time](images/planner_exp_3.png)
+![Planner experiment 3 — engine cold-start time.](./images/fig-6-planner-cold-start.svg)
 
 For Qwen3-32B at TP=2 the planner holds SLA cleanly up to ~180 s of
 startup delay; the curve bends sharply at the **~200 s cliff** marked on
@@ -536,6 +496,8 @@ behavior. That is more than configuration scoring; it is policy discovery
 feeding back into Dynamo itself.
 
 ## 4. Simulation As The Inner Loop
+
+![The DynoSim tuning loop: simulate, evaluate, adjust configuration, and validate on real hardware.](./images/fig-9-tuning-loop.svg)
 
 The goal is not to replace real-cluster validation. The goal is to make that
 validation more focused.
