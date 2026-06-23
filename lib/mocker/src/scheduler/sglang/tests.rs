@@ -626,6 +626,36 @@ mod core_behavior {
     }
 
     #[test]
+    fn test_chunked_prefill_admits_next_chunk_when_full_prompt_does_not_fit() {
+        let config = SglangConfig {
+            chunked_prefill_size: 8,
+            ..SglangConfig::from_args(
+                &MockEngineArgs::builder()
+                    .block_size(4)
+                    .speedup_ratio(1.0)
+                    .build()
+                    .unwrap(),
+            )
+        };
+        let mut kv_manager = SglangKvManager::new(12, 4, KvEventPublishers::default(), 0);
+        let mut waiting = VecDeque::from([SglangRequest {
+            uuid: Uuid::new_v4(),
+            prompt_tokens: vec![1; 16],
+            max_output_tokens: 2,
+            output_ids: Vec::new(),
+            last_node: None,
+            kv_indices: Vec::new(),
+            materialized_tokens: 0,
+            cached_tokens: 0,
+            allocated_tokens: 0,
+        }]);
+
+        let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
+        assert_eq!(admit.can_run.len(), 1);
+        assert_eq!(admit.can_run[0].materialized_tokens, 8);
+    }
+
+    #[test]
     fn test_chunked_prefill_subpage_budget_defers_next_request() {
         let config = SglangConfig {
             chunked_prefill_size: 8,
