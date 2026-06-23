@@ -137,8 +137,11 @@ spec:
             - "Qwen/Qwen3-0.6B"
             - "--served-model-name"
             - "Qwen/Qwen3-0.6B"
+            # Decode vLLM listens in-pod on :8001. The pd-router-sidecar owns the
+            # pool targetPort :8000 and forwards decode traffic here, so vLLM must
+            # NOT bind :8000 (same pod = shared netns = "address already in use").
             - "--port"
-            - "8000"
+            - "8001"
             - "--enable-prefix-caching"
             - "--block-size"
             - "16"
@@ -151,8 +154,8 @@ spec:
             - "--kv-events-config"
             - '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
           ports:
-            - name: http
-              containerPort: 8000
+            - name: vllm-local
+              containerPort: 8001
             - name: kv-events
               containerPort: 5557
           env:
@@ -176,9 +179,27 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
-        # decode-side P/D routing sidecar -------------------------
+        # decode-side P/D routing sidecar: fronts the pool targetPort :8000,
+        # reads x-prefiller-host-port, runs vLLM's NIXL kv_transfer handshake
+        # against the prefill pod, then forwards decode to the local vLLM :8001.
         - name: pd-router-sidecar
           image: docker.io/lambda108/pd-sidecar-dynamo:disagg-test
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DYN_PD_LISTEN_ADDR
+              value: "0.0.0.0:8000"
+            - name: DYN_PD_DECODE_URL
+              value: "http://127.0.0.1:8001"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
       tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
