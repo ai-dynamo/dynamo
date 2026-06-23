@@ -141,9 +141,13 @@ impl OtlpLogsProtocol {
         let raw = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL)
             .or_else(|_| std::env::var(env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL))
             .unwrap_or_else(|_| "grpc".to_string());
+        // Accept only the two values the runtime parser accepts (`grpc`,
+        // `http/protobuf`); anything else — including the `http`/`http/proto`
+        // aliases — warns and falls back to grpc, so audit and runtime resolve
+        // the same protocol for the same env.
         match raw.trim().to_ascii_lowercase().as_str() {
             "grpc" => Self::Grpc,
-            "http/protobuf" | "http/proto" | "http" => Self::HttpProtobuf,
+            "http/protobuf" => Self::HttpProtobuf,
             other => {
                 tracing::warn!(
                     protocol = other,
@@ -833,6 +837,21 @@ mod tests {
                     env_otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
                     Some("carrier-pigeon"),
                 ),
+                (env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL, None::<&str>),
+            ],
+            || assert_eq!(OtlpLogsProtocol::from_env(), OtlpLogsProtocol::Grpc),
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn protocol_env_http_alias_falls_back_to_grpc_matching_runtime() {
+        // The runtime parser accepts only `grpc`/`http/protobuf`, so `http`
+        // must fall back to grpc here too — otherwise audit and runtime would
+        // resolve different transports/ports for the same env.
+        temp_env::with_vars(
+            [
+                (env_otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL, Some("http")),
                 (env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL, None::<&str>),
             ],
             || assert_eq!(OtlpLogsProtocol::from_env(), OtlpLogsProtocol::Grpc),
