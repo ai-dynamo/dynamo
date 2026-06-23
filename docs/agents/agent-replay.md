@@ -2,66 +2,202 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Agent Simulation
-subtitle: Convert agent request traces into replay and simulation inputs
+subtitle: Capture an agent workload and replay it with DynoSim or AIPerf
 ---
 
-Use agent simulation to replay collected agent trajectories against mock Dynamo workers. Start with [Agent Tracing](agent-tracing.md) to collect request rows, then convert those rows into an agentic Mooncake trace for `python -m dynamo.replay`.
+Capture request shape and timing once. Replay it offline with DynoSim or against a live NVIDIA
+Dynamo endpoint with AIPerf.
 
-## Collect a Trace
+Request traces contain token lengths, prompt hashes, trajectory identity, and timing. They do not
+contain prompts, responses, or tool arguments. Use the audit sink described in
+[Agent Tracing](agent-tracing.md#audit-payloads) when you need payloads for inspection.
 
-Enable request tracing while running the agent workload:
+## Choose a Replay Path
+
+| Goal | Path |
+|---|---|
+| Compare mock engine, KV router, or scheduling behavior without an HTTP endpoint | DynoSim offline replay |
+| Exercise frontend parsing, routing, request rejection, and worker registration without GPUs | AIPerf against [live Mocker](../dynosim/mocker.md) |
+| Measure a real model and transport stack | AIPerf against a live model endpoint |
+| Inspect exact prompts, responses, or tool arguments | Audit sink; audit records are not replay inputs |
+
+Both replay paths start from the same `dynamo.request.trace.v1` capture:
+
+```mermaid
+flowchart LR
+    A["Agent workload through Dynamo"] --> T["Dynamo request trace"]
+    T --> C["request_trace_to_mooncake --agentic"]
+    C --> D["DynoSim offline replay"]
+    T --> F["Trace with final markers"]
+    F --> W["aiperf synthesize dynamo-trace"]
+    W --> P["AIPerf live replay"]
+    P --> M["Mocker-backed endpoint"]
+    P --> R["Real model endpoint"]
+```
+
+The live AIPerf path requires a terminal marker on each trajectory. The offline DynoSim path does
+not.
+
+See [Trace Format Reference](../dynosim/trace-formats.md) for other inputs and mode constraints.
+
+## Capture an Agent Workload
+
+Run the agent through Dynamo with a supported trajectory header. Claude Code, Codex, OpenCode, and
+generic Dynamo clients use the mappings in [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs).
+
+Enable the request trace sink on the frontend:
 
 ```bash
 export DYN_REQUEST_TRACE=1
 export DYN_REQUEST_TRACE_SINKS=jsonl_gz
-export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-trace
+export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace
 ```
 
-For tool timing fidelity, publish explicit tool events over the optional ZMQ ingress described in [Agent Tracing](agent-tracing.md#tool-call-observability). Without tool events, Dynamo can still infer tool-wait time from the gap between adjacent LLM requests in the same trajectory.
+Run the workload, then inspect the captured request rows:
 
-## Convert to Agentic Mooncake
+```bash
+gzip -cd /tmp/dynamo-agent-trace.*.jsonl.gz | \
+  jq -c '
+    select(.event.event_type == "request_end")
+    | {request_id: .event.request.request_id, agent_context: .event.agent_context}
+  ' | \
+  head
+```
 
-**Experimental.** The converter uses Dynamo `request_end` rows for request timing, token lengths, worker placement, and replay hashes. It also uses terminal harness tool rows (`tool_end` / `tool_error`) to preserve tool-wait time between dependent LLM requests.
+Each request row passed to the agentic converter must include `agent_context.trajectory_id`. Set
+`parent_trajectory_id` for child trajectories. For precise tool duration and status, publish the
+optional tool events described in [Tool Call Observability](agent-tracing.md#tool-call-observability).
+Without those events, the converter preserves the elapsed gap between adjacent LLM requests.
 
-Replay ignores non-replay request fields such as `finish_reason_metadata`; use the Perfetto view in [Agent Tracing](agent-tracing.md#view-traces-in-perfetto) when you want to inspect final finish reasons, backend stop signals, or complete tool-call metadata inside the trace.
+## Replay Offline with DynoSim
+
+### Convert the Capture
+
+Convert the request rows to Agentic Mooncake:
 
 ```bash
 cargo run -p dynamo-bench --bin request_trace_to_mooncake -- \
   --agentic \
   --input-path "${DYN_REQUEST_TRACE_OUTPUT_PATH}".*.jsonl.gz \
-  --output-file /tmp/dynamo-request-trace.agentic-mooncake.jsonl
+  --output-file /tmp/dynamo-agent-trace.agentic-mooncake.jsonl
 ```
 
-## Replay Offline
+The converter prints the row count and trace block size:
 
-The binary prints `trace_block_size`. Use that exact value for replay so hash segmentation matches what Dynamo recorded. Align the mock engine block size with the same number in `--extra-engine-args`.
+```text
+Wrote 15 Agentic Mooncake rows to /tmp/dynamo-agent-trace.agentic-mooncake.jsonl
+Trace block size: 64
+```
+
+Set `TRACE_BLOCK_SIZE` to the printed value so replay expands each `hash_id` correctly.
+
+### Run a One-Worker Smoke Test
+
+Start with round-robin routing and one worker:
 
 ```bash
-TRACE_BLOCK_SIZE=128
-uv run --no-sync python -m dynamo.replay /tmp/dynamo-request-trace.agentic-mooncake.jsonl \
+TRACE_BLOCK_SIZE=64
+uv run --no-sync python -m dynamo.replay \
+  /tmp/dynamo-agent-trace.agentic-mooncake.jsonl \
+  --trace-format agentic_mooncake \
+  --trace-block-size "${TRACE_BLOCK_SIZE}" \
+  --replay-mode offline \
+  --router-mode round_robin \
+  --num-workers 1 \
+  --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
+  --report-json /tmp/dynamo-agent-trace.replay-report.json
+```
+
+The command prints a summary and writes run metrics to the report file.
+
+### Compare Router Behavior
+
+After the smoke test passes, run the same trace through the KV router:
+
+```bash
+TRACE_BLOCK_SIZE=64
+uv run --no-sync python -m dynamo.replay \
+  /tmp/dynamo-agent-trace.agentic-mooncake.jsonl \
   --trace-format agentic_mooncake \
   --trace-block-size "${TRACE_BLOCK_SIZE}" \
   --replay-mode offline \
   --router-mode kv_router \
   --num-workers 4 \
   --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
-  --report-json /tmp/dynamo-request-trace.replay-report.json
+  --report-json /tmp/dynamo-agent-trace.kv-router-report.json
 ```
 
-`kv_router` needs at least two mock workers. For a single-worker smoke test, use `--router-mode round_robin --num-workers 1`.
+Change one router or engine setting at a time and compare the report JSON files. Agentic Mooncake
+currently supports offline aggregated replay with trace timestamps. It does not support online
+DynoSim mode, disaggregated replay, or `--replay-concurrency`.
 
-## Agentic Row Semantics
+## Replay Against a Live Endpoint with AIPerf
 
-Agentic Mooncake rows preserve:
+**Experimental.** Use AIPerf to test frontend parsing, request rejection, routing, transport, and
+live worker behavior.
 
-- `request_id`: the LLM request row identity.
-- Mooncake `session_id`: derived from the Dynamo `trajectory_id`.
-- `wait_for`: request IDs that must complete before this row becomes eligible.
-- `branches`: child request IDs spawned from this row.
-- `prefix_reset`: first request in a trajectory.
-- `delay`: non-tool delay after dependencies finish.
-- `tool_wait_ms`: tool time after dependencies finish, parallel-aware as the union of overlapping spans rather than their sum.
-- `tool_events`: per-tool spans attributed to this LLM request, each carrying `tool_call_id`, `tool_class`, `status`, `started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`, and optional `output_bytes`, `output_tokens`, or `error_type`.
-- `hash_ids`, `input_length`, and `output_length`: prompt-prefix and length data for mocker replay.
+This path requires:
 
-Rows with no `wait_for` use their `timestamp` as the replay start time. Rows with dependencies wait for all listed requests to complete, then wait `delay + tool_wait_ms` before dispatch. For more flags and engine settings, see [DynoSim Runs](../dynosim/runs.md).
+- an AIPerf build with `aiperf synthesize dynamo-trace` and
+  `--use-dynamo-conv-aware-routing`
+- a Dynamo build that derives backend session lifecycle from trajectory headers
+
+Older Dynamo builds that require client-generated `nvext.session_control` are not compatible with
+this header-only path.
+
+> [!IMPORTANT]
+> The AIPerf converter requires exactly one request with `trajectory_final=true` at the end of each
+> trajectory. Set `x-dynamo-trajectory-final: true` on the final request. Native Claude Code,
+> Codex, and OpenCode identity headers do not supply this marker, so use DynoSim for those captures
+> unless the harness adds it.
+
+The AIPerf converter reads uncompressed JSONL. Merge the captured segments, then convert them to a
+Weka trace directory. The output directory must be absent or empty.
+
+```bash
+gzip -cd /tmp/dynamo-agent-trace.*.jsonl.gz > /tmp/dynamo-agent-trace.jsonl
+
+aiperf synthesize dynamo-trace /tmp/dynamo-agent-trace.jsonl \
+  --output /tmp/dynamo-agent-weka
+```
+
+Replay the converted workload against a Dynamo endpoint:
+
+```bash
+AIPERF_DATASET_WEKA_SPLIT_FLATTENED_AGENTS=false \
+aiperf profile \
+  --url localhost:8000 \
+  --model my-model \
+  --endpoint-type chat \
+  --input-file /tmp/dynamo-agent-weka \
+  --custom-dataset-type weka_trace \
+  --fixed-schedule \
+  --fixed-schedule-auto-offset \
+  --use-dynamo-conv-aware-routing
+```
+
+Set `AIPERF_DATASET_WEKA_SPLIT_FLATTENED_AGENTS=false` to preserve trajectory boundaries.
+`--use-dynamo-conv-aware-routing` sends trajectory, parent, and final markers as headers without
+changing request bodies. Point `--url` at a Mocker-backed frontend or a real model deployment.
+
+The converter requires one final request per trajectory. It supports one level of child trajectories
+and rejects deeper trees.
+
+## How the Request DAG Is Built
+
+Each node is one LLM request:
+
+- Requests in one trajectory run in recorded order.
+- A child trajectory starts after the last parent request that finished before the child arrived.
+- The next parent request waits when it arrived after the child completed.
+- The edge to the next request carries tool-execution and agent-overhead delays.
+
+DynoSim schedules requests from `wait_for`, `delay`, and `tool_wait_ms`. `branches`, `prefix_reset`,
+and `tool_events` preserve structure for analysis but do not control scheduling. `hash_ids`,
+`input_length`, and `output_length` preserve prompt shape without storing prompt text.
+
+The converter infers spawn and join edges from request timing. It does not recreate application
+logic that the trace never observed.
+
+For Claude Code, Codex, OpenCode, and text inputs, see
+[Trace Format Reference](../dynosim/trace-formats.md#coding-agent-and-text-inputs).

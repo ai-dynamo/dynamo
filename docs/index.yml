@@ -287,6 +287,8 @@ navigation:
               - page: Simulation Runs
                 path: dynosim/runs.md
                 slug: runs
+              - page: Trace Formats
+                path: dynosim/trace-formats.md
               - page: Simulation Sweeps
                 path: dynosim/sweeps.md
                 slug: sweeps

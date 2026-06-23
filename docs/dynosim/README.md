@@ -48,6 +48,8 @@ AIC provides performance models and candidate-shape information. DynoSim uses th
 | Goal | Start Here |
 |---|---|
 | Run one trace or synthetic workload through one config | [DynoSim Runs](runs.md) |
+| Capture and replay an agent request DAG | [Agent Simulation](../agents/agent-replay.md) |
+| Choose a trace schema or converter | [Trace Format Reference](trace-formats.md) |
 | Sweep topology and router choices under SLA/GPU constraints | [DynoSim Sweeps](sweeps.md) |
 | Exercise a live frontend/router setup without GPUs | [Live Simulation with Mocker](mocker.md) |
 | Study Planner scaling decisions against a trace | [Planner DynoSim Benchmarking](planner-benchmarking.md) |
