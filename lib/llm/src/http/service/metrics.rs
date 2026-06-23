@@ -1722,6 +1722,16 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
             annotated.event = None;
             annotated.comment = None;
             annotated.data = None;
+        } else {
+            // Per-chunk metrics ride on a normal content chunk as a comment-only
+            // annotation (no ANNOTATION_LLM_METRICS event) so the collector can
+            // observe them. They have now been observed above; clear the comment
+            // so the serialized metrics JSON is NOT rendered to the client as an
+            // SSE comment line. Only metrics comments reach this branch:
+            // `from_annotation` matches a single comment that parses as
+            // `LLMMetricAnnotation`, so genuine non-metrics comments return `None`
+            // and are preserved untouched. `data` (the content delta) is kept.
+            annotated.comment = None;
         }
     }
 
@@ -2390,6 +2400,101 @@ mod tests {
             (detokenize_metric.get_histogram().get_sample_sum() - 0.05).abs() < 0.001,
             "detokenize average latency should be 0.05ms, got {}",
             detokenize_metric.get_histogram().get_sample_sum()
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_only_metrics_not_rendered_to_client_sse() {
+        // Regression (PR #9390): per-chunk metrics are attached to normal content
+        // chunks as a comment-only annotation (no ANNOTATION_LLM_METRICS event) so
+        // the collector can observe them. The EventConverter must clear that
+        // comment after observing it, otherwise the serialized internal metrics
+        // JSON (token counts, worker ids, latencies) is rendered to the client as
+        // an SSE comment line — an information leak.
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::types::Annotated;
+        use axum::response::IntoResponse;
+        use axum::response::sse::Sse;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let mut collector = metrics.clone().create_response_collector("test-model");
+
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 7,
+            output_tokens: 3,
+            chunk_tokens: 1,
+            cached_tokens: Some(2),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        };
+        // Mirror the preprocessor: attach metrics as a comment-only annotation
+        // (event NOT set) onto a content chunk that carries delta data.
+        let metrics_comment = llm_metrics.to_annotation::<()>().unwrap().comment;
+        let metrics_json = metrics_comment.as_ref().expect("metrics comment present")[0].clone();
+        let content: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "test-model",
+                "choices": [{"index": 0, "delta": {"content": "hello"}}]
+            }))
+            .unwrap();
+        let annotated = Annotated {
+            id: None,
+            data: Some(content),
+            event: None,
+            comment: metrics_comment,
+            error: None,
+        };
+
+        // Precondition: this chunk is recognized as comment-only metrics.
+        assert!(
+            LLMMetricAnnotation::from_annotation(&annotated)
+                .unwrap()
+                .is_some(),
+            "test setup: chunk must be observed as comment-only metrics"
+        );
+
+        let mut http_queue_guard = None;
+        let event = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+        .expect("conversion ok")
+        .expect("content chunk should yield a client event");
+
+        // Render the event to its SSE wire form (exactly what the client receives).
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+
+        // The client must still receive the content delta...
+        assert!(
+            wire.contains("hello"),
+            "content delta should reach the client: {wire}"
+        );
+        // ...but the internal metrics JSON must NOT appear (no SSE comment leak).
+        assert!(
+            !wire.contains(&metrics_json),
+            "internal metrics JSON leaked to client SSE: {wire}"
+        );
+        assert!(
+            !wire.contains("chunk_tokens") && !wire.contains("input_tokens"),
+            "internal metrics fields leaked to client SSE: {wire}"
         );
     }
 
