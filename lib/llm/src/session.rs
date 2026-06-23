@@ -98,36 +98,15 @@ enum SessionState {
     Closing(ClosingState),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OpenOutcome {
-    Created,
-    AlreadyExists,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LifecycleErrorKind {
-    Definitive,
-    Ambiguous,
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct LifecycleError {
-    kind: LifecycleErrorKind,
     message: String,
 }
 
 impl LifecycleError {
-    fn definitive(message: impl Into<String>) -> Self {
+    fn new(message: impl Into<String>) -> Self {
         Self {
-            kind: LifecycleErrorKind::Definitive,
-            message: message.into(),
-        }
-    }
-
-    fn ambiguous(message: impl Into<String>) -> Self {
-        Self {
-            kind: LifecycleErrorKind::Ambiguous,
             message: message.into(),
         }
     }
@@ -141,7 +120,7 @@ pub trait SessionLifecycleBackend: Send + Sync {
         timeout: Duration,
         target: SessionTarget,
         context_id: &str,
-    ) -> Result<OpenOutcome, LifecycleError>;
+    ) -> Result<(), LifecycleError>;
 
     async fn close(
         &self,
@@ -176,28 +155,22 @@ impl EventSessionLifecycle {
             .client()
             .await
             .map_err(|error| {
-                LifecycleError::definitive(format!(
-                    "failed to create session-control client: {error}"
-                ))
+                LifecycleError::new(format!("failed to create session-control client: {error}"))
             })?;
         tokio::time::timeout(Duration::from_secs(5), client.wait_for_instances())
             .await
             .map_err(|_| {
-                LifecycleError::definitive(
-                    "no session-control endpoint registered within five seconds",
-                )
+                LifecycleError::new("no session-control endpoint registered within five seconds")
             })?
             .map_err(|error| {
-                LifecycleError::definitive(format!(
+                LifecycleError::new(format!(
                     "failed waiting for a session-control endpoint: {error}"
                 ))
             })?;
         let router = EventPlaneClient::from_client_no_fault_detection(client, RouterMode::KV)
             .await
             .map_err(|error| {
-                LifecycleError::definitive(format!(
-                    "failed to create session-control router: {error}"
-                ))
+                LifecycleError::new(format!("failed to create session-control router: {error}"))
             })?;
         *cached = Some(router.clone());
         Ok(router)
@@ -216,12 +189,12 @@ impl EventSessionLifecycle {
             .dispatch_exact(SingleIn::new(request), target.worker_id)
             .await
             .map_err(|error| {
-                LifecycleError::ambiguous(format!(
+                LifecycleError::new(format!(
                     "{action} RPC failed for session {session_id}: {error}"
                 ))
             })?;
         let response = stream.next().await.ok_or_else(|| {
-            LifecycleError::ambiguous(format!(
+            LifecycleError::new(format!(
                 "{action} returned no response for session {session_id}"
             ))
         })?;
@@ -242,24 +215,24 @@ impl EventSessionLifecycle {
         action: &str,
     ) -> Result<&'a serde_json::Value, LifecycleError> {
         if response.is_error() {
-            return Err(LifecycleError::definitive(format!(
+            return Err(LifecycleError::new(format!(
                 "{action} returned an annotated error for session {session_id}"
             )));
         }
         let body = response.data.as_ref().ok_or_else(|| {
-            LifecycleError::ambiguous(format!(
+            LifecycleError::new(format!(
                 "{action} returned no response body for session {session_id}"
             ))
         })?;
         match body.get("status").and_then(serde_json::Value::as_str) {
             Some("ok") => Ok(body),
-            Some(status) => Err(LifecycleError::definitive(format!(
+            Some(status) => Err(LifecycleError::new(format!(
                 "{action} failed for session {session_id}: status={status}, message={}",
                 body.get("message")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("unknown error")
             ))),
-            None => Err(LifecycleError::ambiguous(format!(
+            None => Err(LifecycleError::new(format!(
                 "{action} returned a malformed response for session {session_id}"
             ))),
         }
@@ -274,7 +247,7 @@ impl SessionLifecycleBackend for EventSessionLifecycle {
         timeout: Duration,
         target: SessionTarget,
         context_id: &str,
-    ) -> Result<OpenOutcome, LifecycleError> {
+    ) -> Result<(), LifecycleError> {
         let worker_timeout = timeout.saturating_add(SESSION_TIMEOUT_FALLBACK_BUFFER);
         let request = serde_json::json!({
             "action": "open_session",
@@ -285,14 +258,8 @@ impl SessionLifecycleBackend for EventSessionLifecycle {
         let response = self
             .send(request, session_id, target, context_id, "open_session")
             .await?;
-        let body = Self::response_body(&response, session_id, "open_session")?;
-        match body.get("created").and_then(serde_json::Value::as_bool) {
-            Some(true) => Ok(OpenOutcome::Created),
-            Some(false) => Ok(OpenOutcome::AlreadyExists),
-            None => Err(LifecycleError::ambiguous(format!(
-                "open_session response for session {session_id} is missing created"
-            ))),
-        }
+        Self::response_body(&response, session_id, "open_session")?;
+        Ok(())
     }
 
     async fn close(
@@ -489,6 +456,15 @@ impl SessionCoordinator {
                     }
                 }
 
+                if close_expired {
+                    drop(sessions);
+                    Self::ensure_close_task(&self.inner, control.session_id.clone());
+                    return Err(invalid_argument(format!(
+                        "session {} expired and is closing",
+                        control.session_id
+                    )));
+                }
+
                 match sessions.get_mut(&control.session_id) {
                     None => {
                         let Some(kind) = requested_kind else {
@@ -590,14 +566,6 @@ impl SessionCoordinator {
                     }
                 }
             };
-
-            if close_expired {
-                Self::ensure_close_task(&self.inner, control.session_id.clone());
-                return Err(invalid_argument(format!(
-                    "session {} expired and is closing",
-                    control.session_id
-                )));
-            }
             if let Some(operation) = operation {
                 return Ok(operation);
             }
@@ -987,25 +955,12 @@ impl SessionOperation {
                     )
                     .await
                 {
-                    Ok(OpenOutcome::Created) => {
+                    Ok(()) => {
                         *backend_opened = true;
                         Ok(())
                     }
-                    Ok(OpenOutcome::AlreadyExists) => {
-                        abort_opening(&inner, &self.session_id, self.revision);
-                        self.kind = None;
-                        Err(invalid_argument(format!(
-                            "backend session {} already exists",
-                            self.session_id
-                        )))
-                    }
                     Err(error) => {
-                        if error.kind == LifecycleErrorKind::Ambiguous {
-                            opening_to_closing(&inner, &self.session_id, self.revision, target);
-                            SessionCoordinator::ensure_close_task(&inner, self.session_id.clone());
-                        } else {
-                            abort_opening(&inner, &self.session_id, self.revision);
-                        }
+                        abort_opening(&inner, &self.session_id, self.revision);
                         self.kind = None;
                         Err(anyhow::anyhow!(error))
                     }
@@ -1503,15 +1458,8 @@ mod tests {
     use super::*;
     use crate::protocols::common::preprocessor::RoutingHints;
 
-    #[derive(Clone, Copy)]
-    enum FakeOpen {
-        Created,
-        Existing,
-        Ambiguous,
-    }
-
     struct FakeLifecycle {
-        open_result: Mutex<FakeOpen>,
+        open_succeeds: AtomicBool,
         close_results: Mutex<VecDeque<bool>>,
         close_default: AtomicBool,
         block_open: AtomicBool,
@@ -1525,7 +1473,7 @@ mod tests {
     impl FakeLifecycle {
         fn new() -> Arc<Self> {
             Arc::new(Self {
-                open_result: Mutex::new(FakeOpen::Created),
+                open_succeeds: AtomicBool::new(true),
                 close_results: Mutex::new(VecDeque::new()),
                 close_default: AtomicBool::new(true),
                 block_open: AtomicBool::new(false),
@@ -1550,7 +1498,7 @@ mod tests {
             _timeout: Duration,
             _target: SessionTarget,
             _context_id: &str,
-        ) -> Result<OpenOutcome, LifecycleError> {
+        ) -> Result<(), LifecycleError> {
             self.open_calls.fetch_add(1, Ordering::Relaxed);
             if self.block_open.load(Ordering::Relaxed) {
                 self.open_started.add_permits(1);
@@ -1560,10 +1508,10 @@ mod tests {
                     .expect("open release semaphore")
                     .forget();
             }
-            match *self.open_result.lock() {
-                FakeOpen::Created => Ok(OpenOutcome::Created),
-                FakeOpen::Existing => Ok(OpenOutcome::AlreadyExists),
-                FakeOpen::Ambiguous => Err(LifecycleError::ambiguous("ambiguous open")),
+            if self.open_succeeds.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(LifecycleError::new("open failed"))
             }
         }
 
@@ -1583,7 +1531,7 @@ mod tests {
             if succeeds {
                 Ok(())
             } else {
-                Err(LifecycleError::ambiguous("close failed"))
+                Err(LifecycleError::new("close failed"))
             }
         }
     }
@@ -2034,6 +1982,7 @@ mod tests {
         lifecycle.close_default.store(false, Ordering::Relaxed);
         let hooks = hooks();
         let coordinator = coordinator(lifecycle.clone(), hooks.clone());
+        hooks.reaper_armed.acquire().await.unwrap().forget();
         coordinator.inner.sessions.lock().insert(
             "session-1".to_string(),
             SessionState::Bound(BoundState {
@@ -2045,7 +1994,6 @@ mod tests {
                 active_leases: 0,
             }),
         );
-        hooks.reaper_armed.acquire().await.unwrap().forget();
         tokio::time::advance(REAPER_INTERVAL).await;
         lifecycle.close_started.acquire().await.unwrap().forget();
         hooks.retry_armed.acquire().await.unwrap().forget();
@@ -2053,6 +2001,54 @@ mod tests {
             coordinator.inner.sessions.lock().get("session-1"),
             Some(SessionState::Closing(_))
         ));
+        drop(coordinator);
+        hooks.reaper_stopped.acquire().await.unwrap().forget();
+        hooks.retry_stopped.acquire().await.unwrap().forget();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lazy_engine_expiry_starts_close_and_remains_unroutable() {
+        let lifecycle = FakeLifecycle::new();
+        lifecycle.close_default.store(false, Ordering::Relaxed);
+        let hooks = hooks();
+        let coordinator = coordinator(lifecycle.clone(), hooks.clone());
+        hooks.reaper_armed.acquire().await.unwrap().forget();
+        coordinator.inner.sessions.lock().insert(
+            "session-1".to_string(),
+            SessionState::Bound(BoundState {
+                revision: 1,
+                binding: SessionBinding {
+                    expires_at: Instant::now(),
+                    ..binding(SessionKind::EngineBacked)
+                },
+                active_leases: 0,
+            }),
+        );
+
+        let result = coordinator.begin(&control(None), None, false).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("expired and is closing")
+        );
+        lifecycle.close_started.acquire().await.unwrap().forget();
+        hooks.retry_armed.acquire().await.unwrap().forget();
+
+        assert!(matches!(
+            coordinator.inner.sessions.lock().get("session-1"),
+            Some(SessionState::Closing(_))
+        ));
+        assert!(
+            coordinator
+                .begin(&control(None), None, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(lifecycle.close_calls.load(Ordering::Relaxed), 1);
+
         drop(coordinator);
         hooks.reaper_stopped.acquire().await.unwrap().forget();
         hooks.retry_stopped.acquire().await.unwrap().forget();
@@ -2233,36 +2229,17 @@ mod tests {
         hooks.reaper_stopped.acquire().await.unwrap().forget();
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn ambiguous_open_starts_compensating_close() {
-        let lifecycle = FakeLifecycle::new();
-        *lifecycle.open_result.lock() = FakeOpen::Ambiguous;
-        let hooks = hooks();
-        let coordinator = coordinator(lifecycle.clone(), hooks.clone());
-        hooks.reaper_armed.acquire().await.unwrap().forget();
-        let mut operation = coordinator
-            .begin(&control(Some(SessionAction::Open)), None, false)
-            .await
-            .unwrap();
-        assert!(operation.selected(target(1), "open").await.is_err());
-        lifecycle.close_started.acquire().await.unwrap().forget();
-        tokio::task::yield_now().await;
-        assert!(coordinator.inner.sessions.lock().get("session-1").is_none());
-        hooks.retry_stopped.acquire().await.unwrap().forget();
-        drop(coordinator);
-        hooks.reaper_stopped.acquire().await.unwrap().forget();
-    }
-
     #[tokio::test]
-    async fn already_existing_open_is_rejected_without_attaching() {
+    async fn failed_open_returns_to_absent() {
         let lifecycle = FakeLifecycle::new();
-        *lifecycle.open_result.lock() = FakeOpen::Existing;
-        let coordinator = coordinator(lifecycle, hooks());
+        lifecycle.open_succeeds.store(false, Ordering::Relaxed);
+        let coordinator = coordinator(lifecycle.clone(), hooks());
         let mut operation = coordinator
             .begin(&control(Some(SessionAction::Open)), None, false)
             .await
             .unwrap();
         assert!(operation.selected(target(1), "open").await.is_err());
         assert!(coordinator.inner.sessions.lock().get("session-1").is_none());
+        assert_eq!(lifecycle.close_calls.load(Ordering::Relaxed), 0);
     }
 }

@@ -314,8 +314,6 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   if no worker exposes `session_control`; it does not degrade to router-only
   affinity. On the handler side, `_session_kwargs()` checks
   `enable_streaming_session` before injecting `session_params` into SGLang calls.
-  The open response must report whether it created a session so the router never
-  attaches to stale backend state.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
