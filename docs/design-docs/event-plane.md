@@ -20,11 +20,11 @@ Key use cases:
 
 The event plane supports two transports:
 
-| | NATS (default) | ZMQ |
+| | NATS | ZMQ (default) |
 |---|---|---|
 | **External infrastructure** | Requires a NATS server | None (peer-to-peer) |
 | **Setup complexity** | Simple -- point at a NATS server | Automatic -- workers bind sockets and register via discovery |
-| **Best for** | Large-scale deployments | Low operational overhead |
+| **Best for** | NATS-based event bus / durable KV events | Default; low operational overhead, no extra services |
 
 ## Configuration
 
@@ -33,11 +33,11 @@ The event plane supports two transports:
 Set the `DYN_EVENT_PLANE` environment variable to choose a transport:
 
 ```bash
-# Use NATS (default -- no need to set explicitly)
-export DYN_EVENT_PLANE=nats
-
-# Use ZMQ
+# Use ZMQ (default -- no need to set explicitly)
 export DYN_EVENT_PLANE=zmq
+
+# Use NATS (opt-in)
+export DYN_EVENT_PLANE=nats
 ```
 
 Python components also accept this as a CLI flag:
@@ -54,19 +54,17 @@ python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | Context-dependent (see below) |
+| `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | `zmq` (all backends) |
 | `NATS_SERVER` | NATS server URL (NATS transport only) | `nats://localhost:4222` |
 
-When `DYN_EVENT_PLANE` is not set, the default is chosen based on the discovery backend:
-
-- `--discovery-backend file` or `mem` (local backends): defaults to **zmq** — no external services required.
-- `--discovery-backend etcd` or `kubernetes` (distributed backends): defaults to **nats**.
-
-Set `DYN_EVENT_PLANE` explicitly to override this automatic selection.
+When `DYN_EVENT_PLANE` is not set, the default is **zmq** for every discovery backend
+(`file`, `mem`, `etcd`, `kubernetes`) — no external NATS server is required. Set
+`DYN_EVENT_PLANE=nats` to opt into the NATS transport (also required for durable/JetStream
+KV events).
 
 ## NATS Transport
 
-When using NATS (`DYN_EVENT_PLANE=nats`, or unset with a distributed backend):
+When using NATS (`DYN_EVENT_PLANE=nats`):
 
 - Requires a running NATS server. Set `NATS_SERVER` if it is not on `localhost:4222`.
 - Events are published to NATS subjects scoped by namespace and component.

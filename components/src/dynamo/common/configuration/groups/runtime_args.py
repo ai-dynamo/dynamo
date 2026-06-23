@@ -122,9 +122,9 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
-            help="Determines how events are published. If unset, auto-detected from "
-            "--discovery-backend: 'zmq' for file/mem (no external services), 'nats' "
-            "for etcd/kubernetes.",
+            help="Determines how events are published. If unset, defaults to 'zmq' for "
+            "all discovery backends. Set to 'nats' to use a NATS-based event bus "
+            "(required for durable/JetStream KV events).",
             choices=["nats", "zmq"],
         )
         add_argument(

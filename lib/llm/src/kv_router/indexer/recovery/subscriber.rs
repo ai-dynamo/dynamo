@@ -129,7 +129,10 @@ pub async fn start_subscriber(
         );
         if transport_kind != EventTransportKind::Nats {
             anyhow::bail!(
-                "--durable-kv-events requires NATS event plane, but runtime is configured for {transport_kind:?}"
+                "--durable-kv-events requires the NATS event plane, but the runtime resolved to \
+                 {transport_kind:?} (ZMQ is now the default event plane). Either set \
+                 DYN_EVENT_PLANE=nats to keep using durable/JetStream KV events, or drop \
+                 --durable-kv-events to use the default (non-durable) event-plane subscriber."
             );
         }
         tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
