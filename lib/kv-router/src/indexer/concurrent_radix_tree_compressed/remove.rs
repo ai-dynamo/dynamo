@@ -69,13 +69,8 @@ impl ConcurrentRadixTreeCompressed {
                 continue;
             }
 
-            self.apply_removed_group(
-                lookup,
-                worker,
-                group_node.take(),
-                std::mem::take(&mut group_hashes),
-                id,
-            );
+            self.apply_removed_group(lookup, worker, group_node.take(), &group_hashes, id);
+            group_hashes.clear();
 
             match self.resolve_lookup(
                 lookup,
@@ -99,7 +94,7 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        self.apply_removed_group(lookup, worker, group_node, group_hashes, id);
+        self.apply_removed_group(lookup, worker, group_node, &group_hashes, id);
 
         Ok(())
     }
@@ -109,7 +104,7 @@ impl ConcurrentRadixTreeCompressed {
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         node: Option<SharedNode>,
-        block_hashes: Vec<ExternalSequenceBlockHash>,
+        block_hashes: &[ExternalSequenceBlockHash],
         id: u64,
     ) {
         let Some(cur_node) = node else {
@@ -127,7 +122,7 @@ impl ConcurrentRadixTreeCompressed {
                 }
             }
             None => {
-                for block_hash in block_hashes {
+                for &block_hash in block_hashes {
                     self.apply_removed_hash(lookup, worker, block_hash, id);
                 }
             }

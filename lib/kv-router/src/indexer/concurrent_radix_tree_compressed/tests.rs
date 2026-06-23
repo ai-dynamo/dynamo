@@ -587,7 +587,7 @@ mod remove_tests {
             )],
         );
 
-        index.apply_removed_group(&mut lookup0, worker0, Some(group_node), remove_hashes, 42);
+        index.apply_removed_group(&mut lookup0, worker0, Some(group_node), &remove_hashes, 42);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
 
@@ -643,7 +643,7 @@ mod remove_tests {
             )],
         );
 
-        index.apply_removed_group(&mut lookup0, worker0, Some(group_node), remove_hashes, 42);
+        index.apply_removed_group(&mut lookup0, worker0, Some(group_node), &remove_hashes, 42);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 3);
         assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
         assert_eq!(worker_lookup_len(&lookup0, worker0), Some(3));
