@@ -65,9 +65,9 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 | `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
 | `x-prefill-dp-rank` | `prefill_dp_rank` |
 
-Trajectory identity is header-only. Use the coding-agent headers or Dynamo
-trajectory headers described in [Trajectory IDs](../../agents/trajectory-ids.md);
-`nvext` does not accept trajectory identity fields.
+Session identity is header-only. Use the coding-agent headers or Dynamo
+session headers described in [Session IDs](../../agents/session-ids.md);
+`nvext` does not accept session identity fields.
 
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../agents/agent-tracing.md).
@@ -216,7 +216,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
-| [Trajectory IDs](../../agents/trajectory-ids.md) | Passive trajectory identity |
+| [Session IDs](../../agents/session-ids.md) | Passive session identity |
 | [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
 | [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
 | [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |

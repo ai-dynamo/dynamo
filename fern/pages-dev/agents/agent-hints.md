@@ -7,7 +7,7 @@ subtitle: Per-request serving hints for agentic workloads
 
 Agent hints are optional per-request metadata that a harness sends under `nvext.agent_hints`. Dynamo parses these hints in the frontend and passes them to the router and, where supported, backend runtimes.
 
-Use hints only for serving-relevant intent. Use [trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for passive trace identity.
+Use hints only for serving-relevant intent. Use [session IDs](session-ids.md#session-id-inputs) for passive trace identity.
 
 ## Request Schema
 
@@ -58,7 +58,9 @@ Backend support is runtime-specific. For SGLang flags and behavior, see [SGLang 
 
 ## Related Request Extensions
 
-`agent_hints` is separate from trajectory identity:
+`agent_hints` is separate from session identity:
 
-- Trajectory IDs are passive identity for traces and joins.
+- Session IDs are passive identity for traces and joins.
 - `agent_hints` is active serving intent for routing, scheduling, and cache behavior.
+
+Neither the presence of a session ID nor `agent_hints` enables sticky sessions. Configure any session-aware routing policy separately.
