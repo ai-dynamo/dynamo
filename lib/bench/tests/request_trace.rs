@@ -25,7 +25,7 @@ fn pi_trace_summary_has_expected_counts() {
 
     let summary = summarize_tools(&loaded.tools);
     assert_eq!(summary.total_spans, 22);
-    assert_eq!(summary.trajectories, 4);
+    assert_eq!(summary.sessions, 4);
     assert_eq!(summary.by_status.get("succeeded").copied(), Some(20));
     assert_eq!(summary.by_status.get("error").copied(), Some(2));
     // ~71.8s subagent dominates; range allows minor harness rounding.

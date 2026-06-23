@@ -623,8 +623,8 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "nvext": {
                 "agent_context": {
-                    "trajectory_id": "run-123:researcher-0",
-                    "parent_trajectory_id": "run-123:root"
+                    "session_id": "run-123:researcher-0",
+                    "parent_session_id": "run-123:root"
                 }
             }
         }"#;
@@ -644,7 +644,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "nvext": {
                 "agent_context": {
-                    "trajectory_id": ""
+                    "session_id": ""
                 }
             }
         }"#;

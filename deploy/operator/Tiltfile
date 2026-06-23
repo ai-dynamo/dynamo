@@ -18,7 +18,7 @@
 #      running container — no full image rebuild needed.
 #
 # Prerequisites:
-#   - Go >= 1.25        — compiles the manager binary locally
+#   - Go >= 1.26.3      — compiles the manager binary locally
 #   - tilt              — live-reload orchestrator (https://docs.tilt.dev/install.html)
 #   - docker            — builds the live-update container image
 #   - A Kubernetes cluster reachable via your current kubeconfig context

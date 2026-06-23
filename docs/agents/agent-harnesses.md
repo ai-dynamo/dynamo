@@ -5,7 +5,7 @@ title: Agent Harnesses
 subtitle: Point coding-agent CLIs at a Dynamo deployment
 ---
 
-Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages` so **any agent** that uses these APIs can talk to a Dynamo endpoint even if its not explicitly listed in this guide. This guide specifically focuses on popular agent harnesses that send stable trajectory ID that Dynamo can use for optimized routing and scheduling.
+Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages`, so any agent that uses these APIs can talk to a Dynamo endpoint even if it is not listed in this guide. This guide focuses on popular agent harnesses that send stable session IDs. Dynamo normalizes these IDs for tracing and other explicitly configured consumers.
 
 ## Local Setup
 
@@ -33,7 +33,7 @@ wire_api = "responses"
 codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
 ```
 
-Codex sends a `session-id` header that is internally mapped to our `trajectory_id`
+Codex sends a `session-id` header that Dynamo maps to `session_id`.
 
 ## Claude Code
 
@@ -50,7 +50,7 @@ export ANTHROPIC_API_KEY=
 claude
 ```
 
-Dynamo uses `x-claude-code-session-id` as the Claude Code trajectory ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child trajectory ID and the session ID as its parent.
+Dynamo uses `x-claude-code-session-id` as the Claude Code session ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child session ID and the session ID as its parent.
 
 ## OpenCode
 
@@ -85,7 +85,7 @@ Run OpenCode with the provider/model pair:
 opencode -m dynamo/zai-org/GLM-4.7-Flash
 ```
 
-Dynamo maps OpenCode's `x-session-id` header to `trajectory_id` and `x-parent-session-id` to `parent_trajectory_id`.
+Dynamo maps OpenCode's `x-session-id` header to `session_id` and `x-parent-session-id` to `parent_session_id`.
 
 ## Hermes Agent
 
@@ -101,23 +101,23 @@ model:
 
 If your Dynamo endpoint requires auth, add `api_key: <token>` to the Hermes model config or set `OPENAI_API_KEY`.
 
-Just setting that will allow you to run hermes agent via `hermes`. To enable trajectory ids for Dynamo, you can install the plugin using the instructions below.
+This configuration lets you run Hermes with the `hermes` command. To send session IDs to Dynamo, install the plugin:
 
 ```bash
 # clone the plugin
 git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
 # link it to where hermes typically looks for plugins
-ln -sfnT ~/agent-plugins/hermes-plugin ~/.hermes/plugins/dynamo_trajectory
-hermes plugins enable dynamo_trajectory
+ln -sfnT ~/agent-plugins/hermes-plugin ~/.hermes/plugins/dynamo_session
+hermes plugins enable dynamo_session
 
 # run hermes
 hermes
 ```
 
-The plugin copies the Hermes `session_id` into `x-dynamo-trajectory-id` on each LLM request.
+The plugin copies the Hermes `session_id` into `x-dynamo-session-id` on each LLM request.
 
 ## See Also
 
-- [Trajectory IDs](trajectory-ids.md)
+- [Session IDs](session-ids.md)
 - [Agent Tracing](agent-tracing.md)
 - [SGLang for Agentic Workloads](../backends/sglang/agents.md)
