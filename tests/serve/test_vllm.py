@@ -644,12 +644,14 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
             pytest.mark.unified,
-            # Conservative budget from the single-GPU Qwen3-0.6B profile
-            # (aggregated config); TP=2 splits weights across 2 GPUs so per-GPU
-            # peak is <= this. requested_vllm_kv_cache_bytes pins the KV cap for
-            # deterministic, bin-packable runs.
-            pytest.mark.profiled_vram_gib(3.8),
-            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
+            # No profiled_vram_gib / requested_vllm_kv_cache_bytes here: the
+            # single-GPU Qwen3-0.6B values do not transfer to this TP=2 worker.
+            # requested_vllm_kv_cache_bytes forces --kv-cache-memory-bytes +
+            # --gpu-memory-utilization 0.01 onto BOTH ranks, which hangs the
+            # headless multi-node startup past the timeout (CI confirmed). Matches
+            # the legacy multi_node_tp_headless sibling, which is also unprofiled;
+            # real TP=2 profiling is needed before VRAM markers can be added.
+            # TODO: profile to get max_vram for the TP=2 headless topology.
             pytest.mark.timeout(300),
         ],
         model="Qwen/Qwen3-0.6B",
