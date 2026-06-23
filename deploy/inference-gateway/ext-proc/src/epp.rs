@@ -16,6 +16,7 @@ use anyhow::Result;
 use dynamo_kv_router::config::{RouterConfigOverride, kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::entrypoint::DEFAULT_SESSION_AFFINITY_TTL_SECS;
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -166,6 +167,7 @@ impl Router {
             Some(prefill_config),
             None,
             enforce_disagg,
+            DEFAULT_SESSION_AFFINITY_TTL_SECS,
             model_name.clone(),
             actual_namespace.to_string(),
             enable_eagle,
