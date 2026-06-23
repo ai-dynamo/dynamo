@@ -110,8 +110,12 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.15",  # avoid validation error on TRT-LLM available memory checks
         ]
         if mode != "prefill_and_decode":
-            config_file = (
-                f"test_request_migration_trtllm_config_{self.system_port}.yaml"
+            # Write the engine config under the test's tmp_path (guaranteed
+            # writable, unique per test) rather than the CWD, which is
+            # read-only in CI and raised PermissionError.
+            config_file = str(
+                request.getfixturevalue("tmp_path")
+                / f"trtllm_migration_config_{self.system_port}.yaml"
             )
             with open(config_file, "w") as f:
                 f.write(
