@@ -737,10 +737,10 @@ class ElasticEPScalePayload(ChatPayload):
         )
         response.raise_for_status()
         result = response.json()
-        assert result.get("status") == "ok", f"scale_elastic_ep failed: {result}"
-        assert (
-            result.get("new_data_parallel_size") == self.new_data_parallel_size
-        ), f"unexpected scale_elastic_ep result: {result}"
+        if result.get("status") != "ok":
+            raise RuntimeError(f"scale_elastic_ep failed: {result}")
+        if result.get("new_data_parallel_size") != self.new_data_parallel_size:
+            raise RuntimeError(f"unexpected scale_elastic_ep result: {result}")
         self._scaled = True
 
     def url(self) -> str:
