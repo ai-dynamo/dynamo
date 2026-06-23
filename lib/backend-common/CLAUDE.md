@@ -23,13 +23,13 @@ the raw path alongside the LLM `chat`/`completions`/`embedding`/etc.
 ## Engine Lifecycle
 
 ```
-construct -> start(worker_id) -> setup_metrics -> generate/abort -> drain -> cleanup
-    |               |                  |                |             |        |
-parse args,    start engine,    wire Prometheus    serve requests pre-cleanup shutdown,
-return engine  return metadata  (optional)         (concurrent)   drain       release
+construct -> start(worker_id) -> setup_metrics -> generate/abort -> is_quiescent -> cleanup
+    |               |                  |                |             |         |
+parse args,    start engine,    wire Prometheus    serve requests drain-poll  shutdown,
+return engine  return metadata  (optional)         (concurrent)   predicate   release
 ```
 
-The trait has six methods. `from_args` is NOT on the trait — each
+The trait has twelve methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -72,13 +72,17 @@ opt-out and lets `run.rs` stay non-generic.
   handle), put the release logic inside the `generate` stream body
   using RAII; use `abort` only for out-of-band notifications (e.g.
   telling a remote scheduler to cancel compute early).
-- `drain(&self) -> Result<(), DynamoError>` — optional, default no-op.
-  Called once during graceful shutdown after the discovery unregister
-  + grace-period sleep, but BEFORE `cleanup`. Use it for backend-side
-  draining that must complete while NATS / etcd are still alive — e.g.
-  prefill workers polling-until-idle so in-flight NIXL KV transfers
-  finish before GPU memory is released (issue #7319). Failures are
-  logged and swallowed; shutdown proceeds regardless.
+- `is_quiescent(&self) -> Result<Option<bool>, DynamoError>` — optional,
+  default `Ok(None)`. Whether in-flight KV transfers are done so GPU memory
+  can be released. Polled **only on prefill workers**, every
+  `DRAIN_POLL_INTERVAL_S` between the grace period and `cleanup`:
+  `Ok(Some(true))` exits the loop; `Ok(Some(false))`/`Ok(None)`/`Err`
+  keep polling until the budget expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S`
+  (default 30s) capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+  The default `Ok(None)` never frees KV early — vLLM and TRT-LLM keep it (no
+  reliable idle signal); SGLang overrides it by counting in-flight prefill
+  streams. The mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the
+  `Worker`.
 - `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
   Runs after `start()` returns Ok on shutdown (even if registration /
   serve fails), **and** after `start()` raises — so implementations
@@ -87,6 +91,38 @@ opt-out and lets `run.rs` stay non-generic.
   successful first returns `Ok(())` without re-entering teardown. The
   conformance kit pins both — `CleanupWithoutStartFailed` and
   `SecondCleanupFailed`.
+- `health_check_payload(&self) -> Result<Option<Value>, DynamoError>` —
+  optional, default `Ok(None)`. Canary payload the runtime sends through
+  `generate` to actively probe an idle endpoint; `None` disables active
+  probing. Operator overrides (`DYN_HEALTH_CHECK_PAYLOAD` / `WorkerConfig`)
+  take precedence.
+- `supported_controls(&self) -> Result<Vec<String>, DynamoError>` —
+  optional, default empty. Semantic engine-control keys this engine
+  advertises (e.g. `start_profile`, `sleep`, `wake_up`). The Worker maps
+  each onto a `/engine/control/{key}` route via `register_engine_controls`.
+- `engine_control(&self, control: String, body: Value) -> Result<Value, DynamoError>` —
+  optional, default returns a `status:"error"` body. Dispatches one
+  advertised control. Returning a `status:"error"` body is HTTP 200 at the
+  `/engine/*` layer (it 5xx's only when this *raises*).
+- `supported_updates(&self) -> Result<Vec<String>, DynamoError>` —
+  optional, default empty. A sibling surface to `supported_controls` for
+  ops that mutate engine-managed assets rather than the serving lifecycle
+  (e.g. vLLM dynamic LoRA `load_lora` / `unload_lora` / `list_loras`). Kept
+  separate so LoRA doesn't inflate the control surface. The Worker maps
+  each onto a `/engine/update/{key}` route via `register_engine_updates`
+  (no quiesce/resume policy — updates never toggle discovery).
+- `engine_update(&self, update: String, body: Value) -> Result<Value, DynamoError>` —
+  optional, default returns a `status:"error"` body. Dispatches one
+  advertised update; same HTTP-200-on-`status:"error"` semantics as
+  `engine_control`.
+- `on_endpoint_ready(&self, endpoint: Endpoint) -> Result<(), DynamoError>` —
+  optional, default no-op. The Worker hands the engine its serving
+  `Endpoint` exactly once, after it exists and **before**
+  `register_engine_controls` / `register_engine_updates` (so `/engine/*`
+  can't fire before the engine has the endpoint). A failure is **fatal to
+  startup**. Engines that publish their own discovery records stash it
+  (e.g. vLLM dynamic LoRA via `register_model` / `unregister_model`).
+  Mirrors the `on_publisher_ready` handoff idiom.
 
 ## Contract for `generate`
 
@@ -225,15 +261,18 @@ What the **`Worker`** does with the mode at registration time:
 - `Aggregated` → register with the parsed `endpoint_types`.
 
 What an **`LLMEngine`** does with the mode (engine-side dispatch in
-`generate` and `drain`): see `examples/mocker` for a worked reference.
-The mocker stamps a synthetic `disaggregated_params` payload on the
-prefill terminal and rejects decode requests that arrive without
-`PrefillResult`. Real engines run an analogous protocol with their
-own KV transfer transport.
+`generate`): see `examples/mocker` for a worked reference. The mocker
+stamps a synthetic `disaggregated_params` payload on the prefill terminal
+and rejects decode requests that arrive without `PrefillResult`. Real
+engines run an analogous protocol with their own KV transfer transport.
 
-`drain` is the prefill shutdown hook: poll-until-idle so in-flight
-NIXL/KV transfers finish before GPU memory is released. Aggregated and
-decode engines leave the default no-op.
+`is_quiescent` is the prefill shutdown predicate: the `Worker` drains
+**prefill workers by default** (waiting the full budget) and polls
+`is_quiescent` only to exit early — return `Some(true)` once in-flight
+NIXL/KV transfers are done, `Some(false)` while they're pulling. The
+`Worker` owns the mode-gate, the poll loop, and the timeout. Engines that
+can't introspect leave the default `Ok(None)` (wait the budget);
+aggregated/decode engines are never polled (drain is prefill-only).
 
 `PrefillResult` and `BootstrapInfo` are re-exported from
 `dynamo-backend-common` so engines don't need a separate `dynamo-llm`

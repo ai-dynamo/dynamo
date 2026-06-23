@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use dynamo_kv_router::indexer::{METRIC_EVENT_REMOVED, METRIC_EVENT_STORED};
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_kv_router::protocols::{BlockHashOptions, WorkerId, compute_block_hash_for_seq};
 use rstest::rstest;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -56,6 +56,7 @@ fn direct_request(tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
         uuid: None,
         dp_rank: 0,
         arrival_timestamp_ms: None,
+        ..Default::default()
     }
 }
 
@@ -114,6 +115,7 @@ mod scheduling {
                 uuid: None,
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
         }
 
@@ -522,6 +524,7 @@ mod core_behavior {
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let pass = core.execute_pass_internal(None, 0.0);
@@ -560,6 +563,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
         }
 
@@ -644,6 +648,7 @@ async fn assert_sglang_scheduler_completes_all(
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
     }
 
@@ -732,14 +737,18 @@ mod router_events {
 
         let pass1 = core.execute_pass_internal(None, 0.0);
         let mut prompt_hashes = stored_hashes(&pass1.kv_events);
-        assert_eq!(prompt_hashes.len(), 4);
+        assert_eq!(prompt_hashes.len(), 1);
         harness.apply_events(pass1.kv_events).await;
 
         let pass2 = core.execute_pass_internal(None, pass1.end_ms);
         prompt_hashes.extend(nth_stored_hashes(&pass2.kv_events, 0));
         harness.apply_events(pass2.kv_events).await;
 
-        assert_eq!(prompt_hashes.len(), 6);
+        let pass3 = core.execute_pass_internal(None, pass2.end_ms);
+        prompt_hashes.extend(nth_stored_hashes(&pass3.kv_events, 0));
+        harness.apply_events(pass3.kv_events).await;
+
+        assert_eq!(prompt_hashes.len(), 2);
         assert!(harness.ok_count(METRIC_EVENT_STORED) >= 2);
         harness.assert_no_event_warnings();
         harness.shutdown();
@@ -755,14 +764,61 @@ mod router_events {
         let mut full_hashes = stored_hashes(&pass1.kv_events);
         harness.apply_events(pass1.kv_events).await;
 
-        let pass2 = core.execute_pass_internal(None, pass1.end_ms);
-        full_hashes.extend(stored_hashes(&pass2.kv_events));
-        harness.apply_events(pass2.kv_events).await;
+        let mut now_ms = pass1.end_ms;
+        for _ in 0..3 {
+            let pass = core.execute_pass_internal(None, now_ms);
+            now_ms = pass.end_ms;
+            full_hashes.extend(stored_hashes(&pass.kv_events));
+            harness.apply_events(pass.kv_events).await;
+        }
 
-        assert_eq!(full_hashes.len(), 6);
+        assert_eq!(full_hashes.len(), 2);
         assert!(harness.ok_count(METRIC_EVENT_STORED) >= 2);
         harness.assert_no_event_warnings();
         harness.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_completed_output_block_uses_router_token_identity() {
+        let uuid = Uuid::from_u128(0x5a17);
+        let prompt_tokens = vec![101, 202];
+        let mut expected_request = SglangRequest {
+            uuid,
+            prompt_tokens: prompt_tokens.iter().map(|&token| token as u64).collect(),
+            max_output_tokens: 2,
+            output_ids: Vec::new(),
+            last_node: None,
+            kv_indices: Vec::new(),
+            materialized_tokens: 0,
+            cached_tokens: 0,
+            allocated_tokens: 0,
+        };
+        let first_output = expected_request.next_output_token();
+        expected_request.append_output_token(first_output);
+        let second_output = expected_request.next_output_token();
+
+        let mut expected_tokens = prompt_tokens;
+        expected_tokens.extend([first_output, second_output]);
+        let expected_hashes =
+            compute_block_hash_for_seq(&expected_tokens, 4, BlockHashOptions::default());
+
+        let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 16), ROUTER_TEST_WORKER_ID);
+        let mut request = direct_request(expected_tokens[..2].to_vec(), 2);
+        request.uuid = Some(uuid);
+        core.receive(request);
+
+        let mut now_ms = 0.0;
+        let mut hashes = Vec::new();
+        while !core.is_empty() {
+            let pass = core.execute_pass_internal(None, now_ms);
+            now_ms = pass.end_ms;
+            hashes.extend(stored_hashes(&pass.kv_events));
+        }
+
+        assert_eq!(
+            hashes, expected_hashes,
+            "completed prompt+output block should hash the same u32 token identity that SGLang generated"
+        );
     }
 
     #[tokio::test]
@@ -787,16 +843,14 @@ mod router_events {
         assert_eq!(retracted.len(), 1);
 
         let retract_events = buffer.drain();
-        assert!(removed_event_count(&retract_events) > 0);
         harness.apply_events(retract_events).await;
 
-        assert_eq!(harness.overlap_for_hashes(req1_hashes).await, 4);
-        assert!(harness.ok_count(METRIC_EVENT_REMOVED) > 0);
+        assert_eq!(harness.overlap_for_hashes(req1_hashes).await, 1);
         harness.shutdown();
     }
 
     #[tokio::test]
-    async fn test_completion_tail_free_emits_valid_removals() {
+    async fn test_completion_tail_free_does_not_remove_unpublished_blocks() {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
         let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 16), ROUTER_TEST_WORKER_ID);
         core.receive(direct_request(vec![11, 12, 13, 14], 3));
@@ -811,13 +865,12 @@ mod router_events {
         harness.apply_events(pass2.kv_events).await;
 
         let pass3 = core.execute_pass_internal(None, pass2.end_ms);
-        assert!(removed_event_count(&pass3.kv_events) > 0);
+        assert_eq!(removed_event_count(&pass3.kv_events), 0);
         full_hashes.extend(stored_hashes(&pass3.kv_events));
         harness.apply_events(pass3.kv_events).await;
 
-        assert_eq!(prompt_hashes.len(), 4);
+        assert_eq!(prompt_hashes.len(), 1);
         assert!(full_hashes.len() >= prompt_hashes.len());
-        assert!(harness.ok_count(METRIC_EVENT_REMOVED) > 0);
         harness.shutdown();
     }
 
@@ -1057,6 +1110,7 @@ mod router_events {
             uuid: Some(Uuid::from_u128(91)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1100,6 +1154,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1130,6 +1185,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1146,6 +1202,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         // Pass 2: r2 prefill + decode step runs on all running (r1 + r2)
@@ -1171,6 +1228,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1184,6 +1242,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let pass2 = core.execute_pass(&mut collector, pass1.end_ms);
@@ -1238,6 +1297,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -1245,6 +1305,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1289,6 +1350,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..112).collect(), // prompt_len = 12
@@ -1296,6 +1358,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1338,6 +1401,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1400,6 +1464,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..104).collect(),
@@ -1407,6 +1472,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         // Run several passes to build up KV pressure
@@ -1421,6 +1487,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(3)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         // Run more passes — at some point retraction should occur
@@ -1488,6 +1555,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         // Wait for at least one output signal — ensures the scheduler has

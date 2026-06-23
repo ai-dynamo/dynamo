@@ -80,7 +80,7 @@ daemonset:
   # Container image
   image:
     repository: nvcr.io/nvidia/ai-dynamo/snapshot-agent
-    tag: 1.2.0
+    tag: 1.2.1
     pullPolicy: Always
 
   # Snapshot agent and nsrestore log level (trace, debug, info, warn, error)
@@ -190,8 +190,8 @@ config:
     # K8s-specific options (recommended defaults for containers)
     leaveRunning: true      # Keep process running after checkpoint
     shellJob: true          # Containers are often session leaders
-    tcpClose: true          # Close non-listening TCP sockets on restore
-    tcpEstablished: false   # Preserve established TCP sockets during restore
+    tcpClose: false         # Do not close non-listening TCP sockets on restore
+    tcpEstablished: true    # Preserve established TCP sockets during restore
     fileLocks: true         # Applications use file locks
     orphanPtsMaster: true   # Containers with TTYs
     extUnixSk: true         # External Unix sockets
@@ -210,6 +210,9 @@ config:
     lazyPages: false        # Lazy page migration (experimental)
 
     # Config file options (NOT available via RPC - written to criu.conf)
-    libDir: ""                     # Keep empty: external CUDA checkpoint/restore only (no CRIU CUDA plugin)
+    # Dedicated directory for Dynamo Snapshot CRIU plugins.
+    # Do not point this at CRIU's global plugin dir, which can load unrelated
+    # plugins such as the CRIU CUDA plugin.
+    libDir: "/usr/local/lib/snapshot/criu-plugins"
     allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
     skipInFlight: true             # Skip in-flight TCP connections
