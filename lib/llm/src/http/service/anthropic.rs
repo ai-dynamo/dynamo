@@ -898,9 +898,9 @@ mod tests {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-worker-instance-id", "42".parse().unwrap());
-        headers.insert("x-prefill-instance-id", "7".parse().unwrap());
-        headers.insert("x-dp-rank", "3".parse().unwrap());
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-prefill-instance-id", "7".parse().unwrap());
+        headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
 
         apply_anthropic_header_routing_overrides(&mut chat_request, &headers, true);
         let nvext = chat_request.nvext.unwrap();
@@ -916,7 +916,7 @@ mod tests {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
 
         apply_anthropic_header_routing_overrides(&mut chat_request, &headers, false);
         let nvext = chat_request.nvext.unwrap();

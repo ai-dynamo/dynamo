@@ -3327,7 +3327,8 @@ def _test_disagg_direct_mode(
     """E2E test for disaggregated Direct routing mode (simulating GAIE EPP).
 
     In Direct mode, the router does not select workers itself.
-    Worker IDs must be provided via x-worker-instance-id and x-prefill-instance-id
+    Worker IDs must be provided via x-dynamo-worker-instance-id and
+    x-dynamo-prefill-instance-id
     HTTP headers. The test verifies:
       1. Requests with explicit worker ID headers succeed and return a valid response.
       2. Requests without headers fail (Direct mode rejects unaddressed requests).
@@ -3369,10 +3370,10 @@ def _test_disagg_direct_mode(
                 decode_workers.num_workers,
             )
             headers = {
-                "x-worker-instance-id": str(decode_ids[0]),
-                "x-prefill-instance-id": str(prefill_ids[0]),
-                "x-dp-rank": "0",
-                "x-prefill-dp-rank": "0",
+                "x-dynamo-worker-instance-id": str(decode_ids[0]),
+                "x-dynamo-prefill-instance-id": str(prefill_ids[0]),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
             }
             await wait_for_frontend_ready(
                 frontend_url=frontend_url,
@@ -3401,10 +3402,10 @@ def _test_disagg_direct_mode(
                 "stream": False,
             }
             headers = {
-                "x-worker-instance-id": str(target_decode),
-                "x-prefill-instance-id": str(target_prefill),
-                "x-dp-rank": "0",
-                "x-prefill-dp-rank": "0",
+                "x-dynamo-worker-instance-id": str(target_decode),
+                "x-dynamo-prefill-instance-id": str(target_prefill),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
             }
 
             async with aiohttp.ClientSession() as session:
