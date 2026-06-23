@@ -61,13 +61,17 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Add disaggregation-specific configuration
         if mode != "prefill_and_decode":
-            with open("test_etcd_ha_trtllm_config.yaml", "w") as f:
+            # Write the engine config under the test's tmp_path (guaranteed
+            # writable, unique per test) rather than the CWD, which is
+            # read-only in CI and raised PermissionError.
+            config_file = str(
+                request.getfixturevalue("tmp_path")
+                / f"trtllm_etcd_ha_config_{mode}.yaml"
+            )
+            with open(config_file, "w") as f:
                 f.write("cache_transceiver_config:\n  backend: DEFAULT\n")
                 f.write("disable_overlap_scheduler: true\n")
-            command += [
-                "--extra-engine-args",
-                "test_etcd_ha_trtllm_config.yaml",
-            ]
+            command += ["--extra-engine-args", config_file]
 
         health_check_urls = [
             (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
