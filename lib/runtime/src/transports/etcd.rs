@@ -34,7 +34,7 @@ use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
 
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
-const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(5);
+const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// ETCD Client
