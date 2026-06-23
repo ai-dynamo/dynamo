@@ -52,6 +52,12 @@ fn error_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
     )
 }
 
+fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
+    let controller = Controller::new("cancelled-stream".to_string());
+    controller.stop();
+    ResponseStream::new(Box::pin(stream::empty()), Arc::new(controller))
+}
+
 fn request_with_routing(routing: RoutingHints) -> PreprocessedRequest {
     PreprocessedRequest::builder()
         .model("test".to_string())
@@ -304,6 +310,52 @@ async fn session_affinity_stream_without_output_invalidates_binding() {
 
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
     assert_eq!(coordinator.entry_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_existing_binding_survives_cancelled_stream_without_ttl_refresh() {
+    let coordinator = coordinator();
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, Some(0))).unwrap());
+
+    tokio::time::advance(Duration::from_secs(9)).await;
+    let AffinityAcquire::Bound {
+        target: bound_target,
+        lease,
+    } = coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("continuation must acquire the existing binding");
+    };
+    assert_eq!(bound_target, target(7, Some(0)));
+    drop(lease.into_stream(cancelled_response_stream()));
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(target(7, Some(0)))
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_new_binding_rolls_back_cancelled_stream() {
+    let coordinator = coordinator();
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let stream = operation
+        .into_stream(target(7, Some(0)), cancelled_response_stream())
+        .unwrap();
+    drop(stream);
+
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    assert_eq!(coordinator.entry_count(), 0);
+    assert!(matches!(
+        coordinator.acquire(&session_id(), None).await.unwrap(),
+        AffinityAcquire::Initialize(_)
+    ));
 }
 
 #[tokio::test(start_paused = true)]

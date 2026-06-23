@@ -7,30 +7,21 @@ subtitle: Identify agent sessions from supported coding agents and custom client
 
 A session ID is the stable identifier Dynamo uses for one agent reasoning/tool chain. A root agent, planner, researcher subagent, or OpenCode subtask can each have its own session. Every LLM request in that chain should carry the same `session_id`; child sessions can also carry a `parent_session_id` so traces and replay tools can rebuild the tree. Some academic papers also call this a `program_id`.
 
-Session identity and router affinity are separate concepts that share the canonical
-Dynamo header. Sending `X-Dynamo-Session-ID` records the normalized identity and
-enables process-local affinity on supported routing paths. Agent-native session
-headers remain identity-only and do not opt clients into hard affinity. Tracing
-records normalized identity when `DYN_REQUEST_TRACE` is enabled.
+Session identity is passive metadata. Sending `X-Dynamo-Session-ID` does not enable sticky sessions or change request placement. Tracing records the identity when `DYN_REQUEST_TRACE` is enabled, and a session-aware routing policy can consume it only when that policy is configured separately.
 
 ## Session ID Inputs
 
-Custom clients should send the canonical Dynamo headers. When
-`X-Dynamo-Session-ID` is present, Dynamo uses it and
-`X-Dynamo-Parent-Session-ID` instead of any agent-native identity values and uses
-the session ID for router affinity where supported.
+Custom clients should send the canonical Dynamo headers. When `X-Dynamo-Session-ID` is present, Dynamo uses it and `X-Dynamo-Parent-Session-ID` instead of any agent-native identity values.
 
 | Header | Normalized `agent_context` field | Required | Meaning |
 |--------|----------------------------------|:--------:|---------|
-| `X-Dynamo-Session-ID` | `session_id` | Yes | One reasoning/tool chain inside the run and the explicit router-affinity key. |
+| `X-Dynamo-Session-ID` | `session_id` | Yes | One reasoning/tool chain inside the run. |
 | `X-Dynamo-Parent-Session-ID` | `parent_session_id` | No | Parent session when using subagents. |
 | `X-Dynamo-Session-Final` | `session_final` | No | `true` marks the session's last request for lifecycle-aware consumers. |
 
 ### Native Agent Headers
 
 Dynamo also recognizes the current stable identity headers emitted by the following coding agents. The [frontend API surface compliance test](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) catches header changes as coding agents evolve.
-
-These native headers populate `agent_context` but do not enable router affinity.
 
 | Source | Session input | Parent input | Dynamo behavior |
 |--------|------------------|--------------|-----------------|

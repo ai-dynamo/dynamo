@@ -13,7 +13,7 @@ NVIDIA Dynamo optimizes agent workloads with lightweight headers and request ext
 | Router | Priority, expected output length, and cache-overlap signals | Place requests for KV reuse and order queued work. |
 | KV cache management | Priority and session metadata forwarded to the backend runtime | Influence engine scheduling, cache eviction, and subagent KV isolation where the backend supports it. |
 
-The common identity concept is `session_id`: one stable ID for one agent reasoning/tool chain. Dynamo maps supported coding-agent headers to `session_id`, and custom harnesses can send `X-Dynamo-Session-ID` directly. Native agent headers remain identity-only; the explicit Dynamo header also opts supported routing paths into process-local session affinity. See [Session IDs](session-ids.md#session-id-inputs) for the exact contract.
+The common identity concept is `session_id`: one stable ID for one agent reasoning/tool chain. Dynamo maps supported coding-agent headers to `session_id`, and custom harnesses can send `X-Dynamo-Session-ID` directly. The ID is passive metadata: it does not enable sticky sessions or session-aware routing. A routing policy must opt in to use it. See [Session IDs](session-ids.md#session-id-inputs) for the exact contract.
 
 ## Documentation
 
@@ -48,4 +48,4 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-Use session IDs when you want traceability across LLM calls, tool calls, and external trajectory files. Use the explicit Dynamo session header when those calls should also use supported router affinity. Use `agent_hints` when you want to influence other serving behavior at the router and engine layer.
+Use session IDs when you want traceability across LLM calls, tool calls, and external trajectory files. Use `agent_hints` when you want to influence serving behavior at the router and engine layer. Configure session-aware routing separately when a routing policy supports it.

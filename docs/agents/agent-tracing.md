@@ -5,7 +5,7 @@ title: Agent Tracing
 subtitle: Export Dynamo request traces, tool-call metadata, and Perfetto timelines
 ---
 
-Agent tracing records what Dynamo measured for each eligible LLM request. When a request carries [session identity](session-ids.md), trace rows include the session fields so you can join LLM requests, inferred tool calls, optional harness tool spans, and Perfetto slices. Tracing itself does not control placement; the explicit Dynamo session header separately enables supported router affinity, while agent-native session headers remain identity-only.
+Agent tracing records what Dynamo measured for each eligible LLM request. When a request carries [session identity](session-ids.md), trace rows include the session fields so you can join LLM requests, inferred tool calls, optional harness tool spans, and Perfetto slices. Recording session identity does not enable sticky sessions or session-aware routing.
 
 Tracing is best-effort profiling data, not an audit log. Dynamo does not store tool-call arguments in request traces. Use audit sinks when you need request or response payloads.
 

@@ -5,6 +5,7 @@ use std::{sync::Arc, time::Duration};
 
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
+    error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
@@ -137,6 +138,9 @@ impl KvPushRouter {
         let worker = operation.target().and_then(affinity_worker);
         match self.select_request(request, phase, false, worker).await {
             Ok(selection) => Ok((selection, Some(operation))),
+            Err(error) if match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[]) => {
+                Err(error)
+            }
             Err(_) if operation.target().is_some() && explicit.is_none() => {
                 operation.invalidate();
                 let retry = self
@@ -556,5 +560,127 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");
 
         self.inner.direct(request, worker_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use dynamo_kv_router::{DefaultWorkerSelector, config::KvRouterConfig};
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        distributed::DistributedConfig,
+        error::{ErrorType, match_error_chain},
+        pipeline::{AsyncEngineContext, Context, PushRouter, RouterMode, context::Controller},
+    };
+    use tokio::sync::watch;
+
+    use super::*;
+    use crate::{
+        local_model::runtime_config::ModelRuntimeConfig,
+        protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    };
+
+    fn request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    async fn router() -> (KvPushRouter, Runtime) {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("affinity-selection-cancellation".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let workers = HashMap::from([(7, ModelRuntimeConfig::default())]);
+        let (_tx, workers) = watch::channel(workers);
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let chooser = KvRouter::new(
+            endpoint,
+            client.clone(),
+            workers,
+            16,
+            DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+            Some(config),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let inner = PushRouter::from_client(client, RouterMode::KV)
+            .await
+            .unwrap();
+        let router = KvPushRouter::new(inner, Arc::new(chooser), Duration::from_secs(10)).unwrap();
+        (router, runtime)
+    }
+
+    #[tokio::test]
+    async fn session_affinity_existing_selection_cancellation_preserves_binding_without_retry() {
+        let (router, runtime) = router().await;
+        let session_id = SessionAffinityId::new("cancelled-selection");
+        let original_target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        let AffinityAcquire::Initialize(initializer) =
+            router.affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(original_target).unwrap());
+
+        let controller = Controller::new("cancelled-selection-request".to_string());
+        controller.stop();
+        let mut request = Context::with_controller(request(), controller);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        let Err(error) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+        else {
+            panic!("stopped request must return cancellation");
+        };
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::Cancelled],
+            &[]
+        ));
+        assert_eq!(
+            router.affinity.query_target(&session_id, None).unwrap(),
+            Some(original_target)
+        );
+
+        let AffinityAcquire::Bound { target, lease } =
+            router.affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("cancellation must preserve the existing binding");
+        };
+        assert_eq!(target, original_target);
+        drop(lease);
+
+        drop(router);
+        runtime.shutdown();
     }
 }
