@@ -46,8 +46,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, NvExt, agent_context_from_headers,
-    apply_header_routing_overrides, validate_nvext_semantics,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, agent_context_from_headers,
+    apply_header_routing_overrides,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -1903,15 +1903,6 @@ pub fn validate_completion_fields_generic(
     })
 }
 
-fn validate_openai_nvext(nvext: Option<&NvExt>) -> Result<(), ErrorResponse> {
-    validate_nvext_semantics(nvext).map_err(|e| {
-        ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
-        })
-    })
-}
-
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -2077,10 +2068,6 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
-    if let Err(err_response) = validate_openai_nvext(chat_request.nvext.as_ref()) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);

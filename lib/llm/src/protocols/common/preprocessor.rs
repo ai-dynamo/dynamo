@@ -11,7 +11,7 @@ use dynamo_kv_router::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::extensions::{AgentContext, RouterParams, SessionControl};
+use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
@@ -75,11 +75,6 @@ pub struct RoutingHints {
     /// Request routing constraints used for worker compatibility and soft preference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_constraints: Option<RoutingConstraints>,
-
-    /// Session control for subagent KV isolation and sticky routing.
-    /// Contains session_id (for affinity) and optional action (open/close).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_control: Option<SessionControl>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

@@ -41,13 +41,6 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
-def _session_control_enabled(server_args) -> bool:
-    """The session_control endpoint (close only) is needed for session-radix-cache
-    sessions (--enable-session-radix-cache): close triggers bulk KV release. Open
-    is implicit -- the first tagged generate creates the session's KV."""
-    return bool(getattr(server_args, "enable_session_radix_cache", False))
-
-
 async def init_decode(
     runtime: DistributedRuntime,
     config: Config,
@@ -139,13 +132,6 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    # Serve session_control for streaming OR radix-native sessions.
-    if _session_control_enabled(server_args):
-        session_control_endpoint = runtime.endpoint(
-            f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
-        )
-        shutdown_endpoints.append(session_control_endpoint)
-
     # Worker type and needs, derived from serving_mode.
     if config.serving_mode == DisaggregationMode.DECODE:
         decode_worker_type = WorkerType.Decode
@@ -185,10 +171,6 @@ async def init_decode(
                 needs=decode_needs,
             ),
         ]
-        if _session_control_enabled(server_args):
-            gather_tasks.append(
-                session_control_endpoint.serve_endpoint(handler.session_control)
-            )
         await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

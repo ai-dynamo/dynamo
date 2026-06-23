@@ -165,6 +165,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             lora_path=lora_path,
             **self._priority_kwargs(priority),
         )
+        results = self._wrap_trajectory_stream(results, inner_request)
 
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.

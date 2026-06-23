@@ -55,7 +55,6 @@ Backend support is runtime-specific. For SGLang flags and behavior, see [SGLang 
 | Priority-aware routing | Yes | Yes | Yes |
 | Priority-based cache eviction | Planned | Yes | Planned |
 | Speculative prefill | Yes | Yes | Yes |
-| Subagent KV isolation with session control | No | Experimental | No |
 
 ## Related Request Extensions
 
@@ -63,5 +62,3 @@ Backend support is runtime-specific. For SGLang flags and behavior, see [SGLang 
 
 - Trajectory IDs are passive identity for traces and joins.
 - `agent_hints` is active serving intent for routing, scheduling, and cache behavior.
-
-Session-control metadata for SGLang subagent KV isolation lives under `nvext.session_control`; see [NVIDIA Request Extensions](../components/frontend/nvext.md#session-control).

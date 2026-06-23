@@ -42,8 +42,7 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, NvExt, agent_context_from_headers, apply_header_routing_overrides,
-    validate_nvext_semantics,
+    AGENT_CONTEXT_CONTEXT_KEY, agent_context_from_headers, apply_header_routing_overrides,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -297,10 +296,6 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
-    if let Some(response) = validate_anthropic_nvext(chat_request.nvext.as_ref()) {
-        return Err(response);
-    }
-
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
@@ -791,16 +786,6 @@ fn apply_anthropic_header_routing_overrides(
     if nvext_enabled {
         request.nvext = apply_header_routing_overrides(request.nvext.take(), headers);
     }
-}
-
-fn validate_anthropic_nvext(nvext: Option<&NvExt>) -> Option<Response> {
-    validate_nvext_semantics(nvext).err().map(|e| {
-        anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            &format!("Invalid nvext: {e}"),
-        )
-    })
 }
 
 /// Build an Anthropic-formatted error response from a canonical

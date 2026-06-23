@@ -65,10 +65,7 @@ use crate::protocols::{
     TokenIdType,
     common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-        extensions::{
-            AgentContext, AgentHints, NvExtProvider, SessionAction, SessionControl,
-            routing_constraints_to_kv,
-        },
+        extensions::{AgentHints, NvExtProvider, routing_constraints_to_kv},
     },
     openai::{
         DeltaGeneratorExt,
@@ -98,17 +95,6 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     let strict_priority = hints.and_then(|h| h.strict_priority);
     let priority = hints.and_then(|h| h.priority);
     (priority_jump, strict_priority, priority)
-}
-
-fn agent_context_session_control(agent_context: &AgentContext) -> SessionControl {
-    SessionControl {
-        session_id: agent_context.trajectory_id.clone(),
-        action: agent_context
-            .trajectory_final
-            .is_some_and(|is_final| is_final)
-            .then_some(SessionAction::Close),
-        timeout: 300,
-    }
 }
 
 /// Encode a slice of `f32` values as a base64 string per the OpenAI
@@ -276,12 +262,7 @@ fn attach_agent_context_from_context(
     if let Ok(agent_context) = context.get::<crate::protocols::common::extensions::AgentContext>(
         crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
     ) {
-        let agent_context = agent_context.as_ref().clone();
-        request
-            .routing
-            .get_or_insert_with(RoutingHints::default)
-            .session_control = Some(agent_context_session_control(&agent_context));
-        request.agent_context = Some(agent_context);
+        request.agent_context = Some(agent_context.as_ref().clone());
     }
 }
 
@@ -879,7 +860,6 @@ impl OpenAIPreprocessor {
                 priority,
                 lora_name,
                 allowed_worker_ids: None,
-                session_control: nvext.session_control.clone(),
                 routing_constraints: nvext
                     .routing_constraints
                     .clone()
@@ -3415,28 +3395,6 @@ mod tests {
             extra_args["sampling_options"]["bad_words_token_ids"],
             serde_json::json!([[12, 13]])
         );
-    }
-
-    #[test]
-    fn test_agent_context_session_control_uses_trajectory_id() {
-        let sc = agent_context_session_control(&AgentContext {
-            trajectory_id: "run-123:worker-0".to_string(),
-            parent_trajectory_id: None,
-            trajectory_final: None,
-        });
-        assert_eq!(sc.session_id, "run-123:worker-0");
-        assert_eq!(sc.action, None);
-    }
-
-    #[test]
-    fn test_agent_context_session_control_closes_on_trajectory_final() {
-        let sc = agent_context_session_control(&AgentContext {
-            trajectory_id: "run-123:worker-0".to_string(),
-            parent_trajectory_id: None,
-            trajectory_final: Some(true),
-        });
-        assert_eq!(sc.session_id, "run-123:worker-0");
-        assert_eq!(sc.action, Some(SessionAction::Close));
     }
 
     #[test]

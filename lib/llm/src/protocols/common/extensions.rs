@@ -113,33 +113,6 @@ pub struct AgentHints {
     pub latency_sensitivity: Option<f64>,
 }
 
-fn default_session_timeout() -> u64 {
-    300
-}
-
-/// Session control for subagent KV isolation and sticky routing.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct SessionControl {
-    /// Unique session identifier. Present on every turn for sticky routing.
-    pub session_id: String,
-    /// Lifecycle action: `"open"`, `"bind"`, or `"close"`. Omit on intermediate turns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<SessionAction>,
-    /// Inactivity timeout in seconds.
-    #[serde(default = "default_session_timeout")]
-    pub timeout: u64,
-}
-
-/// Session lifecycle actions.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionAction {
-    Open,
-    Bind,
-    Close,
-}
-
 /// Dynamo's LLM request extension envelope.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -203,10 +176,6 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timestamp_ms: Option<f64>,
-
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_control: Option<SessionControl>,
 
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -339,29 +308,6 @@ pub trait NvExtProvider {
     fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
         None
     }
-}
-
-/// Validate Dynamo extension semantics after protocol parsing.
-pub fn validate_nvext_semantics(nvext: Option<&NvExt>) -> anyhow::Result<()> {
-    let Some(nvext) = nvext else {
-        return Ok(());
-    };
-
-    if let Some(session_control) = nvext.session_control.as_ref() {
-        validate_non_empty(
-            &session_control.session_id,
-            "nvext.session_control.session_id",
-        )?;
-    }
-
-    Ok(())
-}
-
-fn validate_non_empty(value: &str, field: &str) -> anyhow::Result<()> {
-    if value.trim().is_empty() {
-        anyhow::bail!("{field} must not be empty");
-    }
-    Ok(())
 }
 
 pub fn routing_constraints_to_kv(
@@ -623,7 +569,6 @@ mod tests {
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
-        assert_eq!(nv_ext.session_control, None);
         assert_eq!(nv_ext.routing_constraints, None);
     }
 
@@ -692,31 +637,6 @@ mod tests {
             let err = serde_json::from_str::<NvExt>(json).unwrap_err();
             assert!(err.to_string().contains("unknown field `agent_context`"));
         }
-    }
-
-    #[test]
-    fn session_control_defaults_timeout() {
-        let sc: SessionControl =
-            serde_json::from_str(r#"{"session_id":"s","action":"open"}"#).expect("session_control");
-        assert_eq!(sc.action, Some(SessionAction::Open));
-        assert_eq!(sc.timeout, 300);
-    }
-
-    #[test]
-    fn session_control_round_trips_actions() {
-        let sc: SessionControl =
-            serde_json::from_str(r#"{"session_id":"sub-1","action":"bind"}"#).unwrap();
-        assert_eq!(sc.action, Some(SessionAction::Bind));
-        assert_eq!(sc.timeout, 300);
-
-        let original = SessionControl {
-            session_id: "test-session".to_string(),
-            action: Some(SessionAction::Close),
-            timeout: 90,
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let deser: SessionControl = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser, original);
     }
 
     #[test]

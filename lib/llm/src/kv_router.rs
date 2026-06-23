@@ -57,13 +57,11 @@ pub mod scheduler;
 mod scheduler_inputs;
 pub mod sequence;
 pub mod shared_cache;
-pub mod sticky;
 
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 pub use scheduler_inputs::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-pub use sticky::{SessionLifecycleController, StickySessionRouter};
 
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
 use scheduler_inputs::{

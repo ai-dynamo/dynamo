@@ -897,43 +897,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "new_version": req.new_version,
         }
 
-    async def close_session(self, body: dict) -> dict:
-        """Close a session: triggers bulk release of its tagged radix KV.
-
-        Args:
-            body: Dict with "session_id".
-        """
-        from sglang.srt.managers.io_struct import CloseSessionReqInput
-
-        session_id = body.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "session_id required"}
-        try:
-            obj = CloseSessionReqInput(session_id=session_id)
-            await self.engine.tokenizer_manager.close_session(obj, None)
-            return {"status": "ok", "session_id": session_id}
-        except Exception as e:
-            logging.error(f"Failed to close session {session_id}: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def session_control(self, request, context=None):
-        """Service mesh endpoint for session lifecycle. Radix-native sessions only
-        need close (open is implicit -- the first tagged generate creates the KV).
-
-        Args:
-            request: Dict with "action" == "close_session" and "session_id".
-            context: Optional Dynamo context (unused but required by protocol).
-
-        Yields:
-            Single dict with operation result.
-        """
-        action = request.get("action")
-        if action == "close_session":
-            result = await self.close_session(request)
-        else:
-            result = {"status": "error", "message": f"Unsupported action: {action}"}
-        yield result
-
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -996,18 +959,44 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
 
+    def _trajectory_id(self, request: Dict[str, Any]) -> Optional[str]:
+        if not getattr(self.config.server_args, "enable_session_radix_cache", False):
+            return None
+        trajectory_id = (request.get("agent_context") or {}).get("trajectory_id")
+        return (
+            trajectory_id if isinstance(trajectory_id, str) and trajectory_id else None
+        )
+
     def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        # session-radix-cache needs the session id on each generate so the engine
-        # tags that turn's KV (req.session_id); released in bulk on close.
-        sa = self.config.server_args
-        if not getattr(sa, "enable_session_radix_cache", False):
-            return {}
-        routing = request.get("routing") or {}
-        session_control = routing.get("session_control") or {}
-        session_id = session_control.get("session_id")
-        if not session_id:
-            return {}
-        return {"session_params": {"id": session_id}}
+        trajectory_id = self._trajectory_id(request)
+        return {"session_params": {"id": trajectory_id}} if trajectory_id else {}
+
+    def _wrap_trajectory_stream(
+        self, stream: AsyncIterator[ResponseT], request: Dict[str, Any]
+    ) -> AsyncIterator[ResponseT]:
+        trajectory_id = self._trajectory_id(request)
+        if (
+            trajectory_id is None
+            or (request.get("agent_context") or {}).get("trajectory_final") is not True
+        ):
+            return stream
+        return self._close_trajectory_after_stream(stream, trajectory_id)
+
+    async def _close_trajectory_after_stream(
+        self, stream: AsyncIterator[ResponseT], trajectory_id: str
+    ) -> AsyncIterator[ResponseT]:
+        try:
+            async for item in stream:
+                yield item
+        finally:
+            from sglang.srt.managers.io_struct import CloseSessionReqInput
+
+            try:
+                await self.engine.tokenizer_manager.close_session(
+                    CloseSessionReqInput(session_id=trajectory_id), None
+                )
+            except Exception:
+                logging.exception("Failed to close trajectory %s", trajectory_id)
 
     @staticmethod
     def _get_guided_decoding_params(
