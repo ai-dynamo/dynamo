@@ -29,19 +29,21 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP export of both traces and logs | `false` | `true` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces | `http://localhost:4317` | `http://tempo:4317` |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (defaults to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` if not set) | same as traces endpoint | `http://localhost:4317` |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP endpoint for logs. Falls back to the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4317` | `http://localhost:4317` | `http://localhost:4317` |
 
 ## OTLP Log Export
 
 When `OTEL_EXPORT_ENABLED=true`, Dynamo exports both **traces and logs** via OTLP. Logs are sent to an OpenTelemetry Collector which routes them to Grafana Loki for aggregation and querying.
 
-By default, logs are exported to the same endpoint as traces (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`). To send logs to a different endpoint, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`:
+Endpoints resolve per signal: the signal-specific variable wins, then the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4317`. Protocol resolves the same way (`OTEL_EXPORTER_OTLP_{TRACES,LOGS}_PROTOCOL` → `OTEL_EXPORTER_OTLP_PROTOCOL` → `grpc`); for `http/protobuf` the `/v1/traces` or `/v1/logs` path is appended to the generic endpoint.
 
 ```bash
 export OTEL_EXPORT_ENABLED=true
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
-# Optional: send logs to a different endpoint
-# export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317
+# Generic endpoint applies to both traces and logs:
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+# Optional per-signal overrides:
+# export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
+# export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://loki-collector:4317
 ```
 
 The local observability stack (see [Getting Started](README.md#getting-started-quickly)) includes an OpenTelemetry Collector that receives OTLP on `localhost:4317` and routes traces to Tempo and logs to Loki. In Grafana, the Loki datasource is pre-configured with a derived field that links `trace_id` labels to Tempo, so you can jump directly from a log line to its corresponding trace.
@@ -329,6 +331,58 @@ export DYN_SKIP_SGLANG_LOG_FORMATTING=true
 Alternatively, pass the `--log-level` argument to the SGLang worker
 command to set the SGLang engine's log level directly (e.g.
 `--log-level DEBUG`). This is independent of `DYN_LOG`.
+
+## Audit Payload Logging (OTLP)
+
+Dynamo's **audit** subsystem captures per-request `/v1/chat/completions` payloads (the request, and the response when one completes) and fans them out to configured sinks. The `otel` sink exports each audit record as an OTLP **log record** under the instrumentation scope `dynamo.payload`, so payloads can flow through the same OpenTelemetry Collector pipeline as application logs.
+
+Audit is **opt-in** and independent of `OTEL_EXPORT_ENABLED` (which controls application log/trace export). It is enabled only by listing sinks in `DYN_AUDIT_SINKS`.
+
+> [!IMPORTANT]
+> The OTLP audit sink is enabled by `DYN_AUDIT_SINKS=otel` (or e.g. `DYN_AUDIT_SINKS=stderr,otel`). Setting `DYN_AUDIT_SINKS=stderr` together with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` only writes audit JSON to the process's **stderr** — it does **not** export audit records over OTLP. Only the `otel` sink exports over OTLP.
+
+### How records are emitted
+
+- **One** audit record is published per request, carrying the request and — when the response completes — the response.
+- On client cancellation, gateway timeout, or aggregation failure, the record is still emitted with an **empty response**, so those cases remain auditable. A hard process crash before emission is the only case that loses a record.
+- Each record maps to one OTLP `LogRecord`: scope `dynamo.payload`, body `openai.chat_completion`, with attributes `rid`, `endpoint`, `model`, `streaming`, `audit_complete`, and `payload` (the audit record serialized as a JSON string). Redacted HTTP request headers are included inside `payload.http.request.headers` for the `otel` sink only — other sinks never serialize headers.
+
+### Configuration
+
+Audit-specific variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DYN_AUDIT_SINKS` | Comma-separated sinks: `stderr`, `nats`, `jsonl`, `jsonl_gz`, `otel`. Audit is enabled when non-empty. Leave **unset** to disable (do not use an empty string). | unset (disabled) |
+| `DYN_AUDIT_FORCE_LOGGING` | Audit every request regardless of the OpenAI `store` flag. Without it, only `store=true` requests are audited. | `false` |
+| `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized records emit a marker with `audit_complete=false` and `audit_drop_reason` instead of being silently dropped. | `4194304` (4 MiB) |
+| `DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST` | Extra header names (comma/whitespace separated) to redact, on top of the default credential list. Does not enable header capture by itself. | none |
+
+The `otel` sink ships over OTLP using the **standard** `OTEL_EXPORTER_OTLP_*` variables — the same ones the runtime log/trace exporter uses, resolved identically:
+
+- **Protocol**: `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` → `OTEL_EXPORTER_OTLP_PROTOCOL` → **`grpc`** (matches the runtime default).
+- **Endpoint**: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (used as-is) → `OTEL_EXPORTER_OTLP_ENDPOINT` (`/v1/logs` appended only for `http/protobuf`) → default (`http://localhost:4317` for `grpc`, `http://localhost:4318/v1/logs` for `http/protobuf`).
+- `OTEL_SERVICE_NAME` sets the service name on exported records (default `dynamo`).
+
+> [!NOTE]
+> Keep the endpoint consistent with the protocol: a `grpc` endpoint is used verbatim (no path), while `http/protobuf` expects an HTTP URL and gets `/v1/logs` appended. Because the audit sink and the runtime exporter share these variables and the same `grpc` default, audit logs and application telemetry resolve to the same destination unless you override the logs signal explicitly.
+
+### Example
+
+Export chat-completion audit payloads over OTLP gRPC to a collector, auditing every request:
+
+```bash
+export DYN_AUDIT_SINKS=otel
+export DYN_AUDIT_FORCE_LOGGING=true
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4317
+export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
+```
+
+To also write audit JSON to the process's stderr (headers are `otel`-only, so the stderr copy has none):
+
+```bash
+export DYN_AUDIT_SINKS=stderr,otel
+```
 
 ## Related Documentation
 
