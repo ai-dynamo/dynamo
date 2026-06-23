@@ -414,8 +414,8 @@ class KubernetesConnector(PlannerConnector):
     ) -> tuple[Optional[str], str]:
         """Return (dgd_service_name, component_name_for_filter).
 
-        ``dgd_service_name`` is the stable DGD component name (typically
-        PascalCase, e.g. ``"VllmPrefillWorker"``) and is used for Kubernetes
+        ``dgd_service_name`` is the DGD ``spec.services`` dict key (typically
+        PascalCase, e.g. ``"prefill"``) and is used for Kubernetes
         operations like patching replica counts.
 
         ``component_name_for_filter`` is the component name that the Rust
@@ -429,8 +429,8 @@ class KubernetesConnector(PlannerConnector):
            :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
            ``"backend"``).
 
-        Note: the DGD component name (``service.name``) must NOT be used for
-        filtering -- it is typically PascalCase (``"VllmPrefillWorker"``) and
+        Note: the DGD services dict key (``service.name``) must NOT be used
+        here -- it is typically PascalCase (``"prefill"``) and
         would never match the lowercase value the worker writes to MDC.
         """
         defaults = build_worker_info_from_defaults(backend, sub_component_type)

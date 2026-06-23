@@ -178,7 +178,7 @@ spec:
           - name: TRITON_PTXAS_PATH
             value: "/usr/local/cuda/bin/ptxas"
         services:
-          VllmWorker:
+          worker:
             envs:
               - name: CUSTOM_ENV
                 value: "my-value"

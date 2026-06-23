@@ -42,7 +42,7 @@ spec:
           - -c
           - |
             exec python3 -m dynamo.frontend --router-mode kv --router-reset-states
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -83,7 +83,7 @@ spec:
                 podAffinityTerm:
                   labelSelector:
                     matchLabels:
-                      nvidia.com/dynamo-component: "VllmPrefillWorker"
+                      nvidia.com/dynamo-component: "prefill"
                   topologyKey: "kubernetes.io/hostname"
         mainContainer:
           env:
@@ -104,7 +104,7 @@ spec:
              --tensor-parallel-size 2 \
              --disaggregation-mode decode \
              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -145,7 +145,7 @@ spec:
                 podAffinityTerm:
                   labelSelector:
                     matchLabels:
-                      nvidia.com/dynamo-component: "VllmPrefillWorker"
+                      nvidia.com/dynamo-component: "prefill"
                   topologyKey: "kubernetes.io/hostname"
         mainContainer:
           env:

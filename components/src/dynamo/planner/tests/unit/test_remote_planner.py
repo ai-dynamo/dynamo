@@ -455,7 +455,7 @@ def test_connector_get_worker_info_delegates_to_local_k8s(connector_runtime):
     """
     c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
     mdc_info = WorkerInfo(
-        k8s_name="VllmPrefillWorker",
+        k8s_name="prefill",
         component_name="prefill",
         endpoint="generate",
         context_length=32768,
@@ -515,13 +515,13 @@ def test_connector_get_actual_worker_counts_delegates_to_local_k8s(connector_run
     c._local_k8s_init_attempted = True
 
     counts = c.get_actual_worker_counts(
-        prefill_component_name="VllmPrefillWorker",
-        decode_component_name="VllmDecodeWorker",
+        prefill_component_name="prefill",
+        decode_component_name="decode",
     )
     assert counts == (2, 3, False)
     fake_local.get_actual_worker_counts.assert_called_once_with(
-        prefill_component_name="VllmPrefillWorker",
-        decode_component_name="VllmDecodeWorker",
+        prefill_component_name="prefill",
+        decode_component_name="decode",
     )
 
 

@@ -16,8 +16,8 @@
 #
 # Architecture:
 #   DGD gp-ctrl:    GlobalPlanner (--max-total-gpus)
-#   DGD model-a:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_A)
-#   DGD model-b:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_B)
+#   DGD model-a:    Frontend + prefill + decode + Planner  (MODEL_A)
+#   DGD model-b:    Frontend + prefill + decode + Planner  (MODEL_B)
 #
 # Prerequisites:
 #   - Cluster Prometheus deployed and scraping pods via PodMonitor
@@ -114,7 +114,7 @@ spec:
           name: main
     replicas: 1
     type: planner
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -145,7 +145,7 @@ spec:
             claimName: hf-model-cache
     replicas: 1
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:
@@ -215,7 +215,7 @@ spec:
           name: main
     replicas: 1
     type: planner
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -246,7 +246,7 @@ spec:
             claimName: hf-model-cache
     replicas: 1
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:

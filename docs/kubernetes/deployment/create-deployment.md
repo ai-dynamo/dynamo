@@ -107,7 +107,7 @@ It serves the following roles:
 You should then pick a worker and specialize the config. For example,
 
 ```yaml
-VllmWorker:         # vLLM-specific config
+worker:         # vLLM-specific config
   enforce-eager: true
   enable-prefix-caching: true
 
@@ -200,7 +200,7 @@ spec:
   topologyConstraint:
     packDomain: rack
   services:
-    VllmWorker:
+    worker:
       # ...
 ```
 

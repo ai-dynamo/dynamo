@@ -18,7 +18,7 @@ While theoretically each `DistributedRuntime` can have multiple `Namespace`s as 
 For example, a typical deployment configuration (like `examples/backends/vllm/deploy/agg.yaml` or `examples/backends/sglang/deploy/agg.yaml`) has multiple components:
 
 - `Frontend`: Starts an HTTP server (OpenAI-compatible API on port 8000), handles incoming requests, applies chat templates, performs tokenization, and routes requests to workers. The `make_engine` function encapsulates this functionality.
-- `Worker` components (e.g., `VllmDecodeWorker`, `VllmPrefillWorker`, `SGLangDecodeWorker`, `TRTLLMWorker`): Perform the actual inference computation using their respective engines (SGLang, TensorRT-LLM, vLLM).
+- `Worker` components (e.g., `decode`, `prefill`, `SGLangDecodeWorker`, `TRTLLMWorker`): Perform the actual inference computation using their respective engines (SGLang, TensorRT-LLM, vLLM).
 
 Since these components are deployed in different processes, each has its own `DistributedRuntime`. Within their own `DistributedRuntime`, they all share the same `Namespace` (e.g., `vllm-agg`, `sglang-disagg`). Under their namespace, each has its own `Component`:
 
@@ -59,7 +59,7 @@ When using Kubernetes discovery, the KV store backend automatically switches to 
 - `Component`: When a `Component` object is created, it registers a service in the internal registry of the `DistributedRuntime`, which tracks all services and endpoints.
 - `Endpoint`: When an Endpoint object is created and started, it performs registration based on the discovery backend:
   - **Kubernetes mode**: Endpoint information is stored in DynamoWorkerMetadata CRD resources, which are watched by other components for discovery.
-  - **KV Store mode**: Endpoint information is stored in etcd at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that endpoints of different workers of the same type (i.e., two `VllmPrefillWorker`s in one deployment) share the same `Namespace`, `Component`, and `Endpoint` name. They are distinguished by their different primary `lease_id`.
+  - **KV Store mode**: Endpoint information is stored in etcd at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that endpoints of different workers of the same type (i.e., two `prefill`s in one deployment) share the same `Namespace`, `Component`, and `Endpoint` name. They are distinguished by their different primary `lease_id`.
 
 ## Calling Endpoints
 

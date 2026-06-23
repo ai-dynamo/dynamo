@@ -58,7 +58,7 @@ spec:
           - secretRef:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     sharedMemorySize: 20Gi

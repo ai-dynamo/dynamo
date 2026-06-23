@@ -179,7 +179,7 @@ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.metrics.log
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.previous.log  # Pre-restart logs
 │   └── fault-tolerance-test-frontend-576bd784dc-jv68q.yaml
-├── decode/                                # Or VllmDecodeWorker for vLLM backend
+├── decode/                                # Or decode for vLLM backend
 │   └── [same structure as Frontend]
 └── test.log.txt
 ```
@@ -216,7 +216,7 @@ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.metrics.log
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.previous.log  # Pre-restart logs
 │   └── fault-tolerance-test-frontend-576bd784dc-jv68q.yaml
-├── decode/                                # Or VllmDecodeWorker for vLLM backend
+├── decode/                                # Or decode for vLLM backend
 │   └── [same structure as Frontend]
 └── test.log.txt
 ```

@@ -26,8 +26,8 @@ A shared GlobalPlanner enforces a cluster-wide GPU cap.
 
 ```
 DGD gp-ctrl:    GlobalPlanner (--max-total-gpus)
-DGD model-a:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_A)
-DGD model-b:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_B)
+DGD model-a:    Frontend + prefill + decode + Planner  (MODEL_A)
+DGD model-b:    Frontend + prefill + decode + Planner  (MODEL_B)
 ```
 
 - No GlobalRouter needed — each model has its own endpoint.
@@ -41,9 +41,9 @@ A GlobalRouter selects the best pool for each request.
 
 ```
 DGD gp-ctrl:      Frontend + GlobalRouter + GlobalPlanner
-DGD gp-prefill-0: LocalRouter + VllmPrefillWorker (TP1) + Planner
-DGD gp-prefill-1: LocalRouter + VllmPrefillWorker (TP2) + Planner
-DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
+DGD gp-prefill-0: LocalRouter + prefill (TP1) + Planner
+DGD gp-prefill-1: LocalRouter + prefill (TP2) + Planner
+DGD gp-decode-0:  LocalRouter + decode  (TP1) + Planner
 ```
 
 - GlobalRouter routes prefill requests by (ISL, TTFT target) and decode by (context length, ITL target).

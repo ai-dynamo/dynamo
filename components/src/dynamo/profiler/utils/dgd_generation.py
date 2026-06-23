@@ -173,7 +173,7 @@ def enable_vllm_benchmark_mode(config_dict: dict) -> None:
     """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
 
     Mutates ``config_dict`` in place. Each recognised worker service
-    (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
+    (``prefill`` / ``decode`` / ``worker``) gets the
     mode matching its role so its startup self-benchmark publishes
     ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
 

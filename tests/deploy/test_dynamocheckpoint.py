@@ -78,7 +78,7 @@ CHECKPOINT_BACKENDS = {
     "vllm": CheckpointBackendConfig(
         name="vllm",
         manifest=("examples", "backends", "vllm", "deploy", "v1beta1", "agg.yaml"),
-        decode_component="VllmDecodeWorker",
+        decode_component="decode",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
         model=CHECKPOINT_MODEL,

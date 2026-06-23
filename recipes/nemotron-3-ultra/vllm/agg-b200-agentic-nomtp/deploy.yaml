@@ -130,7 +130,7 @@ spec:
               emptyDir: {}
             - name: runtime-tmp
               emptyDir: {}
-    - name: VllmWorker
+    - name: worker
       type: worker
       replicas: 1
       sharedMemorySize: 64Gi

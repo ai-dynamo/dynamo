@@ -317,7 +317,7 @@ GDRCopy v2.5.1 has a build failure on kernel 6.15+ due to a `vm_flags_set` redef
 EFA is designed for **cross-node** communication. Prefill and decode workers must be scheduled on **different nodes** to avoid EAGAIN errors during KV transfer.
 
 ```yaml
-VllmDecodeWorker:
+decode:
   extraPodSpec:
     affinity:
       podAntiAffinity:
@@ -327,7 +327,7 @@ VllmDecodeWorker:
                 - key: nvidia.com/dynamo-component
                   operator: In
                   values:
-                    - VllmPrefillWorker
+                    - prefill
             topologyKey: kubernetes.io/hostname
 ```
 
@@ -701,7 +701,7 @@ If both prefill and decode workers show the same NODE, this is the problem.
 **Solution**: Add pod anti-affinity rules to ensure workers are scheduled on different nodes:
 
 ```yaml
-VllmDecodeWorker:
+decode:
   extraPodSpec:
     affinity:
       podAntiAffinity:
@@ -711,7 +711,7 @@ VllmDecodeWorker:
                 - key: nvidia.com/dynamo-component
                   operator: In
                   values:
-                    - VllmPrefillWorker
+                    - prefill
             topologyKey: kubernetes.io/hostname
 ```
 
