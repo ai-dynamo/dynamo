@@ -2421,10 +2421,10 @@ class PlannerReplayBridge:
         router_config: Optional[KvRouterConfig] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
-        replay_concurrency: Optional[int] = None,
         sla_ttft_ms: Optional[float] = None,
         sla_itl_ms: Optional[float] = None,
         sla_e2e_ms: Optional[float] = None,
+        replay_concurrency: Optional[int] = None,
     ) -> None: ...
 
     @staticmethod
@@ -2438,10 +2438,10 @@ class PlannerReplayBridge:
         router_config: Optional[KvRouterConfig] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
-        replay_concurrency: Optional[int] = None,
         sla_ttft_ms: Optional[float] = None,
         sla_itl_ms: Optional[float] = None,
         sla_e2e_ms: Optional[float] = None,
+        replay_concurrency: Optional[int] = None,
     ) -> "PlannerReplayBridge": ...
 
     @staticmethod

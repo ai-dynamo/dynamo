@@ -67,10 +67,11 @@ pub struct PlannerReplayHandle {
 /// (cap n requests in flight, trace timestamps ignored); `None` replays at the
 /// trace's arrival timestamps. Both work with the planner advance/scaling loop,
 /// which is mode-agnostic.
-fn replay_mode(max_in_flight: Option<usize>) -> ReplayMode {
+fn replay_mode(max_in_flight: Option<usize>) -> Result<ReplayMode> {
     match max_in_flight {
-        Some(max_in_flight) => ReplayMode::Concurrency { max_in_flight },
-        None => ReplayMode::Trace,
+        Some(0) => anyhow::bail!("max_in_flight must be at least 1"),
+        Some(max_in_flight) => Ok(ReplayMode::Concurrency { max_in_flight }),
+        None => Ok(ReplayMode::Trace),
     }
 }
 
@@ -117,7 +118,7 @@ impl PlannerReplayHandle {
             prefill_load_estimator,
             trace.into_trace_driver_with_block_size(args.block_size)?,
             num_workers,
-            replay_mode(max_in_flight),
+            replay_mode(max_in_flight)?,
             router_mode,
         )?
         .with_sla_thresholds(sla);
@@ -178,7 +179,7 @@ impl PlannerReplayHandle {
             router_config,
             prefill_load_estimator,
             trace.into_trace_driver_with_block_size(config.decode_args.block_size)?,
-            replay_mode(max_in_flight),
+            replay_mode(max_in_flight)?,
             router_mode,
         )?
         .with_sla_thresholds(sla);

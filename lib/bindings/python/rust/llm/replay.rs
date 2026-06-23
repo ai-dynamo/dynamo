@@ -1667,7 +1667,7 @@ pub struct PlannerReplayBridge {
 impl PlannerReplayBridge {
     /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
     #[new]
-    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, replay_concurrency=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         trace_file: PathBuf,
@@ -1677,10 +1677,10 @@ impl PlannerReplayBridge {
         router_config: Option<KvRouterConfig>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
-        replay_concurrency: Option<isize>,
         sla_ttft_ms: Option<f64>,
         sla_itl_ms: Option<f64>,
         sla_e2e_ms: Option<f64>,
+        replay_concurrency: Option<isize>,
     ) -> PyResult<Self> {
         let args =
             Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
@@ -1717,7 +1717,7 @@ impl PlannerReplayBridge {
 
     /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
     #[staticmethod]
-    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, replay_concurrency=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_disagg(
         trace_file: PathBuf,
@@ -1729,10 +1729,10 @@ impl PlannerReplayBridge {
         router_config: Option<KvRouterConfig>,
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
-        replay_concurrency: Option<isize>,
         sla_ttft_ms: Option<f64>,
         sla_itl_ms: Option<f64>,
         sla_e2e_ms: Option<f64>,
+        replay_concurrency: Option<isize>,
     ) -> PyResult<Self> {
         let prefill_args =
             Python::with_gil(|py| materialize_replay_mocker_args(py, prefill_engine_args.clone()))?;

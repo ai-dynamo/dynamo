@@ -401,7 +401,8 @@ def _run_planner_replay(
                 sla_e2e_ms=sla_e2e_ms,
             )
         else:
-            assert trace_file is not None  # guaranteed by the trace/synthetic check
+            if trace_file is None:  # guaranteed by the trace/synthetic check above
+                raise ValueError("planner replay needs trace_file in trace mode")
             bridge = PlannerReplayBridge(
                 trace_file=trace_file,
                 extra_engine_args=extra_engine_args,
@@ -445,7 +446,8 @@ def _run_planner_replay(
                 sla_e2e_ms=sla_e2e_ms,
             )
         else:
-            assert trace_file is not None  # guaranteed by the trace/synthetic check
+            if trace_file is None:  # guaranteed by the trace/synthetic check above
+                raise ValueError("planner replay needs trace_file in trace mode")
             bridge = PlannerReplayBridge.create_disagg(
                 trace_file=trace_file,
                 prefill_engine_args=prefill_engine_args,
