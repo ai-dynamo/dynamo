@@ -163,7 +163,9 @@ impl WorkerConfig {
     /// mode. Decode workers force this off because they don't host the
     /// in-process KV indexer endpoint and must not advertise it.
     pub(crate) fn effective_enable_local_indexer(&self) -> bool {
-        self.enable_local_indexer && !self.disaggregation_mode.is_decode()
+        self.enable_local_indexer
+            && !self.disaggregation_mode.is_decode()
+            && !self.disaggregation_mode.is_encode()
     }
 }
 
@@ -1066,12 +1068,23 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 }
 
 /// Pick the `ModelType` to register with based on the worker's disaggregation
-/// role. `DisaggregationMode::Prefill` short-circuits to `ModelType::Prefill`
-/// regardless of `endpoint_types`; everything else falls back to the parsed
-/// `endpoint_types` so existing callers see no change.
+/// role.
+///
+/// - `Prefill` → `ModelType::Prefill`, ignoring `endpoint_types`.
+/// - `Encode` → `ModelType::empty()`. Encode workers do not serve public
+///   OpenAI endpoints; they emit `encoder_result` terminal chunks for the
+///   frontend EncodeRouter.
+/// - Everything else → parsed `endpoint_types`.
 fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     if config.disaggregation_mode.is_prefill() {
         return Ok(ModelType::Prefill);
+    }
+    // Encode workers do not serve public OpenAI endpoints directly.
+    // They emit encoder_result terminal chunks consumed by the frontend
+    // EncodeRouter, which is not yet landed.  Return empty so the watcher
+    // never builds a public chat/completions engine from an Encode card.
+    if config.disaggregation_mode.is_encode() {
+        return Ok(ModelType::empty());
     }
     parse_endpoint_types(&config.endpoint_types)
 }
@@ -1084,6 +1097,15 @@ fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<
         DisaggregationMode::Prefill => (WorkerType::Prefill, vec![vec![WorkerType::Decode]]),
         DisaggregationMode::Decode => (WorkerType::Decode, vec![vec![WorkerType::Prefill]]),
         DisaggregationMode::Aggregated => (WorkerType::Aggregated, Vec::new()),
+        // Encode workers need either a [Prefill + Decode] pair or a single
+        // Aggregated downstream worker to forward the encoder payload to.
+        DisaggregationMode::Encode => (
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        ),
     }
 }
 
@@ -1438,6 +1460,19 @@ mod tests {
             ..WorkerConfig::default()
         };
         assert_eq!(resolve_model_type(&config).unwrap(), ModelType::Chat);
+    }
+
+    #[test]
+    fn resolve_model_type_encode_returns_empty() {
+        // Encode workers must not advertise any public OpenAI endpoint type.
+        // endpoint_types is intentionally set to a non-empty value to confirm
+        // it is ignored.
+        let config = WorkerConfig {
+            endpoint_types: "chat,completions".to_string(),
+            disaggregation_mode: DisaggregationMode::Encode,
+            ..WorkerConfig::default()
+        };
+        assert_eq!(resolve_model_type(&config).unwrap(), ModelType::empty());
     }
 
     #[test]

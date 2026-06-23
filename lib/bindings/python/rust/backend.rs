@@ -83,6 +83,7 @@ pub enum DisaggregationMode {
     Aggregated = 1,
     Prefill = 2,
     Decode = 3,
+    Encode = 4,
 }
 
 impl From<DisaggregationMode> for RsDisaggregationMode {
@@ -91,6 +92,7 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
             DisaggregationMode::Aggregated => RsDisaggregationMode::Aggregated,
             DisaggregationMode::Prefill => RsDisaggregationMode::Prefill,
             DisaggregationMode::Decode => RsDisaggregationMode::Decode,
+            DisaggregationMode::Encode => RsDisaggregationMode::Encode,
         }
     }
 }

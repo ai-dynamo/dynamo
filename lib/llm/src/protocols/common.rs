@@ -61,6 +61,11 @@ pub enum FinishReason {
 
     #[serde(rename = "content_filter")]
     ContentFilter,
+
+    /// Encode worker has finished producing the encoder payload;
+    /// no generated tokens. Used in E/PD and E/P/D topologies.
+    #[serde(rename = "encode")]
+    Encode,
 }
 
 impl std::fmt::Display for FinishReason {
@@ -72,6 +77,7 @@ impl std::fmt::Display for FinishReason {
             FinishReason::Error(msg) => write!(f, "error: {}", msg),
             FinishReason::Cancelled => write!(f, "cancelled"),
             FinishReason::ContentFilter => write!(f, "content_filter"),
+            FinishReason::Encode => write!(f, "encode"),
         }
     }
 }
@@ -85,6 +91,7 @@ impl std::str::FromStr for FinishReason {
             "length" => Ok(FinishReason::Length),
             "stop" => Ok(FinishReason::Stop),
             "cancelled" | "abort" => Ok(FinishReason::Cancelled),
+            "encode" => Ok(FinishReason::Encode),
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }
@@ -102,6 +109,7 @@ impl From<FinishReason> for dynamo_protocols::types::CompletionFinishReason {
             }
             FinishReason::Length => dynamo_protocols::types::CompletionFinishReason::Length,
             FinishReason::Error(_) => dynamo_protocols::types::CompletionFinishReason::Stop,
+            FinishReason::Encode => dynamo_protocols::types::CompletionFinishReason::Stop,
         }
     }
 }

@@ -293,6 +293,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             Some(common::FinishReason::Error(err_msg)) => {
                 return Err(anyhow::anyhow!(err_msg));
             }
+            Some(common::FinishReason::Encode) => Some(dynamo_protocols::types::FinishReason::Stop),
             None => None,
         };
         let stop_reason = delta.stop_reason.clone();
@@ -473,6 +474,7 @@ mod tests {
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            encoder_result: None,
         }
     }
 
@@ -528,6 +530,7 @@ mod tests {
                 "prefill_compute_time_ms": 45.6
             })),
             routing_data: None,
+            encoder_result: None,
         }
     }
 
@@ -734,6 +737,7 @@ mod tests {
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
             routing_data: None,
+            encoder_result: None,
         };
 
         let response = generator

@@ -21,6 +21,7 @@ from . import telemetry
 from .disagg import enforce_prefill_max_tokens, require_prefill_result
 from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
 from .health_check import build_health_check_payload, is_probe
+from .multimodal import encoder_terminal_chunk, extract_multimodal_inputs
 from .publisher import ComponentSnapshot, KvEventSource, PushSource
 from .worker import WorkerConfig
 
@@ -86,11 +87,9 @@ class SampleLLMEngine(LLMEngine):
         parser.add_argument("--event-plane", default=None)
         parser.add_argument(
             "--disaggregation-mode",
-            choices=[
-                m.value for m in DisaggregationMode if m != DisaggregationMode.ENCODE
-            ],
+            choices=[m.value for m in DisaggregationMode],
             default=DisaggregationMode.AGGREGATED.value,
-            help="Disaggregation role: 'agg' (default), 'prefill', or 'decode'.",
+            help="Disaggregation role: 'agg' (default), 'prefill', 'decode', or 'encode'.",
         )
         args = parser.parse_args(argv)
 
@@ -207,9 +206,20 @@ class SampleLLMEngine(LLMEngine):
         self._publish_queue.put(("removed", {"block_hashes": hashes}))
         self._kv_used_blocks = max(0, self._kv_used_blocks - len(hashes))
 
+    async def _run_encoder(self, request: GenerateRequest, context: Context) -> Any:
+        await asyncio.sleep(self.delay)
+        token_ids = request.get("token_ids", [])
+        return {"handle": f"enc_{len(token_ids)}_{uuid.uuid4().hex[:8]}"}
+
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
+        if self.disaggregation_mode == DisaggregationMode.ENCODE:
+            result = await self._run_encoder(request, context)
+            prompt_len = len(request.get("token_ids", []))
+            yield encoder_terminal_chunk(result, prompt_len)
+            return
+
         # Canary probes bypass cross-worker coordination — run as aggregated.
         if self.disaggregation_mode == DisaggregationMode.DECODE and not is_probe(
             request
@@ -217,6 +227,22 @@ class SampleLLMEngine(LLMEngine):
             require_prefill_result(request, self.disaggregation_mode)
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             enforce_prefill_max_tokens(request)
+
+        mm_data = extract_multimodal_inputs(request)
+        if mm_data is not None:
+            enc_result = request.get("encoder_result")
+            if enc_result is not None:
+                # Validate the sample-engine handle format (enc_<n>_<uuid8>).
+                # This check is specific to SampleLLMEngine's synthetic protocol;
+                # real engines define their own encoder_result contract.
+                handle = (
+                    enc_result.get("handle", "") if isinstance(enc_result, dict) else ""
+                )
+                if not isinstance(handle, str) or not handle.startswith("enc_"):
+                    raise ValueError(
+                        f"encoder_result.handle has unexpected format: {handle!r}; "
+                        "expected a string starting with 'enc_'"
+                    )
 
         token_ids = request.get("token_ids", [])
         prompt_len = len(token_ids)

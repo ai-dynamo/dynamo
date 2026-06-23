@@ -55,6 +55,7 @@ fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) ->
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
+        encoder_result: None,
     }
 }
 

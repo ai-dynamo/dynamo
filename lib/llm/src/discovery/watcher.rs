@@ -54,16 +54,27 @@ use crate::{
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
     types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
+    worker_type::WorkerType,
 };
 
 use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
-/// Constructs the WorkerSet storage key. Prefill and decode workers in the same
-/// namespace get different keys so they don't block each other's registration.
-fn worker_set_key(namespace: &str, model_type: ModelType) -> String {
+/// Constructs the WorkerSet storage key.
+///
+/// Workers with different roles in the same namespace must land in separate
+/// WorkerSets: their MDCs carry distinct `worker_type` values, so their
+/// `mdcsum()`s differ and the checksum-compatibility check would reject the
+/// second registration.
+fn worker_set_key(
+    namespace: &str,
+    model_type: ModelType,
+    worker_type: Option<WorkerType>,
+) -> String {
     if model_type.supports_prefill() {
         format!("{}:prefill", namespace)
+    } else if matches!(worker_type, Some(WorkerType::Encode)) {
+        format!("{}:encode", namespace)
     } else {
         namespace.to_string()
     }
@@ -271,7 +282,7 @@ impl ModelWatcher {
                     // If a WorkerSet already exists for this (model, namespace, type),
                     // validate that the new worker's checksum matches. Different
                     // WorkerSets (different namespaces) are allowed to have different checksums to support rolling updates.
-                    let ws_key = worker_set_key(&mcid.namespace, card.model_type);
+                    let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
                     if let Some(model) = self.manager.get_model(card.name())
                         && !model.is_checksum_compatible(&ws_key, card.mdcsum())
                     {
@@ -414,7 +425,7 @@ impl ModelWatcher {
         let model_name = card.name().to_string();
         let worker_namespace = &mcid.namespace;
         let worker_component = &mcid.component;
-        let ws_key = worker_set_key(&mcid.namespace, card.model_type);
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
 
         // Query discovery for all remaining instances of this model
         let active_instances = self
@@ -515,7 +526,7 @@ impl ModelWatcher {
         // If so, this is just another worker joining an existing set — no pipeline build needed.
         let model_name = card.name().to_string();
         let namespace = mcid.namespace.clone();
-        let ws_key = worker_set_key(&namespace, card.model_type);
+        let ws_key = worker_set_key(&namespace, card.model_type, card.worker_type);
 
         if let Some(model) = self.manager.get_model(&model_name)
             && model.has_worker_set(&ws_key)
@@ -719,7 +730,7 @@ impl ModelWatcher {
 
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
-        let ws_key = worker_set_key(&namespace, card.model_type);
+        let ws_key = worker_set_key(&namespace, card.model_type, card.worker_type);
 
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
@@ -727,6 +738,7 @@ impl ModelWatcher {
 
         if card.model_input == ModelInput::Tokens
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
+            && !matches!(card.worker_type, Some(WorkerType::Encode))
         {
             // Case 1: Tokens + (Chat OR Completions OR Both)
             // A model that expects pre-processed requests meaning it's up to us whether we
@@ -1230,6 +1242,27 @@ mod tests {
             "test-checksum".to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    #[test]
+    fn test_worker_set_key_encode_gets_separate_key() {
+        // Encode workers must key to `namespace:encode`, not bare `namespace`.
+        // Without this split their mdcsum (which encodes worker_type ordinal)
+        // would differ from Aggregated workers sharing the same key, causing
+        // the watcher to reject them as checksum-incompatible duplicates.
+        let encode_key = worker_set_key("myns", ModelType::empty(), Some(WorkerType::Encode));
+        let agg_key = worker_set_key(
+            "myns",
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Aggregated),
+        );
+        let prefill_key = worker_set_key("myns", ModelType::Prefill, Some(WorkerType::Prefill));
+
+        assert_eq!(encode_key, "myns:encode");
+        assert_eq!(prefill_key, "myns:prefill");
+        // Aggregated uses bare namespace; Encode must not collide with it.
+        assert_eq!(agg_key, "myns");
+        assert_ne!(encode_key, agg_key);
     }
 
     #[test]

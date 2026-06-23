@@ -78,7 +78,7 @@ pub struct TopLogprob {
 }
 pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct BackendOutput {
     /// New token_ids generated from the LLM Engine
     pub token_ids: Vec<TokenIdType>,
@@ -142,6 +142,12 @@ pub struct BackendOutput {
     /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
+
+    /// Opaque encoder output from an Encode worker, forwarded by the EncodeRouter
+    /// to the downstream Prefill/Aggregated worker's request.  Present only on
+    /// encode-mode terminal chunks; `None` on all other chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<serde_json::Value>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -196,6 +202,13 @@ pub struct LLMEngineOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
+    /// Opaque encoder payload forwarded from an Encode worker to the downstream
+    /// Prefill/Aggregated worker in E/PD and E/P/D topologies.
+    /// Set on the encode terminal chunk; the frontend injects it into the
+    /// downstream request's `encoder_result` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Framework-owned link to the prefill worker's span (cross-process
     /// trace linking on disagg requests). Set by the framework on the
     /// prefill terminal chunk; consumed by the decode adapter. Engines
@@ -237,6 +250,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
@@ -259,6 +273,7 @@ impl LLMEngineOutput {
             top_logprobs: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
@@ -281,6 +296,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
@@ -303,6 +319,35 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            extra_args: None,
+            completion_usage: None,
+            engine_data: None,
+            routing_data: None,
+        }
+    }
+
+    /// Build the encode-mode terminal chunk.
+    ///
+    /// Yields no generated tokens (`token_ids` is empty) and carries the
+    /// opaque encoder payload in `encoder_result` for the downstream
+    /// Prefill/Aggregated worker to consume.
+    pub fn encode(encoder_result: serde_json::Value) -> Self {
+        LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(FinishReason::Encode),
+            stop_reason: None,
+            index: None,
+            disaggregated_params: None,
+            encoder_result: Some(encoder_result),
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,

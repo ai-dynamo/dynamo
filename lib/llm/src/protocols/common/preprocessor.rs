@@ -269,6 +269,16 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mm_processor_kwargs: Option<serde_json::Value>,
 
+    /// Opaque encoder output forwarded by the EncodeRouter from the Encode worker
+    /// to the downstream Prefill/Aggregated worker.  The EncodeRouter injects this
+    /// after reading it from the encode terminal chunk's `encoder_result` field.
+    /// Engines read it via `request.get("encoder_result")` in Python or via this
+    /// field in Rust.  Absent on non-multimodal requests and on the Encode worker
+    /// itself (which produces it, not consumes it).
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Optional request timestamp in milliseconds forwarded from nvext.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

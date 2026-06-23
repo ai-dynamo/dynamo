@@ -162,3 +162,112 @@ async def test_decode_without_probe_marker_still_requires_prefill_result():
     )
     with pytest.raises(ValueError, match="prefill_result"):
         await _collect(engine, {"token_ids": [1]})
+
+
+# ---------------------------------------------------------------------------
+# Multimodal / Encode mode tests (DIS-2111)
+# ---------------------------------------------------------------------------
+
+
+async def test_aggregated_receives_multi_modal_data():
+    """Acceptance criterion 1: aggregated engine sees multi_modal_data
+    without error — text-plus-vision inline path."""
+    engine = SampleLLMEngine(
+        max_tokens=2,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+    )
+    chunks = await _collect(
+        engine,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": ["http://example.com/img.png"]},
+        },
+    )
+    assert len(chunks) == 2
+    assert chunks[-1]["finish_reason"] == "length"
+
+
+async def test_encode_mode_emits_one_terminal_chunk():
+    """Acceptance criterion 2: Encode worker emits exactly one terminal
+    chunk with finish_reason='encode', empty token_ids, and encoder_result."""
+    engine = SampleLLMEngine(
+        max_tokens=16,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.ENCODE,
+    )
+    chunks = await _collect(engine, {"token_ids": [1, 2, 3]})
+    assert len(chunks) == 1
+    terminal = chunks[0]
+    assert terminal["finish_reason"] == "encode"
+    assert terminal["token_ids"] == []
+    assert "encoder_result" in terminal
+    handle = terminal["encoder_result"]["handle"]
+    assert handle.startswith("enc_"), f"unexpected handle: {handle!r}"
+    assert terminal["completion_usage"]["completion_tokens"] == 0
+    assert terminal["completion_usage"]["prompt_tokens"] == 3
+
+
+async def test_downstream_validates_encoder_result():
+    """Acceptance criterion 3: aggregated downstream worker validates
+    encoder_result when a request carries multi_modal_data + encoder_result."""
+    engine = SampleLLMEngine(
+        max_tokens=4,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+    )
+    chunks = await _collect(
+        engine,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": ["http://example.com/img.png"]},
+            "encoder_result": {"handle": "enc_2_abc12345"},
+        },
+    )
+    assert len(chunks) == 4
+    assert chunks[-1]["finish_reason"] == "length"
+
+
+async def test_downstream_rejects_malformed_encoder_result():
+    """Negative: downstream engine raises when encoder_result.handle has
+    an unexpected format, catching misconfigured encoder pipelines early."""
+    engine = SampleLLMEngine(
+        max_tokens=4,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+    )
+    with pytest.raises(ValueError, match="encoder_result.handle"):
+        await _collect(
+            engine,
+            {
+                "token_ids": [1],
+                "multi_modal_data": {"image_url": ["http://example.com/img.png"]},
+                "encoder_result": {"handle": "bad_handle"},
+            },
+        )
+
+
+async def test_encode_mode_prompt_length_in_usage():
+    """Encode terminal completion_usage reflects prompt length, not
+    generated tokens — downstream usage accounting must not double-count."""
+    engine = SampleLLMEngine(
+        max_tokens=16,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.ENCODE,
+    )
+    chunks = await _collect(engine, {"token_ids": list(range(7))})
+    usage = chunks[0]["completion_usage"]
+    assert usage["prompt_tokens"] == 7
+    assert usage["completion_tokens"] == 0
+    assert usage["total_tokens"] == 7
+
+
+async def test_from_args_propagates_encode_mode():
+    """encode mode is accepted by from_args and propagated to both engine
+    and WorkerConfig — required for the unified Worker to register as
+    WorkerType.Encode."""
+    engine, worker_config = await SampleLLMEngine.from_args(
+        ["--disaggregation-mode", "encode"]
+    )
+    assert engine.disaggregation_mode is DisaggregationMode.ENCODE
+    assert worker_config.disaggregation_mode is DisaggregationMode.ENCODE

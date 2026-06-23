@@ -34,14 +34,11 @@ from .health_check import parse_health_check_payload_cli
 
 logger = logging.getLogger(__name__)
 
-# Map the user-facing `dynamo.common.constants.DisaggregationMode` (which
-# carries 4 modes including ENCODE) to the 3-mode Rust enum. ENCODE is not
-# supported by the unified abstraction yet — multimodal encode workers stay
-# on the legacy main.py path until they migrate.
 _DISAGG_MODE_TO_RUST = {
     DisaggregationMode.AGGREGATED: _backend.DisaggregationMode.Aggregated,
     DisaggregationMode.PREFILL: _backend.DisaggregationMode.Prefill,
     DisaggregationMode.DECODE: _backend.DisaggregationMode.Decode,
+    DisaggregationMode.ENCODE: _backend.DisaggregationMode.Encode,
 }
 
 

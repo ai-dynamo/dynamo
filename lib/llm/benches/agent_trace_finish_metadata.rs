@@ -115,6 +115,7 @@ fn backend_outputs(count: usize) -> Vec<BackendOutput> {
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            encoder_result: None,
         })
         .collect()
 }

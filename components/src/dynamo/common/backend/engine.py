@@ -40,6 +40,16 @@ class GenerateRequest(TypedDict, total=False):
     Disaggregated-serving keys (``prefill_result``, ``bootstrap_info``)
     are set by the frontend's PrefillRouter on decode requests; engines
     read them via ``dynamo.common.backend.disagg`` helpers.
+
+    Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
+    ``extra_args``) are preserved as-is from the Rust preprocessor.
+    Backend-common does not interpret them; each engine reads what it
+    needs and ignores the rest.
+
+    ``encoder_result`` carries opaque encoder output from an upstream
+    Encode worker to the downstream Prefill/Aggregated worker in E/PD
+    and E/P/D topologies.  Absent on non-multimodal requests and on
+    requests that arrive at the Encode worker itself.
     """
 
     token_ids: Required[list[int]]
@@ -48,6 +58,10 @@ class GenerateRequest(TypedDict, total=False):
     output_options: dict[str, Any]
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
+    multi_modal_data: dict[str, Any]
+    mm_processor_kwargs: dict[str, Any]
+    extra_args: dict[str, Any]
+    encoder_result: Any
 
 
 class GenerateChunk(TypedDict, total=False):
@@ -58,6 +72,11 @@ class GenerateChunk(TypedDict, total=False):
     additionally include ``finish_reason`` and ``completion_usage``.
     Prefill terminals carry ``disaggregated_params`` for the
     PrefillRouter to forward to the decode peer.
+
+    Encode-mode terminal: ``token_ids=[]``, ``finish_reason="encode"``,
+    and ``encoder_result`` carrying the opaque encoder payload.  The
+    ``completion_usage`` on the terminal reflects the prompt length only
+    (no generated tokens).
     """
 
     token_ids: Required[list[int]]
@@ -65,6 +84,9 @@ class GenerateChunk(TypedDict, total=False):
     finish_reason: str
     completion_usage: dict[str, int]
     disaggregated_params: dict[str, Any]
+    # Encode-mode terminal only — opaque encoder payload forwarded to
+    # the downstream Prefill/Aggregated worker.
+    encoder_result: Any
 
 
 @dataclass
@@ -114,7 +136,22 @@ class LLMEngine(ABC):
         3. generate()      -- called for each request (concurrent calls expected)
         4. abort()         -- called when a request is cancelled (optional, default no-op)
         5. cleanup()       -- called once on shutdown, release all resources
+
+    Encode / multimodal dispatch:
+        Engines that support ``DisaggregationMode.ENCODE`` call
+        ``_run_encoder()`` from their ``generate()`` and yield the standard
+        encode terminal chunk inline.  ``self.disaggregation_mode`` is set
+        in ``__init__``; the property/setter on this class stores it.
     """
+
+    @property
+    def disaggregation_mode(self) -> DisaggregationMode:
+        """Worker disaggregation role.  Set from ``__init__`` via assignment."""
+        return getattr(self, "_disaggregation_mode", DisaggregationMode.AGGREGATED)
+
+    @disaggregation_mode.setter
+    def disaggregation_mode(self, value: DisaggregationMode) -> None:
+        self._disaggregation_mode = value
 
     @classmethod
     @abstractmethod
@@ -159,11 +196,37 @@ class LLMEngine(ABC):
         Called concurrently for multiple in-flight requests.
 
         Each chunk: ``{"token_ids": [...], "index": 0}``
-        Final chunk must include: ``{"token_ids": [...], "index": 0,
-        "finish_reason": "...", "completion_usage": {...}}``
+        Final chunk must include ``finish_reason`` and ``completion_usage``.
+
+        For encode mode, call ``_run_encoder()`` and yield the terminal chunk::
+
+            if self.disaggregation_mode == DisaggregationMode.ENCODE:
+                result = await self._run_encoder(request, context)
+                prompt_len = len(request.get("token_ids", []))
+                yield GenerateChunk(
+                    token_ids=[], index=0, finish_reason="encode",
+                    completion_usage={"prompt_tokens": prompt_len,
+                                      "completion_tokens": 0,
+                                      "total_tokens": prompt_len},
+                    encoder_result=result,
+                )
+                return
         """
         ...
-        yield  # type: ignore[misc]
+
+    async def _run_encoder(self, request: GenerateRequest, context: Context) -> Any:
+        """Run the encoder forward pass; return the opaque encoder result.
+
+        Override in engines that support ``DisaggregationMode.ENCODE``.
+        The returned value is placed verbatim in ``encoder_result`` on the
+        terminal chunk yielded by ``generate()``.
+
+        Raises ``NotImplementedError`` by default.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support encode mode; "
+            "override _run_encoder() for DisaggregationMode.ENCODE"
+        )
 
     async def abort(self, context: Context) -> None:
         """Abort an in-flight request (optional, default no-op).

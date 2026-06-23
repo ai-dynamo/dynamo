@@ -86,6 +86,17 @@ pub enum ConformanceFailure {
         chunked: usize,
         reported: u32,
     },
+    /// Encode conformance: stream yielded more than one chunk, or the
+    /// single chunk's `finish_reason` was not `FinishReason::Encode`.
+    EncodeTerminalExpected,
+    /// Encode conformance: encode terminal's `token_ids` was non-empty.
+    /// Encode workers must emit no generated tokens.
+    EncodeTokensNotEmpty {
+        count: usize,
+    },
+    /// Encode conformance: encode terminal's `encoder_result` field was
+    /// `None`. Encode workers must always populate this field.
+    EncoderResultMissing,
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -137,6 +148,21 @@ impl std::fmt::Display for ConformanceFailure {
                 "engine emitted {chunked} tokens across the stream but reported \
                  completion_usage.completion_tokens = {reported} on the terminal \
                  (engine bookkeeping diverges from streamed output)"
+            ),
+            EncodeTerminalExpected => write!(
+                f,
+                "encode generate() must yield exactly one chunk with \
+                 finish_reason = FinishReason::Encode"
+            ),
+            EncodeTokensNotEmpty { count } => write!(
+                f,
+                "encode terminal chunk must have empty token_ids; got {count} tokens \
+                 (encode workers produce no generated tokens)"
+            ),
+            EncoderResultMissing => write!(
+                f,
+                "encode terminal chunk must set encoder_result to a non-None value; \
+                 downstream workers depend on this payload"
             ),
         }
     }
@@ -204,6 +230,88 @@ where
         .await
         .map_err(|e| CleanupWithoutStartFailed(e.to_string()))?;
 
+    Ok(())
+}
+
+/// Run the encode conformance suite against an engine in `DisaggregationMode::Encode`.
+///
+/// Tests:
+/// 1. `start()` returns a non-empty model.
+/// 2. A single `generate()` yields exactly **one** terminal chunk with
+///    `finish_reason = FinishReason::Encode`, empty `token_ids`, and a
+///    non-`None` `encoder_result`.
+/// 3. `cleanup()` succeeds and is idempotent.
+/// 4. `cleanup()` is safe on a never-started engine.
+pub async fn run_encode_conformance<E, F>(mut factory: F) -> Result<(), ConformanceFailure>
+where
+    E: LLMEngine,
+    F: FnMut() -> E,
+{
+    let engine = factory();
+
+    let config = engine
+        .start(0)
+        .await
+        .map_err(|e| StartFailed(e.to_string()))?;
+    if config.model.is_empty() {
+        return Err(EmptyModelInConfig);
+    }
+
+    check_encode_generate(&engine, &config.model).await?;
+
+    engine
+        .cleanup()
+        .await
+        .map_err(|e| CleanupFailed(e.to_string()))?;
+    engine
+        .cleanup()
+        .await
+        .map_err(|e| SecondCleanupFailed(e.to_string()))?;
+
+    let fresh = factory();
+    fresh
+        .cleanup()
+        .await
+        .map_err(|e| CleanupWithoutStartFailed(e.to_string()))?;
+
+    Ok(())
+}
+
+async fn check_encode_generate<E: LLMEngine>(
+    engine: &E,
+    model: &str,
+) -> Result<(), ConformanceFailure> {
+    use dynamo_llm::protocols::common::FinishReason;
+
+    let ctx = mock_context();
+    let stream = engine
+        .generate(request(model), GenerateContext::new(ctx, None))
+        .await
+        .map_err(|e| GenerateFailed(e.to_string()))?;
+    let items: Vec<_> = stream.collect().await;
+
+    if items.is_empty() {
+        return Err(NoChunksYielded);
+    }
+    // Encode workers must yield exactly one terminal chunk.
+    if items.len() != 1 {
+        return Err(EncodeTerminalExpected);
+    }
+    let chunk = match &items[0] {
+        Ok(c) => c,
+        Err(e) => return Err(StreamYieldedError(e.to_string())),
+    };
+    if !matches!(chunk.finish_reason, Some(FinishReason::Encode)) {
+        return Err(EncodeTerminalExpected);
+    }
+    if !chunk.token_ids.is_empty() {
+        return Err(EncodeTokensNotEmpty {
+            count: chunk.token_ids.len(),
+        });
+    }
+    if chunk.encoder_result.is_none() {
+        return Err(EncoderResultMissing);
+    }
     Ok(())
 }
 

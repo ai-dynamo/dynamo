@@ -425,6 +425,7 @@ mod tests {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            encoder_result: None,
         })
     }
 

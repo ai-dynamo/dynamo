@@ -307,16 +307,16 @@ def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
 
 
 @pytest.mark.unified
-def test_python_worker_config_rejects_unsupported_mode_when_running():
-    """ENCODE has no unified-path implementation yet; the shim must raise
-    NotImplementedError when it tries to translate the mode for the Rust
-    binding instead of silently treating ENCODE as aggregated."""
+def test_python_worker_config_translates_encode_mode():
+    """ENCODE is a supported unified-path mode; the shim must translate it
+    to the Rust binding without raising."""
+    import dynamo._core.backend as _backend
     from dynamo.common.backend.worker import WorkerConfig, _to_rust_disaggregation_mode
     from dynamo.common.constants import DisaggregationMode
 
     cfg = WorkerConfig(namespace="ns", disaggregation_mode=DisaggregationMode.ENCODE)
-    with pytest.raises(NotImplementedError):
-        _to_rust_disaggregation_mode(cfg.disaggregation_mode)
+    rust_mode = _to_rust_disaggregation_mode(cfg.disaggregation_mode)
+    assert rust_mode is _backend.DisaggregationMode.Encode
 
 
 def test_worker_constructor_requires_engine_config_loop():

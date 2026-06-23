@@ -489,7 +489,7 @@ Request handling:
 |---------|-------------|
 | Logprob response wire | Legacy handlers extract logprobs onto response chunks (`vllm/handlers.py:_extract_logprobs`, `sglang/.../decode_handler.py:_extract_logprobs`, `trtllm/.../handler_base.py:_extract_logprobs`); the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. vLLM's `build_sampling_params` still passes `output_options.logprobs` to the engine on the unified path, so the engine computes them, but the values are dropped before reaching the chunk. SGLang and TRT-LLM unified `generate()` do not read `output_options.logprobs` at all. |
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
-| Multimodal | Images / video / embeddings, NIXL embedding transfer, encode workers. `worker.py:_to_rust_disaggregation_mode` rejects the `ENCODE` role. |
+| Multimodal | Images / video / embeddings, NIXL embedding transfer. `DisaggregationMode.ENCODE` is wired end-to-end (Python → Rust → `WorkerType::Encode`); the remaining gap is frontend EncodeRouter support for injecting `encoder_result` onto the downstream request. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
