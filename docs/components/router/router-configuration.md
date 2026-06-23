@@ -36,7 +36,7 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 ## Session Affinity
 
 Send `X-Dynamo-Session-ID` to keep related requests on one worker. Native coding
-harness session headers continue to provide trajectory identity and do not enable
+harness session headers continue to provide session identity and do not enable
 hard affinity.
 
 The first successfully dispatched request binds the session ID to its selected
@@ -61,9 +61,8 @@ bindings. If no prefill router is active, only the decode or aggregated binding 
 created.
 
 Session affinity does not create a backend session or send lifecycle RPCs. There is
-no explicit unbind; idle expiry removes only router-local state. Use
-`X-Dynamo-Trajectory-ID` separately for agent identity, tracing, KV hints, and
-SGLang radix tagging.
+no explicit unbind; idle expiry removes only router-local state. The same session
+ID is available to tracing and other explicitly configured consumers.
 
 ### AIC Prefill Load Model
 

@@ -58,6 +58,16 @@ fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse>
     ResponseStream::new(Box::pin(stream::empty()), Arc::new(controller))
 }
 
+async fn assert_binding_expires_after_refreshed_ttl(coordinator: &AffinityCoordinator) {
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(target(7, Some(0)))
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
 fn request_with_routing(routing: RoutingHints) -> PreprocessedRequest {
     PreprocessedRequest::builder()
         .model("test".to_string())
@@ -163,8 +173,12 @@ async fn session_affinity_initializer_cancellation_wakes_waiter() {
     coordinator.wait_for_initializing_waiter().await;
     drop(first);
 
+    let next = waiter.await.unwrap().unwrap();
+    assert!(matches!(&next, AffinityAcquire::Initialize(_)));
+    drop(next);
+    assert_eq!(coordinator.entry_count(), 0);
     assert!(matches!(
-        waiter.await.unwrap().unwrap(),
+        coordinator.acquire(&session_id(), None).await.unwrap(),
         AffinityAcquire::Initialize(_)
     ));
 }
@@ -254,27 +268,6 @@ async fn session_affinity_failed_bound_operation_invalidates_binding() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_active_leases_prevent_expiry() {
-    let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
-    else {
-        panic!("first request must initialize");
-    };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
-
-    tokio::time::advance(Duration::from_secs(20)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        coordinator.query_target(&session_id(), None).unwrap(),
-        Some(target(7, Some(0)))
-    );
-
-    drop(lease);
-    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
-}
-
-#[tokio::test(start_paused = true)]
 async fn session_affinity_stream_drop_refreshes_idle_ttl() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
@@ -288,17 +281,11 @@ async fn session_affinity_stream_drop_refreshes_idle_ttl() {
     assert!(stream.next().await.is_some());
     drop(stream);
 
-    tokio::time::advance(Duration::from_secs(9)).await;
-    assert_eq!(
-        coordinator.query_target(&session_id(), None).unwrap(),
-        Some(target(7, Some(0)))
-    );
-    tokio::time::advance(Duration::from_secs(2)).await;
-    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    assert_binding_expires_after_refreshed_ttl(&coordinator).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_stream_without_output_invalidates_binding() {
+async fn session_affinity_empty_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
@@ -306,14 +293,15 @@ async fn session_affinity_stream_without_output_invalidates_binding() {
         panic!("first request must initialize");
     };
     let lease = initializer.commit(target(7, Some(0))).unwrap();
-    drop(lease.into_stream(response_stream(0)));
+    tokio::time::advance(Duration::from_secs(9)).await;
+    let mut stream = lease.into_stream(response_stream(0));
+    assert!(stream.next().await.is_none());
 
-    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
-    assert_eq!(coordinator.entry_count(), 0);
+    assert_binding_expires_after_refreshed_ttl(&coordinator).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_existing_binding_survives_cancelled_stream_without_ttl_refresh() {
+async fn session_affinity_cancelled_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
@@ -331,35 +319,27 @@ async fn session_affinity_existing_binding_survives_cancelled_stream_without_ttl
         panic!("continuation must acquire the existing binding");
     };
     assert_eq!(bound_target, target(7, Some(0)));
-    drop(lease.into_stream(cancelled_response_stream()));
+    let mut stream = lease.into_stream(cancelled_response_stream());
+    assert!(stream.next().await.is_none());
 
-    assert_eq!(
-        coordinator.query_target(&session_id(), None).unwrap(),
-        Some(target(7, Some(0)))
-    );
-    tokio::time::advance(Duration::from_secs(2)).await;
-    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    assert_binding_expires_after_refreshed_ttl(&coordinator).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_new_binding_rolls_back_cancelled_stream() {
+async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl() {
     let coordinator = coordinator();
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
-    let stream = operation
+    let mut stream = operation
         .into_stream(target(7, Some(0)), cancelled_response_stream())
         .unwrap();
-    drop(stream);
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert!(stream.next().await.is_none());
 
-    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
-    assert_eq!(coordinator.entry_count(), 0);
-    assert!(matches!(
-        coordinator.acquire(&session_id(), None).await.unwrap(),
-        AffinityAcquire::Initialize(_)
-    ));
+    assert_binding_expires_after_refreshed_ttl(&coordinator).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_error_stream_invalidates_binding() {
+async fn session_affinity_error_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
@@ -367,11 +347,12 @@ async fn session_affinity_error_stream_invalidates_binding() {
         panic!("first request must initialize");
     };
     let lease = initializer.commit(target(7, Some(0))).unwrap();
+    tokio::time::advance(Duration::from_secs(9)).await;
     let mut stream = lease.into_stream(error_response_stream());
     assert!(stream.next().await.unwrap().is_err());
+    assert!(stream.next().await.is_none());
 
-    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
-    assert_eq!(coordinator.entry_count(), 0);
+    assert_binding_expires_after_refreshed_ttl(&coordinator).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -387,24 +368,11 @@ async fn session_affinity_stream_eof_refreshes_idle_ttl() {
     let mut stream = lease.into_stream(response_stream(1));
     while stream.next().await.is_some() {}
 
-    tokio::time::advance(Duration::from_secs(9)).await;
-    assert!(
-        coordinator
-            .query_target(&session_id(), None)
-            .unwrap()
-            .is_some()
-    );
-    tokio::time::advance(Duration::from_secs(2)).await;
-    assert!(
-        coordinator
-            .query_target(&session_id(), None)
-            .unwrap()
-            .is_none()
-    );
+    assert_binding_expires_after_refreshed_ttl(&coordinator).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_failed_bound_attempt_does_not_refresh_ttl() {
+async fn session_affinity_bound_lease_drop_refreshes_idle_ttl() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =
         coordinator.acquire(&session_id(), None).await.unwrap()
@@ -420,13 +388,14 @@ async fn session_affinity_failed_bound_attempt_does_not_refresh_ttl() {
         panic!("continuation must acquire the binding");
     };
     tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(target(7, Some(0)))
+    );
     drop(lease);
 
-    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
-    assert!(matches!(
-        coordinator.acquire(&session_id(), None).await.unwrap(),
-        AffinityAcquire::Initialize(_)
-    ));
+    assert_binding_expires_after_refreshed_ttl(&coordinator).await;
 }
 
 #[tokio::test(start_paused = true)]

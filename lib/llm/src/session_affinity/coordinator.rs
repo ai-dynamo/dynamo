@@ -16,7 +16,6 @@ use dynamo_runtime::{
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
     error::{DynamoError, ErrorType},
     pipeline::{Error, ManyOut, ResponseStream},
-    protocols::maybe_error::MaybeError,
 };
 use futures::Stream;
 use tokio::{sync::Notify, time::Instant};
@@ -248,7 +247,6 @@ impl AffinityCoordinator {
                             coordinator: Arc::downgrade(&self.inner),
                             session_id,
                             revision: *revision,
-                            created_binding: false,
                             active: true,
                         };
                         return Ok(AffinityAcquire::Bound {
@@ -464,7 +462,6 @@ impl AffinityInitialization {
             coordinator: Arc::downgrade(&inner),
             session_id: self.session_id.clone(),
             revision: self.revision,
-            created_binding: true,
             active: true,
         })
     }
@@ -495,7 +492,6 @@ pub struct AffinityLease {
     coordinator: Weak<AffinityCoordinatorInner>,
     session_id: String,
     revision: u64,
-    created_binding: bool,
     active: bool,
 }
 
@@ -506,14 +502,12 @@ impl AffinityLease {
             Box::pin(AffinityTrackedStream {
                 stream,
                 lease: Some(self),
-                saw_success: false,
-                context: context.clone(),
             }),
             context,
         )
     }
 
-    fn release(&mut self, refresh_ttl: bool) {
+    fn release(&mut self) {
         if !self.active {
             return;
         }
@@ -537,9 +531,7 @@ impl AffinityLease {
             return;
         }
         *active_leases -= 1;
-        if refresh_ttl {
-            *idle_deadline = Instant::now() + inner.ttl;
-        }
+        *idle_deadline = Instant::now() + inner.ttl;
     }
 
     fn invalidate(&mut self) {
@@ -560,44 +552,17 @@ impl AffinityLease {
             inner.entry_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
-
-    fn cancel_before_output(&mut self) {
-        if self.created_binding {
-            self.invalidate();
-        } else {
-            self.release(false);
-        }
-    }
 }
 
 impl Drop for AffinityLease {
     fn drop(&mut self) {
-        self.release(false);
+        self.release();
     }
 }
 
 struct AffinityTrackedStream {
     stream: ManyOut<LlmResponse>,
     lease: Option<AffinityLease>,
-    saw_success: bool,
-    context: Arc<dyn AsyncEngineContext>,
-}
-
-impl AffinityTrackedStream {
-    fn finish(&mut self) {
-        let Some(mut lease) = self.lease.take() else {
-            return;
-        };
-        if self.saw_success {
-            lease.release(true);
-            return;
-        }
-        if self.context.is_stopped() || self.context.is_killed() {
-            lease.cancel_before_output();
-            return;
-        }
-        lease.invalidate();
-    }
 }
 
 impl Stream for AffinityTrackedStream {
@@ -606,27 +571,12 @@ impl Stream for AffinityTrackedStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(None) => {
-                self.finish();
+                drop(self.lease.take());
                 Poll::Ready(None)
             }
-            Poll::Ready(Some(item)) => {
-                if item.is_err() {
-                    if let Some(mut lease) = self.lease.take() {
-                        lease.invalidate();
-                    }
-                } else {
-                    self.saw_success = true;
-                }
-                Poll::Ready(Some(item))
-            }
+            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
             poll => poll,
         }
-    }
-}
-
-impl Drop for AffinityTrackedStream {
-    fn drop(&mut self) {
-        self.finish();
     }
 }
 
