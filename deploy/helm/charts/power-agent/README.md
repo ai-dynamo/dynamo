@@ -88,11 +88,14 @@ Step 2: install in dev mode.
 ```bash
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace $NAMESPACE \
-  --set image.tag=v1.0.0 \
   --set daemonset.enabled=false \
   --set dev.enabled=true \
   --set dev.nodeName=<gpu-node-name>
 ```
+
+Dev mode uses `dev.image.*` (defaults to `vllm-runtime:1.0.1`), so the
+production `image.tag` is not required here — set `dev.image.tag` instead if
+you need a different iteration image.
 
 `daemonset.enabled` and `dev.enabled` are mutually exclusive — the
 chart fails to render at `helm template` / `helm install` time if both
@@ -125,7 +128,7 @@ kubectl delete pod power-agent-dev -n $NAMESPACE
 | Key | Meaning | Default |
 |-----|---------|---------|
 | `image.repository` | Power Agent image registry path | `nvcr.io/nvidia/ai-dynamo/power-agent` |
-| `image.tag` | **Required** — pin to a release tag or `sha256:digest` (no default) | `""` |
+| `image.tag` | **Required for DaemonSet mode** — pin to a release tag or `sha256:digest` (no default); ignored in dev mode | `""` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets list | `[]` |
 | `agent.safeDefaultWatts` | Per-SKU fail-closed cap when annotation parsing fails or multi-pod conflicts can't agree (≈70% of TDP) | `500` |
@@ -214,7 +217,7 @@ TGP on GPUs it previously managed but no longer sees.
 script ConfigMap doesn't exist. Run the `kubectl create configmap`
 recipe from the Dev install section above.
 
-**`Error: image.tag is required (pin to a release tag or sha256:digest; :latest is not supported)`** at install time: pass `--set image.tag=<pinned>`. The chart deliberately rejects unset / `:latest` tags to keep deployments reproducible.
+**`Error: image.tag is required when daemonset.enabled (pin to a release tag or sha256:digest; :latest is not supported)`** at install time: pass `--set image.tag=<pinned>`. The chart deliberately rejects unset / `:latest` tags to keep DaemonSet deployments reproducible. (Dev mode validates `dev.image.tag` instead.)
 
 **`Error: daemonset.enabled and dev.enabled are mutually exclusive`** at install time: pick one mode. The chart cannot render both a DaemonSet and a single-Pod dev harness from one release.
 

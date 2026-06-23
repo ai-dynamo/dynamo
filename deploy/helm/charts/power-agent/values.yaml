@@ -7,9 +7,11 @@
 
 image:
   repository: nvcr.io/nvidia/ai-dynamo/power-agent
-  # REQUIRED. Pin to a release tag or sha256 digest. No default to avoid the
-  # `:latest` reproducibility footgun CodeRabbit flagged on PR #9682.
-  # `helm install` will fail fast at template time if this is empty.
+  # REQUIRED for DaemonSet mode (daemonset.enabled, the default). Pin to a
+  # release tag or sha256 digest. No default to avoid the `:latest`
+  # reproducibility footgun CodeRabbit flagged on PR #9682. `helm install`
+  # fails fast at template time if this is empty while daemonset.enabled.
+  # Dev-pod mode (dev.enabled) ignores this and uses dev.image.* instead.
   tag: ""
   pullPolicy: IfNotPresent
 

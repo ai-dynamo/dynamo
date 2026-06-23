@@ -267,12 +267,12 @@ jobs:
           helm lint "$CHART" --set image.tag=ci-test
           # Production DaemonSet render (default daemonset.enabled=true).
           helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
-          # Dev-pod render (mutually exclusive with the DaemonSet; pinned node).
+          # Dev-pod render: uses dev.image.* and must NOT require the production
+          # image.tag (regression guard for the daemonset-gated validation).
           helm template power-agent "$CHART" \
             --set daemonset.enabled=false \
             --set dev.enabled=true \
-            --set dev.nodeName=ci-node \
-            --set image.tag=ci-test >/dev/null
+            --set dev.nodeName=ci-node >/dev/null
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
