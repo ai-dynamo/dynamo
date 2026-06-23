@@ -1346,9 +1346,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Stop accepting new generate requests and quiesce in-flight ones.
 
         Lighter than ``sleep``: keeps the model resident in GPU memory but
-        prevents new requests from racing weight mutations. Used by the
-        trainer-driven MX refit cycle:
-        ``pause → update_weights_via_mx → flush_cache → resume``.
+        prevents new requests from racing weight mutations. This is available
+        for explicit admin flows; NeMo-RL's MX dispatcher currently calls
+        ``update_weights_via_mx`` and ``flush_cache`` directly.
         """
         try:
             await self.engine_client.pause_generation()
@@ -1360,9 +1360,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def resume_generation(self, body: dict | None = None) -> dict:
         """Resume accepting new generate requests after a pause.
 
-        Counterpart to :meth:`pause_generation`. The trainer's refit cycle
-        calls this in a ``finally`` block so the worker re-enters service
-        even if the refit itself errored.
+        Counterpart to :meth:`pause_generation`.
         """
         try:
             await self.engine_client.resume_generation()
@@ -1914,28 +1912,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "workers_ok": sum(1 for r in (results or []) if r),
             "workers_total": len(results or []),
         }
-
-    async def prepare_refit_info(self, request=None):
-        """Forward per-tensor (shape, dtype) info to every worker.
-
-        Called once by the trainer driver before the first refit cycle. The
-        trainer sends ``{tensor_name: [shape_list, dtype_string]}``; we hand
-        it to ``MxRefitWorkerExtension.prepare_refit_info`` on each worker.
-        """
-        if request is None:
-            yield {"status": "error", "message": "state_dict_info dict required"}
-            return
-        state_dict_info = request.get("state_dict_info") or request
-        try:
-            await self.engine_client.collective_rpc(
-                "prepare_refit_info",
-                kwargs={"state_dict_info": state_dict_info},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("[mx] prepare_refit_info collective_rpc failed: %s", exc)
-            yield {"status": "error", "message": str(exc)}
-            return
-        yield {"status": "ok"}
 
     def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
         """Add a temporary directory to be cleaned up later."""
