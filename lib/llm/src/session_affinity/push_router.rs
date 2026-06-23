@@ -4,7 +4,8 @@
 use std::time::Duration;
 
 use dynamo_runtime::pipeline::{
-    AsyncEngine, Error, ManyOut, PushRouter, SingleIn, async_trait as pipeline_async_trait,
+    AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
+    SingleIn, async_trait as pipeline_async_trait,
 };
 
 use super::{
@@ -75,6 +76,34 @@ impl SessionAffinityPushRouter {
         self.inner.peek_next_worker()
     }
 
+    async fn acquire_routable(
+        &self,
+        session_id: &crate::protocols::common::extensions::SessionAffinityId,
+        explicit: Option<AffinityTarget>,
+        request_context: &dyn AsyncEngineContext,
+    ) -> Result<super::AffinityAcquire, Error> {
+        let operation = self
+            .affinity
+            .acquire_with_context(session_id, explicit, request_context)
+            .await?;
+        let Some(target) = operation.target() else {
+            return Ok(operation);
+        };
+        if self
+            .inner
+            .client
+            .instance_ids_avail()
+            .contains(&target.worker_id)
+        {
+            return Ok(operation);
+        }
+
+        operation.invalidate();
+        self.affinity
+            .acquire_with_context(session_id, explicit, request_context)
+            .await
+    }
+
     pub async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
@@ -136,10 +165,13 @@ impl SessionAffinityPushRouter {
                 .await;
         }
 
-        let operation = self.affinity.acquire(&session_id, explicit).await?;
+        let request_context = request.context();
+        let operation = self
+            .acquire_routable(&session_id, explicit, request_context.as_ref())
+            .await?;
         let selected = operation.target().or(explicit);
         let rank = selected.and_then(|target| target.dp_rank);
-        let ((metadata, target), stream) = self
+        let dispatch = self
             .inner
             .select_and_dispatch_exact(
                 request,
@@ -153,7 +185,14 @@ impl SessionAffinityPushRouter {
                     Ok((prepare(request, worker_id, rank)?, target))
                 },
             )
-            .await?;
+            .await;
+        let ((metadata, target), stream) = match dispatch {
+            Ok(result) => result,
+            Err(error) => {
+                operation.invalidate();
+                return Err(error);
+            }
+        };
         Ok((metadata, operation.into_stream(target, stream)?))
     }
 }
@@ -211,10 +250,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
             return Ok(stream);
         }
 
-        let operation = self.affinity.acquire(&session_id, explicit).await?;
+        let request_context = request.context();
+        let operation = self
+            .acquire_routable(&session_id, explicit, request_context.as_ref())
+            .await?;
         let selected = operation.target().or(explicit);
         let rank = selected.and_then(|target| target.dp_rank);
-        let (target, stream) = self
+        let dispatch = self
             .inner
             .select_and_dispatch_exact(
                 request,
@@ -231,7 +273,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
                     Ok(target)
                 },
             )
-            .await?;
+            .await;
+        let (target, stream) = match dispatch {
+            Ok(result) => result,
+            Err(error) => {
+                operation.invalidate();
+                return Err(error);
+            }
+        };
         operation.into_stream(target, stream)
     }
 }
@@ -417,7 +466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_affinity_unavailable_target_fails_without_rebinding() {
+    async fn session_affinity_unavailable_target_is_invalidated() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -458,10 +507,7 @@ mod tests {
         );
         assert_eq!(
             router.affinity.query_target(&session_id, None).unwrap(),
-            Some(AffinityTarget {
-                worker_id: 99,
-                dp_rank: None,
-            })
+            None
         );
 
         runtime.shutdown();

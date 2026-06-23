@@ -9,14 +9,11 @@ NVIDIA Dynamo optimizes agent workloads with lightweight headers and request ext
 
 | Layer | Signal | Optimization |
 |-------|--------|--------------|
-| Frontend API | Session and trajectory headers plus `nvext` request extensions | Normalize affinity, agent identity, and serving intent across APIs. |
-| Router | Session affinity, priority, expected output length, and cache-overlap signals | Pin sessions, place other requests for KV reuse, and order queued work. |
-| KV cache management | Priority and trajectory metadata forwarded to the backend runtime | Influence engine scheduling, cache eviction, and trajectory-aware radix tagging where the backend supports it. |
+| Frontend API | Trajectory headers and `nvext` request extensions | Normalize agent identity and serving intent across APIs. |
+| Router | Trajectory identity, priority, expected output length, and cache-overlap signals | Place requests for KV reuse, order queued work, and support agent-aware routing strategies. |
+| KV cache management | Priority and session metadata forwarded to the backend runtime | Influence engine scheduling, cache eviction, and subagent KV isolation where the backend supports it. |
 
-Use `trajectory_id` as one stable identifier for an agent reasoning/tool chain.
-Send `x-dynamo-trajectory-id` explicitly, or use Claude Code's agent ID. Native
-harness session headers remain separate router-affinity identifiers. See
-[Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for the exact contract.
+The common identity concept is `trajectory_id`: one stable ID for one agent reasoning/tool chain. Dynamo maps supported coding-agent headers to `trajectory_id`, and custom harnesses can send `x-dynamo-trajectory-id` directly. See [Trajectory IDs](trajectory-ids.md#trajectory-id-inputs) for the exact contract.
 
 ## Documentation
 

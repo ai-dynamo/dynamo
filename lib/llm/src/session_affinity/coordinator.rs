@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -13,15 +13,19 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_runtime::{
-    engine::AsyncEngineContextProvider,
+    engine::{AsyncEngineContext, AsyncEngineContextProvider},
     error::{DynamoError, ErrorType},
     pipeline::{Error, ManyOut, ResponseStream},
+    protocols::maybe_error::MaybeError,
 };
 use futures::Stream;
 use tokio::{sync::Notify, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::{LlmResponse, MAX_SESSION_AFFINITY_TTL_SECS};
+use super::{
+    LlmResponse, MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
+    MAX_SESSION_AFFINITY_TTL_SECS,
+};
 use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -52,6 +56,9 @@ enum AffinityEntry {
 struct AffinityCoordinatorInner {
     entries: DashMap<String, AffinityEntry>,
     ttl: Duration,
+    max_entries: usize,
+    max_session_id_bytes: usize,
+    entry_count: AtomicUsize,
     next_revision: AtomicU64,
     cancel: CancellationToken,
     #[cfg(test)]
@@ -73,6 +80,18 @@ pub struct AffinityCoordinator {
 
 impl AffinityCoordinator {
     pub fn new(ttl: Duration) -> Result<Self, Error> {
+        Self::new_with_limits(
+            ttl,
+            MAX_SESSION_AFFINITY_ENTRIES,
+            MAX_SESSION_AFFINITY_ID_BYTES,
+        )
+    }
+
+    fn new_with_limits(
+        ttl: Duration,
+        max_entries: usize,
+        max_session_id_bytes: usize,
+    ) -> Result<Self, Error> {
         if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
             .contains(&ttl)
         {
@@ -83,6 +102,9 @@ impl AffinityCoordinator {
         let inner = Arc::new(AffinityCoordinatorInner {
             entries: DashMap::new(),
             ttl,
+            max_entries,
+            max_session_id_bytes,
+            entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
             cancel: CancellationToken::new(),
             #[cfg(test)]
@@ -112,31 +134,57 @@ impl AffinityCoordinator {
                     return;
                 };
                 let now = Instant::now();
+                let mut removed = 0;
                 inner.entries.retain(|_, entry| {
-                    !matches!(
+                    let retain = !matches!(
                         entry,
                         AffinityEntry::Bound {
                             active_leases: 0,
                             idle_deadline,
                             ..
                         } if *idle_deadline <= now
-                    )
+                    );
+                    removed += usize::from(!retain);
+                    retain
                 });
+                inner.entry_count.fetch_sub(removed, Ordering::Relaxed);
             }
         });
     }
 
+    #[cfg(test)]
     pub async fn acquire(
         &self,
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
     ) -> Result<AffinityAcquire, Error> {
+        self.acquire_inner(session_id, requested_target, None).await
+    }
+
+    pub async fn acquire_with_context(
+        &self,
+        session_id: &SessionAffinityId,
+        requested_target: Option<AffinityTarget>,
+        request_context: &dyn AsyncEngineContext,
+    ) -> Result<AffinityAcquire, Error> {
+        self.acquire_inner(session_id, requested_target, Some(request_context))
+            .await
+    }
+
+    async fn acquire_inner(
+        &self,
+        session_id: &SessionAffinityId,
+        requested_target: Option<AffinityTarget>,
+        request_context: Option<&dyn AsyncEngineContext>,
+    ) -> Result<AffinityAcquire, Error> {
+        self.validate_session_id(session_id)?;
         let session_id = session_id.as_str().to_string();
 
         loop {
             let now = Instant::now();
             match self.inner.entries.entry(session_id.clone()) {
                 Entry::Vacant(entry) => {
+                    self.reserve_entry()?;
                     return Ok(AffinityAcquire::Initialize(entry.insert_initializing(
                         &self.inner,
                         session_id,
@@ -151,7 +199,20 @@ impl AffinityCoordinator {
                         tokio::pin!(notified);
                         notified.as_mut().enable();
                         drop(entry);
-                        notified.await;
+                        if let Some(context) = request_context {
+                            tokio::select! {
+                                biased;
+                                _ = context.stopped() => {
+                                    return Err(cancelled(context.id()));
+                                }
+                                _ = context.killed() => {
+                                    return Err(cancelled(context.id()));
+                                }
+                                _ = notified => {}
+                            }
+                        } else {
+                            notified.await;
+                        }
                     }
                     AffinityEntry::Bound {
                         target: _,
@@ -204,6 +265,7 @@ impl AffinityCoordinator {
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
     ) -> Result<Option<AffinityTarget>, Error> {
+        self.validate_session_id(session_id)?;
         let Some(entry) = self.inner.entries.get(session_id.as_str()) else {
             return Ok(None);
         };
@@ -225,7 +287,7 @@ impl AffinityCoordinator {
 
     #[cfg(test)]
     pub(super) fn entry_count(&self) -> usize {
-        self.inner.entries.len()
+        self.inner.entry_count.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -258,6 +320,31 @@ impl AffinityCoordinator {
         };
         assert_eq!(*active_leases, 0);
         *idle_deadline = Instant::now();
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_limits(max_entries: usize, max_session_id_bytes: usize) -> Self {
+        Self::new_with_limits(Duration::from_secs(10), max_entries, max_session_id_bytes).unwrap()
+    }
+
+    fn validate_session_id(&self, session_id: &SessionAffinityId) -> Result<(), Error> {
+        if session_id.as_str().len() > self.inner.max_session_id_bytes {
+            return Err(invalid_argument(format!(
+                "session affinity ID must not exceed {} bytes",
+                self.inner.max_session_id_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn reserve_entry(&self) -> Result<(), Error> {
+        self.inner
+            .entry_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < self.inner.max_entries).then_some(count + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| resource_exhausted("session affinity entry limit reached"))
     }
 }
 
@@ -319,10 +406,20 @@ impl AffinityAcquire {
             Self::Initialize(initialization) => {
                 Ok(initialization.commit(selected_target)?.into_stream(stream))
             }
-            Self::Bound { target, lease } => {
-                validate_bound_target("session", target, Some(selected_target))?;
+            Self::Bound { target, mut lease } => {
+                if let Err(error) = validate_bound_target("session", target, Some(selected_target))
+                {
+                    lease.invalidate();
+                    return Err(error);
+                }
                 Ok(lease.into_stream(stream))
             }
+        }
+    }
+
+    pub fn invalidate(self) {
+        if let Self::Bound { mut lease, .. } = self {
+            lease.invalidate();
         }
     }
 }
@@ -379,12 +476,15 @@ impl Drop for AffinityInitialization {
         let Some(inner) = self.coordinator.upgrade() else {
             return;
         };
-        inner.entries.remove_if(&self.session_id, |_, entry| {
+        let removed = inner.entries.remove_if(&self.session_id, |_, entry| {
             matches!(
                 entry,
                 AffinityEntry::Initializing { revision, .. } if *revision == self.revision
             )
         });
+        if removed.is_some() {
+            inner.entry_count.fetch_sub(1, Ordering::Relaxed);
+        }
         self.notify.notify_waiters();
     }
 }
@@ -403,6 +503,7 @@ impl AffinityLease {
             Box::pin(AffinityTrackedStream {
                 stream,
                 lease: Some(self),
+                saw_success: false,
             }),
             context,
         )
@@ -436,6 +537,25 @@ impl AffinityLease {
             *idle_deadline = Instant::now() + inner.ttl;
         }
     }
+
+    fn invalidate(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        let Some(inner) = self.coordinator.upgrade() else {
+            return;
+        };
+        let removed = inner.entries.remove_if(&self.session_id, |_, entry| {
+            matches!(
+                entry,
+                AffinityEntry::Bound { revision, .. } if *revision == self.revision
+            )
+        });
+        if removed.is_some() {
+            inner.entry_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Drop for AffinityLease {
@@ -447,6 +567,7 @@ impl Drop for AffinityLease {
 struct AffinityTrackedStream {
     stream: ManyOut<LlmResponse>,
     lease: Option<AffinityLease>,
+    saw_success: bool,
 }
 
 impl Stream for AffinityTrackedStream {
@@ -456,9 +577,23 @@ impl Stream for AffinityTrackedStream {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(None) => {
                 if let Some(mut lease) = self.lease.take() {
-                    lease.release(true);
+                    if self.saw_success {
+                        lease.release(true);
+                    } else {
+                        lease.invalidate();
+                    }
                 }
                 Poll::Ready(None)
+            }
+            Poll::Ready(Some(item)) => {
+                if item.is_err() {
+                    if let Some(mut lease) = self.lease.take() {
+                        lease.invalidate();
+                    }
+                } else {
+                    self.saw_success = true;
+                }
+                Poll::Ready(Some(item))
             }
             poll => poll,
         }
@@ -468,7 +603,11 @@ impl Stream for AffinityTrackedStream {
 impl Drop for AffinityTrackedStream {
     fn drop(&mut self) {
         if let Some(mut lease) = self.lease.take() {
-            lease.release(true);
+            if self.saw_success {
+                lease.release(true);
+            } else {
+                lease.invalidate();
+            }
         }
     }
 }
@@ -539,6 +678,24 @@ pub(crate) fn invalid_argument(message: impl Into<String>) -> Error {
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
         .message(message.into())
+        .build()
+        .into()
+}
+
+fn resource_exhausted(message: impl Into<String>) -> Error {
+    DynamoError::builder()
+        .error_type(ErrorType::ResourceExhausted)
+        .message(message.into())
+        .build()
+        .into()
+}
+
+fn cancelled(context_id: &str) -> Error {
+    DynamoError::builder()
+        .error_type(ErrorType::Cancelled)
+        .message(format!(
+            "request {context_id} was cancelled while waiting for session affinity"
+        ))
         .build()
         .into()
 }

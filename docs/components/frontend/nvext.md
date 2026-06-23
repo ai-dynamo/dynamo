@@ -69,11 +69,10 @@ Trajectory identity is header-only. Use the coding-agent headers or Dynamo
 trajectory headers described in [Trajectory IDs](../../agents/trajectory-ids.md);
 `nvext` does not accept trajectory identity fields.
 
-Session affinity is also header-only. Send `X-Dynamo-Session-ID`, or use a supported
-coding harness's native session header. The router binds the first dispatched request
-to its selected worker and routes later requests with the same session ID to that
-worker until the idle timeout expires. Session affinity is independent of trajectory
-identity and is not forwarded to backend workers.
+Session affinity is also header-only. Send `X-Dynamo-Session-ID`. The router binds
+the first dispatched request to its selected worker and routes later requests with
+the same session ID to that worker until the idle timeout expires. Session affinity
+is independent of trajectory identity and is not forwarded to backend workers.
 
 > [!NOTE]
 > Clients that previously used `nvext.session_control` should send

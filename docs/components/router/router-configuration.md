@@ -35,27 +35,24 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 
 ## Session Affinity
 
-Send `X-Dynamo-Session-ID` to keep related requests on one worker. Dynamo also
-recognizes native harness headers in this order after the canonical header:
-`X-Claude-Code-Session-ID`, Codex `Session-ID`, and OpenCode `X-Session-ID`.
-Empty values are skipped. If a request carries more than one value, the first
-non-empty value in that precedence order wins.
+Send `X-Dynamo-Session-ID` to keep related requests on one worker. Native coding
+harness session headers continue to provide trajectory identity and do not enable
+hard affinity.
 
 The first successfully dispatched request binds the session ID to its selected
 worker and, when available, data-parallel rank. Later requests exact-dispatch to
 that target without transport fallback. Concurrent requests can share a binding.
-Active requests prevent expiry, and completion or stream cancellation restarts the
-idle timer.
+Active requests prevent expiry. A successful response restarts the idle timer;
+dispatch failures and error-only streams invalidate the binding.
 
 Set `--router-session-affinity-ttl-secs` or
 `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to configure the idle timeout. The default
 is `300`; the accepted range is `1` through `31536000` seconds. This timeout is
 independent of `--router-ttl-secs` and `--router-predicted-ttl-secs`.
 
-If the bound worker or rank is unavailable, the request fails and the binding stays
-in place until idle expiry. Dynamo does not rebind on discovery loss, overload, or
-constraint mismatch. Router restart clears all bindings. Bindings are not shared
-between frontend replicas.
+If the bound worker disappears, Dynamo invalidates the binding so a subsequent
+selection can bind an available worker. Router restart clears all bindings. Bindings
+are not shared between frontend replicas.
 
 Direct mode still requires the phase-appropriate explicit worker ID on every
 affinity request. The stored binding validates that target but does not supply a

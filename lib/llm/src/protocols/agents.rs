@@ -9,10 +9,40 @@ pub(crate) const HEADER_CLAUDE_CODE_SESSION_ID: &str = "x-claude-code-session-id
 pub(crate) const HEADER_CLAUDE_CODE_AGENT_ID: &str = "x-claude-code-agent-id";
 pub(crate) const HEADER_CODEX_SESSION_ID: &str = "session-id";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
+pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
 pub(crate) const HEADER_DYNAMO_TRAJECTORY_ID: &str = "x-dynamo-trajectory-id";
 pub(crate) const HEADER_DYNAMO_PARENT_TRAJECTORY_ID: &str = "x-dynamo-parent-trajectory-id";
 pub(crate) const HEADER_DYNAMO_TRAJECTORY_FINAL: &str = "x-dynamo-trajectory-final";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AgentHeaderMapping {
+    session_header: &'static str,
+    trajectory_header: Option<&'static str>,
+    parent_session_header: Option<&'static str>,
+    infer_parent_from_session_for_child: bool,
+}
+
+const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
+    AgentHeaderMapping {
+        session_header: HEADER_CLAUDE_CODE_SESSION_ID,
+        trajectory_header: Some(HEADER_CLAUDE_CODE_AGENT_ID),
+        parent_session_header: None,
+        infer_parent_from_session_for_child: true,
+    },
+    AgentHeaderMapping {
+        session_header: HEADER_CODEX_SESSION_ID,
+        trajectory_header: None,
+        parent_session_header: None,
+        infer_parent_from_session_for_child: false,
+    },
+    AgentHeaderMapping {
+        session_header: HEADER_OPENCODE_SESSION_ID,
+        trajectory_header: None,
+        parent_session_header: Some(HEADER_OPENCODE_PARENT_SESSION_ID),
+        infer_parent_from_session_for_child: false,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentContextHeaderValues {
@@ -27,25 +57,42 @@ fn header_value(headers: &HeaderMap, header_name: &str) -> Option<String> {
 }
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
-    let trajectory_id = header_value(headers, HEADER_DYNAMO_TRAJECTORY_ID)
-        .or_else(|| header_value(headers, HEADER_CLAUDE_CODE_AGENT_ID))?;
     let trajectory_final = header_bool(headers, HEADER_DYNAMO_TRAJECTORY_FINAL);
-    Some(AgentContextHeaderValues {
-        trajectory_id,
-        parent_trajectory_id: header_value(headers, HEADER_DYNAMO_PARENT_TRAJECTORY_ID),
-        trajectory_final,
-    })
+    if let Some(trajectory_id) = header_value(headers, HEADER_DYNAMO_TRAJECTORY_ID) {
+        return Some(AgentContextHeaderValues {
+            trajectory_id,
+            parent_trajectory_id: header_value(headers, HEADER_DYNAMO_PARENT_TRAJECTORY_ID),
+            trajectory_final,
+        });
+    }
+
+    for mapping in AGENT_HEADER_MAPPINGS {
+        let Some(session_id) = header_value(headers, mapping.session_header) else {
+            continue;
+        };
+        let trajectory_id = mapping
+            .trajectory_header
+            .and_then(|trajectory_header| header_value(headers, trajectory_header))
+            .unwrap_or_else(|| session_id.clone());
+        let parent_trajectory_id = mapping
+            .parent_session_header
+            .and_then(|parent_header| header_value(headers, parent_header))
+            .or_else(|| {
+                (mapping.infer_parent_from_session_for_child && trajectory_id != session_id)
+                    .then(|| session_id.clone())
+            });
+
+        return Some(AgentContextHeaderValues {
+            trajectory_id,
+            parent_trajectory_id,
+            trajectory_final,
+        });
+    }
+    None
 }
 
 pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
-    [
-        HEADER_DYNAMO_SESSION_ID,
-        HEADER_CLAUDE_CODE_SESSION_ID,
-        HEADER_CODEX_SESSION_ID,
-        HEADER_OPENCODE_SESSION_ID,
-    ]
-    .into_iter()
-    .find_map(|header| header_value(headers, header))
+    header_value(headers, HEADER_DYNAMO_SESSION_ID)
 }
 
 fn header_bool(headers: &HeaderMap, header_name: &str) -> Option<bool> {

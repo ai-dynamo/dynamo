@@ -3,7 +3,12 @@
 
 use std::{sync::Arc, time::Duration};
 
-use dynamo_runtime::pipeline::{Context, ResponseStream, context::Controller};
+use dynamo_runtime::{
+    engine::AsyncEngineContext,
+    error::ErrorType,
+    pipeline::{Context, ResponseStream, context::Controller},
+    protocols::maybe_error::MaybeError,
+};
 use futures::{StreamExt, stream};
 
 use super::{
@@ -36,6 +41,13 @@ fn response_stream(items: usize) -> dynamo_runtime::pipeline::ManyOut<LlmRespons
     let items = (0..items).map(|_| Annotated::from_data(LLMEngineOutput::default()));
     ResponseStream::new(
         Box::pin(stream::iter(items)),
+        Arc::new(Controller::default()),
+    )
+}
+
+fn error_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
+    ResponseStream::new(
+        Box::pin(stream::iter([Annotated::from_error("backend failed")])),
         Arc::new(Controller::default()),
     )
 }
@@ -152,6 +164,36 @@ async fn session_affinity_initializer_cancellation_wakes_waiter() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn session_affinity_wait_stops_when_request_is_cancelled() {
+    let coordinator = coordinator();
+    let first = coordinator.acquire(&session_id(), None).await.unwrap();
+    let AffinityAcquire::Initialize(first) = first else {
+        panic!("first request must initialize");
+    };
+
+    let context = Arc::new(Controller::default());
+    let waiter_context = context.clone();
+    let waiter_coordinator = coordinator.clone();
+    let waiter = tokio::spawn(async move {
+        waiter_coordinator
+            .acquire_with_context(&session_id(), None, waiter_context.as_ref())
+            .await
+    });
+    coordinator.wait_for_initializing_waiter().await;
+    context.stop();
+
+    let Err(error) = waiter.await.unwrap() else {
+        panic!("cancelled waiter must return an error");
+    };
+    assert!(dynamo_runtime::error::match_error_chain(
+        error.as_ref(),
+        &[ErrorType::Cancelled],
+        &[]
+    ));
+    drop(first);
+}
+
+#[tokio::test(start_paused = true)]
 async fn session_affinity_validates_worker_and_rank_contract() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) = coordinator
@@ -181,6 +223,28 @@ async fn session_affinity_validates_worker_and_rank_contract() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_failed_bound_operation_invalidates_binding() {
+    let coordinator = coordinator();
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, Some(0))).unwrap());
+
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    assert_eq!(operation.target(), Some(target(7, Some(0))));
+    operation.invalidate();
+
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    assert_eq!(coordinator.entry_count(), 0);
+    assert!(matches!(
+        coordinator.acquire(&session_id(), None).await.unwrap(),
+        AffinityAcquire::Initialize(_)
+    ));
 }
 
 #[tokio::test(start_paused = true)]
@@ -214,7 +278,9 @@ async fn session_affinity_stream_drop_refreshes_idle_ttl() {
     };
     let lease = initializer.commit(target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    drop(lease.into_stream(response_stream(1)));
+    let mut stream = lease.into_stream(response_stream(1));
+    assert!(stream.next().await.is_some());
+    drop(stream);
 
     tokio::time::advance(Duration::from_secs(9)).await;
     assert_eq!(
@@ -223,6 +289,37 @@ async fn session_affinity_stream_drop_refreshes_idle_ttl() {
     );
     tokio::time::advance(Duration::from_secs(2)).await;
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_stream_without_output_invalidates_binding() {
+    let coordinator = coordinator();
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    drop(lease.into_stream(response_stream(0)));
+
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    assert_eq!(coordinator.entry_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_error_stream_invalidates_binding() {
+    let coordinator = coordinator();
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let mut stream = lease.into_stream(error_response_stream());
+    assert!(stream.next().await.unwrap().is_err());
+
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    assert_eq!(coordinator.entry_count(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -262,12 +359,7 @@ async fn session_affinity_failed_bound_attempt_does_not_refresh_ttl() {
     else {
         panic!("first request must initialize");
     };
-    drop(
-        initializer
-            .commit(target(7, Some(0)))
-            .unwrap()
-            .into_stream(response_stream(0)),
-    );
+    drop(initializer.commit(target(7, Some(0))).unwrap());
 
     tokio::time::advance(Duration::from_secs(9)).await;
     let AffinityAcquire::Bound { lease, .. } =
@@ -348,4 +440,38 @@ fn session_affinity_rejects_invalid_ttl_before_starting_reaper() {
         ));
         assert!(error.to_string().contains("session affinity TTL"));
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_enforces_id_and_entry_limits() {
+    let coordinator = AffinityCoordinator::with_test_limits(1, 8);
+    let oversized = SessionAffinityId::new("123456789");
+    let Err(error) = coordinator.acquire(&oversized, None).await else {
+        panic!("oversized session ID must fail");
+    };
+    assert!(dynamo_runtime::error::match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert_eq!(coordinator.entry_count(), 0);
+
+    let first_id = SessionAffinityId::new("first");
+    let first = coordinator.acquire(&first_id, None).await.unwrap();
+    let second_id = SessionAffinityId::new("second");
+    let Err(error) = coordinator.acquire(&second_id, None).await else {
+        panic!("entry limit must reject a second session");
+    };
+    assert!(dynamo_runtime::error::match_error_chain(
+        error.as_ref(),
+        &[ErrorType::ResourceExhausted],
+        &[]
+    ));
+
+    drop(first);
+    assert_eq!(coordinator.entry_count(), 0);
+    assert!(matches!(
+        coordinator.acquire(&second_id, None).await.unwrap(),
+        AffinityAcquire::Initialize(_)
+    ));
 }

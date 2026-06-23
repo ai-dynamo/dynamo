@@ -129,10 +129,33 @@ impl KvPushRouter {
             ));
         }
 
-        let operation = self.affinity.acquire(&session_id, explicit).await?;
+        let request_context = request.context();
+        let operation = self
+            .affinity
+            .acquire_with_context(&session_id, explicit, request_context.as_ref())
+            .await?;
         let worker = operation.target().and_then(affinity_worker);
-        let selection = self.select_request(request, phase, false, worker).await?;
-        Ok((selection, Some(operation)))
+        match self.select_request(request, phase, false, worker).await {
+            Ok(selection) => Ok((selection, Some(operation))),
+            Err(_) if operation.target().is_some() && explicit.is_none() => {
+                operation.invalidate();
+                let retry = self
+                    .affinity
+                    .acquire_with_context(&session_id, None, request_context.as_ref())
+                    .await?;
+                match self.select_request(request, phase, false, None).await {
+                    Ok(selection) => Ok((selection, Some(retry))),
+                    Err(retry_error) => {
+                        retry.invalidate();
+                        Err(retry_error)
+                    }
+                }
+            }
+            Err(error) => {
+                operation.invalidate();
+                Err(error)
+            }
+        }
     }
 
     async fn track_selection(
@@ -320,16 +343,28 @@ impl KvPushRouter {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let (mut selection, operation) = self
+        let (mut selection, mut operation) = self
             .select_with_affinity(&request, phase, is_query_only)
             .await?;
-        let mut guard = self
+        let mut guard = match self
             .track_selection(&request, &mut selection, is_query_only)
-            .await?;
+            .await
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                if let Some(operation) = operation.take() {
+                    operation.invalidate();
+                }
+                return Err(error);
+            }
+        };
         let metadata = match prepare(&mut request, selection.instance_id, Some(selection.dp_rank)) {
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
+                if let Some(operation) = operation.take() {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };
@@ -338,9 +373,18 @@ impl KvPushRouter {
             dp_rank: Some(selection.dp_rank),
         };
         drop(route_guard);
-        let stream = self
+        let stream = match self
             .dispatch_selection(request, selection, guard, true)
-            .await?;
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                if let Some(operation) = operation.take() {
+                    operation.invalidate();
+                }
+                return Err(error);
+            }
+        };
         let Some(operation) = operation else {
             return Ok((metadata, stream));
         };
@@ -383,7 +427,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let (mut selection, operation) = self
+        let (mut selection, mut operation) = self
             .select_with_affinity(&request, phase, is_query_only)
             .await?;
         if is_query_only {
@@ -431,17 +475,32 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let guard = self
-            .track_selection(&request, &mut selection, false)
-            .await?;
+        let guard = match self.track_selection(&request, &mut selection, false).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                if let Some(operation) = operation.take() {
+                    operation.invalidate();
+                }
+                return Err(error);
+            }
+        };
         drop(route_guard);
         let selected_target = AffinityTarget {
             worker_id: selection.instance_id,
             dp_rank: Some(selection.dp_rank),
         };
-        let stream = self
+        let stream = match self
             .dispatch_selection(request, selection, guard, operation.is_some())
-            .await?;
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                if let Some(operation) = operation.take() {
+                    operation.invalidate();
+                }
+                return Err(error);
+            }
+        };
         match operation {
             Some(operation) => operation.into_stream(selected_target, stream),
             None => Ok(stream),

@@ -283,7 +283,7 @@ fn pinned_worker_hint(
             Some((worker_id, routing.dp_rank))
         }
         RequestPhase::Aggregated => {
-            let worker_id = routing.backend_instance_id?;
+            let worker_id = routing.decode_worker_id.or(routing.backend_instance_id)?;
             Some((worker_id, routing.dp_rank))
         }
     }
@@ -370,16 +370,17 @@ mod tests {
     }
 
     #[test]
-    fn pinned_worker_hint_aggregated_uses_backend_worker() {
+    fn pinned_worker_hint_aggregated_uses_decode_worker_before_backend() {
         let routing = RoutingHints {
             backend_instance_id: Some(9),
+            decode_worker_id: Some(5),
             dp_rank: Some(7),
             ..Default::default()
         };
 
         assert_eq!(
             pinned_worker_hint(RequestPhase::Aggregated, Some(&routing)),
-            Some((9, Some(7)))
+            Some((5, Some(7)))
         );
     }
 

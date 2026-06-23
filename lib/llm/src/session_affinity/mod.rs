@@ -12,6 +12,8 @@ pub use coordinator::{
 pub use push_router::SessionAffinityPushRouter;
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
+pub const MAX_SESSION_AFFINITY_ENTRIES: usize = 65_536;
+pub const MAX_SESSION_AFFINITY_ID_BYTES: usize = 256;
 
 pub type LlmResponse =
     crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>;
