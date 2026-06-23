@@ -69,15 +69,9 @@ Session identity is header-only. Use the coding-agent headers or Dynamo
 session headers described in [Session IDs](../../agents/session-ids.md);
 `nvext` does not accept session identity fields.
 
-Session affinity is also header-only. Send `X-Dynamo-Session-ID`. The router binds
-the first dispatched request to its selected worker and routes later requests with
-the same session ID to that worker until the idle timeout expires. The same header
-also provides session identity to tracing and other explicitly configured consumers.
-
-> [!NOTE]
-> Clients that previously used `nvext.session_control` should send
-> `X-Dynamo-Session-ID` instead. The router does not expose open, close, or explicit
-> unbind actions.
+When a router is configured, it also uses `X-Dynamo-Session-ID` for router-local
+session affinity. See [Configuration and Tuning](../router/router-configuration.md#session-affinity)
+for routing behavior and TTL settings.
 
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../agents/agent-tracing.md).

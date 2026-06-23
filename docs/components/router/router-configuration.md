@@ -42,8 +42,10 @@ hard affinity.
 The first successfully dispatched request binds the session ID to its selected
 worker and, when available, data-parallel rank. Later requests exact-dispatch to
 that target without transport fallback. Concurrent requests can share a binding.
-Active requests prevent expiry. A successful response restarts the idle timer;
-dispatch failures and error-only streams invalidate the binding.
+Active requests prevent expiry. When a request lease ends after EOF, early drop,
+error, or cancellation, the idle timer restarts. A missing bound worker or a
+non-cancellation selection, setup, dispatch, or target-validation failure invalidates
+the binding.
 
 Set `--router-session-affinity-ttl-secs` or
 `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to configure the idle timeout. The default
