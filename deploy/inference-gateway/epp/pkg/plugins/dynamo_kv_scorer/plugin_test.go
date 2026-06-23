@@ -89,3 +89,49 @@ func TestBuildOpenAIRequest_CompletionsTokenPromptUsesPromptIDs(t *testing.T) {
 		t.Fatalf("expected model=test-model, got %v", got)
 	}
 }
+
+func TestBuildOpenAIRequest_CompletionsTextPromptUsesPromptField(t *testing.T) {
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Raw: "hello"},
+			},
+		},
+	}
+
+	body, err := BuildOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
+	}
+
+	if _, ok := body["messages"]; ok {
+		t.Fatalf("did not expect text completions to synthesize messages: %v", body["messages"])
+	}
+	if got := body["prompt"]; got != "hello" {
+		t.Fatalf("expected prompt=hello, got %#v", got)
+	}
+}
+
+func TestBuildOpenAIRequest_CompletionsStringArrayPromptUsesPromptField(t *testing.T) {
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"hello", "world"}},
+			},
+		},
+	}
+
+	body, err := BuildOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
+	}
+
+	if _, ok := body["messages"]; ok {
+		t.Fatalf("did not expect string-array completions to synthesize messages: %v", body["messages"])
+	}
+	if got := body["prompt"]; !reflect.DeepEqual(got, []string{"hello", "world"}) {
+		t.Fatalf("expected prompt string array, got %#v", got)
+	}
+}

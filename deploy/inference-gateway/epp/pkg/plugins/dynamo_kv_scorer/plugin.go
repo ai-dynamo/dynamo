@@ -331,9 +331,14 @@ func addCompletionPrompt(requestBody map[string]any, prompt fwkrh.Prompt) {
 		return
 	}
 
-	requestBody["messages"] = []map[string]any{
-		{"role": "user", "content": prompt.PlainText()},
+	if prompt.Strings != nil {
+		stringsPrompt := make([]string, len(prompt.Strings))
+		copy(stringsPrompt, prompt.Strings)
+		requestBody["prompt"] = stringsPrompt
+		return
 	}
+
+	requestBody["prompt"] = prompt.Raw
 }
 
 // extractNvext returns the caller-supplied nvext object from the PayloadMap,

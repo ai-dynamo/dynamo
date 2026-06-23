@@ -1107,8 +1107,8 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     }
 }
 
-/// Parse a JSON request string, collect completion token-id prompts directly
-/// or apply the chat template and tokenize, then lift router queue priorities
+/// Parse a JSON request string, collect completion prompts directly or apply
+/// the chat template and tokenize, then lift router queue priorities
 /// out of `nvext.agent_hints`.
 ///
 /// Returns `(token_ids, priority_jump, strict_priority, routing_constraints)` on success,
