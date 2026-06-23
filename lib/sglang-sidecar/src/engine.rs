@@ -842,9 +842,13 @@ fn bootstrap_info_to_kv_session(
         },
     );
     fields.insert(
+        // The Dynamo PrefillRouter mints a full u64 room; carry it as a STRING so
+        // the f64 NumberValue precision loss (and i64 saturation on the engine
+        // side) doesn't collapse rooms >= 2^63 to the same value -> room
+        // collisions -> NIXL KVReceiver handshake failures under concurrency.
         "bootstrap_room".to_string(),
         prost_types::Value {
-            kind: Some(prost_types::value::Kind::NumberValue(bi.bootstrap_room as f64)),
+            kind: Some(prost_types::value::Kind::StringValue(bi.bootstrap_room.to_string())),
         },
     );
     pb::KvSessionRef {
