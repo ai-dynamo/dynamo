@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-# empty workspace to exclude from top level workspace
-# excluded due to pyo3 extension module build issues
+# Standalone workspace to exclude from top level workspace.
+# Excluded due to pyo3 extension module build issues. Parent workspace
+# dependencies are not visible here, so duplicate external pins intentionally.
+
+[workspace.dependencies]
+dynamo-protocols = { version = "=2.0.0" }
 
 [package]
 name = "dynamo-py3"
@@ -50,7 +54,7 @@ aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git",
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "1.4.1" }
-dynamo-protocols = { version = "=2.0.0" }
+dynamo-protocols = { workspace = true }
 dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
