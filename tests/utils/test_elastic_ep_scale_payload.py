@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests.utils import payloads as payloads_mod
+from tests.utils.constants import DefaultPort
 from tests.utils.payloads import ElasticEPScalePayload
 
 pytestmark = [
@@ -25,7 +26,9 @@ pytestmark = [
 ]
 
 
-def _make_payload(*, new_dp: int = 4, system_port: int = 8081) -> ElasticEPScalePayload:
+def _make_payload(
+    *, new_dp: int = 4, system_port: int = DefaultPort.SYSTEM1.value
+) -> ElasticEPScalePayload:
     return ElasticEPScalePayload(
         body={
             "model": "m",
@@ -62,14 +65,14 @@ def capture_post(monkeypatch):
 def test_url_triggers_scale_then_returns_chat_url(capture_post):
     """url() POSTs to the control route on the system port, then returns the
     chat-completions URL on the frontend port."""
-    payload = _make_payload(new_dp=4, system_port=8081)
+    payload = _make_payload(new_dp=4, system_port=DefaultPort.SYSTEM1.value)
 
     url = payload.url()
 
     assert len(capture_post) == 1
     assert (
         capture_post[0]["url"]
-        == "http://localhost:8081/engine/control/scale_elastic_ep"
+        == f"http://localhost:{DefaultPort.SYSTEM1.value}/engine/control/scale_elastic_ep"
     )
     assert capture_post[0]["json"] == {"new_data_parallel_size": 4}
     assert url.endswith("/v1/chat/completions")
@@ -87,7 +90,7 @@ def test_scale_runs_once_across_repeats(capture_post):
 
 
 def test_scale_error_status_raises(monkeypatch):
-    """A non-ok scale response surfaces as an assertion, not a silent pass."""
+    """A non-ok scale response surfaces as an error, not a silent pass."""
 
     def fake_post(url: str, json: Any = None, timeout: float = 0) -> Any:
         resp = MagicMock()
@@ -98,5 +101,5 @@ def test_scale_error_status_raises(monkeypatch):
     monkeypatch.setattr(payloads_mod.requests, "post", fake_post)
     payload = _make_payload()
 
-    with pytest.raises(AssertionError, match="scale_elastic_ep failed"):
+    with pytest.raises(RuntimeError, match="scale_elastic_ep failed"):
         payload.url()

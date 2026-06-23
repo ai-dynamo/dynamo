@@ -195,6 +195,11 @@ vllm_configs = {
             # ceiling over model download + engine-core respawn.
             pytest.mark.timeout(1800),
             pytest.mark.model("Qwen/Qwen3-30B-A3B"),
+            # VRAM carve-out (.ai/test-model-size-guardrails.md): the 30B MoE is
+            # required to exercise real expert parallelism, and this runs on the
+            # dedicated gpu_4 nightly tier (large-VRAM, whole-node), not the
+            # 24 GiB bin-packed standard tier. profiled_vram_gib is omitted
+            # pending a profiling run; the test is not bin-packed by --max-vram-gib.
         ],
         # Small MoE that exercises expert parallelism; must match elastic_ep.sh's
         # default so payload model-name injection resolves to the served model.
@@ -639,7 +644,12 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
             pytest.mark.unified,
-            # TODO: profile to get max_vram
+            # Conservative budget from the single-GPU Qwen3-0.6B profile
+            # (aggregated config); TP=2 splits weights across 2 GPUs so per-GPU
+            # peak is <= this. requested_vllm_kv_cache_bytes pins the KV cap for
+            # deterministic, bin-packable runs.
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
             pytest.mark.timeout(300),
         ],
         model="Qwen/Qwen3-0.6B",

@@ -21,6 +21,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"    # build_vllm_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # ---- Tunables (override via env vars) ----
@@ -58,11 +59,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# KV-cache sizing for VRAM-profiled CI runs (empty unless the profiling env var is set).
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+
 print_launch_banner "Launching Elastic EP / ePLB (unified, DP=$DP_SIZE)" "$MODEL" "$HTTP_PORT"
 
 # Elastic EP requires vLLM's Ray DP backend (--data-parallel-backend ray), but
-# the vLLM runtime image does not ship ray. Ensure it is importable.
-python3 -c 'import ray' 2>/dev/null || { echo "ray not found; installing (required for elastic EP)..."; pip install -q ray; }
+# the vLLM runtime image does not ship ray. Ensure it is importable. Pin to the
+# project's declared minimum (pyproject ai-dynamo[vllm]: ray>=2.55.0).
+python3 -c 'import ray' 2>/dev/null || { echo "ray not found; installing (required for elastic EP)..."; pip install -q "ray>=2.55.0"; }
 
 # run ingress
 python -m dynamo.frontend --router-mode kv &
@@ -79,6 +84,7 @@ python3 -m dynamo.vllm.unified_main \
     --enable-eplb \
     --enable-elastic-ep \
     --enforce-eager \
+    $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 echo "All workers starting. (press Ctrl+C to stop)..."
