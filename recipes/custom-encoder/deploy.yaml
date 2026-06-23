@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated Dynamo + vLLM serving with a pluggable in-process CustomEncoder
+# (ai-dynamo/dynamo#10832). A SINGLE aggregated worker loads a CustomEncoder
+# subclass in-process via --custom-encoder-class; there is NO separate encode
+# worker and NO NIXL transfer. For each multimodal request the worker calls
+# encoder.encode(image_urls) and assembles a mixed token-ids/embeds EmbedsPrompt
+# (vLLM embeds the text positions itself; the encoder's image embeds are spliced
+# at the placeholder span).
+#
+# This demo runs the example HitchhikersCustomEncoder on a TEXT-ONLY LM
+# (Qwen2.5-1.5B-Instruct): the encoder fakes an "image" as the embeddings of a
+# fixed phrase so the spliced prompt answers "42". Swap --custom-encoder-class
+# (and --model) for a real encoder + LM in production.
+#
+# REQUIRES a custom image built from PR #10832 (see README → "Build the image"):
+#   - dynamo.vllm with the --custom-encoder-class handler,
+#   - examples/custom_encoder baked at /workspace/examples/custom_encoder,
+#   - vLLM >= 0.21 (EmbedsPrompt.prompt_is_token_ids).
+#
+# The operator auto-creates a Service `custom-encoder-agg-frontend` on port 8000
+# which smoke.yaml targets. ${VLLM_IMAGE} / ${HW_NODE_SELECTOR} are filled by
+# run.sh via envsubst; ${MODEL_NAME} / ${ENCODER_CLASS} stay literal (pod env).
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: custom-encoder-agg
+  labels:
+    app.kubernetes.io/name: custom-encoder
+    app.kubernetes.io/component: agg-custom-encoder
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        # Large request-plane + HTTP body limits so a real (non-fake) encoder
+        # can receive multi-MB base64 images. Harmless for the demo's tiny image.
+        - name: DYN_TCP_MAX_MESSAGE_SIZE
+          value: "209715200"
+        - name: DYN_HTTP_BODY_LIMIT_MB
+          value: "200"
+        # Permit non-public (localhost / data:) image references.
+        - name: DYN_MM_ALLOW_INTERNAL
+          value: "1"
+      extraPodSpec:
+        # nodeSelector comes from `run.sh --node <host>` (envsubst); `{}`
+        # (match any node) when --node is omitted.
+        nodeSelector: ${HW_NODE_SELECTOR}
+        mainContainer:
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      subComponentType: null
+
+    VllmWorker:
+      componentType: worker
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --custom-encoder-class "${ENCODER_CLASS}" \
+                --custom-jinja-template /workspace/examples/custom_encoder/templates/qwen_vl.jinja \
+                --enable-multimodal \
+                --enable-prompt-embeds \
+                --max-model-len 16384 \
+                --gpu-memory-utilization 0.8 \
+                --enforce-eager \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen2.5-1.5B-Instruct"
+            # Dotted module.ClassName of the CustomEncoder subclass. The example
+            # encoder ships in the image at /workspace/examples/custom_encoder.
+            - name: ENCODER_CLASS
+              value: "examples.custom_encoder.hitchhikers_custom_encoder.HitchhikersCustomEncoder"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            # Weights are pre-pulled by the model-download Job; serve from cache.
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            # /workspace on sys.path so the dotted examples.custom_encoder.*
+            # import in --custom-encoder-class resolves.
+            - name: PYTHONPATH
+              value: /workspace
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_TCP_MAX_MESSAGE_SIZE
+              value: "209715200"
+            - name: DYN_HTTP_BODY_LIMIT_MB
+              value: "200"
+            # The example encoder forces <|image_pad|> (151655) via this env;
+            # production encoders usually auto-resolve it from the tokenizer.
+            - name: DYN_IMAGE_PLACEHOLDER_TOKEN_ID
+              value: "151655"
+            - name: DYN_MM_ALLOW_INTERNAL
+              value: "1"
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+      subComponentType: null
+      volumeMounts:
+        # HF cache at the PVC root (DGD volumeMounts grammar has no subPath).
+        # --enforce-eager skips cudagraph capture so we don't need a persisted
+        # compilation cache.
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface

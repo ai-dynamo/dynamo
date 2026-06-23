@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pre-downloads the demo LM (Qwen/Qwen2.5-1.5B-Instruct, ~3 GiB, public) into
+# shared-model-cache at the standard HF_HOME path so the weights land at
+# /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/,
+# sharing the HF Hub cache layout with the rest of the namespace.
+#
+# Pre-downloading lets the worker run HF_HUB_OFFLINE=1 (no startup egress
+# stall). The model is tiny + public, so this is fast and needs no HF token.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: custom-encoder-model-download
+  labels:
+    app.kubernetes.io/name: custom-encoder
+    app.kubernetes.io/component: model-download
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: custom-encoder
+        app.kubernetes.io/component: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen2.5-1.5B-Instruct"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.11.0
+              hf download "$MODEL_NAME"
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /home/dynamo/.cache/huggingface
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

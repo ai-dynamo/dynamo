@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Correctness smoke test for the aggregated CustomEncoder path (PR #10832).
+# Sends the Hitchhiker's prompt with an image content part; the example
+# HitchhikersCustomEncoder splices the embeddings of "the Ultimate Question of
+# Life, the Universe, and Everything" at the image placeholder, so the assembled
+# prompt reads "...The Answer to <that phrase> is?" and the completion must
+# contain "42". The image content is irrelevant — the example encoder ignores
+# the URL — so we send a self-contained 1x1 data: image (no egress needed).
+#
+# run.sh pipes this through `envsubst` (only ${SMOKE_FRONTEND}) before apply;
+# the inline-bash ${FRONTEND}/${MODEL_NAME}/${IMAGE_URL} stay literal and resolve
+# from the pod env. The pod echoes a `SMOKE PASS` / `SMOKE FAIL` marker that
+# run.sh polls for (it terminates itself — do not `kubectl logs -f`).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: custom-encoder-smoke
+  labels:
+    app.kubernetes.io/name: custom-encoder
+    app.kubernetes.io/component: smoke
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: python:3.11
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -uo pipefail
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends curl jq >/dev/null
+
+          FE="http://${FRONTEND}:8000"
+          echo "Waiting for model '${MODEL_NAME}' at ${FE}/v1/models ..."
+          for i in $(seq 1 60); do
+            if curl -s "${FE}/v1/models" \
+                 | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; then
+              echo "Model '${MODEL_NAME}' is ready."
+              break
+            fi
+            echo "[$(date '+%H:%M:%S')] not ready ($i/60), sleeping 10s"
+            sleep 10
+          done
+
+          # Build the request with jq so the apostrophe in "Hitchhiker's" and the
+          # data: URL are escaped correctly.
+          REQ="$(jq -nc \
+            --arg m "${MODEL_NAME}" \
+            --arg url "${IMAGE_URL}" \
+            --arg t1 "Based on The Hitchhiker's Guide to the Galaxy, The Answer to" \
+            --arg t2 " is?" \
+            '{model:$m, max_tokens:32, temperature:0, messages:[{role:"user", content:[
+               {type:"text", text:$t1},
+               {type:"image_url", image_url:{url:$url}},
+               {type:"text", text:$t2}]}]}')"
+          echo "REQUEST: ${REQ}"
+
+          RESP="$(curl -sS "${FE}/v1/chat/completions" \
+                    -H 'Content-Type: application/json' -d "${REQ}")" || {
+            echo "SMOKE FAIL: request errored"
+            exit 1
+          }
+          echo "RESPONSE: ${RESP}"
+          ANSWER="$(echo "${RESP}" | jq -r '.choices[0].message.content // empty')"
+          echo "COMPLETION: ${ANSWER}"
+
+          if echo "${ANSWER}" | grep -q "42"; then
+            echo "SMOKE PASS"
+            exit 0
+          fi
+          echo "SMOKE FAIL: '42' not found in completion"
+          exit 1
+      env:
+        - name: FRONTEND
+          value: ${SMOKE_FRONTEND}
+        - name: MODEL_NAME
+          value: "Qwen/Qwen2.5-1.5B-Instruct"
+        # Self-contained 1x1 PNG. The example encoder ignores image content; for
+        # a real encoder, override with a reachable image URL (http(s):// or a
+        # larger data: URL) — DYN_MM_ALLOW_INTERNAL=1 on the deploy permits both.
+        - name: IMAGE_URL
+          value: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+      resources:
+        requests:
+          cpu: "1"
+          memory: 1Gi
+        limits:
+          cpu: "2"
+          memory: 2Gi
