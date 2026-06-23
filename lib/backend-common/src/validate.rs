@@ -40,12 +40,17 @@ pub(crate) fn wrap(
             );
             match &item {
                 Ok(chunk) if chunk.finish_reason.is_some() => {
-                    // Encode-mode terminal rule: non-cancelled terminals
-                    // MUST carry an object-shaped encoder_result. Cancelled
-                    // is exempt because cancellation can land before the
-                    // encoder produces a payload.
+                    // Encode-mode terminal rule: successful terminals MUST
+                    // carry an object-shaped encoder_result. Cancelled is
+                    // exempt because cancellation can land before the encoder
+                    // produces a payload; Error terminals are exempt because a
+                    // failure path (LLMEngineOutput::error) legitimately has no
+                    // encoder_result.
                     if mode.is_encode()
-                        && !matches!(chunk.finish_reason, Some(FinishReason::Cancelled))
+                        && !matches!(
+                            chunk.finish_reason,
+                            Some(FinishReason::Cancelled | FinishReason::Error(_))
+                        )
                     {
                         assert!(
                             matches!(

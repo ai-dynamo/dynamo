@@ -223,7 +223,11 @@ pub struct PreprocessedRequest {
     /// only by contract (see Python `require_encoder_result` and the
     /// Rust `LLMEngineOutput::encode_terminal` constructor).
     #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_object"
+    )]
     pub encoder_result: Option<serde_json::Value>,
 
     /// Directional link to a predecessor worker's `engine.generate` span.
@@ -282,6 +286,27 @@ pub struct PreprocessedRequest {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub is_probe: bool,
+}
+
+/// Enforce the object-only `encoder_result` contract at the serde boundary.
+/// The handoff payload is engine-opaque but must be a JSON object at every hop;
+/// reject arrays/scalars here so a non-conforming (e.g. cross-language)
+/// producer fails fast instead of leaking a malformed shape downstream.
+fn deserialize_optional_object<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    if let Some(v) = &value {
+        if !v.is_object() {
+            return Err(serde::de::Error::custom(
+                "encoder_result must be a JSON object",
+            ));
+        }
+    }
+    Ok(value)
 }
 
 impl PreprocessedRequest {

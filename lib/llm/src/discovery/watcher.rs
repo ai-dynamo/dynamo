@@ -490,7 +490,15 @@ impl ModelWatcher {
             // return `None`, and produce a WorkerSet with no PrefillRouter at
             // all. The stale-DecodeWaiting cleanup tests cover this rebuild
             // path.
-            if card.model_type.supports_prefill() {
+            if matches!(
+                card.worker_type,
+                Some(crate::worker_type::WorkerType::Encode)
+            ) {
+                // ENCODE teardown: Encode has its own `ws_key` and carries no
+                // prefill/decode activator state. Skip both cleanup paths so we
+                // don't clear a live decode-side waiter belonging to an
+                // unrelated worker in this namespace.
+            } else if card.model_type.supports_prefill() {
                 if removed.is_some() {
                     self.manager
                         .remove_prefill_activator(&model_name, worker_namespace);
@@ -1421,7 +1429,7 @@ mod tests {
 
     #[test]
     fn worker_set_key_encode_and_aggregated_coexist_in_same_namespace() {
-        // Regression for the DIS-2110 collision: Encode and Aggregated
+        // Regression for the Encode/Aggregated key collision: Encode and Aggregated
         // workers in the same namespace MUST map to different keys, so
         // both can register without an MDC checksum mismatch.
         let agg_key = worker_set_key(

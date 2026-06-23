@@ -399,7 +399,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Encode-set classification (DIS-2110)
+    // Encode-set classification
     //
     // Encode WorkerSets carry no serving engines (the watcher's role
     // gate skips pipeline construction), so the legacy "no engines =

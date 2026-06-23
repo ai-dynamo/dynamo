@@ -869,7 +869,7 @@ mod tests {
         );
     }
 
-    // -- Encode-set visibility (DIS-2110) --
+    // -- Encode-set visibility --
     //
     // Encode workers ride the EncoderRouter, not the public chat/completions
     // surface. Tests below verify is_displayable correctly hides Encode-only

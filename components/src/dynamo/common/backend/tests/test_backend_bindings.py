@@ -301,7 +301,7 @@ def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
 def test_python_worker_config_translates_all_disagg_modes():
     """Every variant of dynamo.common.constants.DisaggregationMode must map
     to a Rust binding value -- including ENCODE, which gained unified-path
-    support in DIS-2110. Regression for the prior `NotImplementedError`
+    support. Regression for the prior `NotImplementedError`
     behavior where ENCODE was rejected at translation time."""
     from dynamo.common.backend.worker import _to_rust_disaggregation_mode
     from dynamo.common.constants import DisaggregationMode
