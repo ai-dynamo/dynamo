@@ -8,17 +8,18 @@ use dynamo_kv_router::protocols::WorkerId;
 use uuid::Uuid;
 
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
+use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
 use crate::kv_manager::SglangKvManager;
 use crate::replay::TraceCollector;
 
 use super::config::SglangConfig;
-use super::decode::{cache_materialized_prefix, simulate_decode_step};
+use super::decode::{cache_materialized_prefix, simulate_decode_step_with_sampler};
 use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
-use super::request::{SglangRequest, direct_to_sglang};
+use super::request::SglangRequest;
 use crate::scheduler::{
     CapturedRouterEventBuffer, EnginePassResult, MockerMetrics, RouterEventVisibility,
-    build_fpm_snapshot, capture_router_event_sink,
+    accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -28,12 +29,17 @@ pub(crate) struct SglangCore {
     pub(super) running: Vec<SglangRequest>,
     pub(super) new_token_ratio: f64,
     pub(super) kv_manager: SglangKvManager,
+    speculative_sampler: Option<SpeculativeDecodeSampler>,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
 }
 
 impl SglangCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
-        Self::new_internal(args, 0, None, KvEventPublishers::default())
+        Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
+    }
+
+    pub(crate) fn new_with_worker_id(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        Self::new_internal(args, 0, worker_id, None, KvEventPublishers::default())
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
@@ -41,6 +47,7 @@ impl SglangCore {
         Self::new_internal(
             args,
             0,
+            worker_id,
             Some(buffer),
             KvEventPublishers::new(Some(sink), None),
         )
@@ -51,18 +58,25 @@ impl SglangCore {
         dp_rank: u32,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
-        Self::new_internal(args, dp_rank, None, kv_event_publishers)
+        Self::new_internal(args, dp_rank, u64::from(dp_rank), None, kv_event_publishers)
     }
 
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
+        worker_id: WorkerId,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
         let config = SglangConfig::from_args(&args);
         let total_tokens = args.num_gpu_blocks * args.block_size;
+        let speculative_sampler = args.aic_nextn.map(|nextn| {
+            let rates =
+                normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
+                    .expect("normalized MTP acceptance rates");
+            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(worker_id))
+        });
 
         Self {
             config,
@@ -76,12 +90,13 @@ impl SglangCore {
                 kv_event_publishers,
                 dp_rank,
             ),
+            speculative_sampler,
             kv_event_buffer,
         }
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
-        let request = direct_to_sglang(request);
+        let request = SglangRequest::from(request);
         request.debug_assert_invariants(self.config.block_size);
         let uuid = request.uuid;
         self.waiting.push_back(request);
@@ -167,10 +182,11 @@ impl SglangCore {
             .collect();
 
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let mut decode = simulate_decode_step(
+        let mut decode = simulate_decode_step_with_sampler(
             &mut self.running,
             &mut self.kv_manager,
             &self.config,
+            self.speculative_sampler.as_mut(),
             decode_start_ms,
             true,
         );
@@ -220,6 +236,8 @@ impl SglangCore {
             (decode.end_ms - now_ms) / 1000.0,
         );
 
+        let (accept_length_output_tokens, accept_length_decode_forwards) =
+            accept_length_sample(&decode.output_signals);
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         let active_decode_blocks = self.active_kv_blocks();
         EnginePassResult {
@@ -248,6 +266,8 @@ impl SglangCore {
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
+            accept_length_output_tokens,
+            accept_length_decode_forwards,
         }
     }
 

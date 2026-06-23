@@ -25,7 +25,8 @@ use super::state::{DisaggPhase, DisaggRequestState};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector,
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds,
+    TraceCollector,
 };
 use crate::scheduler::AdmissionEvent;
 
@@ -186,6 +187,14 @@ impl DisaggRuntime {
         );
         decode_engine.set_scaling_args(config.decode_args.clone(), false);
 
+        // Record each pool's GPUs/worker from its engine parallelism so the
+        // report can express GPU-hours from the mocker's own config.
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(
+            config.prefill_args.aic_gpus_per_worker(),
+            config.decode_args.aic_gpus_per_worker(),
+        );
+
         Ok(Self {
             now_ms: 0.0,
             next_prefill_worker_idx: 0,
@@ -197,7 +206,7 @@ impl DisaggRuntime {
             prefill_router,
             decode_router,
             requests: HashMap::new(),
-            collector: TraceCollector::default(),
+            collector,
             events: BinaryHeap::new(),
             progress,
             #[cfg(test)]
@@ -235,6 +244,12 @@ impl DisaggRuntime {
     /// it for the calibration use case this exists to serve.
     pub(in crate::replay) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
         self.max_sim_time_ms = ms;
+        self
+    }
+
+    /// Set the SLA thresholds used to classify goodput in the final report.
+    pub(in crate::replay) fn with_sla_thresholds(mut self, sla: SlaThresholds) -> Self {
+        self.collector.set_sla_thresholds(sla);
         self
     }
 
@@ -472,10 +487,7 @@ impl DisaggRuntime {
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next = choose_next_timestamp(
-            self.admission.next_ready_time_ms(self.cluster_in_flight()),
-            next_event_ms,
-        );
+        let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
         #[cfg(feature = "kvbm-offload")]
         {
             let next_offload = choose_next_timestamp(
@@ -518,6 +530,29 @@ impl DisaggRuntime {
     /// Process one prefill output signal, including router updates and decode handoff scheduling.
     fn process_prefill_signal(&mut self, signal: OutputSignal) -> Result<()> {
         if !signal.completed {
+            return Ok(());
+        }
+
+        if signal.rejected {
+            // Rejected at the prefill worker: it never prefilled, so it must not
+            // be marked prefill-completed or handed off to decode (that would
+            // reject it again at decode and book phantom traffic). Free its
+            // prefill-router slot and terminally complete it here.
+            if self.prefill_router.is_some() {
+                let admissions = {
+                    let prefill_router =
+                        self.prefill_router.as_mut().expect("router checked above");
+                    prefill_router
+                        .on_request_completed(signal.uuid, self.now_ms)?
+                        .admissions
+                };
+                self.record_router_pending();
+                self.dispatch_prefill_admissions(admissions)?;
+            }
+            self.admission
+                .on_request_completed(signal.uuid, self.now_ms)?;
+            self.progress.inc_completed();
+            self.state_mut(signal.uuid)?.mark_done();
             return Ok(());
         }
 
@@ -589,13 +624,18 @@ impl DisaggRuntime {
                 .transition_log
                 .push(DisaggTransition::WorkloadCompleted { uuid: signal.uuid });
         }
-        let state = self.state(signal.uuid)?;
-        let original = state.original_request()?;
-        let input_tokens = original.tokens.len();
-        let output_tokens = original.max_output_tokens;
-        let latencies = self.collector.request_latencies(signal.uuid);
-        self.traffic
-            .on_request(input_tokens, output_tokens, latencies);
+        // A request rejected at decode never ran, so it produced no tokens or
+        // latency — keep it out of the planner-facing traffic deltas (mirror the
+        // aggregated path). It still frees its slot, advances, and is marked done.
+        if !signal.rejected {
+            let state = self.state(signal.uuid)?;
+            let original = state.original_request()?;
+            let input_tokens = original.tokens.len();
+            let output_tokens = original.max_output_tokens;
+            let latencies = self.collector.request_latencies(signal.uuid);
+            self.traffic
+                .on_request(input_tokens, output_tokens, latencies);
+        }
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {
@@ -628,7 +668,11 @@ impl DisaggRuntime {
         _worker_idx: usize,
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
+        accept_length_output_tokens: usize,
+        accept_length_decode_forwards: usize,
     ) -> Result<()> {
+        self.traffic
+            .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
             self.process_decode_signal(signal)?;
         }
@@ -655,6 +699,8 @@ impl DisaggRuntime {
                         payload.worker_idx,
                         payload.completed_requests,
                         payload.output_signals,
+                        payload.accept_length_output_tokens,
+                        payload.accept_length_decode_forwards,
                     )?;
                 }
                 SimulationWorkerStage::Aggregated => {
@@ -788,6 +834,8 @@ impl DisaggRuntime {
                 payload.worker_idx,
                 payload.completed_requests,
                 payload.output_signals,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
         }
         for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
@@ -883,10 +931,13 @@ impl DisaggRuntime {
             };
 
             if next_timestamp_ms > until_ms {
+                if until_ms > self.now_ms {
+                    self.advance_now_ms(until_ms);
+                }
                 break;
             }
 
-            self.now_ms = next_timestamp_ms;
+            self.advance_now_ms(next_timestamp_ms);
             self.drain_current_timestamp()?;
         }
 
@@ -896,6 +947,21 @@ impl DisaggRuntime {
     /// Current simulated time in milliseconds.
     pub(in crate::replay) fn now_ms(&self) -> f64 {
         self.now_ms
+    }
+
+    /// Advance the sim clock to `new_now_ms`, integrating provisioned
+    /// worker-seconds for both pools over the interval just elapsed.
+    /// `worker_count()` counts active + starting-up + draining workers, so this
+    /// captures the startup ramp and the scale-down drain tail.
+    fn advance_now_ms(&mut self, new_now_ms: f64) {
+        let dt_ms = (new_now_ms - self.now_ms).max(0.0);
+        if dt_ms > 0.0 {
+            let prefill_worker_seconds = self.prefill_engine.worker_count() as f64 * dt_ms / 1000.0;
+            let decode_worker_seconds = self.decode_engine.worker_count() as f64 * dt_ms / 1000.0;
+            self.collector
+                .add_worker_seconds(prefill_worker_seconds, decode_worker_seconds);
+        }
+        self.now_ms = new_now_ms;
     }
 
     pub(in crate::replay) fn active_prefill_count(&self) -> usize {
@@ -1038,7 +1104,7 @@ impl DisaggRuntime {
             {
                 break;
             }
-            self.now_ms = next_timestamp_ms;
+            self.advance_now_ms(next_timestamp_ms);
             self.drain_current_timestamp()?;
         }
 
@@ -1152,6 +1218,74 @@ mod tests {
         config
     }
 
+    fn trtllm_reject_staged_args(worker_type: WorkerType) -> MockEngineArgs {
+        // 4 GPU blocks * block_size 4 = 16-token to-completion budget per request.
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Trtllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .worker_type(worker_type)
+            .build()
+            .unwrap()
+    }
+
+    fn trtllm_reject_disagg_config() -> OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
+            prefill_args: trtllm_reject_staged_args(WorkerType::Prefill),
+            decode_args: trtllm_reject_staged_args(WorkerType::Decode),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        }
+    }
+
+    /// Disagg regression for terminal-rejection propagation. An oversized request
+    /// rejected at the prefill stage must be terminally completed there — NOT
+    /// handed off to decode, which would reject it a second time (the observed
+    /// double-reject) and book phantom traffic. The valid follower completes; the
+    /// rejected request never reaches the decode stage.
+    #[test]
+    fn trtllm_oversized_request_rejected_at_prefill_not_handed_to_decode() {
+        let oversized = Uuid::from_u128(1);
+        let valid = Uuid::from_u128(2);
+        let requests = VecDeque::from([
+            request(1, 16, 4, 0.0), // 16-token prompt -> ceil((16+4)/4)=5 > 4-block pool -> reject
+            request(2, 4, 4, 0.0),  // fits
+        ]);
+        let (collector, stats) = DisaggRuntime::new(
+            &trtllm_reject_disagg_config(),
+            None,
+            None,
+            requests,
+            ReplayMode::Concurrency { max_in_flight: 1 },
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .run()
+        .unwrap();
+        let report = collector.finish();
+        assert_eq!(
+            report.request_counts.num_requests, 2,
+            "both requests arrived"
+        );
+        assert_eq!(
+            report.request_counts.completed_requests, 1,
+            "only the valid request completes; the rejected one is excluded"
+        );
+        assert!(
+            !stats.decode_assignments.contains_key(&oversized),
+            "a prefill-rejected request must terminally complete at prefill, never hand off to decode"
+        );
+        assert!(
+            stats.decode_assignments.contains_key(&valid),
+            "the valid request runs through the decode stage"
+        );
+    }
+
     fn scaling_test_args(worker_type: WorkerType) -> MockEngineArgs {
         MockEngineArgs::builder()
             .block_size(64)
@@ -1202,6 +1336,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(arrival_ms),
+            ..Default::default()
         }
     }
 
@@ -1218,12 +1353,14 @@ mod tests {
                             max_output_tokens: 2,
                             hash_ids: vec![11],
                             delay_after_previous_ms: 0.0,
+                            ..Default::default()
                         },
                         TurnTrace {
                             input_length: 192,
                             max_output_tokens: 2,
                             hash_ids: vec![21, 22, 23],
                             delay_after_previous_ms: 10.0,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -1235,6 +1372,7 @@ mod tests {
                         max_output_tokens: 2,
                         hash_ids: vec![31, 32],
                         delay_after_previous_ms: 0.0,
+                        ..Default::default()
                     }],
                 },
             ],
@@ -1383,6 +1521,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![2; 128],
@@ -1390,6 +1529,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(2)),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             },
         ];
 
@@ -1506,6 +1646,26 @@ mod tests {
         assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
     }
 
+    #[test]
+    fn test_advance_to_moves_clock_across_idle_gap() {
+        let config = disagg_config();
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            None,
+            None,
+            VecDeque::from([request(1, 64, 2, 1000.0)]),
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        runtime.advance_to(500.0).unwrap();
+
+        assert_eq!(runtime.now_ms(), 500.0);
+        let stats = runtime.drain_traffic();
+        assert!((stats.duration_s - 0.5).abs() < 1e-9);
+    }
+
     /// Setting `max_sim_time_ms` causes `run()` to break before scheduled
     /// arrivals past the cap. This test verifies the cap operates on
     /// **simulated** time (`now_ms`), not real wall-clock time: with
@@ -1616,7 +1776,7 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrency_workload_delayed_follow_up_does_not_bypass_other_ready_sessions() {
+    fn test_concurrency_workload_holds_session_slot_depth_first() {
         let (collector, _) = run_concurrency_workload_collect(
             &disagg_config(),
             multiturn_trace(),
@@ -1636,7 +1796,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, input_length)| input_length)
                 .collect::<Vec<_>>(),
-            vec![64, 128, 192]
+            vec![64, 192, 128]
         );
     }
 }

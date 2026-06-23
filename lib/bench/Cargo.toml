@@ -26,8 +26,8 @@ name = "claude_trace_export"
 path = "claude_trace_export.rs"
 
 [[bin]]
-name = "agent_trace_to_mooncake"
-path = "agent_trace_to_mooncake.rs"
+name = "request_trace_to_mooncake"
+path = "request_trace_to_mooncake.rs"
 
 [[bench]]
 name = "offline_replay_bench"

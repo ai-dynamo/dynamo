@@ -57,6 +57,19 @@ fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> Lo
     }
 }
 
+/// sglang's `MultimodalItem._compute_pad_value` constants — must track upstream;
+/// if they drift, MM routing silently degrades to text-prefix. Pinned by
+/// `pad_value_matches_sglang_protocol`.
+pub const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
+pub const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
+
+/// Canonical per-image pad_value from a routing-side `mm_hash`, called by both
+/// the frontend and the kv-router so request- and event-side hashes agree.
+/// Keeps the low 30 bits only (sglang's limit).
+pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
+    (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
+}
+
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata
 /// and LoRA adapter identity.
 ///
@@ -425,8 +438,26 @@ pub enum RouterRequest {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
         #[serde(default, skip_serializing_if = "RoutingConstraints::is_empty")]
         routing_constraints: RoutingConstraints,
+        #[serde(default)]
+        priority_jump: f64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        strict_priority: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
     },
-    MarkPrefill,
+    PotentialLoads {
+        tokens: Vec<Token>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
+    },
+    MarkPrefill {
+        // once prefill completes, the frontend might not be allowed to send a
+        // request with linking the id. In this case, the request_id is provided in the payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     MarkFree {
         // once request is cancelled, the frontend might not be allowed to send a
         // request with linking the id. In this case, the request_id is provided in the payload.
@@ -441,8 +472,15 @@ impl Default for RouterRequest {
             tokens: vec![],
             block_mm_infos: None,
             routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: None,
         }
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,6 +488,16 @@ impl Default for RouterRequest {
 pub enum RouterBackpressureReason {
     /// The configured cap on total queued ISL tokens has been reached.
     MaxQueuedIslTokensExceeded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PotentialLoad {
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
+    pub potential_prefill_tokens: usize,
+    pub potential_decode_blocks: usize,
+    #[serde(default)]
+    pub active_requests: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,6 +520,15 @@ pub enum RouterResponse {
     },
     FreeMarked {
         success: bool,
+    },
+    PotentialLoads {
+        // loads of every worker tracked by the scheduler.
+        loads: Vec<PotentialLoad>,
+        // the queue sizes for this specific router instance.
+        #[serde(default)]
+        pending_count: usize,
+        #[serde(default)]
+        pending_isl_tokens: usize,
     },
 }
 
@@ -584,6 +641,8 @@ pub enum ActiveSequenceEventData {
         #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
+    // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
+    // at high frequency, and broadcasting it would consume disproportionate network bandwidth.
     Free,
     MarkPrefillCompleted,
 }
@@ -948,7 +1007,7 @@ impl OverlapScores {
     pub fn new() -> Self {
         Self {
             scores: FxHashMap::default(),
-            frequencies: Vec::with_capacity(32),
+            frequencies: Vec::new(),
         }
     }
 
@@ -964,16 +1023,6 @@ impl OverlapScores {
         for worker in workers {
             let score = self.scores.entry(*worker).or_insert(0);
             *score += 1;
-        }
-    }
-
-    /// Add an entry in the frequency list.
-    pub fn add_frequency(&mut self, frequency: usize) {
-        if frequency != 0 {
-            self.frequencies
-                .last()
-                .inspect(|elem| debug_assert!(**elem >= frequency));
-            self.frequencies.push(frequency);
         }
     }
 }
@@ -1016,12 +1065,14 @@ impl TokensWithHashes {
     /// Adds multimodal extra info for blocks.
     pub fn with_mm_infos(mut self, infos: Vec<Option<BlockExtraInfo>>) -> Self {
         self.block_mm_infos = Some(infos);
+        self.invalidate_hashes();
         self
     }
 
     /// Sets the LoRA adapter name for hash computation.
     pub fn with_lora_name(mut self, name: String) -> Self {
         self.lora_name = Some(name);
+        self.invalidate_hashes();
         self
     }
 
@@ -1039,6 +1090,10 @@ impl TokensWithHashes {
         }
 
         self.is_eagle = is_eagle;
+        self.invalidate_hashes();
+    }
+
+    fn invalidate_hashes(&mut self) {
         self.block_hashes = None;
         self.seq_hashes = None;
     }
@@ -1115,6 +1170,28 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use serde_json;
+
+    /// Pin the sglang pad_value constants and formula against upstream
+    /// `MultimodalItem._compute_pad_value`. If sglang bumps a constant, this
+    /// fails — otherwise routing-side pad_value would silently diverge from
+    /// sglang's `BlockStored` bytes and MM-routing would degrade to text-prefix.
+    #[test]
+    fn pad_value_matches_sglang_protocol() {
+        assert_eq!(MM_PAD_SHIFT_VALUE, 1_000_000);
+        assert_eq!(MM_PAD_HASH_MASK, (1u64 << 30) - 1);
+        assert_eq!(pad_value_for_mm_hash(0), MM_PAD_SHIFT_VALUE as u32);
+        let fits = (1u64 << 30) - 1;
+        assert_eq!(
+            pad_value_for_mm_hash(fits),
+            (MM_PAD_SHIFT_VALUE + fits) as u32
+        );
+        let overflow = (1u64 << 30) | 0xCAFE;
+        assert_eq!(
+            pad_value_for_mm_hash(overflow),
+            (MM_PAD_SHIFT_VALUE + 0xCAFE) as u32,
+            "high bits above the 30-bit mask must be discarded"
+        );
+    }
 
     #[test]
     fn test_router_event_new() {
@@ -1249,6 +1326,63 @@ mod tests {
         for (b, l) in base_hashes.iter().zip(lora_hashes.iter()) {
             assert_ne!(b, l);
         }
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_lora_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..8).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 4);
+        let base_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_lora_name("my-adapter".to_string());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, base_sequence_hashes);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_mm_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let mm_infos = vec![
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![(0, 1)],
+                }],
+            }),
+            None,
+        ];
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 2);
+        let text_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_mm_infos(mm_infos.clone());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                block_mm_infos: Some(&mm_infos),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, text_sequence_hashes);
     }
 
     #[test]
@@ -1531,5 +1665,207 @@ mod tests {
                 request_id: Some(ref request_id)
             } if request_id == "req-123"
         ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_priority_jump() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 5.0,
+            strict_priority: 0,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":5.0}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                priority_jump,
+                ..
+            } if priority_jump == 5.0
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_lora_name() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: Some(ref lora_name),
+                ..
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: None,
+                ..
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_strict_priority_compatibility() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 4,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"strict_priority":4}"#
+        );
+
+        let missing: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+        assert!(matches!(
+            missing,
+            RouterRequest::New {
+                strict_priority: 0,
+                ..
+            }
+        ));
+
+        let zero = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&zero).unwrap(),
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0}"#
+        );
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_serialization_with_lora_name() {
+        let request = RouterRequest::PotentialLoads {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"potential_loads","tokens":[1,2,3],"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: Some(ref lora_name),
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"potential_loads","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: None,
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_mark_prefill_serialization_with_request_id() {
+        let request = RouterRequest::MarkPrefill {
+            request_id: Some("req-123".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"mark_prefill","request_id":"req-123"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::MarkPrefill {
+                request_id: Some(ref request_id)
+            } if request_id == "req-123"
+        ));
+    }
+
+    #[test]
+    fn test_potential_load_defaults_active_requests() {
+        let load = serde_json::from_str::<PotentialLoad>(
+            r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load.worker_id, 1);
+        assert_eq!(load.dp_rank, 0);
+        assert_eq!(load.potential_prefill_tokens, 16);
+        assert_eq!(load.potential_decode_blocks, 4);
+        assert_eq!(load.active_requests, 0);
+    }
+
+    #[test]
+    fn test_potential_load_serializes_active_requests() {
+        let load = PotentialLoad {
+            worker_id: 1,
+            dp_rank: 0,
+            potential_prefill_tokens: 16,
+            potential_decode_blocks: 4,
+            active_requests: 2,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&load).unwrap(),
+            r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
+        );
     }
 }

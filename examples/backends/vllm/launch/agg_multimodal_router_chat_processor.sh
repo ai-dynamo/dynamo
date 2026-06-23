@@ -13,8 +13,8 @@
 # `KvRouter` directly. This is the original MM-aware routing path.
 #
 # The default script (`agg_multimodal_router.sh`) uses the Rust frontend with
-# the `lightseek-mm` feature instead — pure-Rust per-image token-count via
-# the `llm-multimodal` crate, no PyO3/GIL on the routing hot path. Use this
+# the `mm-routing` feature instead — pure-Rust per-image token-count, no
+# PyO3/GIL on the routing hot path. Use this
 # `_chat_processor` variant when you specifically want the vLLM Python path
 # (e.g., to take advantage of `DYNAMO_MM_TRANSFER` shm/NIXL pre-rendered
 # `mm_kwargs`).
@@ -170,6 +170,9 @@ COMMON_ENV=(
     "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 )
 
+# Phase 1: launch all workers in parallel.
+# Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
+# requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + i - 1))
@@ -194,8 +197,11 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
             $GPU_MEM_ARGS \
             --max-model-len "${MAX_MODEL_LEN}" \
             ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
-    # trap 'kill 0' handles cleanup
-    # Wait for this worker before starting the next one to avoid ZMQ port races.
+done
+
+# Phase 2: wait for all workers to be ready.
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
 done
 

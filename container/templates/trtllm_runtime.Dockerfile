@@ -127,6 +127,9 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     \
     # Third-party deps Dynamo wheels declare but upstream lacks, plus the
     # huggingface-hub pin and KVBM-matching nixl-cu13. See the file for context.
+    # The requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
+    # directive that keeps the GPL-encumbered prebuilt ffmpeg off disk; IMAGEIO_FFMPEG_EXE
+    # below points imageio at the in-tree LGPL CLI.
     uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
     \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
@@ -142,6 +145,20 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --no-deps "$GMS_WHEEL"; fi; \
     fi
 {% endif %}
+
+# Copy the in-tree LGPL ffmpeg from wheel_builder. The TRT-LLM diffusion handler
+# always encodes video (video_handler.py:263 → encode_to_video_bytes), so the
+# CLI and its libav* / libvpx runtime libs need to be present in this image and
+# imageio must be pointed at it via IMAGEIO_FFMPEG_EXE. Ungated by
+# enable_media_ffmpeg because TRT-LLM unconditionally needs the encoder.
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    cp -nL /tmp/usr/local/lib/libav*.so* /usr/local/lib/ 2>/dev/null || true && \
+    cp -nL /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ 2>/dev/null || true && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
+    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
+ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 
 # Pull /workspace_src (incl. ATTRIBUTION/LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
@@ -181,6 +198,7 @@ ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/usr/local/bin/etcd:${PATH} \
+    IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
 
