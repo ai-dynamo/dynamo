@@ -291,7 +291,8 @@ impl StickySessionRouter {
         self.store.remove(session_id)
     }
 
-    pub(super) fn unbind_if_token(&self, session_id: &str, token: AffinityBindingToken) -> bool {
+    #[cfg(test)]
+    fn unbind_if_token(&self, session_id: &str, token: AffinityBindingToken) -> bool {
         self.store.remove_if_token(session_id, token)
     }
 }
