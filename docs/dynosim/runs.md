@@ -185,7 +185,7 @@ Mooncake request fields. Each row should contain the normal Mooncake fields plus
 
 Rows with no `wait_for` use `timestamp` as their start time. Rows with dependencies wait for every
 listed request to complete, then wait `delay + tool_wait_ms` before dispatch. `branches` records
-child requests spawned by this row, and `prefix_reset` marks the first row in a trajectory.
+child requests spawned by this row, and `prefix_reset` marks the first row in a session.
 
 Use `agent_trace_to_mooncake --agentic` to create this format from Dynamo agent traces:
 
