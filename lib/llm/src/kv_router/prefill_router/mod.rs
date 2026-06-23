@@ -5,24 +5,29 @@ use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
+use futures::StreamExt;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::{
     PrefillLoadEstimator,
+    conditional_disagg::ConditionalDisaggPolicy,
     config::RouterConfigOverride,
     protocols::{RouterBackpressureReason, RoutingConstraints},
 };
 use dynamo_runtime::{
     pipeline::{
-        AsyncEngineContextProvider, Context, ManyOut, Operator, RouterMode, ServerStreamingEngine,
-        SingleIn, async_trait,
+        AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
+        ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
     protocols::common::{
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
@@ -31,9 +36,12 @@ use crate::{
 
 mod activation;
 mod admission;
+mod conditional_bypass;
 mod query;
+mod session_kv_cache;
 
 use admission::InnerPrefillRouter;
+use session_kv_cache::SessionKvTransferCache;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -114,6 +122,13 @@ struct PrefillCompletion {
     worker_link: Option<TraceLink>,
 }
 
+/// Annotation marker the conditional-disagg bypass path sets on a request before
+/// dispatching it to a DECODE-mode worker. The worker's Python wrapper checks for
+/// this annotation and skips its "disaggregated_params is required" validation,
+/// running the request as AGG instead. Kept in sync with the Python constant in
+/// `components/src/dynamo/trtllm/request_handlers/handler_base.py`.
+pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefill";
+
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
@@ -124,11 +139,27 @@ struct PrefillCompletion {
 /// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
+    /// Reference to the decode-side `KvRouter` so the conditional-disagg
+    /// peek can pick the cache-hot decode worker. `None` for the
+    /// non-KV-routing modes and for `disabled()` routers.
+    decode_router: Option<Arc<super::KvRouter>>,
     model_manager: Arc<ModelManager>,
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    /// Conditional-disagg bypass policy. Immutable after construction.
+    /// `disabled()` initializes to a no-op `IslBoundingPolicy::disabled()`.
+    conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
+    /// v1.5 load-gate busy threshold. Resolved once at construction:
+    /// `KvRouterConfig::conditional_disagg_prefill_busy_threshold` if set, else
+    /// `KvRouterConfig::router_queue_threshold`. `None` ⇒ load gate is a
+    /// no-op (matches startup warning in `validate_kv_router_config`).
+    conditional_disagg_prefill_busy_threshold: Option<f64>,
+    /// v2 decode-side circuit-breaker threshold, from
+    /// `KvRouterConfig::conditional_disagg_decode_busy_threshold`. No fallback —
+    /// `None` ⇒ decode gate disabled (existing behavior preserved).
+    conditional_disagg_decode_busy_threshold: Option<f64>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name (used for logging / lifecycle messages).
     model_name: String,
@@ -137,6 +168,7 @@ pub struct PrefillRouter {
     is_eagle: bool,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
+    session_kv_cache: Option<Arc<SessionKvTransferCache>>,
 }
 
 impl Drop for PrefillRouter {
@@ -165,6 +197,14 @@ impl
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
         let engine_ctx = context.context();
+        let session_affinity = context
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .ok()
+            .map(|session_affinity| session_affinity.as_ref().clone());
+        let session_cache_key = session_affinity
+            .as_ref()
+            .map(|session_affinity| session_affinity.as_str().to_string())
+            .or_else(|| metadata.get(SESSION_AFFINITY_CONTEXT_KEY).cloned());
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -179,6 +219,61 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
+        if self.conditional_disagg_policy.is_enabled() {
+            match self
+                .select_decode_worker_for_conditional_disagg(&req, &request_id)
+                .await
+            {
+                Ok(Some(decision)) => {
+                    tracing::info!(
+                        request_id = %request_id,
+                        worker_id = decision.worker.worker_id,
+                        dp_rank = decision.worker.dp_rank,
+                        net_new_tokens = decision.net_new_tokens,
+                        overlap_tokens = decision.overlap_tokens,
+                        "Conditional disagg routing to decode worker"
+                    );
+
+                    if req.tracker.is_none() {
+                        req.tracker = Some(Arc::new(RequestTracker::new()));
+                    }
+                    if let Some(ref tracker) = req.tracker {
+                        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+                    }
+
+                    let routing = req.routing_mut();
+                    routing.decode_worker_id = Some(decision.worker.worker_id);
+                    routing.dp_rank = Some(decision.worker.dp_rank);
+
+                    // Mark the request so the DECODE-mode worker's Python wrapper
+                    // accepts disaggregated_params=None and runs the request as AGG.
+                    // Without this, handler_base.py raises
+                    // "Disaggregated params are required for decode mode".
+                    if !req.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION) {
+                        req.annotations
+                            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+                    }
+
+                    let response_stream = next.generate(context.map(|_| req)).await?;
+                    let ctx = response_stream.context();
+                    let annotation = Annotated::<LLMEngineOutput>::from_annotation(
+                        BYPASS_REMOTE_PREFILL_ANNOTATION,
+                        &true,
+                    )?;
+                    let merged = stream::once(async move { annotation }).chain(response_stream);
+                    return Ok(ResponseStream::new(Box::pin(merged), ctx));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        error = %error,
+                        "Conditional disagg decision failed; falling back to remote prefill"
+                    );
+                }
+            }
+        }
+
         // Ensure tracker exists for routing decisions in disaggregated mode.
         // Create one if not provided by the upstream DeltaGenerator.
         if req.tracker.is_none() {
@@ -190,6 +285,9 @@ impl
         // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
+        if let Some(session_id) = session_cache_key.as_deref() {
+            self.inject_cached_decode_kv_params(&mut prefill_req, session_id)?;
+        }
 
         // Try to resolve prefill worker upfront: if we can get bootstrap info early,
         // spawn prefill in background and proceed to decode immediately.
@@ -305,11 +403,17 @@ impl
 
         decode_req.stop_conditions.max_tokens = original_max_tokens;
 
-        // Decode should not score prompt overlap or account prompt-side load.
+        // Decode should not account prompt-side load. Normal disagg also forces
+        // zero prompt-overlap credit; conditional disagg leaves overlap affinity
+        // available for cache-hot decode routing.
         let existing_override = decode_req.router_config_override.take();
-        decode_req.router_config_override = Some(build_decode_router_override(existing_override));
+        decode_req.router_config_override = Some(build_decode_router_override(
+            existing_override,
+            self.conditional_disagg_policy.is_enabled(),
+        ));
 
-        next.generate(context.map(|_| decode_req)).await
+        let decode_stream = next.generate(context.map(|_| decode_req)).await?;
+        Ok(self.wrap_decode_stream(decode_stream, session_cache_key))
     }
 }
 
@@ -373,6 +477,85 @@ impl PrefillRouter {
         self.model_manager
             .get_kv_transfer_routing_constraints(endpoint_id, worker_id)
     }
+
+    fn inject_cached_decode_kv_params(
+        &self,
+        request: &mut PreprocessedRequest,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(cache) = self.session_kv_cache.as_ref() else {
+            return Ok(());
+        };
+        let Some(mut kv_transfer_params) = cache.take(session_id) else {
+            return Ok(());
+        };
+
+        let Some(params) = kv_transfer_params.as_object_mut() else {
+            tracing::warn!(
+                session_id,
+                "cached vLLM NIXL KV transfer params were not a JSON object; skipping bidirectional prefill injection"
+            );
+            return Ok(());
+        };
+        params.insert("do_remote_decode".to_string(), Value::Bool(true));
+        params.insert("do_remote_prefill".to_string(), Value::Bool(false));
+
+        insert_kv_transfer_params(request, kv_transfer_params)?;
+        tracing::debug!(
+            session_id,
+            "injected cached decode KV transfer params into prefill request"
+        );
+        Ok(())
+    }
+
+    fn wrap_decode_stream(
+        &self,
+        decode_stream: ManyOut<Annotated<LLMEngineOutput>>,
+        session_cache_key: Option<String>,
+    ) -> ManyOut<Annotated<LLMEngineOutput>> {
+        let Some(cache) = self.session_kv_cache.clone() else {
+            return decode_stream;
+        };
+        let Some(session_id) = session_cache_key else {
+            return decode_stream;
+        };
+
+        let stream_context = decode_stream.context();
+        let observed_stream = decode_stream.map(move |output| {
+            if let Some(kv_transfer_params) = extract_kv_transfer_params(&output) {
+                cache.put(session_id.clone(), kv_transfer_params);
+                tracing::debug!(
+                    session_id,
+                    "cached decode KV transfer params for future bidirectional prefill"
+                );
+            }
+            output
+        });
+        ResponseStream::new(Box::pin(observed_stream), stream_context)
+    }
+}
+
+fn insert_kv_transfer_params(
+    request: &mut PreprocessedRequest,
+    kv_transfer_params: Value,
+) -> anyhow::Result<()> {
+    if request.extra_args.is_none() {
+        request.extra_args = Some(Value::Object(serde_json::Map::new()));
+    }
+    let Some(extra_args) = request.extra_args.as_mut().and_then(Value::as_object_mut) else {
+        anyhow::bail!("extra_args must be a JSON object to inject vLLM NIXL KV transfer params");
+    };
+    extra_args.insert("kv_transfer_params".to_string(), kv_transfer_params);
+    Ok(())
+}
+
+fn extract_kv_transfer_params(output: &Annotated<LLMEngineOutput>) -> Option<Value> {
+    output
+        .data
+        .as_ref()
+        .and_then(|data| data.disaggregated_params.as_ref())
+        .and_then(|params| params.get("kv_transfer_params"))
+        .cloned()
 }
 
 fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, random_room: u64) -> u64 {
@@ -392,13 +575,17 @@ fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, random_roo
 
 fn build_decode_router_override(
     existing_override: Option<RouterConfigOverride>,
+    allow_decode_overlap_affinity: bool,
 ) -> RouterConfigOverride {
-    RouterConfigOverride {
-        overlap_score_credit: Some(0.0),
-        assume_kv_reuse: Some(false),
-        track_prefill_tokens: Some(false),
-        ..existing_override.unwrap_or_default()
+    let mut override_config = existing_override.unwrap_or_default();
+
+    if !allow_decode_overlap_affinity {
+        override_config.overlap_score_credit = Some(0.0);
     }
+    override_config.assume_kv_reuse = Some(false);
+    override_config.track_prefill_tokens = Some(false);
+
+    override_config
 }
 
 fn merge_decode_topology_constraints(
@@ -432,13 +619,43 @@ mod tests {
     const MAX_ROOM: u64 = i64::MAX as u64;
 
     #[test]
-    fn decode_router_override_disables_overlap_and_prefill_tracking() {
-        let override_config = build_decode_router_override(Some(RouterConfigOverride {
-            router_temperature: Some(0.7),
-            ..Default::default()
-        }));
+    fn decode_router_override_is_load_only_by_default() {
+        let override_config = build_decode_router_override(
+            Some(RouterConfigOverride {
+                overlap_score_credit: Some(0.5),
+                router_temperature: Some(0.7),
+                ..Default::default()
+            }),
+            false,
+        );
 
         assert_eq!(override_config.overlap_score_credit, Some(0.0));
+        assert_eq!(override_config.assume_kv_reuse, Some(false));
+        assert_eq!(override_config.track_prefill_tokens, Some(false));
+        assert_eq!(override_config.router_temperature, Some(0.7));
+    }
+
+    #[test]
+    fn decode_router_override_inherits_base_overlap_when_conditional_disagg_allows_it() {
+        let override_config = build_decode_router_override(None, true);
+
+        assert_eq!(override_config.overlap_score_credit, None);
+        assert_eq!(override_config.assume_kv_reuse, Some(false));
+        assert_eq!(override_config.track_prefill_tokens, Some(false));
+    }
+
+    #[test]
+    fn decode_router_override_preserves_request_overlap_when_conditional_disagg_allows_it() {
+        let override_config = build_decode_router_override(
+            Some(RouterConfigOverride {
+                overlap_score_credit: Some(0.25),
+                router_temperature: Some(0.7),
+                ..Default::default()
+            }),
+            true,
+        );
+
+        assert_eq!(override_config.overlap_score_credit, Some(0.25));
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));
@@ -534,6 +751,48 @@ mod tests {
                 assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
             }
         }
+    }
+
+    #[test]
+    fn insert_and_extract_kv_transfer_params() {
+        let mut request = PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        let kv_params = serde_json::json!({
+            "do_remote_decode": true,
+            "do_remote_prefill": false,
+            "remote_block_ids": [1, 2],
+        });
+
+        insert_kv_transfer_params(&mut request, kv_params.clone()).unwrap();
+
+        assert_eq!(
+            request
+                .extra_args
+                .as_ref()
+                .and_then(|extra_args| extra_args.get("kv_transfer_params")),
+            Some(&kv_params)
+        );
+
+        let output = Annotated::from_data(LLMEngineOutput {
+            disaggregated_params: Some(serde_json::json!({
+                "kv_transfer_params": kv_params,
+            })),
+            ..Default::default()
+        });
+        assert_eq!(
+            extract_kv_transfer_params(&output),
+            Some(serde_json::json!({
+                "do_remote_decode": true,
+                "do_remote_prefill": false,
+                "remote_block_ids": [1, 2],
+            }))
+        );
     }
 
     fn make_test_router(enforce_disagg: bool) -> Arc<PrefillRouter> {

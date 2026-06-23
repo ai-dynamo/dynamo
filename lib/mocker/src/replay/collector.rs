@@ -331,7 +331,7 @@ struct TraceRequestStats {
     /// Index of the prefill worker that handled this request, if any.
     /// `None` in two situations:
     ///   - Aggregated replay (no separate prefill pool) — meaningless field.
-    ///   - Offline disagg with conditional-prefill bypass — request was
+    ///   - Offline disagg with conditional-disagg bypass — request was
     ///     routed directly to a decode worker without going through prefill.
     ///
     /// Downstream tooling derives "was_bypassed" as `prefill_worker_idx is None`
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(rec.decode_worker_idx, Some(7));
     }
 
-    /// A conditional-prefill bypass is reflected by `prefill_worker_idx ==
+    /// A conditional-disagg bypass is reflected by `prefill_worker_idx ==
     /// None` while `decode_worker_idx` is set. This is how downstream tooling
     /// distinguishes bypassed requests from standard disagg flow.
     #[test]

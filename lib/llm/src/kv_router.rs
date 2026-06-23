@@ -674,6 +674,34 @@ where
         self.scheduler.pending_count()
     }
 
+    /// Per-worker prefill-busy peek for conditional-disagg v1.5 load gate.
+    /// Forwards `SchedulerQueue::worker_is_prefill_busy`; `None` means the
+    /// worker is unknown or has no config. Caller provides the busy threshold
+    /// (resolved from `conditional_disagg_prefill_busy_threshold` with fallback to
+    /// `router_queue_threshold`).
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+        decay_now: tokio::time::Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.scheduler
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
+    /// Per-worker decode-busy peek for the conditional-disagg v2 decode-side
+    /// circuit breaker. Forwards `SchedulerQueue::worker_is_decode_busy`;
+    /// `None` means the worker is unknown, has no config, or did not report
+    /// `total_kv_blocks` — callers treat `None` as "don't block bypass". Caller
+    /// provides the busy threshold (from `conditional_disagg_decode_busy_threshold`).
+    pub fn worker_is_decode_busy(
+        &self,
+        worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.scheduler.worker_is_decode_busy(worker, threshold)
+    }
+
     /// Sum of ISL tokens for requests currently parked in the scheduler queue.
     pub fn pending_isl_tokens(&self) -> usize {
         self.scheduler.pending_isl_tokens()

@@ -335,10 +335,13 @@ def create_kv_events_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
-    if dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
+    if (
+        dynamo_config.disaggregation_mode == DisaggregationMode.DECODE
+        and not dynamo_config.enable_conditional_disagg
+    ):
         logger.info(
             "Decode worker detected (disaggregation_mode=decode): "
-            "kv_events_config disabled (decode workers don't publish KV events)"
+            "kv_events_config disabled (pass --enable-conditional-disagg to opt in)"
         )
         return None
 
@@ -364,17 +367,17 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses NixlConnector.
 
     Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside PdConnector (kv_connector_extra_config.connectors contains
-    "NixlConnector").
+    inside connector wrappers such as PdConnector or MultiConnector
+    (kv_connector_extra_config.connectors contains "NixlConnector").
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
         return False
     if kv_cfg.kv_connector == "NixlConnector":
         return True
-    # PdConnector wraps multiple connectors in kv_connector_extra_config.
+    # Connector wrappers put multiple connectors in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
-    if kv_cfg.kv_connector == "PdConnector":
+    if kv_cfg.kv_connector in {"PdConnector", "MultiConnector"}:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
@@ -385,14 +388,14 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
 def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses DynamoConnector (KVBM).
 
-    Handles both direct usage and nested usage inside PdConnector.
+    Handles both direct usage and nested usage inside connector wrappers.
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
         return False
     if kv_cfg.kv_connector == "DynamoConnector":
         return True
-    if kv_cfg.kv_connector == "PdConnector":
+    if kv_cfg.kv_connector in {"PdConnector", "MultiConnector"}:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if (

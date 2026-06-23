@@ -24,6 +24,7 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     MooncakeConnectorProtocol,
     NixlConnectorProtocol,
+    kv_transfer_config_has_connector,
     make_kv_connector_protocol,
 )
 
@@ -217,6 +218,32 @@ def test_mooncake_decode_does_not_reimport_per_call(fake_mooncake):
 def test_make_kv_connector_protocol_dispatches_nixl():
     proto = make_kv_connector_protocol(_config("NixlConnector"))
     assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_dispatches_multi_connector_with_nixl():
+    cfg = _config(
+        "MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+                {
+                    "kv_connector": "OffloadingConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "cpu_bytes_to_use": 128849018880,
+                        "store_threshold": 2,
+                        "max_tracker_size": 262144,
+                        "eviction_policy": "arc",
+                        "offload_prompt_only": True,
+                    },
+                },
+            ]
+        },
+    )
+
+    assert kv_transfer_config_has_connector(cfg, "NixlConnector")
+    assert kv_transfer_config_has_connector(cfg, "OffloadingConnector")
+    assert isinstance(make_kv_connector_protocol(cfg), NixlConnectorProtocol)
 
 
 def test_make_kv_connector_protocol_dispatches_mooncake(fake_mooncake):

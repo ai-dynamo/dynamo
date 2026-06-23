@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
+use dynamo_kv_router::conditional_disagg::make_conditional_disagg_policy;
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -14,10 +15,13 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
+use super::{
+    InnerPrefillRouter, PrefillLifecycleState, PrefillRouter,
+    session_kv_cache::SessionKvTransferCache,
+};
 use crate::{
     discovery::ModelManager,
-    kv_router::KvPushRouter,
+    kv_router::{KvPushRouter, KvRouter},
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
@@ -33,16 +37,21 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
+            decode_router: None,
             model_manager,
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             enforce_disagg,
+            conditional_disagg_policy: make_conditional_disagg_policy(None),
+            conditional_disagg_prefill_busy_threshold: None,
+            conditional_disagg_decode_busy_threshold: None,
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            session_kv_cache: SessionKvTransferCache::from_env().map(Arc::new),
         })
     }
 
@@ -54,6 +63,7 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        decode_router: Option<Arc<KvRouter>>,
         enforce_disagg: bool,
         model_name: String,
         namespace: String,
@@ -62,19 +72,36 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
+        // v1.5: dedicated busy threshold falls back to router_queue_threshold
+        // when unset. The startup INFO/WARN that surfaces which knob is in
+        // effect lives in `validate_kv_router_config`.
+        let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
+            c.conditional_disagg_prefill_busy_threshold
+                .or(c.router_queue_threshold)
+        });
+        // v2 decode gate: dedicated threshold, no fallback. None ⇒ disabled.
+        let conditional_disagg_decode_busy_threshold = kv_router_config
+            .as_ref()
+            .and_then(|c| c.conditional_disagg_decode_busy_threshold);
 
         let router = Arc::new(Self {
             prefill_router,
+            decode_router,
             model_manager: model_manager.clone(),
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
+            conditional_disagg_policy,
+            conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold,
             prefill_load_estimator,
             model_name,
             namespace,
             is_eagle,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            session_kv_cache: SessionKvTransferCache::from_env().map(Arc::new),
         });
 
         // Spawn background task to wait for activation

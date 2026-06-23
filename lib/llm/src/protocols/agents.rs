@@ -91,6 +91,10 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
     None
 }
 
+pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
+    header_value(headers, HEADER_DYNAMO_SESSION_ID)
+}
+
 fn header_bool(headers: &HeaderMap, header_name: &str) -> Option<bool> {
     let value = header_value(headers, header_name)?;
     match value.to_ascii_lowercase().as_str() {

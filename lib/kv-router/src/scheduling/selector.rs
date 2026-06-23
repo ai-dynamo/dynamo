@@ -199,10 +199,26 @@ impl DefaultWorkerSelector {
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
-        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
-        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
+
+        if self.worker_type == "decode"
+            && !request.track_prefill_tokens
+            && weights.overlap_score_credit > 0.0
+        {
+            let logit = decode_cost_blocks - overlap_credit_blocks;
+            tracing::debug!(
+                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
+                 = decode_blocks - overlap_credit_blocks \
+                 = {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}",
+                worker.worker_id,
+                worker.dp_rank,
+            );
+            return logit;
+        }
+
+        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks;
 
         if shared_beyond > 0 {
@@ -734,6 +750,99 @@ mod tests {
                 request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
                 16,
             )
+            .unwrap();
+
+        assert_eq!(result.worker.worker_id, 1);
+    }
+
+    #[test]
+    fn test_decode_selector_uses_overlap_when_prefill_tracking_disabled() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "decode",
+        );
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        request.effective_overlap_blocks.insert(worker0, 4.0);
+        request.effective_cached_tokens.insert(worker0, 64);
+
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+
+        assert_eq!(result.worker.worker_id, 0);
+        assert_eq!(result.cached_tokens, 64);
+    }
+
+    #[test]
+    fn test_decode_selector_balances_overlap_against_decode_load() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "decode",
+        );
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        request.effective_overlap_blocks.insert(worker0, 4.0);
+        request.effective_cached_tokens.insert(worker0, 64);
+        request.worker_loads =
+            worker_loads_with_active_decode(FxHashMap::from_iter([(worker0, 10), (worker1, 0)]));
+
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+
+        assert_eq!(result.worker.worker_id, 1);
+    }
+
+    #[test]
+    fn test_decode_selector_ignores_lower_tier_overlap_when_overlap_credit_disabled() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 0.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "decode",
+        );
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        request.tier_overlap_blocks.host_pinned.insert(worker0, 12);
+        request.worker_loads =
+            worker_loads_with_active_decode(FxHashMap::from_iter([(worker0, 10), (worker1, 6)]));
+
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);

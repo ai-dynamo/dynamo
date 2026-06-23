@@ -91,6 +91,7 @@ from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
+    NixlConnectorProtocol,
     make_kv_connector_protocol,
 )
 
@@ -121,6 +122,17 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+
+# Conditional-disagg bypass marker. Kept in sync with
+# `BYPASS_REMOTE_PREFILL_ANNOTATION` in
+# `lib/llm/src/kv_router/prefill_router/mod.rs`. When the Rust router decides
+# a request is cheap enough to run locally on a decode worker (small net-new
+# prefill, mostly cached), it pushes this string into `req.annotations` and
+# routes the request straight to the chosen decode worker, skipping the
+# remote prefill stage. The decode handler treats a request carrying this
+# annotation as if disaggregation_mode were AGGREGATED — full prefill+decode
+# on this worker, no `kv_transfer_params`.
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
 
 class _DeferredAbort:
@@ -2932,6 +2944,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        emit_kv_transfer_params=False,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3040,6 +3053,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             embedding_sequence_length=embedding_sequence_length,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        if emit_kv_transfer_params:
+                            kv_transfer_params = getattr(
+                                res, "kv_transfer_params", None
+                            )
+                            if kv_transfer_params is not None:
+                                out["disaggregated_params"] = {
+                                    "kv_transfer_params": kv_transfer_params,
+                                }
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
@@ -3156,6 +3177,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             embedding_params = None
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+            request.get("annotations") or []
+        ):
+            # Conditional-disagg bypass: the Rust router skipped the remote
+            # prefill stage for this request. Run it like an AGG request
+            # (full prefill+decode locally) instead of taking the decode-only
+            # paths that expect KV-transfer metadata from an upstream prefill
+            # worker. `kv_params` / `embedding_params` are already `None`
+            # above (no `prefill_result` is sent on the bypass path), so the
+            # downstream code will naturally skip the `kv_transfer_params`
+            # wiring and let vLLM run a full forward pass.
+            logger.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running request as AGG (prefill+decode on this worker)."
+            )
+            is_decode_only = False
         has_mm_data = (
             "multi_modal_data" in request and request["multi_modal_data"] is not None
         )
@@ -3347,6 +3384,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        emit_kv_transfer_params=is_decode_only,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3400,14 +3438,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(
@@ -3467,6 +3506,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             chunk["usage"] = BaseWorkerHandler._build_completion_usage(
                                 request_output=res,
                             )
+                            if is_decode_only:
+                                kv_transfer_params = getattr(
+                                    res, "kv_transfer_params", None
+                                )
+                                if kv_transfer_params is not None:
+                                    chunk["disaggregated_params"] = {
+                                        "kv_transfer_params": kv_transfer_params,
+                                    }
 
                         yield chunk
                         previous_text_per_choice[output_idx] = output.text
@@ -3579,9 +3626,32 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
-        sampling_params.extra_args[
-            "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+        kv_transfer_params = kv_protocol.prefill_request_kv_transfer_params()
+        request_extra_args = request.get("extra_args") or {}
+        caller_kv_transfer_params = (
+            request_extra_args.get("kv_transfer_params")
+            if isinstance(request_extra_args, dict)
+            else None
+        )
+        if caller_kv_transfer_params is not None:
+            if isinstance(kv_protocol, NixlConnectorProtocol):
+                if not isinstance(caller_kv_transfer_params, dict):
+                    raise ValueError(
+                        "extra_args.kv_transfer_params must be a dict for vLLM NIXL prefill"
+                    )
+                kv_transfer_params = {
+                    **kv_transfer_params,
+                    **caller_kv_transfer_params,
+                    "do_remote_decode": True,
+                    "do_remote_prefill": False,
+                }
+            else:
+                logger.warning(
+                    "Ignoring caller-provided kv_transfer_params for non-NIXL "
+                    "KV connector %s",
+                    type(kv_protocol).__name__,
+                )
+        sampling_params.extra_args["kv_transfer_params"] = kv_transfer_params
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1

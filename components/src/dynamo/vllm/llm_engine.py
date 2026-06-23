@@ -76,10 +76,16 @@ from .handlers import (
     build_sampling_params,
     get_dp_range_for_worker,
 )
+from .kv_connector_protocols import kv_transfer_config_has_connector
 from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
 )
+
+
+def _is_nixl_kv_connector(vllm_config: Any) -> bool:
+    return kv_transfer_config_has_connector(vllm_config, "NixlConnector")
+
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -378,6 +384,16 @@ class VllmLLMEngine(LLMEngine):
                 "remote_port": None,
             }
             caller_kv = sampling_params.extra_args.get("kv_transfer_params", {})
+            if caller_kv and not _is_nixl_kv_connector(self._vllm_config):
+                logger.warning(
+                    "Ignoring caller-provided kv_transfer_params for non-NIXL "
+                    "KV connector"
+                )
+                caller_kv = {}
+            if not isinstance(caller_kv, dict):
+                raise ValueError(
+                    "extra_args.kv_transfer_params must be a dict for vLLM NIXL prefill"
+                )
             sampling_params.extra_args["kv_transfer_params"] = {
                 **kv_defaults,
                 **caller_kv,
@@ -517,9 +533,13 @@ class VllmLLMEngine(LLMEngine):
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
                     }
-                    # Stamp the connector's transfer handle on the
-                    # prefill terminal so PrefillRouter can forward it.
-                    if is_prefill:
+                    # Stamp the connector's transfer handle on the terminal
+                    # chunk so PrefillRouter can forward P-side params to
+                    # decode and cache D-side params for the next turn.
+                    if (
+                        is_prefill
+                        or self.disaggregation_mode == DisaggregationMode.DECODE
+                    ):
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
                         if kv_transfer_params is not None:
                             out["disaggregated_params"] = {

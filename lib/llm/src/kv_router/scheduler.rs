@@ -276,6 +276,34 @@ where
         self.inner.pending_isl_tokens()
     }
 
+    /// Per-worker prefill-busy peek. See
+    /// `SchedulerQueue::worker_is_prefill_busy` for full semantics. Used by
+    /// conditional-disagg v1.5 (`PrefillLoadPolicy`) to gate bypass on
+    /// whether the prefill worker the router would pick for this request is
+    /// already over the existing prefill-busy line.
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+        decay_now: tokio::time::Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.inner
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
+    /// Per-worker decode-busy peek. See
+    /// `SchedulerQueue::worker_is_decode_busy` for full semantics. Used by the
+    /// conditional-disagg v2 decode-side circuit breaker to deny bypass when
+    /// the decode worker the router would pick for this request lacks KV
+    /// headroom to absorb local prefill+decode work.
+    pub fn worker_is_decode_busy(
+        &self,
+        worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.inner.worker_is_decode_busy(worker, threshold)
+    }
+
     pub fn worker_type(&self) -> &'static str {
         self.inner.worker_type()
     }

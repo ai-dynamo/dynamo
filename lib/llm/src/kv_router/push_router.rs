@@ -17,7 +17,9 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+    },
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -191,6 +193,7 @@ impl KvPushRouter {
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
+        let bypassed_remote_prefill = request.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION);
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
@@ -218,6 +221,7 @@ impl KvPushRouter {
                 dp_rank = selection.dp_rank,
                 overlap_blocks = selection.overlap_amount,
                 phase = ?phase,
+                bypassed = bypassed_remote_prefill,
             )),
         )
         .await

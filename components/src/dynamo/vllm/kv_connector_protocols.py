@@ -110,6 +110,7 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
+    "MultiConnector": NixlConnectorProtocol,
 }
 
 # Wrapper connectors that compose sub-connectors under
@@ -118,6 +119,19 @@ KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
 # with the same config shape, so both delegate PD coordination to their
 # single PD-capable child.
 MULTI_CONNECTOR_WRAPPERS: Tuple[str, ...] = ("MultiConnector", "PdConnector")
+
+
+def kv_transfer_config_has_connector(vllm_config: Any, connector_name: str) -> bool:
+    kv_cfg = getattr(vllm_config, "kv_transfer_config", None)
+    name = getattr(kv_cfg, "kv_connector", None) if kv_cfg is not None else None
+    if name == connector_name:
+        return True
+
+    extra = getattr(kv_cfg, "kv_connector_extra_config", None) or {}
+    for child in extra.get("connectors", []):
+        if isinstance(child, dict) and child.get("kv_connector") == connector_name:
+            return True
+    return False
 
 
 def make_kv_connector_protocol(vllm_config: Any) -> KvConnectorProtocol:
@@ -145,6 +159,8 @@ def make_kv_connector_protocol(vllm_config: Any) -> KvConnectorProtocol:
     if name in MULTI_CONNECTOR_WRAPPERS:
         return _resolve_multi_connector_protocol(vllm_config, kv_cfg)
     cls = KV_CONNECTOR_PROTOCOLS.get(name)
+    if cls is None and kv_transfer_config_has_connector(vllm_config, "NixlConnector"):
+        return NixlConnectorProtocol(vllm_config)
     if cls is None:
         raise ValueError(
             f"Unsupported kv_connector={name!r} for PD. Supported names: "
