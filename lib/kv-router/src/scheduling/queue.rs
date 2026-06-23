@@ -439,10 +439,13 @@ impl<
                 if let Some(max_isl_tokens) = self.tier_cap_for_request(&request)
                     && pending_isl_tokens >= max_isl_tokens
                 {
+                    let potential_cached_tokens =
+                        self.best_possible_cached_tokens_for_request(&request);
                     request.respond(Err(KvSchedulerError::Backpressure {
                         reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
                         queued_isl_tokens: pending_isl_tokens,
                         max_queued_isl_tokens: Some(max_isl_tokens),
+                        potential_cached_tokens,
                     }));
                     return;
                 }
@@ -718,6 +721,19 @@ impl<
         let worker_count = workers.len();
         self.queue_depth_tiers
             .cap_for(cache_miss_tokens, worker_count)
+    }
+
+    fn best_possible_cached_tokens_for_request(
+        &self,
+        request: &SchedulingRequest,
+    ) -> Option<usize> {
+        let workers = self.workers_with_configs.borrow();
+        let ctx = SchedulingContext::new(request, &workers);
+        Some(
+            request
+                .isl_tokens
+                .saturating_sub(ctx.best_effective_prefill_tokens()),
+        )
     }
 
     /// Check if all eligible workers are prefill-busy based on threshold.
@@ -1630,6 +1646,7 @@ mod tests {
                     reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
                     queued_isl_tokens: 512,
                     max_queued_isl_tokens: Some(512),
+                    potential_cached_tokens: Some(0),
                 })
             ),
             "expected backpressure when queue is full, got {resp3:?}"
@@ -1679,9 +1696,49 @@ mod tests {
                     reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
                     queued_isl_tokens: 512,
                     max_queued_isl_tokens: Some(512),
+                    potential_cached_tokens: Some(0),
                 })
             ),
             "expensive-tier request should backpressure at depth 1, got {resp3:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_backpressure_reports_potential_cached_tokens() {
+        let block_size = 16;
+        let isl = 512;
+        let tiers = RouterQueueDepthTiers::try_from(vec![RouterQueueDepthByMissingIslTier {
+            missing_cache_tokens_floor: 0,
+            max_queue_depth: isl,
+        }])
+        .unwrap();
+        let (queue, _slots, _cfg_tx) =
+            make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        let (req2, _rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+
+        let (mut req3, rx3) = make_request("req-3", isl);
+        req3.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(0, 0), 384);
+        queue.enqueue(req3).await;
+
+        let resp3 = rx3.await.expect("oneshot dropped");
+        assert!(
+            matches!(
+                resp3,
+                Err(KvSchedulerError::Backpressure {
+                    reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
+                    queued_isl_tokens: 512,
+                    max_queued_isl_tokens: Some(512),
+                    potential_cached_tokens: Some(384),
+                })
+            ),
+            "backpressure should expose potential cached tokens, got {resp3:?}"
         );
     }
 

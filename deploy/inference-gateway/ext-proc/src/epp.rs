@@ -335,11 +335,13 @@ impl Router {
                 reason,
                 queued_isl_tokens,
                 max_queued_isl_tokens,
+                potential_cached_tokens,
             } => Err(anyhow::anyhow!(
-                "Prefill router backpressure: {:?} (queued_isl_tokens={}, max={:?})",
+                "Prefill router backpressure: {:?} (queued_isl_tokens={}, max={:?}, potential_cached_tokens={:?})",
                 reason,
                 queued_isl_tokens,
-                max_queued_isl_tokens
+                max_queued_isl_tokens,
+                potential_cached_tokens
             )),
         }
     }
