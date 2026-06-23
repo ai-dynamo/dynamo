@@ -132,6 +132,9 @@ Verify that your cluster has nodes with GPUs and GPU allocation is configured:
 
 ```bash
 kubectl get nodes -o custom-columns="NAME:.metadata.name,GPU:.status.allocatable['nvidia\.com/gpu']"
+```
+
+```text
 NAME                                        GPU
 gke-my-cluster-default-pool-81c691d5-v7pn   <none>
 gke-my-cluster-gpu-pool-6b65a2ea-7p04       1
