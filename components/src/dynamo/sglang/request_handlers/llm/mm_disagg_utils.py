@@ -118,6 +118,10 @@ def build_disagg_mm_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
     mm_data = _multi_modal_data(request)
     image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
     video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
+    # TODO: Native EP/D works with this raw-media path, but both prefill and
+    # decode call it, so SGLang may fetch/load/preprocess the same media twice.
+    # Remove the duplicate preprocessing once native EP/D can share processed
+    # media or embeddings while preserving decode-side token layout.
     if image_data or video_data:
         logger.debug(
             "disaggregated multimodal request: images=%d, videos=%d",
