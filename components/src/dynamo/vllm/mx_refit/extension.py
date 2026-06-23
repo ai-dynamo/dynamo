@@ -385,7 +385,105 @@ def _torch_dtype(dtype_name: str) -> torch.dtype:
         "half": torch.float16,
         "float32": torch.float32,
         "float": torch.float32,
+        "int64": torch.int64,
+        "long": torch.long,
     }.get(dtype_name, torch.bfloat16)
+
+
+def _split_policy_and_draft_weights(
+    weights: list[tuple[str, torch.Tensor]],
+) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
+    policy_weights = []
+    draft_weights = []
+    for name, tensor in weights:
+        if name.startswith("draft."):
+            draft_weights.append((name.removeprefix("draft."), tensor))
+        else:
+            policy_weights.append((name, tensor))
+    return policy_weights, draft_weights
+
+
+def _derive_qwen_llama_hf_names(megatron_name: str, role: str | None) -> list[str]:
+    name = megatron_name.removeprefix("module.")
+
+    if name.startswith("decoder.layers."):
+        parts = name.split(".")
+        if len(parts) < 4:
+            return [name]
+        layer = parts[2]
+        suffix = ".".join(parts[3:])
+        layer_prefix = f"model.layers.{layer}"
+
+        if suffix == "self_attention.linear_qkv.weight":
+            return [
+                f"{layer_prefix}.self_attn.q_proj.weight",
+                f"{layer_prefix}.self_attn.k_proj.weight",
+                f"{layer_prefix}.self_attn.v_proj.weight",
+            ]
+        if suffix == "self_attention.linear_proj.weight":
+            return [f"{layer_prefix}.self_attn.o_proj.weight"]
+        if suffix == "self_attention.q_layernorm.weight":
+            return [f"{layer_prefix}.self_attn.q_norm.weight"]
+        if suffix == "self_attention.k_layernorm.weight":
+            return [f"{layer_prefix}.self_attn.k_norm.weight"]
+        if suffix == "mlp.linear_fc1.weight" and role == "gated_mlp_column":
+            return [
+                f"{layer_prefix}.mlp.gate_proj.weight",
+                f"{layer_prefix}.mlp.up_proj.weight",
+            ]
+        if suffix == "mlp.linear_fc2.weight":
+            return [f"{layer_prefix}.mlp.down_proj.weight"]
+        if suffix == "input_layernorm.weight":
+            return [f"{layer_prefix}.input_layernorm.weight"]
+        if suffix == "pre_mlp_layernorm.weight":
+            return [f"{layer_prefix}.post_attention_layernorm.weight"]
+
+    if name == "decoder.final_layernorm.weight":
+        return ["model.norm.weight"]
+    if name == "embedding.word_embeddings.weight":
+        return ["model.embed_tokens.weight"]
+    if name == "output_layer.weight":
+        return ["lm_head.weight"]
+    return [name]
+
+
+def _resolve_hf_names(
+    megatron_name: str,
+    role: str | None,
+    name_map: dict[str, list[str]],
+) -> list[str]:
+    lookup_name = megatron_name.removeprefix("module.")
+    hf_names = name_map.get(lookup_name, name_map.get(megatron_name))
+    if hf_names is None:
+        return _derive_qwen_llama_hf_names(megatron_name, role)
+
+    hf_names = list(hf_names)
+    if hf_names in ([megatron_name], [lookup_name]):
+        return _derive_qwen_llama_hf_names(megatron_name, role)
+    return [name.removeprefix("module.") for name in hf_names]
+
+
+def _trim_draft_vocab_padding(
+    draft_model: torch.nn.Module,
+    draft_weights: list[tuple[str, torch.Tensor]],
+) -> list[tuple[str, torch.Tensor]]:
+    vocab_sizes = {
+        name: int(module.org_vocab_size)
+        for name, module in draft_model.named_modules()
+        if hasattr(module, "org_vocab_size")
+    }
+    if not vocab_sizes:
+        return draft_weights
+
+    trimmed = []
+    for name, tensor in draft_weights:
+        for module_name, org_vocab_size in vocab_sizes.items():
+            leaf_name = module_name.rsplit(".", 1)[-1]
+            if leaf_name in name and tensor.shape[0] > org_vocab_size:
+                tensor = tensor[:org_vocab_size]
+                break
+        trimmed.append((name, tensor))
+    return trimmed
 
 
 class MxRefitWorkerExtension:
@@ -455,6 +553,7 @@ class MxRefitWorkerExtension:
                 model._do_torchao_reload = old_do_torchao_reload
 
     def _mx_load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        weights, draft_weights = _split_policy_and_draft_weights(weights)
         tp_size, tp_rank = _target_tp(self)
         uses_fp8_quantization = self._mx_uses_fp8_quantization()
         if tp_size > 1:
@@ -485,6 +584,28 @@ class MxRefitWorkerExtension:
             self._mx_load_fp8_weights(weights)
         else:
             self.model_runner.model.load_weights(weights=weights)
+        self._mx_load_draft_weights(draft_weights)
+
+    def _mx_load_draft_weights(
+        self,
+        draft_weights: list[tuple[str, torch.Tensor]],
+    ) -> None:
+        if not draft_weights:
+            return
+
+        drafter = getattr(self.model_runner, "drafter", None)
+        draft_model = getattr(drafter, "model", None) if drafter is not None else None
+        if draft_model is None:
+            speculator = getattr(self.model_runner, "speculator", None)
+            draft_model = (
+                getattr(speculator, "model", None) if speculator is not None else None
+            )
+        if draft_model is None:
+            raise RuntimeError("Received EAGLE draft weights, but vLLM has no drafter.")
+
+        draft_model.load_weights(
+            weights=_trim_draft_vocab_padding(draft_model, draft_weights),
+        )
 
     def _mx_maybe_process_fp8_kv_cache(self) -> None:
         cache_config = getattr(self.model_runner.vllm_config, "cache_config", None)
@@ -655,15 +776,13 @@ class MxRefitWorkerExtension:
             for td in cand.registry.get("tensors", []):
                 if td.name in receive_specs or not td.megatron_role:
                     continue
-                lookup_name = (
-                    td.name[len("module.") :]
-                    if td.name.startswith("module.")
-                    else td.name
-                )
-                hf_names = name_map.get(lookup_name, name_map.get(td.name, [td.name]))
                 receive_specs[td.name] = ReceiveSpec(
                     megatron_name=td.name,
-                    hf_names=list(hf_names),
+                    hf_names=_resolve_hf_names(
+                        td.name,
+                        td.megatron_role,
+                        name_map,
+                    ),
                     role=td.megatron_role,
                     target_shape=tuple(int(s) for s in td.global_shape),
                     target_dtype=td.dtype,
