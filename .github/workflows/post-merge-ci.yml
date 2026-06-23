@@ -780,8 +780,6 @@ jobs:
       operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      with:
-        persist-credentials: false
     - name: Setup vCluster and operator
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
@@ -809,8 +807,6 @@ jobs:
       operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      with:
-        persist-credentials: false
     - name: Setup vCluster and operator
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
@@ -839,8 +835,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
@@ -887,8 +881,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
@@ -936,8 +928,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
@@ -1002,8 +992,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
@@ -1075,8 +1063,6 @@ jobs:
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      with:
-        persist-credentials: false
     - name: Teardown vCluster
       uses: ./.github/actions/teardown-dynamo-operator
       with:
@@ -1090,8 +1076,6 @@ jobs:
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      with:
-        persist-credentials: false
     - name: Teardown vCluster
       uses: ./.github/actions/teardown-dynamo-operator
       with:
