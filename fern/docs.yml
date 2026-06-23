@@ -207,9 +207,11 @@ redirects:
   - source: "/dynamo/blog"
     destination: "/dynamo/dev/digest"
   # Tab split: docs tab divided into Home / User Guide / Reference / Blog tabs.
-  # These four pages changed section (and thus URL); everything else kept its URL.
-  - source: "/dynamo/dev/getting-started/introduction"
-    destination: "/dynamo/dev/introduction"
+  # Compatibility and blog changed section (and thus URL); everything else kept its URL.
+  # Introduction was later moved from the Home tab back into User Guide > Getting Started,
+  # so its redirect points the old Home-tab URL at the Getting Started page.
+  - source: "/dynamo/dev/introduction"
+    destination: "/dynamo/dev/getting-started/introduction"
   - source: "/dynamo/dev/getting-started/compatibility"
     destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/dev/getting-started/blog"
@@ -288,5 +290,7 @@ favicon: ../docs/assets/NVIDIA_symbol.svg
 js:
   - url: https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js
     strategy: beforeInteractive
+  - url: https://buttons.github.io/buttons.js
+    strategy: afterInteractive
 css:
   - ./main.css

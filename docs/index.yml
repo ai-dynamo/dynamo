@@ -50,14 +50,16 @@ tabs:
 navigation:
   - tab: home
     layout:
-      - page: Introduction
-        path: getting-started/introduction.mdx
+      - page: Welcome
+        path: welcome.mdx
 
   - tab: user-guide
     layout:
       # ==================== Getting Started ====================
       - section: Getting Started
         contents:
+          - page: Introduction
+            path: getting-started/introduction.mdx
           - page: About
             path: getting-started/about.md
           - page: K8s Quickstart
@@ -533,44 +535,6 @@ navigation:
                 path: features/speculative-decoding/speculative-decoding-vllm.md
 
   - tab: developer-guide
-
-  - tab: recipes
-  layout:
-    # ==================== Recipes ====================
-    - page: Browse All Recipes
-      path: recipes/README.mdx
-      slug: browse
-    - page: Kimi-K2.6
-      path: recipes/kimi-k2-6.mdx
-      slug: kimi-k2-6
-    - page: Nemotron 3 Ultra
-      path: recipes/nemotron-3-ultra.mdx
-      slug: nemotron-3-ultra
-    - page: Nemotron 3 Super
-      path: recipes/nemotron-3-super.mdx
-      slug: nemotron-3-super
-    - page: GLM-5 NVFP4
-      path: recipes/glm-5-nvfp4.mdx
-      slug: glm-5-nvfp4
-    - page: DeepSeek V3.2 NVFP4
-      path: recipes/deepseek-v3-2-nvfp4.mdx
-      slug: deepseek-v3-2-nvfp4
-    - page: GPT-OSS-120B
-      path: recipes/gpt-oss-120b.mdx
-      slug: gpt-oss-120b
-    - page: Qwen3-32B
-      path: recipes/qwen3-32b.mdx
-      slug: qwen3-32b
-    - page: Qwen3-235B-A22B FP8
-      path: recipes/qwen3-235b-a22b-fp8.mdx
-      slug: qwen3-235b-a22b-fp8
-    - page: Qwen3-32B FP8
-      path: recipes/qwen3-32b-fp8.mdx
-      slug: qwen3-32b-fp8
-    - page: Llama-3.3-70B FP8
-      path: recipes/llama-3-3-70b.mdx
-      slug: llama-3-3-70b
-
     layout:
       # ==================== Developer's Guide ====================
       - section: Developer's Guide
@@ -639,6 +603,43 @@ navigation:
               - page: Integration README
                 path: templates/integration-readme.md
 
+  - tab: recipes
+    layout:
+      # ==================== Recipes ====================
+      - page: Browse All Recipes
+        path: recipes/README.mdx
+        slug: browse
+      - page: Kimi-K2.6
+        path: recipes/kimi-k2-6.mdx
+        slug: kimi-k2-6
+      - page: Nemotron 3 Ultra
+        path: recipes/nemotron-3-ultra.mdx
+        slug: nemotron-3-ultra
+      - page: Nemotron 3 Super
+        path: recipes/nemotron-3-super.mdx
+        slug: nemotron-3-super
+      - page: GLM-5 NVFP4
+        path: recipes/glm-5-nvfp4.mdx
+        slug: glm-5-nvfp4
+      - page: DeepSeek V3.2 NVFP4
+        path: recipes/deepseek-v3-2-nvfp4.mdx
+        slug: deepseek-v3-2-nvfp4
+      - page: GPT-OSS-120B
+        path: recipes/gpt-oss-120b.mdx
+        slug: gpt-oss-120b
+      - page: Qwen3-32B
+        path: recipes/qwen3-32b.mdx
+        slug: qwen3-32b
+      - page: Qwen3-235B-A22B FP8
+        path: recipes/qwen3-235b-a22b-fp8.mdx
+        slug: qwen3-235b-a22b-fp8
+      - page: Qwen3-32B FP8
+        path: recipes/qwen3-32b-fp8.mdx
+        slug: qwen3-32b-fp8
+      - page: Llama-3.3-70B FP8
+        path: recipes/llama-3-3-70b.mdx
+        slug: llama-3-3-70b
+
   - tab: reference
     layout:
       # ==================== Reference ====================
@@ -649,6 +650,8 @@ navigation:
             path: getting-started/compatibility.md
           - page: Release Artifacts
             path: reference/release-artifacts.md
+          - page: Examples # TODO: get rid of this bc it doesn't actually give anything new beyond linking to other pages -- maybe just link to the relevant sections
+            path: getting-started/examples.md
           - page: Glossary
             path: reference/glossary.md
 
