@@ -79,7 +79,7 @@ https://cloud.google.com/sdk/docs/install
 
 ## Install Dynamo Kubernetes Platform
 
-Set `RELEASE_VERSION`to `1.2.1` in [step 2](../../installation-guide.md#step-2-install-the-dynamo-platform) of
+Set `RELEASE_VERSION` to `1.2.1` in [step 2](../../installation-guide.md#step-2-install-the-dynamo-platform) of
 [Dynamo Installation Guide](../../installation-guide.md#overview) and perform the step.
 Optionally, perform
 [step 3](../../installation-guide.md#step-3-install-optional-components).
