@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod g2pb;
 mod transfer;
 mod utils;
 mod zmq;
@@ -10,6 +11,16 @@ mod leader;
 mod nccl_bootstrap;
 mod worker;
 
+pub use g2pb::{
+    G2PB_COMPONENT_NAME, G2PB_ENDPOINT_NAME, G2PB_NAMESPACE, G2pbCacheStorage, G2pbCommitRequest,
+    G2pbDiscoveredPeers, G2pbError, G2pbFetchBlocksResponse, G2pbFetchRequest, G2pbFetchResponse,
+    G2pbLoadRemoteRequest, G2pbOfferRequest, G2pbOfferResponse, G2pbPeer,
+    G2pbPeerInstance, G2pbPeerResolver, G2pbPutBlock, G2pbPutPayloadRequest, G2pbQueryHit,
+    G2pbQueryRequest, G2pbRequestPlaneClient, G2pbRpcRequest, G2pbRpcResponse,
+    G2pbStageBlocksRequest, G2pbStageBlocksResponse, G2pbStorageAgent, G2pbStorageClient,
+    G2pbStorageConfig, G2pbTransferBlock, discover_g2pb_peers, route_g2pb_put_blocks_by_owner,
+    route_g2pb_sequence_hashes_by_owner, route_g2pb_transfer_blocks_by_owner, select_g2pb_owner,
+};
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 #[cfg(feature = "nccl")]
 pub use nccl_bootstrap::{NcclBootstrap, NcclCommOwned};

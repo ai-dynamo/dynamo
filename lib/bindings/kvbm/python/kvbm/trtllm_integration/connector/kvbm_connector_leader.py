@@ -7,6 +7,11 @@ from typing import List, Optional
 
 import tensorrt_llm
 from kvbm import KvbmLeader
+from kvbm.async_loading_advisor import (
+    clear_async_loading_advisor,
+    get_async_loading_advisor,
+    register_async_loading_advisor,
+)
 from kvbm.trtllm_integration.consolidator_config import get_consolidator_mode, is_truthy
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
@@ -99,9 +104,12 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 "KV Event Consolidator disabled via DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR"
             )
 
-        print(f"KvConnectorLeader initialized with rank: {mappings.rank}")
+        print(
+            f"KvConnectorLeader initialized with rank: {mappings.rank}, local_rank: {mappings.local_rank}"
+        )
         self._connector = RustKvConnectorLeader(
             mappings.rank,
+            mappings.local_rank,
             self.drt,
             self.block_size,
             leader,
@@ -109,6 +117,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             consolidator_output_endpoint=consolidator_output_ep,
             consolidator_mode=consolidator_mode,
         )
+        register_async_loading_advisor(self.advise_async_loading)
 
     @nvtx_annotate(category="scheduler")
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
@@ -217,11 +226,59 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         if bool(request.multimodal_positions):
             raise ValueError("Unsupported request - requires mm extra keys")
 
-        all_token_ids = request.get_tokens(0)
-
-        # extract the critial aspects of the request that effect how the tokens are hashed
-        request = KvbmRequest(
-            request_id=str(request.request_id), lora_name=None, salt_hash=None
+        self._create_slot_from_tokens(
+            request_id=str(request.request_id),
+            token_ids=list(request.get_tokens(0)),
+            lora_name=None,
+            salt_hash=None,
         )
 
-        self._connector.create_slot(request, all_token_ids)
+    def _create_slot_from_tokens(
+        self,
+        request_id: str,
+        token_ids: List[int],
+        lora_name: Optional[str],
+        salt_hash: Optional[str],
+    ) -> None:
+        if self._connector.has_slot(request_id):
+            return None
+
+        request = KvbmRequest(
+            request_id=request_id, lora_name=lora_name, salt_hash=salt_hash
+        )
+        self._connector.create_slot(request, token_ids)
+
+    @nvtx_annotate(category="scheduler")
+    def advise_async_loading(
+        self,
+        request_id: str,
+        token_ids: List[int],
+        lora_name: Optional[str] = None,
+        salt_hash: Optional[str] = None,
+        transfer_for_ms: int = 100,
+        min_blocks: int = 10,
+    ) -> None:
+        """
+        Start best-effort async remote loading before scheduling.
+
+        This is the side-band pre-scheduler hook. It does not require a TRT-LLM
+        `LlmRequest`; callers provide request identity plus tokens, with optional
+        LoRA and salt inputs so hashing stays consistent with the eventual slot.
+        """
+        self._create_slot_from_tokens(request_id, token_ids, lora_name, salt_hash)
+
+        request = KvbmRequest(
+            request_id=request_id, lora_name=lora_name, salt_hash=salt_hash
+        )
+        self._connector.advise_async_loading(
+            request, token_ids, transfer_for_ms, min_blocks
+        )
+
+    def __del__(self):
+        try:
+            advisor = get_async_loading_advisor()
+            bound = getattr(advisor, "__self__", None)
+            if bound is self:
+                clear_async_loading_advisor()
+        except Exception:
+            pass

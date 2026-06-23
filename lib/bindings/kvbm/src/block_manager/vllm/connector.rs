@@ -8,6 +8,7 @@ use dynamo_llm::tokens::SequenceHash;
 
 pub mod leader;
 pub mod trtllm_leader;
+pub mod trtllm_onboarding_advisor;
 pub mod trtllm_worker;
 pub mod worker;
 

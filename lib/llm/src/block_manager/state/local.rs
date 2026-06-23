@@ -35,7 +35,9 @@ impl LocalBlockDataFactories {
                 config,
                 resources.nixl_agent.as_ref().as_ref(),
             )?;
-            block_set.add_block_set(next_block_set_idx, layout.serialize()?);
+            if resources.nixl_agent.is_some() {
+                block_set.add_block_set(next_block_set_idx, layout.serialize()?);
+            }
             Some(LocalBlockDataFactory::new(
                 layout,
                 next_block_set_idx,
@@ -57,7 +59,9 @@ impl LocalBlockDataFactories {
                 config,
                 resources.nixl_agent.as_ref().as_ref(),
             )?;
-            block_set.add_block_set(next_block_set_idx, layout.serialize()?);
+            if resources.nixl_agent.is_some() {
+                block_set.add_block_set(next_block_set_idx, layout.serialize()?);
+            }
             Some(LocalBlockDataFactory::new(
                 layout,
                 next_block_set_idx,
