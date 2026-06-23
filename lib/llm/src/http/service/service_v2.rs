@@ -157,10 +157,12 @@ impl ServiceObserver {
         tokio::time::timeout(timeout, async {
             loop {
                 let notified = self.inflight_zero.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 if self.inflight_count() == 0 {
                     break;
                 }
-                notified.await;
+                notified.as_mut().await;
             }
         })
         .await
@@ -1053,9 +1055,9 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn test_liveness_endpoint_reflects_cancellation() {
+    async fn test_liveness_endpoint_stays_live_while_draining() {
         temp_env::async_with_vars(
-            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))],
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
             async {
                 let cancel_token = Arc::new(CancellationToken::new());
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1063,6 +1065,8 @@ mod tests {
                     .expect("failed to bind ephemeral port");
                 let port = listener.local_addr().unwrap().port();
                 let service = HttpService::builder().port(port).build().unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
 
                 let service_token = cancel_token.clone();
                 let handle = tokio::spawn(async move {
@@ -1082,8 +1086,9 @@ mod tests {
                     .await
                     .expect("Request failed");
 
-                assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
+                drop(inflight);
                 handle.abort();
             },
         )
@@ -1154,12 +1159,17 @@ mod tests {
                 .await
         );
 
+        let waiter = {
+            let observer = observer.clone();
+            tokio::spawn(async move {
+                observer
+                    .wait_inflight_zero_or_timeout(Duration::from_secs(1))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
         drop(permit);
-        assert!(
-            observer
-                .wait_inflight_zero_or_timeout(Duration::from_secs(1))
-                .await
-        );
+        assert!(waiter.await.unwrap());
         assert_eq!(observer.inflight_count(), 0);
     }
 
