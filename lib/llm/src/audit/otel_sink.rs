@@ -10,8 +10,10 @@
 //! teardown can still lose buffered OTLP records.
 //!
 //! Transport follows `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` with
-//! `OTEL_EXPORTER_OTLP_PROTOCOL` as fallback. Supported values are
-//! `http/protobuf` (default) and `grpc`.
+//! `OTEL_EXPORTER_OTLP_PROTOCOL` as fallback. Supported values are `grpc`
+//! (default) and `http/protobuf`. The default matches the runtime OTLP
+//! exporter (`lib/runtime/src/logging.rs`), so audit logs and application
+//! telemetry resolve the same protocol/endpoint from the shared env vars.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -152,18 +154,22 @@ enum OtlpLogsProtocol {
 
 impl OtlpLogsProtocol {
     fn from_env() -> Self {
+        // Default to grpc when unset, matching the runtime OTLP exporter
+        // (`parse_otlp_protocol` in lib/runtime/src/logging.rs). Diverging here
+        // would silently send audit logs to a different protocol/port than the
+        // rest of Dynamo's telemetry when only a generic endpoint is configured.
         let raw = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL)
             .or_else(|_| std::env::var(env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL))
-            .unwrap_or_else(|_| "http/protobuf".to_string());
+            .unwrap_or_else(|_| "grpc".to_string());
         match raw.trim().to_ascii_lowercase().as_str() {
-            "http/protobuf" | "http/proto" | "http" => Self::HttpProtobuf,
             "grpc" => Self::Grpc,
+            "http/protobuf" | "http/proto" | "http" => Self::HttpProtobuf,
             other => {
                 tracing::warn!(
                     protocol = other,
-                    "audit otel: unsupported OTLP logs protocol; defaulting to http/protobuf"
+                    "audit otel: unsupported OTLP logs protocol; defaulting to grpc"
                 );
-                Self::HttpProtobuf
+                Self::Grpc
             }
         }
     }
@@ -813,13 +819,30 @@ mod tests {
 
     #[test]
     #[serial]
-    fn protocol_env_defaults_to_http_protobuf() {
+    fn protocol_env_defaults_to_grpc() {
         temp_env::with_vars(
             [
                 (env_otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL, None::<&str>),
                 (env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL, None::<&str>),
             ],
-            || assert_eq!(OtlpLogsProtocol::from_env(), OtlpLogsProtocol::HttpProtobuf),
+            // Matches the runtime OTLP exporter default (grpc) so audit logs and
+            // application telemetry agree on protocol/endpoint when unset.
+            || assert_eq!(OtlpLogsProtocol::from_env(), OtlpLogsProtocol::Grpc),
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn protocol_env_unknown_falls_back_to_grpc() {
+        temp_env::with_vars(
+            [
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
+                    Some("carrier-pigeon"),
+                ),
+                (env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL, None::<&str>),
+            ],
+            || assert_eq!(OtlpLogsProtocol::from_env(), OtlpLogsProtocol::Grpc),
         );
     }
 
