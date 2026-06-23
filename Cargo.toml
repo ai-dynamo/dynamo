@@ -21,7 +21,6 @@ members = [
     "lib/kvbm-consolidator",
     "lib/kvbm-logical",
     "lib/kvbm-physical",
-    "lib/protocols",
     "lib/bench",
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
@@ -55,7 +54,7 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.3.0" }
 dynamo-memory = { path = "lib/memory", version = "1.3.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.3.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.3.0", features = ["metrics", "runtime-protocols"] }
-dynamo-protocols = { path = "lib/protocols", version = "1.3.0" }
+dynamo-protocols = { version = "=2.0.0" }
 dynamo-parsers = { version = "1.4.1" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.3.0" }
 fastokens = { version = "0.2.0" }

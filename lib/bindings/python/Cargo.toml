@@ -50,7 +50,7 @@ aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git",
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "1.4.1" }
-dynamo-protocols = { path = "../../protocols" }
+dynamo-protocols = { version = "=2.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
