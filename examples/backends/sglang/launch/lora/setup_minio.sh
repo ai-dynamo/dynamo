@@ -1,1 +1,1 @@
-../../common/setup_minio.sh
+../../../../common/setup_minio.sh
