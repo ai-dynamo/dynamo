@@ -5,7 +5,10 @@ title: Agent Harnesses
 subtitle: Point coding-agent CLIs at a Dynamo deployment
 ---
 
-Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages` so **any agent** that uses these APIs can talk to a Dynamo endpoint even if its not explicitly listed in this guide. This guide specifically focuses on popular agent harnesses that send stable trajectory ID that Dynamo can use for optimized routing and scheduling.
+Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages` so any
+agent that uses these APIs can connect to a Dynamo endpoint. Supported coding
+harnesses send stable session IDs that Dynamo uses for router affinity. Send
+trajectory identity separately when you need tracing or SGLang radix tagging.
 
 ## Local Setup
 
@@ -33,7 +36,8 @@ wire_api = "responses"
 codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
 ```
 
-Codex sends a `session-id` header that is internally mapped to our `trajectory_id`
+Codex sends `session-id`. Dynamo uses it for router affinity and does not derive a
+trajectory ID from it.
 
 ## Claude Code
 
@@ -50,7 +54,10 @@ export ANTHROPIC_API_KEY=
 claude
 ```
 
-Dynamo uses `x-claude-code-session-id` as the Claude Code trajectory ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child trajectory ID and the session ID as its parent.
+Dynamo uses `x-claude-code-session-id` for router affinity. It uses
+`x-claude-code-agent-id` as trajectory identity when present, unless
+`x-dynamo-trajectory-id` overrides it. The session ID does not become a parent
+trajectory.
 
 ## OpenCode
 
@@ -85,7 +92,8 @@ Run OpenCode with the provider/model pair:
 opencode -m dynamo/zai-org/GLM-4.7-Flash
 ```
 
-Dynamo maps OpenCode's `x-session-id` header to `trajectory_id` and `x-parent-session-id` to `parent_trajectory_id`.
+Dynamo maps OpenCode's `x-session-id` header to router affinity.
+`x-parent-session-id` does not create trajectory identity.
 
 ## Hermes Agent
 

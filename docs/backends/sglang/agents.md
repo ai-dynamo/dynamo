@@ -128,7 +128,9 @@ python -m dynamo.sglang \
 
 Dynamo reads trajectory identity from agent headers such as `X-Dynamo-Trajectory-ID` and passes it to SGLang on every generate request. `X-Dynamo-Trajectory-Final: true` is normalized into an internal KV eviction hint and forwarded with the agent context, but the SGLang backend does not act on that hint in this release.
 
-The radix entries remain normally evictable, so this mechanism does not require sticky routing. A separate session-routing API may choose affinity independently of trajectory identity.
+The radix entries remain normally evictable, so this mechanism does not require
+session affinity. `X-Dynamo-Session-ID` can independently keep requests on one
+router-selected worker, but Dynamo sends no backend session lifecycle RPCs.
 
 ## Quickstart
 

@@ -33,6 +33,41 @@ policy orders requests within a tier.
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
 
+## Session Affinity
+
+Send `X-Dynamo-Session-ID` to keep related requests on one worker. Dynamo also
+recognizes native harness headers in this order after the canonical header:
+`X-Claude-Code-Session-ID`, Codex `Session-ID`, and OpenCode `X-Session-ID`.
+Empty values are skipped. If a request carries more than one value, the first
+non-empty value in that precedence order wins.
+
+The first successfully dispatched request binds the session ID to its selected
+worker and, when available, data-parallel rank. Later requests exact-dispatch to
+that target without transport fallback. Concurrent requests can share a binding.
+Active requests prevent expiry, and completion or stream cancellation restarts the
+idle timer.
+
+Set `--router-session-affinity-ttl-secs` or
+`DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to configure the idle timeout. The default
+is `300`; the accepted range is `1` through `31536000` seconds. This timeout is
+independent of `--router-ttl-secs` and `--router-predicted-ttl-secs`.
+
+If the bound worker or rank is unavailable, the request fails and the binding stays
+in place until idle expiry. Dynamo does not rebind on discovery loss, overload, or
+constraint mismatch. Router restart clears all bindings. Bindings are not shared
+between frontend replicas.
+
+Direct mode still requires the phase-appropriate explicit worker ID on every
+affinity request. The stored binding validates that target but does not supply a
+missing ID. In disaggregated serving, prefill and decode use separate phase-local
+bindings. If no prefill router is active, only the decode or aggregated binding is
+created.
+
+Session affinity does not create a backend session or send lifecycle RPCs. There is
+no explicit unbind; idle expiry removes only router-local state. Use
+`X-Dynamo-Trajectory-ID` separately for agent identity, tracing, KV hints, and
+SGLang radix tagging.
+
 ### AIC Prefill Load Model
 
 Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. For the cost-model behavior, see [Prefill Load Modeling](router-concepts.md#prefill-load-modeling).

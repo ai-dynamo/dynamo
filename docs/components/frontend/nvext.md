@@ -69,6 +69,18 @@ Trajectory identity is header-only. Use the coding-agent headers or Dynamo
 trajectory headers described in [Trajectory IDs](../../agents/trajectory-ids.md);
 `nvext` does not accept trajectory identity fields.
 
+Session affinity is also header-only. Send `X-Dynamo-Session-ID`, or use a supported
+coding harness's native session header. The router binds the first dispatched request
+to its selected worker and routes later requests with the same session ID to that
+worker until the idle timeout expires. Session affinity is independent of trajectory
+identity and is not forwarded to backend workers.
+
+> [!NOTE]
+> Clients that previously used `nvext.session_control` should send
+> `X-Dynamo-Session-ID` instead. The router does not expose open, close, or explicit
+> unbind actions. Send `X-Dynamo-Trajectory-ID` separately when you need tracing,
+> replay identity, or SGLang radix tagging.
+
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../agents/agent-tracing.md).
 
@@ -219,4 +231,4 @@ When the client requests response metadata via `extra_fields`, the response incl
 | [Trajectory IDs](../../agents/trajectory-ids.md) | Passive trajectory identity |
 | [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
 | [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
-| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and trajectory radix tagging |
