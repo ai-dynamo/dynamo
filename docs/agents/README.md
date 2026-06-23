@@ -5,52 +5,47 @@ title: Agents
 subtitle: Agent-aware serving features in Dynamo
 ---
 
-Dynamo provides a small set of request extensions and trace utilities for
-serving agentic workloads. The harness remains responsible for the semantic
-agent trajectory. Dynamo receives lightweight metadata and uses it for serving
-telemetry, routing hints, and backend-specific cache behavior.
+NVIDIA Dynamo optimizes agent workloads with lightweight headers and request extensions for the router, inference engine, and KV cache manager. The harness remains responsible for agent semantics, while Dynamo uses request metadata for observability, replay, routing, priority, and cache-aware serving.
 
-## Core Concepts
+| Layer | Signal | Optimization |
+|-------|--------|--------------|
+| Frontend API | Session headers and `nvext` request extensions | Normalize agent identity and serving intent across APIs. |
+| Router | Priority, expected output length, and cache-overlap signals | Place requests for KV reuse and order queued work. |
+| KV cache management | Priority and session metadata forwarded to the backend runtime | Influence engine scheduling, cache eviction, and subagent KV isolation where the backend supports it. |
+
+The common identity concept is `session_id`: one stable ID for one agent reasoning/tool chain. Dynamo maps supported coding-agent headers to `session_id`, and custom harnesses can send `X-Dynamo-Session-ID` directly. The ID is passive metadata: it does not enable sticky sessions or session-aware routing. A routing policy must opt in to use it. See [Session IDs](session-ids.md#session-id-inputs) for the exact contract.
+
+## Documentation
 
 | Concept | Purpose |
 |---------|---------|
-| [Agent Tracing](agent-tracing.md) | Passive `session_id`/`trajectory_id` metadata plus Dynamo-owned request timing, token, cache, worker-placement, and harness tool-event traces. |
-| [Agent Hints](agent-hints.md) | Optional per-request hints such as priority, expected output length, and speculative prefill. |
-| [Priority Scheduling](priority-scheduling.md) | Request priority semantics across the router queue, backend engines, and cache policy. |
-| [Use Pi-Mono with Dynamo](pi-mono.md) | End-to-end quickstart that drives the Pi coding agent through Dynamo with agent context and tool tracing turned on. |
-| [Tool Calling](../tool-calling/README.md) | Supported tool-call parsers and parser names, plus engine-fallback configurations. |
-| [Reasoning](../reasoning/README.md) | Supported reasoning parsers for chain-of-thought models, plus engine-fallback configurations. |
-
-## Backend-Specific Guides
-
-Agent features are exposed through common request metadata, but backend support
-varies by runtime.
-
-| Backend Guide | Contents |
-|---------------|----------|
-| [SGLang for Agentic Workloads](../backends/sglang/agents.md) | Priority scheduling, priority-based radix eviction, speculative prefill, and streaming session control for subagent KV isolation. |
+| [Agent Harnesses](agent-harnesses.md) | Quickstart for running popular agent harnesses through Dynamo. |
+| [Session IDs](session-ids.md) | Stable agent identity for tracing and opt-in consumers. |
+| [Agent Tracing](agent-tracing.md) | Request traces, inferred tool calls, optional harness tool spans, and Perfetto conversion. |
+| [Agent Simulation](agent-replay.md) | Convert agent traces into replay and simulation inputs. |
+| [Agent Hints](agent-hints.md) | Per-request hints such as priority, expected output length, and speculative prefill. |
+| [Priority Scheduling](../components/router/priority-scheduling.md) | Priority behavior across the router queue, backend engines, and cache policy. |
+| [ThunderAgent Program Scheduler](thunderagent-router.md) | Experimental tool-boundary pause/resume scheduler on top of KV-aware routing. |
 
 ## Request Surface
 
-Agent-facing request metadata lives under `nvext` on OpenAI-compatible request
-bodies:
+Agent session identity is header-only. Agent-facing body metadata under `nvext` is for hints and controls.
 
-```json
-{
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer sk-dummy' \
+  -H 'x-dynamo-session-id: research-run-42:researcher' \
+  -d '{
+    "model": "my-model",
+    "messages": [{"role": "user", "content": "..."}],
     "nvext": {
-        "agent_context": {
-            "session_type_id": "deep_research",
-            "session_id": "research-run-42",
-            "trajectory_id": "research-run-42:researcher"
-        },
-        "agent_hints": {
-            "priority": 5,
-            "osl": 1024
-        }
+      "agent_hints": {
+        "priority": 5,
+        "osl": 1024
+      }
     }
-}
+  }'
 ```
 
-Use `agent_context` when you want traceability across LLM calls, tool calls, and
-external trajectory files. Use `agent_hints` only when the harness has
-serving-relevant intent that Dynamo can act on.
+Use session IDs when you want traceability across LLM calls, tool calls, and external trajectory files. Use `agent_hints` when you want to influence serving behavior at the router and engine layer. Configure session-aware routing separately when a routing policy supports it.

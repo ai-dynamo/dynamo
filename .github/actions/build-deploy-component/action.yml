@@ -11,6 +11,10 @@ inputs:
   image_tag:
     description: 'Image tag to apply to built images'
     required: true
+  target:
+    description: 'Dockerfile target to build. Defaults to agent for snapshot and the default target for operator.'
+    required: false
+    default: ''
   builder_name:
     description: 'Buildx builder name'
     required: true
@@ -38,6 +42,10 @@ inputs:
     default: ''
   extra_tags:
     description: 'Optional newline-separated list of fully-qualified extra image URIs to also tag and push'
+    required: false
+    default: ''
+  extra_build_args:
+    description: 'Optional newline-separated KEY=VALUE build args'
     required: false
     default: ''
 
@@ -97,14 +105,26 @@ runs:
         TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
         echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
-        TARGET_FLAG=""
-        if [[ "${{ inputs.component }}" == "snapshot" ]]; then
-          TARGET_FLAG="--target agent"
+        TARGET="${{ inputs.target }}"
+        if [[ -z "${TARGET}" && "${{ inputs.component }}" == "snapshot" ]]; then
+          TARGET="agent"
         fi
+
+        TARGET_FLAG=""
+        if [[ -n "${TARGET}" ]]; then
+          TARGET_FLAG="--target ${TARGET}"
+        fi
+
+        BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
+        while IFS= read -r build_arg; do
+          if [[ -n "${build_arg}" ]]; then
+            BUILD_ARGS+=("--build-arg" "${build_arg}")
+          fi
+        done <<< "${{ inputs.extra_build_args }}"
 
         docker buildx build --push \
             --platform ${{ steps.settings.outputs.build_platforms }} \
-            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            "${BUILD_ARGS[@]}" \
             --build-context snapshot=../snapshot \
             ${TARGET_FLAG} \
             ${TAGGING_FLAGS} -f Dockerfile .

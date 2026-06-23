@@ -6,7 +6,7 @@
 mod kv_event_sink;
 #[path = "sglang/mod.rs"]
 pub mod sglang;
-mod trtllm;
+mod source_holds;
 pub mod vllm;
 
 pub use crate::common::protocols::ForwardPassSnapshot;
@@ -15,6 +15,10 @@ use dynamo_kv_router::protocols::RouterEvent;
 pub(crate) use kv_event_sink::{
     CapturedRouterEventBuffer, DeferredFpmBuffer, capture_deferred_kv_publish_sink,
     capture_router_event_sink, publish_deferred_fpm, publish_deferred_kv_events,
+};
+pub(crate) use source_holds::{
+    DestinationHolds, RemovedSource, SchedulerCommand, SchedulerCommandResult, SourceCompletion,
+    SourceHolds,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -110,6 +114,27 @@ pub(crate) fn build_fpm_snapshot(
     }
 }
 
+/// Return (visible output tokens, request-forwards) for accept-length
+/// accounting. One output signal corresponds to one visible token; multiple
+/// signals with the same UUID in a pass are an MTP/spec-decode burst.
+pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, usize) {
+    let visible_tokens = output_signals
+        .iter()
+        .filter(|signal| !signal.rejected)
+        .count();
+    if visible_tokens == 0 {
+        return (0, 0);
+    }
+
+    let request_forwards = output_signals
+        .iter()
+        .filter(|signal| !signal.rejected)
+        .map(|signal| signal.uuid)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    (visible_tokens, request_forwards)
+}
+
 pub(crate) use sglang::SglangCore;
 pub use sglang::SglangScheduler;
 pub(crate) use vllm::VllmCore;
@@ -135,6 +160,10 @@ pub(crate) struct EnginePassResult {
     pub(crate) kv_events: Vec<RouterEvent>,
     /// Forward pass metrics snapshot for this iteration.
     pub(crate) fpm: Option<ForwardPassSnapshot>,
+    /// Visible output tokens emitted by this pass for accept-length accounting.
+    pub(crate) accept_length_output_tokens: usize,
+    /// Number of request decode forwards that emitted those visible tokens.
+    pub(crate) accept_length_decode_forwards: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +192,25 @@ impl EngineCore {
         match self {
             Self::Vllm(core) => core.is_empty(),
             Self::Sglang(core) => core.is_empty(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_drained(&self) -> bool {
+        match self {
+            Self::Vllm(core) => core.is_drained(),
+            Self::Sglang(core) => core.is_drained(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn apply_command(
+        &mut self,
+        command: SchedulerCommand,
+    ) -> anyhow::Result<SchedulerCommandResult> {
+        match self {
+            Self::Vllm(core) => core.apply_command(command),
+            Self::Sglang(core) => core.apply_command(command),
         }
     }
 
@@ -367,6 +415,37 @@ pub(crate) mod test_utils;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::handoff::HandoffId;
+    use crate::common::protocols::{EngineType, MockEngineArgs, WorkerType};
+
+    fn core(engine_type: EngineType, worker_type: WorkerType, blocks: usize) -> EngineCore {
+        let args = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(blocks)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(true)
+            .worker_type(worker_type)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        match engine_type {
+            EngineType::Vllm | EngineType::Trtllm => EngineCore::Vllm(VllmCore::new(args)),
+            EngineType::Sglang => EngineCore::Sglang(SglangCore::new(args)),
+        }
+    }
+
+    fn request(uuid: Uuid, tokens: Vec<u32>) -> DirectRequest {
+        DirectRequest {
+            tokens,
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn welford_acc_empty() {
@@ -416,6 +495,87 @@ mod tests {
             "expected {expected}, got {}",
             acc.variance()
         );
+    }
+
+    #[test]
+    fn unavailable_destination_keeps_source_held_until_both_owners_are_cancelled() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut source = core(engine_type, WorkerType::Prefill, 8);
+            let mut destination = core(engine_type, WorkerType::Decode, 2);
+            let held_handoff = HandoffId::from(Uuid::from_u128(30_000 + case as u128));
+            let capacity_handoff = HandoffId::from(Uuid::from_u128(30_100 + case as u128));
+            let request_id = Uuid::from_u128(30_200 + case as u128);
+
+            assert!(matches!(
+                destination
+                    .apply_command(SchedulerCommand::ReserveDestination {
+                        handoff_id: capacity_handoff,
+                        request: request(
+                            Uuid::from_u128(30_300 + case as u128),
+                            (100..108).collect(),
+                        ),
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::DestinationReserved { .. }
+            ));
+            source
+                .apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                    handoff_id: held_handoff,
+                    request: request(request_id, (0..8).collect()),
+                })
+                .unwrap();
+            let mut now_ms = 0.0;
+            for _ in 0..8 {
+                let pass = source.execute_hidden_pass(now_ms);
+                now_ms = pass.end_ms;
+                if source.is_empty() {
+                    break;
+                }
+            }
+            assert!(source.is_empty());
+            assert!(!source.is_drained());
+
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::ReserveDestination {
+                        handoff_id: held_handoff,
+                        request: request(request_id, (0..4).collect()),
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::DestinationUnavailable
+            );
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination {
+                        handoff_id: held_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Noop
+            );
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination {
+                        handoff_id: capacity_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(
+                source
+                    .apply_command(SchedulerCommand::CancelSource {
+                        handoff_id: held_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert!(source.is_empty());
+            assert!(source.is_drained());
+            assert!(destination.is_empty());
+            assert!(destination.is_drained());
+        }
     }
 }
 

@@ -101,15 +101,6 @@ func ResolveCheckpointForService(
 		info.StartupPolicy = startupPolicy
 		return info, nil
 	case config.Identity == nil:
-		// Manual mode with neither checkpointRef nor identity cannot resolve or
-		// create anything: the DGD controller only creates DynamoCheckpoint CRs
-		// in Auto mode, so without a ref or identity a Manual checkpoint would
-		// silently never become Ready. Fail fast instead. (Auto mode legitimately
-		// reaches here with a nil identity; the controller owns CR creation.)
-		if config.Mode == nvidiacomv1alpha1.CheckpointModeManual {
-			return nil, fmt.Errorf(
-				"checkpoint Manual mode requires checkpointRef or identity to be set")
-		}
 		return &CheckpointInfo{
 			Enabled:       true,
 			StartupPolicy: startupPolicy,

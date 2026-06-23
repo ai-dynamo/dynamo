@@ -23,12 +23,14 @@ pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
 use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
 use tokio::sync::oneshot;
 
+mod embedding_cache;
 mod lookup;
 mod recording;
 mod recovery;
 pub mod remote;
 mod side;
 
+pub use self::embedding_cache::{EmbeddingCacheIndexer, try_build_cache_indexer};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
@@ -130,9 +132,8 @@ impl Indexer {
 
             let cancellation_token = component.drt().primary_token();
             return Ok(Self::KvIndexer {
-                primary: KvIndexer::new_with_frequency(
+                primary: KvIndexer::new_with_pruning(
                     cancellation_token,
-                    None,
                     block_size,
                     kv_indexer_metrics,
                     prune_config,
@@ -167,9 +168,8 @@ impl Indexer {
         let cancellation_token = component.drt().primary_token();
 
         Ok(Self::KvIndexer {
-            primary: KvIndexer::new_with_frequency(
+            primary: KvIndexer::new_with_pruning(
                 cancellation_token,
-                None,
                 block_size,
                 kv_indexer_metrics,
                 None,

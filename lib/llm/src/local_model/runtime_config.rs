@@ -9,7 +9,6 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use crate::protocols::tensor;
 use dynamo_kv_router::protocols::KvTransferEnforcement;
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
@@ -56,7 +55,17 @@ pub struct DisaggregatedEndpoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
 #[validate(schema(function = "validate_model_runtime_config"))]
+/// Runtime-resolved metadata published by a worker after its engine starts.
+///
+/// NOTE: This type is intended for facts that can only be known authoritatively at
+/// runtime, such as the effective engine context limit, capacity, data-parallel
+/// placement, and resolved service endpoints. Some legacy fields do not yet follow
+/// this ownership boundary; avoid adding declarative model metadata here.
 pub struct ModelRuntimeConfig {
+    /// Effective context limit enforced by the running engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+
     pub total_kv_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
@@ -98,27 +107,6 @@ pub struct ModelRuntimeConfig {
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
-
-    /// Backend framework serving this model (e.g. "sglang", "vllm"). Used
-    /// by the frontend to apply backend-specific hints — for example, the
-    /// MM-aware KV router picks the per-image routing-token fill recipe
-    /// from this field (sglang fills with `pad_value(mm_hash)`, vLLM fills
-    /// with the placeholder token id and attaches mm_hashes via
-    /// `block_mm_infos`). Set by each backend at registration time
-    /// (`components/src/dynamo/sglang/register.py`,
-    /// `components/src/dynamo/vllm/main.py`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_framework: Option<String>,
-
-    // Provide tensor model config in the case where the model type is Tensor.
-    // Currently use JSON object for convinence, the programmatic way is to
-    // define the model config struct as part of the tensor protocol and
-    // import it here.
-    // [gluo TODO] switch to ModelConfig if desired and workout a way to
-    // prepare it in a convinent way, the protobuf library used by tonic
-    // doesn't provide JSON parsing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tensor_model_config: Option<tensor::TensorModelConfig>,
 
     /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +179,7 @@ const fn default_eagle() -> bool {
 impl Default for ModelRuntimeConfig {
     fn default() -> Self {
         Self {
+            context_length: None,
             total_kv_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
@@ -204,8 +193,6 @@ impl Default for ModelRuntimeConfig {
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             runtime_data: HashMap::new(),
-            backend_framework: None,
-            tensor_model_config: None,
             disaggregated_endpoint: None,
             enable_eagle: false,
             taints: HashSet::new(),
@@ -489,6 +476,7 @@ mod tests {
         let cfg = ModelRuntimeConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("stable_routing_id"));
+        assert!(!json.contains("context_length"));
     }
 
     #[test]

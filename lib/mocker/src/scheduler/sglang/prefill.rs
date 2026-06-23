@@ -65,7 +65,10 @@ pub(super) fn get_new_batch_prefill(
     let mut total_isl = 0usize;
     let mut total_prefix = 0usize;
 
-    while let Some(mut req) = waiting.pop_front() {
+    let available_running_slots = config.max_running_requests.saturating_sub(running.len());
+    while can_run.len() < available_running_slots
+        && let Some(mut req) = waiting.pop_front()
+    {
         let extend_input = req.extend_input_len();
         if extend_input == 0 {
             rejected.push_back(req);

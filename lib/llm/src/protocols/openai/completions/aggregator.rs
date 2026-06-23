@@ -10,9 +10,9 @@ use super::NvCreateCompletionResponse;
 use crate::protocols::{
     Annotated, DataStream,
     codec::{Message, SseCodecError},
-    common::FinishReason,
+    common::{FinishReason, extensions::merge_response_nvext},
     convert_sse_stream,
-    openai::{ParsingOptions, nvext::merge_response_nvext},
+    openai::ParsingOptions,
 };
 
 /// Aggregates a stream of [`CompletionResponse`]s into a single [`CompletionResponse`].

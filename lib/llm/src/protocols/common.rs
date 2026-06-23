@@ -23,6 +23,7 @@ use dynamo_protocols::types::StopReason;
 /// Maximum nesting depth allowed in guided_grammar EBNF strings.
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
 
+pub mod extensions;
 pub mod llm_backend;
 pub mod postprocessor;
 pub mod preprocessor;
@@ -250,6 +251,10 @@ pub struct StopConditions {
     /// generated. The returned output will NOT contain the stop tokens.
     pub stop_token_ids: Option<Vec<TokenIdType>>,
 
+    /// List of tokens that stop generation when they are generated.
+    /// The returned output WILL contain the stop tokens.
+    pub stop_token_ids_visible: Option<Vec<TokenIdType>>,
+
     /// List of hidden/system tokens that stop generation when they are
     /// generated. The returned output will NOT contain the stop tokens.
     pub stop_token_ids_hidden: Option<Vec<TokenIdType>>,
@@ -273,6 +278,7 @@ impl StopConditions {
         if self.ignore_eos.unwrap_or(false) {
             self.stop = None;
             self.stop_token_ids = None;
+            self.stop_token_ids_visible = None;
             self.stop_token_ids_hidden = None;
         }
     }

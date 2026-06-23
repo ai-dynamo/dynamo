@@ -252,7 +252,7 @@ the runtime wheel from a clone:
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo.git
-pip install maturin
+pip install 'maturin[patchelf]'
 cd dynamo/lib/bindings/python && maturin build --release --out /tmp/wheels
 pip install /tmp/wheels/*.whl       # ai-dynamo-runtime
 pip install /path/to/dynamo         # ai-dynamo (components/ tree)
@@ -847,7 +847,7 @@ Request handling:
 
 | Feature | What's missing |
 |---------|----------------|
-| Logprob response wire | `PreprocessedRequest.output_options.{logprobs, prompt_logprobs}` exists on the request shape. Of the existing engines (Python-bridged through PyO3), only vLLM passes the option through to its sampling params on the unified path; SGLang and TRT-LLM unified `generate()` ignore it. No engine populates `log_probs` / `top_logprobs` / `cum_log_probs` on `LLMEngineOutput` — the response wire is open but unused |
+| `cum_log_probs` response wire | Completion-side `log_probs` / `top_logprobs` are populated on the unified path for vLLM, SGLang, and TRT-LLM (shared helpers in `components/src/dynamo/common/backend/logprobs.py`). Prompt-side logprobs ride on the final chunk's `LLMEngineOutput.engine_data["prompt_logprobs"]` (consumed by `prompt_logprobs_from_engine_data` in the response builders). `cum_log_probs` is still not emitted. |
 | Text-in-text-out mode | `ModelInput::Text` is rejected at startup — `Tokens` only |
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers; `ENCODE` disaggregation role |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
@@ -1009,7 +1009,8 @@ use async_trait::async_trait;
 use dynamo_backend_common::engine::GenerateContext;
 use dynamo_backend_common::{
     BackendError, CommonArgs, DynamoError, EngineConfig, ErrorType, FinishReason, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, chunk, usage,
+    LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, PreprocessedRequest, WorkerConfig,
+    chunk, usage,
 };
 use futures::stream::BoxStream;
 use tokio::sync::RwLock;
@@ -1137,11 +1138,16 @@ async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
     Ok(EngineConfig {
         model: self.model.clone(),
         served_model_name: Some(self.model.clone()),
-        context_length: Some(8192),
-        kv_cache_block_size: Some(64),     // None if no block-structured KV
-        total_kv_blocks: Some(16384),
-        max_num_seqs: Some(256),
-        max_num_batched_tokens: Some(8192),
+        // Token-pipeline metadata goes in the `llm` sub-record (RawEngines
+        // leave it None).
+        llm: Some(LlmRegistration {
+            context_length: Some(8192),
+            kv_cache_block_size: Some(64),     // None if no block-structured KV
+            total_kv_blocks: Some(16384),
+            max_num_seqs: Some(256),
+            max_num_batched_tokens: Some(8192),
+            ..Default::default()
+        }),
         ..Default::default()
     })
 }

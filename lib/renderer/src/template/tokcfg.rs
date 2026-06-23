@@ -111,38 +111,69 @@ pub struct GenerationConfig {
     eos_token_id: Either<u32, Vec<u32>>,
 }
 
+/// Formatter matching Python `json.dumps` default separators (`", "` and
+/// `": "`). serde_json's `CompactFormatter` writes `","`/`":"` instead, and
+/// chat templates embed these strings directly into the prompt, so the
+/// separator choice is model-visible.
+struct PyJsonFormatter;
+
+impl serde_json::ser::Formatter for PyJsonFormatter {
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if !first {
+            writer.write_all(b", ")?;
+        }
+        Ok(())
+    }
+
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if !first {
+            writer.write_all(b", ")?;
+        }
+        Ok(())
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        writer.write_all(b": ")
+    }
+}
+
+/// Mirrors HF transformers' `tojson` filter, not stock Jinja2's. Transformers
+/// overrides Jinja's HTML-safe `tojson` with plain
+/// `json.dumps(x, ensure_ascii=False)` in its chat-template environment, and
+/// vLLM/SGLang render through that — so chat templates (and the models trained
+/// on their output) expect Python separators and **no** HTML escaping
+/// (`'`, `<`, `>`, `&` stay literal). serde_json leaves non-ASCII unescaped by
+/// default, matching `ensure_ascii=False`.
 pub fn tojson(value: Value, kwargs: Kwargs) -> Result<Value, Error> {
-    if let Ok(indent) = kwargs.get("indent") {
-        let mut buf = Vec::new();
+    let mut buf = Vec::new();
+    let result = if let Ok(indent) = kwargs.get("indent") {
+        // Python `json.dumps(indent=n)` separators are `(",", ": ")` with the
+        // item separator followed by newline + indent — PrettyFormatter matches.
         let repeat = b" ".repeat(indent);
         let formatter = serde_json::ser::PrettyFormatter::with_indent(&repeat);
         let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
-        value.serialize(&mut serializer).unwrap();
-        String::from_utf8(buf).map_err(|err| {
-            Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
-        })
+        value.serialize(&mut serializer)
     } else {
-        serde_json::to_string(&value).map_err(|err| {
+        let mut serializer = serde_json::Serializer::with_formatter(&mut buf, PyJsonFormatter);
+        value.serialize(&mut serializer)
+    };
+    result.map_err(|err| {
+        Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
+    })?;
+    String::from_utf8(buf)
+        .map_err(|err| {
             Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
         })
-    }
-    .map_err(|err| {
-        Error::new(ErrorKind::InvalidOperation, "cannot serialize to JSON").with_source(err)
-    })
-    .map(|s| {
-        // When this filter is used the return value is safe for both HTML and JSON
-        let mut rv = String::with_capacity(s.len());
-        for c in s.chars() {
-            match c {
-                '<' => rv.push_str("\\u003c"),
-                '>' => rv.push_str("\\u003e"),
-                '&' => rv.push_str("\\u0026"),
-                '\'' => rv.push_str("\\u0027"),
-                _ => rv.push(c),
-            }
-        }
-        Value::from_safe_string(rv)
-    })
+        .map(Value::from_safe_string)
 }
 
 pub fn strftime_now(format_str: &str) -> Result<Value, Error> {

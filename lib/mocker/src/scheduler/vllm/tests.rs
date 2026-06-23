@@ -11,14 +11,15 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 use uuid::Uuid;
 
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
-    DirectRequest, FpmPublisher, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
-    PreemptionMode, RawKvEvent, RawKvEventSink,
+    DirectRequest, EngineType, FpmPublisher, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
+    OutputSignal, PreemptionMode, RawKvEvent, RawKvEventSink,
 };
 use crate::common::sequence::ActiveSequence;
-use crate::scheduler::RouterEventVisibility;
 use crate::scheduler::SchedulerHandle;
 use crate::scheduler::test_utils::{RouterIndexerHarness, removed_event_count, stored_hashes};
+use crate::scheduler::{RouterEventVisibility, SchedulerCommand, SchedulerCommandResult};
 
 use super::core::{RequestStatus, VllmCore, VllmRequestState};
 use super::live::{MockerMetrics, Scheduler};
@@ -69,6 +70,372 @@ fn router_args() -> MockEngineArgs {
         .unwrap()
 }
 
+mod source_holds {
+    use super::*;
+
+    fn args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap()
+    }
+
+    fn request(uuid: Uuid) -> DirectRequest {
+        DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    fn execute(core: &mut VllmCore, now_ms: f64) -> crate::scheduler::EnginePassResult {
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, now_ms)
+    }
+
+    #[test]
+    fn terminal_completion_holds_source_without_freeing_kv() {
+        let mut core = VllmCore::new(args());
+        let request_id = Uuid::from_u128(101);
+        let handoff_id = HandoffId::from(Uuid::from_u128(201));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id,
+            request: request(request_id),
+        })
+        .unwrap();
+
+        let first = execute(&mut core, 0.0);
+        assert!(!first.output_signals[0].completed);
+        let active_before_terminal = core.kv_manager.num_active_blocks();
+        assert!(active_before_terminal > 0);
+
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(core.source_is_held(handoff_id));
+        assert!(!core.state.requests.contains_key(&request_id));
+        assert_eq!(core.kv_manager.num_active_blocks(), active_before_terminal);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert!(!core.source_is_held(handoff_id));
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+    }
+
+    #[test]
+    fn cancel_and_early_release_cleanup_exactly_once() {
+        let mut core = VllmCore::new(args());
+        let first_id = HandoffId::from(Uuid::from_u128(202));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: first_id,
+            request: request(Uuid::from_u128(102)),
+        })
+        .unwrap();
+        let first = execute(&mut core, 0.0);
+        execute(&mut core, first.end_ms);
+        let held_blocks = core.kv_manager.num_active_blocks();
+
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        assert!(held_blocks > 0);
+
+        let second_id = first_id;
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: second_id,
+            request: request(Uuid::from_u128(103)),
+        })
+        .unwrap();
+        assert!(core.source_is_registered(second_id));
+        core.apply_command(SchedulerCommand::ReleaseSource {
+            handoff_id: second_id,
+        })
+        .unwrap();
+        assert!(!core.source_is_registered(second_id));
+
+        let first = execute(&mut core, 0.0);
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(!core.source_is_held(second_id));
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+    }
+
+    #[test]
+    fn active_request_id_is_rejected_before_source_hold_registration() {
+        let mut core = VllmCore::new(args());
+        let request_id = Uuid::from_u128(104);
+        let handoff_id = HandoffId::from(Uuid::from_u128(204));
+        core.receive(request(request_id));
+
+        assert!(
+            core.apply_command(SchedulerCommand::Submit(request(request_id)))
+                .is_err()
+        );
+        assert!(
+            core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                request: request(request_id),
+            })
+            .is_err()
+        );
+        assert!(!core.source_is_registered(handoff_id));
+        assert_eq!(core.num_requests(), 1);
+    }
+}
+
+mod destination_lifecycle {
+    use super::*;
+    use crate::common::protocols::WorkerType;
+
+    fn args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(12)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .worker_type(worker_type)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap()
+    }
+
+    fn request(uuid: Uuid, tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
+        DirectRequest {
+            tokens,
+            max_output_tokens,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    fn execute(core: &mut VllmCore, now_ms: f64) -> crate::scheduler::EnginePassResult {
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, now_ms)
+    }
+
+    fn assert_no_republished_stores(
+        activation: &[dynamo_kv_router::protocols::LocalBlockHash],
+        later: &[dynamo_kv_router::protocols::LocalBlockHash],
+    ) {
+        assert!(later.iter().all(|hash| !activation.contains(hash)));
+    }
+
+    fn drive_source_to_hold(core: &mut VllmCore, handoff_id: HandoffId, req: DirectRequest) {
+        assert!(matches!(
+            core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                request: req,
+            })
+            .unwrap(),
+            SchedulerCommandResult::Submitted(_)
+        ));
+        let mut now_ms = 0.0;
+        for _ in 0..8 {
+            let pass = execute(core, now_ms);
+            now_ms = pass.end_ms;
+            if core.is_empty() {
+                break;
+            }
+        }
+        assert!(core.is_empty());
+        assert!(core.source_is_held(handoff_id));
+        assert!(!core.is_drained());
+    }
+
+    #[test]
+    fn handoff_prefill_to_reserved_decode_owns_kv_until_normal_admission() {
+        let logical_uuid = Uuid::from_u128(10_001);
+        let handoff_id = HandoffId::from(Uuid::from_u128(10_002));
+        let logical_tokens = (0..8).collect::<Vec<_>>();
+
+        let mut source = VllmCore::new_with_kv_capture(args(WorkerType::Prefill), 31);
+        let mut destination = VllmCore::new_with_kv_capture(args(WorkerType::Decode), 32);
+
+        destination.receive(request(Uuid::from_u128(10_003), (0..4).collect(), 1));
+        execute(&mut destination, 0.0);
+        assert!(destination.is_empty());
+        destination.drain_kv_events();
+
+        let blocker_uuid = Uuid::from_u128(10_004);
+        destination.receive(request(blocker_uuid, (100..104).collect(), 3));
+        let blocker_first = execute(&mut destination, 1.0);
+        assert_eq!(destination.state.running.len(), 1);
+        destination.drain_kv_events();
+
+        drive_source_to_hold(
+            &mut source,
+            handoff_id,
+            request(logical_uuid, logical_tokens.clone(), 2),
+        );
+
+        let usage_before_reservation = destination.kv_manager.num_active_blocks();
+        assert_eq!(
+            destination
+                .apply_command(SchedulerCommand::ReserveDestination {
+                    handoff_id,
+                    request: request(logical_uuid, logical_tokens, 2),
+                })
+                .unwrap(),
+            SchedulerCommandResult::DestinationReserved {
+                request_id: logical_uuid
+            }
+        );
+        assert!(destination.destination_is_held(handoff_id));
+        assert!(!destination.is_drained());
+        assert_eq!(destination.state.running.len(), 1);
+        assert!(destination.kv_manager.num_active_blocks() > usage_before_reservation);
+        assert!(stored_hashes(&destination.drain_kv_events()).is_empty());
+
+        let reserved_block_ids = destination.destination_block_ids(handoff_id);
+        let occupancy_before_activation = destination.kv_manager.num_active_blocks();
+        assert!(!reserved_block_ids.is_empty());
+        assert_eq!(
+            destination
+                .apply_command(SchedulerCommand::ActivateDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert!(!destination.destination_is_held(handoff_id));
+        assert_eq!(
+            destination.kv_manager.num_active_blocks(),
+            occupancy_before_activation
+        );
+        assert_eq!(
+            destination.state.requests[&logical_uuid].status,
+            RequestStatus::Waiting
+        );
+        assert_eq!(destination.state.running.len(), 1);
+        assert_eq!(
+            destination.request_block_ids(logical_uuid),
+            reserved_block_ids
+        );
+        let activation_stores = stored_hashes(&destination.drain_kv_events());
+        assert!(!activation_stores.is_empty());
+
+        assert_eq!(
+            source
+                .apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert!(source.is_empty());
+        assert!(source.is_drained());
+
+        let blocked = execute(&mut destination, blocker_first.end_ms);
+        assert_eq!(
+            destination.state.requests[&logical_uuid].status,
+            RequestStatus::Waiting
+        );
+        assert_eq!(
+            destination.request_block_ids(logical_uuid),
+            reserved_block_ids
+        );
+        let blocked_stores = stored_hashes(&blocked.kv_events);
+        assert_no_republished_stores(&activation_stores, &blocked_stores);
+
+        let blocker_terminal = execute(&mut destination, blocked.end_ms);
+        assert!(
+            blocker_terminal
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == blocker_uuid && signal.completed)
+        );
+        assert_eq!(
+            destination.state.requests[&logical_uuid].status,
+            RequestStatus::Waiting
+        );
+
+        let admitted = execute(&mut destination, blocker_terminal.end_ms);
+        assert_eq!(
+            destination.state.requests[&logical_uuid].status,
+            RequestStatus::Running
+        );
+        assert!(
+            destination
+                .request_block_ids(logical_uuid)
+                .starts_with(&reserved_block_ids)
+        );
+        assert!(
+            destination.state.requests[&logical_uuid]
+                .sequence
+                .num_allocated_tokens()
+                >= destination.state.requests[&logical_uuid]
+                    .sequence
+                    .num_input_tokens()
+        );
+        assert_no_republished_stores(&activation_stores, &stored_hashes(&admitted.kv_events));
+
+        let terminal = execute(&mut destination, admitted.end_ms);
+        assert!(
+            terminal
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == logical_uuid && signal.completed)
+        );
+        assert!(destination.is_empty());
+        assert!(destination.is_drained());
+        assert!(!destination.destination_is_held(handoff_id));
+        assert_eq!(destination.kv_manager.num_active_blocks(), 0);
+    }
+
+    #[test]
+    fn trtllm_destination_reservation_fails_without_acquiring_kv() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Trtllm)
+            .block_size(4)
+            .num_gpu_blocks(12)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .worker_type(WorkerType::Decode)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut destination = VllmCore::new(args);
+        let handoff_id = HandoffId::from(Uuid::from_u128(10_005));
+
+        let error = destination
+            .apply_command(SchedulerCommand::ReserveDestination {
+                handoff_id,
+                request: request(Uuid::from_u128(10_006), (0..8).collect(), 2),
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "destination reservation is not supported for TRT-LLM"
+        );
+        assert!(!destination.destination_is_held(handoff_id));
+        assert_eq!(destination.kv_manager.num_active_blocks(), 0);
+        assert!(destination.is_drained());
+    }
+}
+
 mod core_behavior {
     use super::*;
 
@@ -93,6 +460,7 @@ mod core_behavior {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -100,6 +468,7 @@ mod core_behavior {
             uuid: Some(r2),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -156,6 +525,7 @@ mod core_behavior {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -163,6 +533,7 @@ mod core_behavior {
             uuid: Some(r2),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -199,6 +570,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
         }
 
@@ -258,6 +630,7 @@ mod core_behavior {
             uuid: Some(Uuid::from_u128(81)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -281,6 +654,7 @@ mod core_behavior {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -305,8 +679,8 @@ mod core_behavior {
         let args = MockEngineArgs::builder()
             .block_size(4)
             .num_gpu_blocks(6)
-            .max_num_batched_tokens(Some(12))
-            .max_num_seqs(Some(3))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
             .enable_chunked_prefill(true)
             .enable_prefix_caching(false)
             .preemption_mode(PreemptionMode::Lifo)
@@ -316,28 +690,164 @@ mod core_behavior {
         let mut core = VllmCore::new(args);
         let r1 = Uuid::from_u128(1);
         let r2 = Uuid::from_u128(2);
-        let r3 = Uuid::from_u128(3);
-        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32), (r3, 200u32..212u32)] {
+        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32)] {
             core.receive(DirectRequest {
                 tokens: range.collect(),
-                max_output_tokens: 2,
+                max_output_tokens: 8,
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
         }
 
         let mut collector = crate::replay::TraceCollector::default();
-        let pass1 = core.execute_pass(&mut collector, 0.0);
-        let pass2 = core.execute_pass(&mut collector, 1.0);
+        let mut now_ms = 0.0;
+        let mut preemptions_before = 0;
+        for _ in 0..16 {
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms.max(now_ms + 1.0);
+            preemptions_before = pass.mocker_metrics.vllm_preemptions_total;
+            if preemptions_before > 0 {
+                break;
+            }
+        }
         let request = core.state.requests.get(&r2).unwrap();
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
+        assert_eq!(preemptions_before, 1);
+    }
+
+    #[test]
+    fn test_waiting_full_isl_gate_blocks_without_preemption_then_admits() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(3))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let holder = Uuid::from_u128(1);
+        let blocked = Uuid::from_u128(2);
+        let follower = Uuid::from_u128(3);
+        core.receive(DirectRequest {
+            tokens: (0..16).collect(),
+            max_output_tokens: 1,
+            uuid: Some(holder),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+        core.receive(DirectRequest {
+            tokens: (100..112).collect(),
+            max_output_tokens: 1,
+            uuid: Some(blocked),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+        core.receive(DirectRequest {
+            tokens: (200..204).collect(),
+            max_output_tokens: 1,
+            uuid: Some(follower),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+
+        assert!(core.state.waiting.contains(&blocked));
+        assert!(core.state.waiting.contains(&follower));
+        assert_eq!(core.state.waiting.front().copied(), Some(blocked));
+        assert!(
+            !pass1
+                .admissions
+                .iter()
+                .any(|admission| admission.uuid == blocked)
+        );
+        assert!(
+            !pass1
+                .admissions
+                .iter()
+                .any(|admission| admission.uuid == follower),
+            "a smaller follower must not skip a blocked FIFO head"
+        );
+        assert!(
+            pass1
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == holder && signal.completed)
+        );
+        assert_eq!(
+            core.state
+                .requests
+                .get(&blocked)
+                .unwrap()
+                .num_computed_tokens,
+            0
+        );
         assert_eq!(pass1.mocker_metrics.vllm_preemptions_total, 0);
-        assert_eq!(pass2.mocker_metrics.vllm_preemptions_total, 1);
-        assert_eq!(pass2.mocker_metrics.waiting_requests, 1);
+
+        let pass2 = core.execute_pass(&mut collector, pass1.end_ms.max(1.0));
+        assert!(
+            pass2
+                .admissions
+                .iter()
+                .any(|admission| admission.uuid == blocked),
+            "blocked request should be admitted after the holder completes"
+        );
+        assert_eq!(pass2.mocker_metrics.vllm_preemptions_total, 0);
+    }
+
+    #[test]
+    fn test_fresh_request_larger_than_pool_is_rejected_and_follower_runs() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let oversized = Uuid::from_u128(1);
+        let follower = Uuid::from_u128(2);
+        for (uuid, range) in [(oversized, 0u32..20u32), (follower, 100u32..104u32)] {
+            core.receive(DirectRequest {
+                tokens: range.collect(),
+                max_output_tokens: 1,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+                ..Default::default()
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert!(
+            pass.output_signals
+                .iter()
+                .any(|signal| { signal.uuid == oversized && signal.completed && signal.rejected })
+        );
+        assert!(
+            pass.admissions
+                .iter()
+                .any(|admission| admission.uuid == follower)
+        );
+        assert_eq!(pass.mocker_metrics.vllm_preemptions_total, 0);
     }
 
     #[test]
@@ -409,6 +919,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
         }
 
@@ -420,6 +931,106 @@ mod core_behavior {
         assert!(core.state.waiting.is_empty());
         assert!(core.state.running.is_empty());
         assert_eq!(core.kv_manager.num_active_blocks(), 0);
+    }
+
+    #[test]
+    fn test_mtp_batch_applies_request_bursts_in_stable_order() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("1,1".to_string()))
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let short = Uuid::from_u128(1);
+        let long = Uuid::from_u128(2);
+        core.receive(DirectRequest {
+            tokens: (0..4).collect(),
+            max_output_tokens: 5,
+            uuid: Some(short),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+        core.receive(DirectRequest {
+            tokens: (100..104).collect(),
+            max_output_tokens: 8,
+            uuid: Some(long),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let first = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(first.output_signals.len(), 6);
+        let pass = core.execute_pass(&mut collector, first.end_ms);
+        let ordered = pass
+            .output_signals
+            .iter()
+            .map(|signal| (signal.uuid, signal.completed))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                (short, false),
+                (short, true),
+                (long, false),
+                (long, false),
+                (long, false),
+            ]
+        );
+
+        let request = core.state.requests.get(&long).unwrap();
+        assert_eq!(request.sequence.generated_tokens(), 6);
+        assert_eq!(request.sequence.len() - request.num_computed_tokens, 1);
+        assert_eq!(
+            pass.fpm.unwrap().num_decode_requests,
+            2,
+            "FPM counts requests participating in the forward pass, not emitted tokens"
+        );
+    }
+
+    #[test]
+    fn test_mtp_releases_unused_block_reservations() {
+        let args = MockEngineArgs::builder()
+            .block_size(2)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(2))
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("0,1".to_string()))
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::from_u128(3);
+        core.receive(DirectRequest {
+            tokens: (0..3).collect(),
+            max_output_tokens: 5,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(pass.output_signals.len(), 1);
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            2,
+            "the block reserved only for rejected drafts must return through RAII"
+        );
+        let request = core.state.requests.get(&uuid).unwrap();
+        assert_eq!(request.sequence.generated_tokens(), 1);
+        assert_eq!(request.sequence.len() - request.num_computed_tokens, 1);
     }
 }
 
@@ -435,6 +1046,7 @@ mod router_events {
             uuid: Some(Uuid::from_u128(71)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -463,6 +1075,7 @@ mod router_events {
             uuid: Some(Uuid::from_u128(41)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -488,8 +1101,8 @@ mod router_events {
         let args = MockEngineArgs::builder()
             .block_size(4)
             .num_gpu_blocks(6)
-            .max_num_batched_tokens(Some(12))
-            .max_num_seqs(Some(3))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
             .enable_chunked_prefill(true)
             .enable_prefix_caching(true)
             .preemption_mode(PreemptionMode::Lifo)
@@ -499,34 +1112,116 @@ mod router_events {
         let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
         let r1 = Uuid::from_u128(51);
         let r2 = Uuid::from_u128(52);
-        let r3 = Uuid::from_u128(53);
-        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32), (r3, 200u32..212u32)] {
+        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32)] {
             core.receive(DirectRequest {
                 tokens: range.collect(),
-                max_output_tokens: 2,
+                max_output_tokens: 8,
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
         }
 
         let mut collector = crate::replay::TraceCollector::default();
         let mut now_ms = 0.0;
-        let mut saw_remove = false;
-        for _ in 0..2 {
+        let mut saw_preemption = false;
+        for _ in 0..16 {
             let pass = core.execute_pass(&mut collector, now_ms);
-            saw_remove |= removed_event_count(&pass.kv_events) > 0;
-            now_ms = pass.end_ms;
+            now_ms = pass.end_ms.max(now_ms + 1.0);
             harness.apply_events(pass.kv_events).await;
+            if core
+                .state
+                .requests
+                .get(&r2)
+                .is_some_and(|request| request.status == RequestStatus::Preempted)
+            {
+                saw_preemption = true;
+                break;
+            }
         }
 
+        assert!(saw_preemption);
         let request = core.state.requests.get(&r2).unwrap();
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
+
+        let mut readmitted = false;
+        for _ in 0..32 {
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms.max(now_ms + 1.0);
+            readmitted |= pass.admissions.iter().any(|admission| admission.uuid == r2);
+            harness.apply_events(pass.kv_events).await;
+            if readmitted {
+                break;
+            }
+        }
+
+        assert!(
+            readmitted,
+            "preempted request should be admitted for recompute"
+        );
+        harness.assert_no_event_warnings();
+        harness.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_mtp_preemption_recompute_drains_with_clean_events() {
+        let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(12))
+            .max_num_seqs(Some(3))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("0,1".to_string()))
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
+        let requests = [
+            (Uuid::from_u128(61), 0u32..8u32),
+            (Uuid::from_u128(62), 100u32..108u32),
+            (Uuid::from_u128(63), 200u32..212u32),
+        ];
+        for (uuid, tokens) in requests {
+            core.receive(DirectRequest {
+                tokens: tokens.collect(),
+                max_output_tokens: 7,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+                ..Default::default()
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut now_ms = 0.0;
+        let mut output_tokens = 0;
+        let mut saw_remove = false;
+        for _ in 0..200 {
+            if core.is_empty() {
+                break;
+            }
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms.max(now_ms + 1.0);
+            output_tokens += pass.output_signals.len();
+            saw_remove |= removed_event_count(&pass.kv_events) > 0;
+            harness.apply_events(pass.kv_events).await;
+        }
+
+        assert!(core.is_empty());
+        assert_eq!(output_tokens, 21);
+        assert!(core.state.waiting.is_empty());
+        assert!(core.state.running.is_empty());
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
         assert!(saw_remove);
-        assert!(harness.ok_count(METRIC_EVENT_REMOVED) > 0);
+        harness.assert_no_event_errors();
         harness.assert_no_event_warnings();
         harness.shutdown();
     }
@@ -626,10 +1321,50 @@ mod live_scheduler {
         let _ = tokio::time::timeout(Duration::from_secs(2), forwarder_task).await;
         harness.flush().await;
         harness.assert_no_event_errors();
+        if enable_prefix_caching {
+            assert!(harness.ok_count(METRIC_EVENT_STORED) > 0);
+        } else {
+            assert_eq!(harness.ok_count(METRIC_EVENT_STORED), 0);
+            assert_eq!(harness.ok_count(METRIC_EVENT_REMOVED), 0);
+        }
         // NOTE: we do NOT assert `dump_events().is_empty()` here because
         // mocker's protocol does not emit router `Removed` events on
         // request completion.
         harness.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_mtp_lifecycle_drains_small_blocks() {
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(128)
+            .block_size(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(16))
+            .speedup_ratio(1000.0)
+            .enable_prefix_caching(false)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("1,1".to_string()))
+            .build()
+            .unwrap();
+        let scheduler = Scheduler::new(
+            args,
+            0,
+            Some(output_tx),
+            KvEventPublishers::default(),
+            None,
+            FpmPublisher::default(),
+        );
+
+        crate::scheduler::test_utils::assert_scheduler_completes_all(
+            &scheduler,
+            &mut output_rx,
+            24,
+            5,
+            7,
+            false,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -666,6 +1401,7 @@ mod live_scheduler {
                 uuid: None,
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -721,6 +1457,7 @@ mod live_scheduler {
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut received_count = 0;
@@ -779,6 +1516,7 @@ mod live_scheduler {
             uuid: Some(Uuid::from_u128(72)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let output_batch = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
@@ -835,6 +1573,7 @@ mod live_scheduler {
                 uuid: None,
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
         }
 
@@ -895,6 +1634,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -922,6 +1662,7 @@ mod forward_pass_metrics {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -940,6 +1681,7 @@ mod forward_pass_metrics {
             uuid: Some(r2),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         // Pass 2: r1 decode + r2 prefill (mixed batch)
@@ -969,6 +1711,7 @@ mod forward_pass_metrics {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1008,6 +1751,7 @@ mod forward_pass_metrics {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1052,6 +1796,7 @@ mod forward_pass_metrics {
             uuid: Some(r1),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -1059,6 +1804,7 @@ mod forward_pass_metrics {
             uuid: Some(r2),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1096,6 +1842,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         core.receive(DirectRequest {
             tokens: (100..112).collect(), // prompt_len = 12
@@ -1103,6 +1850,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1141,6 +1889,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1210,6 +1959,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         // Prefill r1 and decode a few tokens to build up KV
@@ -1224,6 +1974,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         // This pass should trigger preemption
@@ -1284,6 +2035,7 @@ mod forward_pass_metrics {
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         // Wait for at least one output signal — ensures the scheduler has
@@ -1404,6 +2156,7 @@ mod offload {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         let plhs = core
             .state
@@ -1478,6 +2231,7 @@ mod offload {
             uuid: Some(hit_uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         let cold_uuid = Uuid::new_v4();
         core.receive(DirectRequest {
@@ -1486,6 +2240,7 @@ mod offload {
             uuid: Some(cold_uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         let plhs = core
             .state
@@ -1566,6 +2321,7 @@ mod offload {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         let plhs = core
             .state
@@ -1635,6 +2391,7 @@ mod offload {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         let (prefix_signal, plhs) = {
             let request = core.state.requests.get(&uuid).unwrap();
@@ -1702,6 +2459,7 @@ mod offload {
             uuid: Some(first_hit),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         let second_hit = Uuid::from_u128(2);
         core.receive(DirectRequest {
@@ -1710,6 +2468,7 @@ mod offload {
             uuid: Some(second_hit),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         let cold = Uuid::from_u128(3);
         core.receive(DirectRequest {
@@ -1718,6 +2477,7 @@ mod offload {
             uuid: Some(cold),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
 
         let mut hit_plhs = Vec::new();
@@ -1809,6 +2569,7 @@ mod offload {
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
         let plhs = core
             .state
@@ -1949,6 +2710,7 @@ mod offload {
                     uuid: Some(uuid),
                     dp_rank: 0,
                     arrival_timestamp_ms: None,
+                    ..Default::default()
                 });
                 uuids.push(uuid);
             }
@@ -1959,6 +2721,7 @@ mod offload {
                 uuid: Some(r4),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                ..Default::default()
             });
             uuids.push(r4);
 

@@ -31,6 +31,7 @@ type CheckpointRequest struct {
 	NodeName           string
 	PodName            string
 	PodNamespace       string
+	PodIP              string
 	Clientset          kubernetes.Interface
 }
 
@@ -235,7 +236,7 @@ func configureCheckpoint(
 	m := types.NewCheckpointManifest(
 		req.CheckpointID,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
-		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, state.StdioFDs),
+		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDANSPIDs) > 0 {
