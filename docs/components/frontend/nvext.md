@@ -92,7 +92,7 @@ important" across Dynamo.
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
 For layer-by-layer behavior and backend requirements, see
-[Priority Scheduling](../../agents/priority-scheduling.md).
+[Priority Scheduling](../router/priority-scheduling.md).
 
 ```json
 {

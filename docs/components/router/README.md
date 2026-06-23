@@ -59,6 +59,7 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 - **[Routing Concepts](router-concepts.md)**: Cost model and worker-selection behavior
 - **[Router Filtering](router-filtering.md)**: Candidate eligibility, DP-rank filtering, and busy-threshold overload handling
 - **[Configuration and Tuning](router-configuration.md)**: Router flags, transport modes, and metrics
+- **[Priority Scheduling](priority-scheduling.md)**: Router queue, backend engine, and cache priority behavior
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
 - **[Router Operations](router-operations.md)**: Replicas, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns

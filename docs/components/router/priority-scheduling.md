@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Priority Scheduling
 subtitle: Request priority across the Dynamo router and backend engines
@@ -31,10 +31,10 @@ Priority can affect three different layers. They are configured separately.
 
 | Layer | What It Controls | Required Configuration | Deep Details |
 |-------|------------------|------------------------|--------------|
-| Frontend API | The user-facing request schema and priority polarity. | Send `priority` for soft router and engine priority, or `strict_priority` for a router-only pending tier. | [NVIDIA Request Extensions](../components/frontend/nvext.md#agent-hints) |
-| Router queue | Which waiting request is dispatched first when the router queue is non-empty. | KV routing plus `--router-queue-threshold` set to a value that actually causes queueing. | [`--router-queue-threshold`](../components/router/router-configuration.md#routing-behavior), [`--router-queue-policy`](../components/router/router-configuration.md#routing-behavior) |
-| Backend engine | Which admitted request the engine schedules first. | Backend-specific priority scheduling flag, such as vLLM `--scheduling-policy priority` or SGLang `--enable-priority-scheduling`. | [vLLM priority scheduling](../backends/vllm/vllm-reference-guide.md#priority-scheduling), [SGLang priority scheduling](../backends/sglang/agents.md#priority-scheduling) |
-| KV cache policy | Which cached blocks are retained or evicted first under memory pressure. | Backend-specific cache priority configuration, such as SGLang `--radix-eviction-policy priority`. | [SGLang priority-based KV cache eviction](../backends/sglang/agents.md#priority-based-kv-cache-eviction) |
+| Frontend API | The user-facing request schema and priority polarity. | Send `priority` for soft router and engine priority, or `strict_priority` for a router-only pending tier. | [NVIDIA Request Extensions](../frontend/nvext.md#agent-hints) |
+| Router queue | Which waiting request is dispatched first when the router queue is non-empty. | KV routing plus `--router-queue-threshold` set to a value that actually causes queueing. | [`--router-queue-threshold`](router-configuration.md#routing-behavior), [`--router-queue-policy`](router-configuration.md#routing-behavior) |
+| Backend engine | Which admitted request the engine schedules first. | Backend-specific priority scheduling flag, such as vLLM `--scheduling-policy priority` or SGLang `--enable-priority-scheduling`. | [vLLM priority scheduling](../../backends/vllm/vllm-reference-guide.md#priority-scheduling), [SGLang priority scheduling](../../backends/sglang/agents.md#priority-scheduling) |
+| KV cache policy | Which cached blocks are retained or evicted first under memory pressure. | Backend-specific cache priority configuration, such as SGLang `--radix-eviction-policy priority`. | [SGLang priority-based KV cache eviction](../../backends/sglang/agents.md#priority-based-kv-cache-eviction) |
 
 These layers are additive. `strict_priority` does not propagate to backend engine scheduling; use `priority` for that layer.
 
@@ -52,7 +52,7 @@ The strict tier is compared first. FCFS, LCFS, or Weighted Shortest Processing T
 
 The default policy is `fcfs`, which uses the priority value as a positive arrival-time bump. Higher values move the request earlier in the queue. Negative priority values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come, first-served ordering by sending a negative priority.
 
-For the flag-level semantics, default value, and backend caveats, see [Router Configuration and Tuning](../components/router/router-configuration.md#routing-behavior).
+For the flag-level semantics, default value, and backend caveats, see [Router Configuration and Tuning](router-configuration.md#routing-behavior).
 
 ## Backend Engine Priority
 
@@ -86,7 +86,7 @@ For router-priority validation:
 
 - Use a fixed request count or burst-style test so every priority tier gets the same number of measured requests.
 - Keep the model, input length, output length, streaming mode, and endpoint path identical across priority tiers.
-- Run at enough load for requests to wait in the router queue. Watch [`dynamo_frontend_router_queue_pending_requests`](../observability/metrics.md#router-queue-metrics-dynamo_frontend_router_queue_) and confirm it is greater than zero during the measured window.
+- Run at enough load for requests to wait in the router queue. Watch [`dynamo_frontend_router_queue_pending_requests`](../../observability/metrics.md#router-queue-metrics-dynamo_frontend_router_queue_) and confirm it is greater than zero during the measured window.
 - Configure the backend priority flag separately if the test is meant to measure engine scheduling, not only router queue ordering.
 
 Expected result: higher Dynamo priority values should receive better TTFT under contention. If lower values win, first check whether the client, benchmark harness, or gateway path negated the priority before it reached Dynamo.
@@ -97,7 +97,7 @@ Expected result: higher Dynamo priority values should receive better TTFT under 
 |---------|--------|
 | Priority has no visible effect. | Confirm requests actually enter the router queue, and confirm the backend priority flag is enabled if you expect engine-level scheduling. |
 | Lower numeric values appear to win. | Do not negate `nvext.agent_hints.priority` for vLLM. Dynamo normalizes backend polarity internally. |
-| Router queue never becomes non-empty. | Lower `--router-queue-threshold`, increase offered load, or check the SGLang `max_num_batched_tokens` caveat in [Router Configuration and Tuning](../components/router/router-configuration.md#tuning-guidelines). |
+| Router queue never becomes non-empty. | Lower `--router-queue-threshold`, increase offered load, or check the SGLang `max_num_batched_tokens` caveat in [Router Configuration and Tuning](router-configuration.md#tuning-guidelines). |
 | Priority works through the frontend but not through a Kubernetes gateway path. | Confirm the gateway path preserves `nvext` and use Dynamo v1.2.0 or later. |
 | AIPerf cannot assign a different priority per request. | Use an AIPerf build with per-request `extra` payload support. |
 
@@ -112,9 +112,9 @@ Expected result: higher Dynamo priority values should receive better TTFT under 
 
 ## Related Docs
 
-- [Agent Hints](agent-hints.md)
-- [NVIDIA Request Extensions](../components/frontend/nvext.md#agent-hints)
-- [Router Configuration and Tuning](../components/router/router-configuration.md)
-- [Router Queue Metrics](../observability/metrics.md#router-queue-metrics-dynamo_frontend_router_queue_)
-- [vLLM Reference Guide](../backends/vllm/vllm-reference-guide.md#priority-scheduling)
-- [SGLang for Agentic Workloads](../backends/sglang/agents.md)
+- [Agent Hints](../../agents/agent-hints.md)
+- [NVIDIA Request Extensions](../frontend/nvext.md#agent-hints)
+- [Router Configuration and Tuning](router-configuration.md)
+- [Router Queue Metrics](../../observability/metrics.md#router-queue-metrics-dynamo_frontend_router_queue_)
+- [vLLM Reference Guide](../../backends/vllm/vllm-reference-guide.md#priority-scheduling)
+- [SGLang for Agentic Workloads](../../backends/sglang/agents.md)
