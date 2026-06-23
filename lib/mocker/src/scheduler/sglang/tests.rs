@@ -18,6 +18,7 @@ use super::live::SglangScheduler;
 use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
 use super::request::SglangRequest;
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
     SglangArgs,
@@ -26,7 +27,10 @@ use crate::kv_manager::SglangKvManager;
 use crate::scheduler::test_utils::{
     RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
-use crate::scheduler::{RouterEventVisibility, SchedulerHandle, capture_router_event_sink};
+use crate::scheduler::{
+    RouterEventVisibility, SchedulerCommand, SchedulerCommandResult, SchedulerHandle,
+    capture_router_event_sink,
+};
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 17;
 
@@ -82,6 +86,355 @@ fn make_decoded_request(
     let result = simulate_decode_step(&mut running, kv_manager, config, 0.0, false);
     assert_eq!(result.output_signals.len(), 1);
     running.pop().unwrap()
+}
+
+mod source_holds {
+    use super::*;
+
+    fn args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(16)
+            .block_size(4)
+            .max_num_seqs(Some(1))
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+    }
+
+    fn request(uuid: Uuid) -> DirectRequest {
+        DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    fn execute(core: &mut SglangCore, now_ms: f64) -> crate::scheduler::EnginePassResult {
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, now_ms)
+    }
+
+    fn occupied_tokens(core: &SglangCore) -> usize {
+        core.kv_manager.cache().total_tokens() - core.kv_manager.cache().available_tokens()
+    }
+
+    #[test]
+    fn terminal_completion_holds_source_without_running_cleanup() {
+        let mut core = SglangCore::new(args());
+        let request_id = Uuid::from_u128(301);
+        let handoff_id = HandoffId::from(Uuid::from_u128(401));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id,
+            request: request(request_id),
+        })
+        .unwrap();
+
+        let first = execute(&mut core, 0.0);
+        assert!(!first.output_signals[0].completed);
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(core.source_is_held(handoff_id));
+        assert!(core.running.is_empty());
+        let held_tokens = occupied_tokens(&core);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert!(!core.source_is_held(handoff_id));
+        let released_tokens = occupied_tokens(&core);
+        assert!(released_tokens < held_tokens);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert_eq!(occupied_tokens(&core), released_tokens);
+    }
+
+    #[test]
+    fn cancel_and_early_release_cleanup_exactly_once() {
+        let mut core = SglangCore::new(args());
+        let first_id = HandoffId::from(Uuid::from_u128(402));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: first_id,
+            request: request(Uuid::from_u128(302)),
+        })
+        .unwrap();
+        let first = execute(&mut core, 0.0);
+        execute(&mut core, first.end_ms);
+        let held_tokens = occupied_tokens(&core);
+
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        let cancelled_tokens = occupied_tokens(&core);
+        assert!(cancelled_tokens < held_tokens);
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        assert_eq!(occupied_tokens(&core), cancelled_tokens);
+
+        core.kv_manager.evict(cancelled_tokens);
+        let second_id = first_id;
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: second_id,
+            request: request(Uuid::from_u128(303)),
+        })
+        .unwrap();
+        assert!(core.source_is_registered(second_id));
+        core.apply_command(SchedulerCommand::ReleaseSource {
+            handoff_id: second_id,
+        })
+        .unwrap();
+        assert!(!core.source_is_registered(second_id));
+
+        let first = execute(&mut core, 0.0);
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(!core.source_is_held(second_id));
+    }
+
+    #[test]
+    fn ordinary_completion_keeps_default_cleanup() {
+        let mut core = SglangCore::new(args());
+        core.receive(request(Uuid::from_u128(306)));
+
+        let first = execute(&mut core, 0.0);
+        let terminal = execute(&mut core, first.end_ms);
+
+        assert!(terminal.output_signals[0].completed);
+        assert_eq!(occupied_tokens(&core), 8);
+    }
+
+    #[test]
+    fn active_request_id_is_rejected_before_source_hold_registration() {
+        let mut core = SglangCore::new(args());
+        let request_id = Uuid::from_u128(307);
+        let handoff_id = HandoffId::from(Uuid::from_u128(407));
+        core.receive(request(request_id));
+
+        assert!(
+            core.apply_command(SchedulerCommand::Submit(request(request_id)))
+                .is_err()
+        );
+        assert!(
+            core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                request: request(request_id),
+            })
+            .is_err()
+        );
+        assert!(!core.source_is_registered(handoff_id));
+        assert_eq!(core.num_requests(), 1);
+    }
+}
+
+mod destination_lifecycle {
+    use super::*;
+    use crate::common::protocols::WorkerType;
+
+    fn args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(16)
+            .block_size(4)
+            .max_num_seqs(Some(1))
+            .worker_type(worker_type)
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+    }
+
+    fn request(uuid: Uuid, tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
+        DirectRequest {
+            tokens,
+            max_output_tokens,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    fn execute(core: &mut SglangCore, now_ms: f64) -> crate::scheduler::EnginePassResult {
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, now_ms)
+    }
+
+    fn assert_no_republished_stores(
+        activation: &[dynamo_kv_router::protocols::LocalBlockHash],
+        later: &[dynamo_kv_router::protocols::LocalBlockHash],
+    ) {
+        assert!(later.iter().all(|hash| !activation.contains(hash)));
+    }
+
+    fn occupied_tokens(core: &SglangCore) -> usize {
+        core.kv_manager.cache().total_tokens() - core.kv_manager.cache().available_tokens()
+    }
+
+    fn drive_source_to_hold(core: &mut SglangCore, handoff_id: HandoffId, req: DirectRequest) {
+        assert!(matches!(
+            core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                request: req,
+            })
+            .unwrap(),
+            SchedulerCommandResult::Submitted(_)
+        ));
+        let mut now_ms = 0.0;
+        for _ in 0..8 {
+            let pass = execute(core, now_ms);
+            now_ms = pass.end_ms;
+            if core.is_empty() {
+                break;
+            }
+        }
+        assert!(core.is_empty());
+        assert!(core.source_is_held(handoff_id));
+        assert!(!core.is_drained());
+    }
+
+    #[test]
+    fn handoff_prefill_to_reserved_decode_owns_kv_until_prebuilt_admission() {
+        let logical_uuid = Uuid::from_u128(20_001);
+        let handoff_id = HandoffId::from(Uuid::from_u128(20_002));
+        let logical_tokens = (0..8).collect::<Vec<_>>();
+
+        let mut source = SglangCore::new_with_kv_capture(args(WorkerType::Prefill), 41);
+        let mut destination = SglangCore::new_with_kv_capture(args(WorkerType::Decode), 42);
+
+        destination.receive(request(Uuid::from_u128(20_003), (0..4).collect(), 1));
+        execute(&mut destination, 0.0);
+        assert!(destination.is_empty());
+        destination.drain_kv_events();
+
+        let blocker_uuid = Uuid::from_u128(20_004);
+        destination.receive(request(blocker_uuid, (100..104).collect(), 3));
+        let blocker_first = execute(&mut destination, 1.0);
+        assert_eq!(destination.running.len(), 1);
+        destination.drain_kv_events();
+
+        drive_source_to_hold(
+            &mut source,
+            handoff_id,
+            request(logical_uuid, logical_tokens.clone(), 2),
+        );
+
+        let usage_before_reservation = occupied_tokens(&destination);
+        assert_eq!(
+            destination
+                .apply_command(SchedulerCommand::ReserveDestination {
+                    handoff_id,
+                    request: request(logical_uuid, logical_tokens, 2),
+                })
+                .unwrap(),
+            SchedulerCommandResult::DestinationReserved {
+                request_id: logical_uuid
+            }
+        );
+        assert!(destination.destination_is_held(handoff_id));
+        assert!(!destination.is_drained());
+        assert_eq!(destination.running.len(), 1);
+        assert!(occupied_tokens(&destination) > usage_before_reservation);
+        assert!(stored_hashes(&destination.drain_kv_events()).is_empty());
+
+        let reserved_indices = destination.destination_indices(handoff_id);
+        let protected_before_activation = destination.kv_manager.cache().protected_size;
+        assert!(!reserved_indices.is_empty());
+        assert_eq!(
+            destination
+                .apply_command(SchedulerCommand::ActivateDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        let ready = destination
+            .prebuilt_request(logical_uuid)
+            .expect("activated request must be prebuilt-ready");
+        assert_eq!(ready.kv_indices, reserved_indices);
+        assert_eq!(destination.running.len(), 1);
+        assert!(destination.kv_manager.cache().protected_size >= protected_before_activation);
+        let activation_stores = stored_hashes(&destination.drain_kv_events());
+        assert!(!activation_stores.is_empty());
+
+        assert_eq!(
+            source
+                .apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert!(source.is_empty());
+        assert!(source.is_drained());
+
+        let blocked = execute(&mut destination, blocker_first.end_ms);
+        assert!(
+            blocked
+                .admissions
+                .iter()
+                .all(|admission| admission.uuid != logical_uuid)
+        );
+        let ready = destination
+            .prebuilt_request(logical_uuid)
+            .expect("full running batch must keep request ready");
+        assert_eq!(ready.kv_indices, reserved_indices);
+        assert_no_republished_stores(&activation_stores, &stored_hashes(&blocked.kv_events));
+
+        let blocker_terminal = execute(&mut destination, blocked.end_ms);
+        assert!(
+            blocker_terminal
+                .admissions
+                .iter()
+                .all(|admission| admission.uuid != logical_uuid)
+        );
+        assert!(
+            blocker_terminal
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == blocker_uuid && signal.completed)
+        );
+        assert!(destination.prebuilt_request(logical_uuid).is_some());
+
+        let admitted = execute(&mut destination, blocker_terminal.end_ms);
+        let logical_admissions = admitted
+            .admissions
+            .iter()
+            .filter(|admission| admission.uuid == logical_uuid)
+            .collect::<Vec<_>>();
+        assert_eq!(logical_admissions.len(), 1);
+        assert_eq!(logical_admissions[0].reused_input_tokens, 0);
+        let running = destination
+            .running
+            .iter()
+            .find(|request| request.uuid == logical_uuid)
+            .expect("prebuilt request must enter the running batch");
+        assert!(running.kv_indices.starts_with(&reserved_indices));
+        assert_no_republished_stores(&activation_stores, &stored_hashes(&admitted.kv_events));
+
+        let terminal = execute(&mut destination, admitted.end_ms);
+        assert!(
+            terminal
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == logical_uuid && signal.completed)
+        );
+        assert!(destination.is_empty());
+        assert!(destination.is_drained());
+        assert!(!destination.destination_is_held(handoff_id));
+        assert_eq!(destination.kv_manager.cache().protected_size, 0);
+    }
 }
 
 mod scheduling {
