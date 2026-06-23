@@ -137,7 +137,7 @@ snapshot:
 
 power_agent:
   - *ci
-  - 'components/power_agent/**'
+  - 'deploy/power-agent/**'
   - 'deploy/helm/charts/power-agent/**'
   - '!**/*.md'
   - '!**/*.rst'
@@ -159,7 +159,7 @@ planner:
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
   # Power-aware planner (PR #9369): per-node power agent component
-  - 'components/power_agent/**'
+  - 'deploy/power-agent/**'
   - 'deploy/helm/charts/power-agent/**'
 
 vllm:

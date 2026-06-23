@@ -73,7 +73,7 @@ locally, update the ConfigMap, restart the Pod.
 >
 > ```bash
 > kubectl create configmap dynamo-power-agent-script \
->   --from-file=power_agent.py=components/power_agent/power_agent.py \
+>   --from-file=power_agent.py=deploy/power-agent/power_agent.py \
 >   -n $NAMESPACE
 > ```
 >
@@ -113,7 +113,7 @@ Update flow (after editing `power_agent.py`):
 
 ```bash
 kubectl create configmap dynamo-power-agent-script \
-  --from-file=power_agent.py=components/power_agent/power_agent.py \
+  --from-file=power_agent.py=deploy/power-agent/power_agent.py \
   -n $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl delete pod power-agent-dev -n $NAMESPACE

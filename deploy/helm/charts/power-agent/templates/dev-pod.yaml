@@ -11,7 +11,7 @@
 # with `MountVolume.SetUp failed`):
 #
 #   kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
-#     --from-file=power_agent.py=components/power_agent/power_agent.py \
+#     --from-file=power_agent.py=deploy/power-agent/power_agent.py \
 #     -n {{ .Release.Namespace }}
 
 {{- if .Values.dev.enabled }}

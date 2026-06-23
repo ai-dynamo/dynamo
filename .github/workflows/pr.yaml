@@ -60,6 +60,8 @@ jobs:
       - snapshot-agent
       - snapshot-placeholder
       - power-agent
+      - power-agent-test
+      - power-agent-helm-tests
       - vllm-build
       - vllm-dev-build
       - vllm-test
@@ -201,34 +203,59 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
+      - name: Build and push power agent
+        uses: ./.github/actions/build-deploy-component
         with:
+          component: power-agent
+          image_tag: ${{ github.sha }}-power-agent
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          flavor: general
-          arch: linux/amd64
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Build and push power agent
-        shell: bash
-        working-directory: ./components/power_agent
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+
+  power-agent-test:
+    needs: changed-files
+    if: needs.changed-files.outputs.power_agent == 'true'
+    name: Power Agent Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
         run: |
-          IMAGE_URI="${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ github.sha }}-power-agent"
-          docker buildx build --push \
-            --platform linux/amd64 \
-            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-            -t "${IMAGE_URI}" \
-            -f Dockerfile .
-          echo "### 🐳 Power Agent Container Image" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`${IMAGE_URI}\` |" >> $GITHUB_STEP_SUMMARY
+          python -m pip install --upgrade pip
+          # Mirrors deploy/power-agent/Dockerfile runtime deps plus pytest.
+          pip install pytest pynvml==12.0.* kubernetes==30.* prometheus-client==0.20.*
+      - name: Run unit tests
+        run: python -m pytest deploy/power-agent/tests/ -v
+
+  power-agent-helm-tests:
+    needs: changed-files
+    if: needs.changed-files.outputs.power_agent == 'true'
+    name: Power Agent Helm Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        with:
+          version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
+      - name: Lint and render (production + dev)
+        run: |
+          CHART=deploy/helm/charts/power-agent
+          helm lint "$CHART" --set image.tag=ci-test
+          # Production DaemonSet render (default daemonset.enabled=true).
+          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
+          # Dev-pod render (mutually exclusive with the DaemonSet; pinned node).
+          helm template power-agent "$CHART" \
+            --set daemonset.enabled=false \
+            --set dev.enabled=true \
+            --set dev.nodeName=ci-node \
+            --set image.tag=ci-test >/dev/null
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -973,6 +1000,7 @@ jobs:
       - operator
       - snapshot-agent
       - snapshot-placeholder
+      - power-agent
       - planner-test
       - vllm-copy-to-acr
       - vllm-multi-gpu-test

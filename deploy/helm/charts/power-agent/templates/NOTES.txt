@@ -34,13 +34,13 @@ DEV MODE: a single Pod (not a DaemonSet) was created, pinned to node "{{ .Values
 │   If you have not done so already, create it from your local checkout:     │
 │                                                                            │
 │     kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
-│       --from-file=power_agent.py=components/power_agent/power_agent.py \
+│       --from-file=power_agent.py=deploy/power-agent/power_agent.py \
 │       -n {{ .Release.Namespace }}
 │                                                                            │
 │   Update flow (after editing power_agent.py locally):                      │
 │                                                                            │
 │     kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
-│       --from-file=power_agent.py=components/power_agent/power_agent.py \
+│       --from-file=power_agent.py=deploy/power-agent/power_agent.py \
 │       -n {{ .Release.Namespace }} --dry-run=client -o yaml \
 │       | kubectl apply -f -                                                 │
 │     kubectl delete pod {{ include "power-agent.fullname" . }}-dev -n {{ .Release.Namespace }}

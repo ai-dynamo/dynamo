@@ -127,41 +127,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
+      - name: Build and push power agent
+        uses: ./.github/actions/build-deploy-component
         with:
+          component: power-agent
+          image_tag: ${{ github.sha }}-power-agent
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          flavor: general
-          arch: linux/amd64
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Build and push power agent
-        shell: bash
-        working-directory: ./components/power_agent
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          IMAGE_TAG="${{ github.sha }}-power-agent"
-          ECR_URI="${ECR_HOSTNAME}/ai-dynamo/dynamo:${IMAGE_TAG}"
-          ACR_URI="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${IMAGE_TAG}"
-          docker buildx build --push \
-            --platform linux/amd64 \
-            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-            -t "${ECR_URI}" \
-            -t "${ACR_URI}" \
-            -f Dockerfile .
-          echo "### 🐳 Power Agent Container Image" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`${ECR_URI}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`${ACR_URI}\` |" >> $GITHUB_STEP_SUMMARY
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-power-agent
 
   # ============================================================================
   # BUILD JOBS

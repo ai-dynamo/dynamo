@@ -3,8 +3,9 @@
 **Status:** Implemented — chart shipped at `deploy/helm/charts/power-agent/`
 (`Chart.yaml` `version: 1.0.0`, `appVersion: "1.0.0"`). Landed in
 [PR #9682](https://github.com/ai-dynamo/dynamo/pull/9682) (PR 1a of the
-PR-9369 split). The container image is built from
-`components/power_agent/Dockerfile` by the `power-agent` CI job. This
+PR-9369 split). The agent's source, tests, and `Dockerfile` live at
+`deploy/power-agent/`; the container image is built by the `power-agent`
+CI job via the reusable `build-deploy-component` action. This
 document remains the chart-shape source of truth.
 **Author:** Kai Ma
 **Date:** 2026-05-19 (initial); refreshed 2026-06-03 (status + build wiring)
@@ -23,6 +24,7 @@ Major CodeRabbit comments on PR9682 about parameterization and reproducibility.
 | v1.1 | 2026-05-19 | Added §1.4 — End-to-end user flow. Pre-empts the "does this actually deliver a `helm something → ready to run` experience" question by making the post-plan three-command flow (2 × `helm install` + 1 × `kubectl apply` for the workload DGD) explicit, and by mapping every infrastructure primitive a power-aware planner needs to the chart that installs it. No decision change; doc-only refinement. |
 | v1.2 | 2026-05-19 | Incorporated review-cycle feedback (evidence-based accept/reject pass): (1) **§4.2** — removed dead `agent.reconcileIntervalSeconds` knob (verified `power_agent.py:529-552` exposes only 4 CLI flags; `RECONCILE_INTERVAL_S = 15` is a hardcoded module constant with no flag); added a maintenance-window rationale comment to `daemonset.updateStrategy.rollingUpdate.maxUnavailable: 1` explaining why the conservative safety default is kept and when to override for large fleets. (2) **§4.4** — added a third template helper `power-agent.effectiveNamespaceRestricted` that forces namespace-scoped RBAC when `dev.enabled=true` (justified by `power_agent.py:541-546` already accepting `--namespace`; dev mode pins to one node + one namespace, so cluster-wide RBAC is gratuitous). (3) **§5.3** — strengthened chart-README requirements: dev-mode `kubectl create configmap` recipe is now ordered as a *prerequisite* step (before `helm install`), not just a post-install NOTES.txt hint; added a one-line note that the chart uses the canonical NVIDIA monitoring-agent pattern (privileged + `NVIDIA_VISIBLE_DEVICES=all`, no `nvidia.com/gpu` claim — privileged container bypasses the unprivileged-visibility edge case). (4) **§6** risk register — updated row 7 (ConfigMap prerequisite escalation); added row 9 covering the dead-knob audit principle (every `values.yaml` key must have a verified template-side or CLI-side wiring). Three of four reviewer points fully accepted; one (Consideration 1 default change) partial-accepted as "preserve `maxUnavailable: 1` default, document the override for large fleets" because power-cap enforcement is safety-critical and the parameterization the reviewer asked for is already in the proposed values surface. |
 | v1.3 | 2026-06-03 | Status-line + build refresh (PR #9682 review by @sttts): (1) flipped the header **Status** from "Draft v1 — no code authored yet" to "Implemented" now that the chart, templates, and `power_agent.py` are all in the tree on this PR — the stale draft marker no longer matched reality. (2) Added a container build: `components/power_agent/Dockerfile` (single-stage `python:3.11-slim-bookworm`, NVML injected at runtime by `runtimeClassName: nvidia`, deps `pynvml` / `kubernetes` / `prometheus-client`) plus a dedicated `power-agent` CI job in `pr.yaml` + `post-merge-ci.yml`, gated on a new `power_agent` changed-files filter — answers the reviewer's "where is it built?" on `values.yaml` `image.repository`. |
+| v1.4 | 2026-06-23 | Source relocation (PR #9682, @nv-anants): `git mv components/power_agent → deploy/power-agent`, since power-agent is a deployable unit (own image + chart + RBAC) and belongs alongside `operator`/`snapshot` under `deploy/`, not next to the runtime backends in `components/`. Rewired the `power-agent` build in `pr.yaml` + `post-merge-ci.yml` onto the reusable `build-deploy-component` action (gating its hard-coded `--build-context snapshot=../snapshot` on `component != power-agent`, which `operator`/`snapshot` still need); added a `power-agent-test` pytest gate to `backend-status-check`; repointed the `power_agent`/`planner` globs in `.github/filters.yaml` to `deploy/power-agent/**`. **All current-source path references below now read `deploy/power-agent/...`; the v1.3 entry above is left at the historical `components/power_agent/Dockerfile` path it shipped at on that date.** |
 
 ---
 
@@ -327,7 +329,7 @@ in the same commit that adds the chart.**
    "breaking change" risk that motivated the "keep one minor version
    with DEPRECATED headers" alternative does not apply at this stage.
 
-3. **Documentation alignment.** `components/power_agent/README.md` and
+3. **Documentation alignment.** `deploy/power-agent/README.md` and
    `examples/deployments/powerplanner/disagg-power-aware.yaml` both
    reference `kubectl apply -f deploy/power_agent/...`. Those
    references update in the same commit to the `helm install ...`
@@ -335,9 +337,9 @@ in the same commit that adds the chart.**
 
 #### What we do NOT delete
 
-- `components/power_agent/` (the Python source and unit tests) is the
+- `deploy/power-agent/` (the Python source and unit tests) is the
   agent's home, untouched by this plan.
-- `components/power_agent/README.md` updates its deployment recipe
+- `deploy/power-agent/README.md` updates its deployment recipe
   section to reference the chart but is not deleted.
 
 ### 3.5 Document persistence (§6.5)
@@ -486,7 +488,7 @@ daemonset:
 # that mounts power_agent.py from a ConfigMap. The caller is responsible
 # for creating the ConfigMap separately, e.g.:
 #   kubectl create configmap dynamo-power-agent-script \
-#     --from-file=power_agent.py=components/power_agent/power_agent.py
+#     --from-file=power_agent.py=deploy/power-agent/power_agent.py
 #
 # Mutually exclusive with daemonset.enabled (chart fails to render if both
 # are true).
@@ -621,7 +623,7 @@ deploy/helm/charts/snapshot/. Parameterises:
 Supersedes the raw deploy/power_agent/{daemonset,rbac,dev-pod}.yaml
 manifests, which this commit removes.
 
-Updates components/power_agent/README.md and the planner power-aware
+Updates deploy/power-agent/README.md and the planner power-aware
 example to reference `helm install` instead of `kubectl apply -f`.
 
 Addresses CodeRabbit review comments on PR #9682:
@@ -666,13 +668,13 @@ deploy/power_agent/dev-pod.yaml      -128
 **Modified (~30 LOC of doc touch-up):**
 
 ```
-components/power_agent/README.md       (replace kubectl-apply recipe with helm-install)
+deploy/power-agent/README.md       (replace kubectl-apply recipe with helm-install)
 examples/deployments/powerplanner/disagg-power-aware.yaml      (header comment update)
 examples/deployments/powerplanner/disagg-conservative-cold-start.yaml (header comment update)
 .github/filters.yaml                                            (add deploy/helm/charts/power-agent/** to planner-group filter)
 ```
 
-(Last item: the planner-group filter already covers `deploy/power_agent/**`
+(Last item: the planner-group filter already covers `deploy/power-agent/**`
 per PR9682. Adding the chart path keeps chart-only changes triggering
 the same CI job set.)
 
@@ -687,10 +689,10 @@ commit:
 
 | File | Current text | Updated text |
 |------|--------------|--------------|
-| `components/power_agent/README.md` §Deployment | `kubectl apply -f deploy/power_agent/rbac.yaml` then `daemonset.yaml` | `helm install power-agent ./deploy/helm/charts/power-agent --namespace <ns> --set image.tag=<release>` |
+| `deploy/power-agent/README.md` §Deployment | `kubectl apply -f deploy/power_agent/rbac.yaml` then `daemonset.yaml` | `helm install power-agent ./deploy/helm/charts/power-agent --namespace <ns> --set image.tag=<release>` |
 | `examples/deployments/powerplanner/disagg-power-aware.yaml` header | "Deploy the Power Agent DaemonSet: `kubectl apply -f deploy/power_agent/rbac.yaml` …" | "Deploy the Power Agent: `helm install power-agent ./deploy/helm/charts/power-agent …`" |
 | `examples/deployments/powerplanner/disagg-conservative-cold-start.yaml` header | (same as above) | (same as above) |
-| `.github/filters.yaml` planner-group | covers `deploy/power_agent/**` | also covers `deploy/helm/charts/power-agent/**` |
+| `.github/filters.yaml` planner-group | covers `deploy/power-agent/**` | also covers `deploy/helm/charts/power-agent/**` |
 
 Note: `examples/deployments/powerplanner/*.yaml` and the planner-pod-rbac-dev
 file live in **other** PRs (9687 and 9683 respectively) — those references
@@ -720,7 +722,7 @@ addresses a specific point in the v1.2 review-feedback cycle:
    >
    > ```bash
    > kubectl create configmap dynamo-power-agent-script \
-   >   --from-file=power_agent.py=components/power_agent/power_agent.py \
+   >   --from-file=power_agent.py=deploy/power-agent/power_agent.py \
    >   -n $NAMESPACE
    > ```
    >
@@ -780,7 +782,7 @@ Before the commit gets pushed to `pr1a/power-agent`:
 3. **`helm template`** with no image tag set — must fail fast at template time with the message from §4.4's `validateImageTag` helper.
 4. **`helm template`** with both `daemonset.enabled=true` and `dev.enabled=true` — must fail fast at template time with the `validateMutex` message.
 5. **Pre-commit hooks pass on the chart files** — the same 8 hooks the v3.3 §7 checklist enforces (isort/black/flake8/codespell/end-of-file-fixer/trailing-whitespace/check-yaml/ruff). `check-yaml` is the relevant one for chart files; the rest don't touch YAML.
-6. **No CI regression** — planner-group jobs trigger and pass (the chart sits inside the planner-group path filter; same job set that already covers `deploy/power_agent/**`).
+6. **No CI regression** — planner-group jobs trigger and pass (the chart sits inside the planner-group path filter; same job set that already covers `deploy/power-agent/**`).
 
 `helm-unittest` (used by the `deploy/helm/charts/platform/Makefile`) is
 optional for v1. Adding a `tests/` directory with a few representative
@@ -846,7 +848,7 @@ users want parametric DGD generation, that belongs in a separate
 
 For v1 the chart `version` and `appVersion` both pin to `"1.0.0"` and
 match the literal string in the (currently unwritten) version manifest
-of `components/power_agent/`. When `power_agent.py` next gains a
+of `deploy/power-agent/`. When `power_agent.py` next gains a
 substantive behaviour change, both bump together. Codifying this as a
 chart-release policy (e.g., a pre-commit check that diffs
 `power_agent.py` LOC against `Chart.yaml` `appVersion`) is **out of
@@ -886,7 +888,7 @@ Mirror of `pr9369-split-plan.md` §7, scoped to this work:
 
 **Doc touch-up:**
 
-- [ ] Update `components/power_agent/README.md` §Deployment to the `helm install` recipe (§5.3).
+- [ ] Update `deploy/power-agent/README.md` §Deployment to the `helm install` recipe (§5.3).
 - [ ] Update both `examples/deployments/powerplanner/*.yaml` headers (§5.3).
 - [ ] Update `.github/filters.yaml` planner-group filter (§5.3).
 - [ ] Confirm `docs/design-docs/power-agent-helm-chart-plan.md` (this file) is committed.
@@ -910,4 +912,4 @@ Mirror of `pr9369-split-plan.md` §7, scoped to this work:
   kubectl rollout status daemonset/power-agent-agent -n <ns>
   kubectl logs -l app.kubernetes.io/name=power-agent -n <ns> --tail=50
   ```
-- [ ] All 43 `components/power_agent/tests/` tests still pass (no code changes — sanity smoke only).
+- [ ] All 43 `deploy/power-agent/tests/` tests still pass (no code changes — sanity smoke only).

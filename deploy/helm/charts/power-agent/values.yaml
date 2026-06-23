@@ -128,7 +128,7 @@ daemonset:
 # for creating the ConfigMap separately BEFORE `helm install`:
 #
 #   kubectl create configmap dynamo-power-agent-script \
-#     --from-file=power_agent.py=components/power_agent/power_agent.py \
+#     --from-file=power_agent.py=deploy/power-agent/power_agent.py \
 #     -n $NAMESPACE
 #
 # Without this ConfigMap the dev pod will stay Pending with a

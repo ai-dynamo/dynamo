@@ -6,8 +6,8 @@
 # and built by the `power-agent` CI job (.github/workflows/pr.yaml,
 # post-merge-ci.yml).
 #
-#   docker build -t power-agent:dev -f components/power_agent/Dockerfile \
-#       components/power_agent
+#   docker build -t power-agent:dev -f deploy/power-agent/Dockerfile \
+#       deploy/power-agent
 
 # DOCKER_PROXY lets CI route the base image through the ECR Docker Hub mirror
 # (e.g. <acct>.dkr.ecr.<region>.amazonaws.com/dockerhub/). Empty by default so
