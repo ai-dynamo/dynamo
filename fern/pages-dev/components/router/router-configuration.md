@@ -108,15 +108,6 @@ Do not combine this setting with `--no-router-kv-events`, including when the app
 To implement KV event publishing for custom inference engines, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints).
 
-### Session Control and Sticky Routing
-
-When a request carries `nvext.session_control`, the KV router can activate two session-related components:
-
-- **StickySessionRouter**: Maintains an in-memory `session_id -> (worker_id, dp_rank)` affinity map with sliding-window TTL. `action: "bind"` creates router-only affinity without backend engine RPCs. Subsequent requests with the same `session_id` are routed to the pinned worker/rank, bypassing KV overlap scoring.
-- **AgentController**: Sends session lifecycle RPCs (`open_session`, `close_session`) to the worker's `session_control` endpoint when `action` is `"open"` or `"close"`. The event-plane client is lazily initialized on the first lifecycle request.
-
-These activate automatically with `--router-mode kv` -- no additional flags are needed. Requests without `session_control` are unaffected and follow the standard KV-aware routing path. Router-only sticky routing only requires `action: "bind"`; engine-backed session lifecycle currently requires the SGLang backend with `--enable-streaming-session`. See [SGLang for Agentic Workloads -- Session Control](../../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental) for details.
-
 ## Tuning Guidelines
 
 `--router-kv-overlap-score-credit` is the primary knob for cache reuse. It credits device-local prefix overlap against the prefill load and must be between 0.0 and 1.0. Higher values steer requests toward workers with better cache overlap and reduce TTFT. Lower values distribute load more evenly and reduce ITL. The default of 1.0 is a reasonable starting point. For direct router APIs and EPP integrations, the same router policy can be overridden per request with `router_config_override.overlap_score_credit`; it is not an `nvext.agent_hints` field.
