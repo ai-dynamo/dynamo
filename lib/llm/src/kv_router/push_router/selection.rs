@@ -262,8 +262,6 @@ fn pinned_worker_hint(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
-
     use super::{pinned_worker_hint, resolve_pinned_worker_rank};
     use crate::protocols::common::{preprocessor::RoutingHints, timing::RequestPhase};
 
