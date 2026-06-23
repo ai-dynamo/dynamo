@@ -409,7 +409,7 @@ def verify_migration_metrics(
         pytest.fail(f"Failed to fetch metrics from {metrics_url}: {e}")
 
     metrics_text = response.text
-    logger.info(f"Fetched metrics from {metrics_url}")
+    logger.info("Fetched metrics from %s", metrics_url)
 
     # Parse metrics to find migration counts
     ongoing_count = _parse_migration_metric(
@@ -423,9 +423,11 @@ def verify_migration_metrics(
     )
 
     logger.info(
-        f"Migration metrics - ongoing_request: {ongoing_count}, "
-        f"new_request: {new_request_count}, "
-        f"max_seq_len_exceeded: {max_seq_len_exceeded_count}"
+        "Migration metrics - ongoing_request: %d, new_request: %d, "
+        "max_seq_len_exceeded: %d",
+        ongoing_count,
+        new_request_count,
+        max_seq_len_exceeded_count,
     )
 
     if expected_ongoing_request_count > 0:
@@ -511,10 +513,9 @@ def run_migration_test(
     if migration_limit > 0 and migration_max_seq_len != 1:
         validate_response(request_thread, response_list, validate_delay=stream)
     else:
-        # openai.APIError covers both mid-stream structured error frames
-        # (DIS-1768 contract) and HTTP non-200 responses. A typed check is more
-        # robust than matching the exception's stringified message against a
-        # specific wire-format prefix.
+        # openai.APIError covers both mid-stream structured error frames and
+        # HTTP non-200 responses. A typed check is more robust than matching the
+        # exception's stringified message against a specific wire-format prefix.
         with pytest.raises(APIError):
             validate_response(request_thread, response_list, validate_delay=stream)
 
