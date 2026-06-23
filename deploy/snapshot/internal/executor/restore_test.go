@@ -59,7 +59,7 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	manifest := types.NewCheckpointManifest(
 		"checkpoint-123",
 		types.CRIUDumpManifest{},
-		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", nil),
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},
 	)
 	if err := types.WriteManifest(checkpointDir, manifest); err != nil {

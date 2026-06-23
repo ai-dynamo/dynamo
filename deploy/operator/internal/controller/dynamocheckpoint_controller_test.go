@@ -197,24 +197,22 @@ func TestBuildCheckpointJob(t *testing.T) {
 
 	// Probes: readiness set, liveness/startup cleared
 	require.NotNil(t, main.ReadinessProbe)
-	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
+	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-snapshot"}, main.ReadinessProbe.Exec.Command)
 	assert.Nil(t, main.LivenessProbe)
 	assert.Nil(t, main.StartupProbe)
 
-	// Checkpoint jobs still mount podinfo for Kubernetes discovery, but not checkpoint storage.
+	// Checkpoint jobs mount snapshot-control, but not checkpoint storage.
 	volNames := make(map[string]bool)
 	for _, v := range podSpec.Volumes {
 		volNames[v.Name] = true
 	}
 	assert.False(t, volNames[snapshotprotocol.CheckpointVolumeName])
-	assert.True(t, volNames[consts.PodInfoVolumeName])
 	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
 	assert.Empty(t, podSpec.ServiceAccountName)
 
 	for _, mount := range main.VolumeMounts {
 		assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, mount.Name)
 	}
-	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: consts.PodInfoVolumeName, MountPath: consts.PodInfoMountPath, ReadOnly: true})
 	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: consts.KubeValueNameSharedMemory, MountPath: consts.DefaultSharedMemoryMountPath})
 	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.SnapshotControlVolumeName, MountPath: snapshotprotocol.SnapshotControlMountPath, SubPath: consts.MainContainerName})
 
@@ -301,7 +299,7 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
 	require.NotNil(t, main.ReadinessProbe)
-	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
+	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-snapshot"}, main.ReadinessProbe.Exec.Command)
 	assert.Nil(t, main.LivenessProbe)
 	assert.Nil(t, main.StartupProbe)
 
@@ -478,7 +476,6 @@ func TestBuildCheckpointJobUsesTargetContainerName(t *testing.T) {
 	assert.Contains(t, target.Env, corev1.EnvVar{Name: snapshotprotocol.SnapshotControlDirEnv, Value: snapshotprotocol.SnapshotControlMountPath})
 	assert.Contains(t, target.Env, corev1.EnvVar{Name: "USER_ENV", Value: "1"})
 	assert.Contains(t, target.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.SnapshotControlVolumeName, MountPath: snapshotprotocol.SnapshotControlMountPath, SubPath: "worker"})
-	assert.Contains(t, target.VolumeMounts, corev1.VolumeMount{Name: consts.PodInfoVolumeName, MountPath: consts.PodInfoMountPath, ReadOnly: true})
 }
 
 func TestBuildCheckpointJobPreservesPreparedEnvAndSharedMemory(t *testing.T) {

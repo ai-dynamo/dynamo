@@ -2337,6 +2337,9 @@ def run_mocker_trace_replay(
     trace_num_prefix_groups: int = 0,
     report_jsonl_path: Optional[str | os.PathLike[str]] = None,
     max_sim_time_ms: Optional[float] = None,
+    sla_ttft_ms: Optional[float] = None,
+    sla_itl_ms: Optional[float] = None,
+    sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
 
@@ -2344,6 +2347,10 @@ def run_mocker_trace_replay(
     JSON object per request is written to that path. Each line includes
     arrival/admit/token timestamps, input/output lengths, the full per-token
     ITL series, and prefill/decode worker indices.
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+    (offline replay only). When any is set, the report carries ``goodput_*`` keys
+    classifying SLA-satisfying requests; with none set, goodput is omitted.
     """
     ...
 

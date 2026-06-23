@@ -233,6 +233,35 @@ pub struct RequestTraceToolEvent {
     pub error_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestTraceToolEventIngress {
+    pub schema: RequestTraceSchema,
+    pub event_type: RequestTraceEventType,
+    pub event_time_unix_ms: u64,
+    pub trajectory_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_trajectory_id: Option<String>,
+    pub tool: RequestTraceToolEvent,
+}
+
+impl From<RequestTraceToolEventIngress> for RequestTraceRecord {
+    fn from(ingress: RequestTraceToolEventIngress) -> Self {
+        Self {
+            schema: ingress.schema,
+            event_type: ingress.event_type,
+            event_time_unix_ms: ingress.event_time_unix_ms,
+            event_source: Some(RequestTraceEventSource::Harness),
+            agent_context: Some(AgentContext {
+                trajectory_id: ingress.trajectory_id,
+                parent_trajectory_id: ingress.parent_trajectory_id,
+                trajectory_final: None,
+            }),
+            request: None,
+            tool: Some(ingress.tool),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RequestTraceToolStatus {
     #[serde(rename = "running")]
