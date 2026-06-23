@@ -80,6 +80,10 @@ mocker = [
     "aiconfigurator>=0.9.0",
 ]
 
+replay = [
+    "pyarrow>=15.0.0",
+]
+
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"

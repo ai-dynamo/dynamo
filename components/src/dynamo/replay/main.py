@@ -8,6 +8,7 @@ import importlib
 import json
 import sys
 from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast
@@ -28,6 +29,7 @@ from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.exgentic import prepare_trace as prepare_exgentic_trace
 from dynamo.replay.reporting import format_report_table, write_report_json
 
 
@@ -579,14 +581,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             "mooncake-delta",
             "agentic_mooncake",
             "applied_compute_agentic",
+            "exgentic",
         ),
         default="mooncake",
         help=(
             "format of trace_file when replaying from a file; mooncake-delta "
             "accumulates per-session input deltas into cumulative prompts and "
             "can use substantially more memory than mooncake; agentic_mooncake "
-            "replays request-level workflow dependencies"
+            "replays request-level workflow dependencies; exgentic reads "
+            "Exgentic agent-llm-traces Parquet shards"
         ),
+    )
+    parser.add_argument(
+        "--trace-harness",
+        help="select one harness from an Exgentic trace",
+    )
+    parser.add_argument(
+        "--trace-model",
+        help="select one canonical model from an Exgentic trace",
     )
     parser.add_argument(
         "--trace-block-size",
@@ -689,6 +701,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
+    if (args.trace_harness is not None or args.trace_model is not None) and (
+        not using_trace_file or args.trace_format != "exgentic"
+    ):
+        parser.error(
+            "--trace-harness and --trace-model require --trace-format=exgentic"
+        )
 
     if args.report_jsonl is not None:
         if args.replay_mode != "offline":
@@ -733,27 +751,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("--planner-config only supports --replay-mode=offline")
         if not using_trace_file:
             parser.error("--planner-config requires a trace file (not synthetic)")
-        if args.trace_format != "mooncake":
-            parser.error("--planner-config only supports --trace-format=mooncake")
+        if args.trace_format not in {"mooncake", "exgentic"}:
+            parser.error(
+                "--planner-config only supports --trace-format=mooncake|exgentic"
+            )
 
-        planner_report = _run_planner_replay(
-            trace_file=args.trace_file,
-            extra_engine_args=extra_engine_args,
-            prefill_engine_args=prefill_engine_args,
-            decode_engine_args=decode_engine_args,
-            router_config=router_config,
-            num_workers=args.num_workers,
-            num_prefill_workers=args.num_prefill_workers,
-            num_decode_workers=args.num_decode_workers,
-            router_mode=args.router_mode,
-            arrival_speedup_ratio=args.arrival_speedup_ratio,
-            trace_block_size=args.trace_block_size,
-            planner_config_arg=args.planner_config,
-            benchmark_granularity=args.benchmark_granularity,
-            sla_ttft_ms=args.sla_ttft_ms,
-            sla_itl_ms=args.sla_itl_ms,
-            sla_e2e_ms=args.sla_e2e_ms,
+        trace_context = (
+            prepare_exgentic_trace(
+                args.trace_file,
+                args.trace_block_size,
+                harness=args.trace_harness,
+                model=args.trace_model,
+            )
+            if args.trace_format == "exgentic"
+            else nullcontext(args.trace_file)
         )
+        with trace_context as planner_trace_file:
+            planner_report = _run_planner_replay(
+                trace_file=planner_trace_file,
+                extra_engine_args=extra_engine_args,
+                prefill_engine_args=prefill_engine_args,
+                decode_engine_args=decode_engine_args,
+                router_config=router_config,
+                num_workers=args.num_workers,
+                num_prefill_workers=args.num_prefill_workers,
+                num_decode_workers=args.num_decode_workers,
+                router_mode=args.router_mode,
+                arrival_speedup_ratio=args.arrival_speedup_ratio,
+                trace_block_size=args.trace_block_size,
+                planner_config_arg=args.planner_config,
+                benchmark_granularity=args.benchmark_granularity,
+                sla_ttft_ms=args.sla_ttft_ms,
+                sla_itl_ms=args.sla_itl_ms,
+                sla_e2e_ms=args.sla_e2e_ms,
+            )
         report = planner_report.trace_report
         if planner_report.scaling_events:
             sys.stdout.write("\nScaling events:\n")
@@ -796,6 +827,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             arrival_speedup_ratio=args.arrival_speedup_ratio,
             trace_block_size=args.trace_block_size,
             trace_format=args.trace_format,
+            trace_harness=args.trace_harness,
+            trace_model=args.trace_model,
             trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
             trace_num_prefix_groups=args.trace_num_prefix_groups,
             report_jsonl_path=args.report_jsonl,

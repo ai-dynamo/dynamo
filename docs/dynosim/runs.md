@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DynoSim Runs
 subtitle: Run one trace or synthetic workload through a simulated Dynamo configuration
@@ -39,7 +39,12 @@ flowchart LR
     H --> TC[Trace Collector]
 ```
 
-The load driver is either a Mooncake-style JSONL trace (timestamps, ISL/OSL, `hash_ids`) or a synthetic generator parameterized by `isl`/`osl`/`concurrency`. Single-engine simulation (`SES`) is the fast path for `num_workers == 1` with vLLM, SGLang, or TRT-LLM; multi-engine simulation (`MES`) covers aggregated multi-worker runs, disaggregated prefill/decode runs, and KV-router runs. The trace collector produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed by downstream analysis.
+The load driver accepts Mooncake-style JSONL, Exgentic agent traces, or a synthetic generator
+parameterized by ISL, OSL, and concurrency. Single-engine simulation (`SES`) is the fast path for
+`num_workers == 1` with vLLM, SGLang, or TRT-LLM; multi-engine simulation (`MES`) covers aggregated
+multi-worker runs, disaggregated prefill/decode runs, and KV-router runs. The trace collector
+produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed
+by downstream analysis.
 
 Each simulation composes a different set of components. SES drives the engine core directly (scheduler + forward-pass modeling). MES composes multiple engine cores with KV transfer/offloading, KV routing, and planner simulation layered on top:
 
@@ -118,9 +123,9 @@ python -m dynamo.replay \
 `python -m dynamo.replay` prints an AIPerf-style summary table to stdout and writes the full
 report JSON to disk.
 
-## Input Format
+## Input Formats
 
-The trace file must be Mooncake-style JSONL. Each line should contain:
+Mooncake-style JSONL rows contain:
 
 - `timestamp` or `created_time`
 - `input_length` or `input_tokens`
@@ -160,6 +165,69 @@ Example:
 
 The second `session-a` row waits for the first turn to complete plus 50 ms. The second `session-b`
 row also waits for the first turn to complete plus the inferred 50 ms timestamp delta.
+
+### Exgentic Agent Traces
+
+**Experimental.** `--trace-format exgentic` reads the Parquet shards from the
+[Exgentic agent-llm-traces dataset](https://huggingface.co/datasets/Exgentic/agent-llm-traces).
+Select one source harness and model with `--trace-harness` and `--trace-model`:
+
+```bash
+hf download Exgentic/agent-llm-traces \
+  --repo-type dataset \
+  --include "data/*.parquet" \
+  --local-dir /tmp/exgentic-agent-llm-traces
+
+uv pip install pyarrow
+
+uv run --no-sync python -m dynamo.replay \
+  /tmp/exgentic-agent-llm-traces/data \
+  --trace-format exgentic \
+  --trace-harness tool_calling_with_shortlisting \
+  --trace-model gemini-3-pro-preview \
+  --trace-block-size 512 \
+  --replay-concurrency 32 \
+  --replay-mode offline \
+  --num-workers 1 \
+  --extra-engine-args '{"block_size":64}'
+```
+
+The current dataset contains these session counts after normalizing provider aliases:
+
+| Harness | DeepSeek V3.2 | Kimi K2.5 | Claude Opus 4.5 | Gemini 3 Pro | GPT-4.1 | GPT-5.2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `claude_code` | 51 | 57 | 413 | 198 | 68 | 52 |
+| `openai_solo` | 3 | 15 | 9 | 20 | 67 | 0 |
+| `smolagents_code` | 48 | 48 | 0 | 0 | 219 | 0 |
+| `tool_calling` | 16 | 39 | 87 | 79 | 210 | 0 |
+| `tool_calling_with_shortlisting` | 17 | 1 | 0 | 64 | 0 | 0 |
+
+Use these canonical values for `--trace-model`: `DeepSeek-V3.2`, `Kimi-K2.5`,
+`claude-opus-4-5`, `gemini-3-pro-preview`, `gpt-4.1`, and `gpt-5.2-2025-12-11`.
+Matching is case-insensitive.
+
+Check the target model context window before choosing a source combination. The following maxima
+exclude failed spans and count input tokens only; leave additional context space for generated
+tokens:
+
+| Harness | Claude Opus 4.5 | Gemini 3 Pro | GPT-4.1 | GPT-5.2 |
+| --- | ---: | ---: | ---: | ---: |
+| `claude_code` | 177,687 | 169,549 | 6,603 | 50,691 |
+| `openai_solo` | 114,514 | 67,378 | 3,848 | — |
+| `smolagents_code` | — | — | 7,107 | — |
+| `tool_calling` | 144,444 | 64,743 | 7,756 | — |
+| `tool_calling_with_shortlisting` | — | 35,446 | — | — |
+
+A 64K-token target covers GPT-4.1, GPT-5.2, and Gemini shortlisting traces. Gemini tool-calling
+reaches 65,759 total input-plus-output tokens, so it needs slightly more than 64K. Covering the
+entire Claude Code or Gemini Claude Code workload requires at least 178,275 or 174,309 total tokens,
+respectively.
+
+Exgentic traces contain token counts but not token IDs or block hashes. DynoSim assigns stable
+synthetic blocks while each session grows, so within-session cache reuse is approximate and
+cross-session prefix sharing is not inferred. Positive gaps between LLM spans become inter-turn
+delays; overlapping spans produce zero delay. The selectors filter the source workload but do not
+change the model configured in the simulated engine.
 
 ### Agentic Mooncake
 
@@ -236,7 +304,8 @@ The dedicated DynoSim CLI exposes:
 - `--replay-concurrency`
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
-- `--trace-format mooncake|mooncake-delta|agentic_mooncake|applied_compute_agentic`
+- `--trace-format mooncake|mooncake-delta|agentic_mooncake|applied_compute_agentic|exgentic`
+- `--trace-harness` and `--trace-model` for Exgentic traces
 - `--trace-block-size`
 - `--turns-per-session`
 - `--shared-prefix-ratio`

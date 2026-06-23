@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import json
-import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, TextIO
+from tempfile import TemporaryDirectory
+from typing import Any, Iterable, Iterator, TextIO
 
 
 @dataclass
@@ -21,6 +21,14 @@ class ConversionStats:
     prefix_resets: int = 0
 
 
+def canonical_model(value: str) -> str:
+    lowered = value.casefold()
+    for prefix in ("openai/azure/", "azure/", "aws/", "gcp/"):
+        if lowered.startswith(prefix):
+            return value[len(prefix) :]
+    return value
+
+
 def _timestamp_ms(value: str) -> float:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -28,51 +36,82 @@ def _timestamp_ms(value: str) -> float:
     return parsed.timestamp() * 1000.0
 
 
-def _parquet_files(inputs: Iterable[str | Path]) -> list[Path]:
-    files: list[Path] = []
-    for value in inputs:
-        path = Path(value)
-        if path.is_dir():
-            files.extend(sorted(path.rglob("*.parquet")))
-        elif path.suffix == ".parquet" and path.is_file():
-            files.append(path)
-        else:
-            raise ValueError(f"expected a Parquet file or directory, got {path}")
+def _parquet_files(trace_file: str | Path) -> list[Path]:
+    path = Path(trace_file)
+    if path.is_dir():
+        files = sorted(path.rglob("*.parquet"))
+    elif path.suffix == ".parquet" and path.is_file():
+        files = [path]
+    else:
+        raise ValueError(f"expected a Parquet file or directory, got {path}")
     if not files:
-        raise ValueError("no Parquet files found")
+        raise ValueError(f"no Parquet files found under {path}")
     return files
 
 
-def iter_parquet_rows(inputs: Iterable[str | Path]) -> Iterable[dict[str, Any]]:
+def iter_parquet_rows(trace_file: str | Path) -> Iterable[dict[str, Any]]:
     try:
         import pyarrow.parquet as pq
     except ImportError as error:
         raise RuntimeError(
-            "pyarrow is required; run with `uv run --with pyarrow python ...`"
+            "trace_format='exgentic' requires pyarrow; install ai-dynamo[replay] "
+            "or run `uv pip install pyarrow`"
         ) from error
 
-    for path in _parquet_files(inputs):
+    columns = [
+        "harness",
+        "models",
+        "session_id",
+        "spans.list.element.start_time",
+        "spans.list.element.end_time",
+        "spans.list.element.attributes.gen_ai.usage.input_tokens",
+        "spans.list.element.attributes.gen_ai.usage.output_tokens",
+        "spans.list.element.status.code",
+        "spans.list.element.type",
+    ]
+    for path in _parquet_files(trace_file):
         parquet = pq.ParquetFile(path)
-        for batch in parquet.iter_batches(
-            batch_size=64, columns=["session_id", "spans"]
-        ):
+        for batch in parquet.iter_batches(batch_size=64, columns=columns):
             yield from batch.to_pylist()
 
 
 def convert_rows(
-    rows: Iterable[dict[str, Any]], output: TextIO, block_size: int
+    rows: Iterable[dict[str, Any]],
+    output: TextIO,
+    block_size: int,
+    harness: str | None = None,
+    model: str | None = None,
 ) -> ConversionStats:
     if block_size <= 0:
-        raise ValueError("block_size must be positive")
+        raise ValueError("trace_block_size must be positive")
 
     stats = ConversionStats()
     seen_sessions: set[str] = set()
+    combinations: set[tuple[str, str]] = set()
+    harness_filter = harness.casefold() if harness else None
+    model_filter = canonical_model(model).casefold() if model else None
     next_hash_id = 1
 
     for row_index, row in enumerate(rows, 1):
+        row_harness = row.get("harness")
         session_id = row.get("session_id")
+        if not isinstance(row_harness, str) or not row_harness:
+            raise ValueError(f"row {row_index} has no harness")
         if not isinstance(session_id, str) or not session_id:
             raise ValueError(f"row {row_index} has no session_id")
+
+        row_models = {
+            canonical_model(value)
+            for value in row.get("models") or []
+            if isinstance(value, str) and value
+        }
+        combinations.update((row_harness, value) for value in row_models)
+        if harness_filter and row_harness.casefold() != harness_filter:
+            continue
+        if model_filter and not any(
+            value.casefold() == model_filter for value in row_models
+        ):
+            continue
         if session_id in seen_sessions:
             raise ValueError(f"duplicate session_id {session_id!r}")
         seen_sessions.add(session_id)
@@ -143,38 +182,32 @@ def convert_rows(
             previous_end_ms = end_ms
 
     if stats.requests == 0:
-        raise ValueError("input did not contain any replayable LLM spans")
+        available = ", ".join(
+            f"{available_harness}/{available_model}"
+            for available_harness, available_model in sorted(combinations)
+        )
+        raise ValueError(
+            f"no replayable Exgentic spans matched harness={harness!r}, model={model!r}; "
+            f"available combinations: {available}"
+        )
     return stats
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Convert Exgentic agent-llm-traces Parquet shards to Mooncake JSONL"
-    )
-    parser.add_argument("input", nargs="+", help="Parquet file or directory")
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--block-size", type=int, default=512)
-    args = parser.parse_args(argv)
-
-    try:
-        with args.output.open("w", encoding="utf-8") as output:
-            stats = convert_rows(iter_parquet_rows(args.input), output, args.block_size)
-    except (OSError, RuntimeError, ValueError) as error:
-        parser.error(str(error))
-
-    print(
-        f"Wrote {stats.requests} requests across {stats.sessions} sessions to {args.output}",
-        file=sys.stderr,
-    )
-    print(
-        f"Skipped: {stats.failed_spans} failed, {stats.non_llm_spans} non-LLM, "
-        f"{stats.zero_token_spans} zero-token; clamped {stats.overlapping_spans} "
-        f"overlaps; reset {stats.prefix_resets} prefixes",
-        file=sys.stderr,
-    )
-    print(f"Trace block size: {args.block_size}", file=sys.stderr)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+@contextmanager
+def prepare_trace(
+    trace_file: str | Path,
+    block_size: int,
+    harness: str | None = None,
+    model: str | None = None,
+) -> Iterator[Path]:
+    with TemporaryDirectory(prefix="dynamo-exgentic-") as directory:
+        output_path = Path(directory) / "trace.mooncake.jsonl"
+        with output_path.open("w", encoding="utf-8") as output:
+            convert_rows(
+                iter_parquet_rows(trace_file),
+                output,
+                block_size,
+                harness=harness,
+                model=model,
+            )
+        yield output_path

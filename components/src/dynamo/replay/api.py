@@ -5,6 +5,7 @@ from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+from dynamo.replay.exgentic import prepare_trace as _prepare_exgentic_trace
 
 
 def run_trace_replay(
@@ -24,6 +25,8 @@ def run_trace_replay(
     arrival_speedup_ratio=1.0,
     trace_block_size=512,
     trace_format="mooncake",
+    trace_harness=None,
+    trace_model=None,
     trace_shared_prefix_ratio=0.0,
     trace_num_prefix_groups=0,
     report_jsonl_path=None,
@@ -32,6 +35,42 @@ def run_trace_replay(
     sla_itl_ms=None,
     sla_e2e_ms=None,
 ):
+    if trace_format == "exgentic":
+        with _prepare_exgentic_trace(
+            trace_file,
+            trace_block_size,
+            harness=trace_harness,
+            model=trace_model,
+        ) as converted_trace:
+            return run_trace_replay(
+                converted_trace,
+                extra_engine_args=extra_engine_args,
+                prefill_engine_args=prefill_engine_args,
+                decode_engine_args=decode_engine_args,
+                router_config=router_config,
+                aic_perf_config=aic_perf_config,
+                num_workers=num_workers,
+                num_prefill_workers=num_prefill_workers,
+                num_decode_workers=num_decode_workers,
+                replay_concurrency=replay_concurrency,
+                replay_mode=replay_mode,
+                router_mode=router_mode,
+                arrival_speedup_ratio=arrival_speedup_ratio,
+                trace_block_size=trace_block_size,
+                trace_format="mooncake",
+                trace_shared_prefix_ratio=trace_shared_prefix_ratio,
+                trace_num_prefix_groups=trace_num_prefix_groups,
+                report_jsonl_path=report_jsonl_path,
+                max_sim_time_ms=max_sim_time_ms,
+                sla_ttft_ms=sla_ttft_ms,
+                sla_itl_ms=sla_itl_ms,
+                sla_e2e_ms=sla_e2e_ms,
+            )
+    if trace_harness is not None or trace_model is not None:
+        raise ValueError(
+            "trace_harness and trace_model require trace_format='exgentic'"
+        )
+
     return _run_mocker_trace_replay(
         trace_file,
         extra_engine_args=extra_engine_args,
