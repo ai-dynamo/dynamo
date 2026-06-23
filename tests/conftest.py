@@ -1159,13 +1159,18 @@ def runtime_services_dynamic_ports(
       leak across workers.
 
     - If discovery_backend != "etcd", etcd is not started (returns None)
-    - NATS is still started when etcd is used so the NATS event plane / request plane
-      remain available, but the default event plane is now ZMQ. Tests that need NATS
-      KV events must opt in via DYN_EVENT_PLANE=nats.
+    - When etcd is used this fixture pins DYN_EVENT_PLANE=nats, reproducing the
+      pre-existing per-backend default (etcd/kubernetes -> NATS). The product
+      default is now ZMQ for all backends, but the in-process e2e harness delivers
+      KV events between a separate engine subprocess and an in-process router over
+      a naive direct ZMQ PUB/SUB path with no broker; that path suffers the
+      slow-joiner problem (events published before the SUB connects are dropped),
+      so the router would observe zero KV events. NATS Core buffers and supports
+      request/reply, so these tests rely on it. Both the in-process router
+      (get_runtime(event_plane=None)) and engine subprocesses (env =
+      os.environ.copy()) inherit this; explicit event_plane="zmq" overrides at the
+      call site still win. file/mem backends are left on the ZMQ default.
     - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True.
-      durable/JetStream KV events require the NATS event plane, so this fixture pins
-      DYN_EVENT_PLANE=nats whenever durable_kv_events=True (otherwise the runtime resolves
-      to the ZMQ default and the durable subscriber refuses to start).
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -1187,10 +1192,10 @@ def runtime_services_dynamic_ports(
                 # Set environment variables for this test's dynamic ports
                 os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
                 os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
-                # durable/JetStream KV events are NATS-only; pin the NATS event plane
-                # since ZMQ is now the default and would otherwise be selected.
-                if durable_kv_events:
-                    os.environ["DYN_EVENT_PLANE"] = "nats"
+                # Pin the NATS event plane for etcd-backed tests: the in-process e2e
+                # harness cannot reliably deliver KV events over the (now-default) ZMQ
+                # plane without a broker (slow-joiner loss). See the fixture docstring.
+                os.environ["DYN_EVENT_PLANE"] = "nats"
 
                 yield nats_process, etcd_process
 
@@ -1205,7 +1210,7 @@ def runtime_services_dynamic_ports(
                     os.environ.pop("ETCD_ENDPOINTS", None)
                 if orig_event_plane is not None:
                     os.environ["DYN_EVENT_PLANE"] = orig_event_plane
-                elif durable_kv_events:
+                else:
                     os.environ.pop("DYN_EVENT_PLANE", None)
     elif request_plane == "nats":
         with NatsServer(
