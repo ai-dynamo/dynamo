@@ -197,6 +197,8 @@ class DynamoSGLangConfig(ConfigBase):
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
             )
 
+        self.validate_multimodal_topology()
+
         if self.multimodal_encode_worker:
             _warn_deprecated(
                 "--multimodal-encode-worker is deprecated; use "
@@ -214,7 +216,6 @@ class DynamoSGLangConfig(ConfigBase):
             self.enable_multimodal = True
 
         self.validate_dedicated_mm_encoder()
-        self.validate_multimodal_topology()
 
     def validate_dedicated_mm_encoder(self) -> None:
         if self.dedicated_mm_encoder and not self.enable_multimodal:
