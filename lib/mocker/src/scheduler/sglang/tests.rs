@@ -214,6 +214,28 @@ mod source_holds {
         assert!(terminal.output_signals[0].completed);
         assert_eq!(occupied_tokens(&core), 8);
     }
+
+    #[test]
+    fn active_request_id_is_rejected_before_source_hold_registration() {
+        let mut core = SglangCore::new(args());
+        let request_id = Uuid::from_u128(307);
+        let handoff_id = HandoffId::from(Uuid::from_u128(407));
+        core.receive(request(request_id));
+
+        assert!(
+            core.apply_command(SchedulerCommand::Submit(request(request_id)))
+                .is_err()
+        );
+        assert!(
+            core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                request: request(request_id),
+            })
+            .is_err()
+        );
+        assert!(!core.source_is_registered(handoff_id));
+        assert_eq!(core.num_requests(), 1);
+    }
 }
 
 mod destination_lifecycle {
@@ -358,6 +380,12 @@ mod destination_lifecycle {
         assert!(source.is_drained());
 
         let blocked = execute(&mut destination, blocker_first.end_ms);
+        assert!(
+            blocked
+                .admissions
+                .iter()
+                .all(|admission| admission.uuid != logical_uuid)
+        );
         let ready = destination
             .prebuilt_request(logical_uuid)
             .expect("full running batch must keep request ready");
@@ -367,6 +395,12 @@ mod destination_lifecycle {
         let blocker_terminal = execute(&mut destination, blocked.end_ms);
         assert!(
             blocker_terminal
+                .admissions
+                .iter()
+                .all(|admission| admission.uuid != logical_uuid)
+        );
+        assert!(
+            blocker_terminal
                 .output_signals
                 .iter()
                 .any(|signal| signal.uuid == blocker_uuid && signal.completed)
@@ -374,6 +408,13 @@ mod destination_lifecycle {
         assert!(destination.prebuilt_request(logical_uuid).is_some());
 
         let admitted = execute(&mut destination, blocker_terminal.end_ms);
+        let logical_admissions = admitted
+            .admissions
+            .iter()
+            .filter(|admission| admission.uuid == logical_uuid)
+            .collect::<Vec<_>>();
+        assert_eq!(logical_admissions.len(), 1);
+        assert_eq!(logical_admissions[0].reused_input_tokens, 0);
         let running = destination
             .running
             .iter()

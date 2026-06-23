@@ -18,8 +18,8 @@ use crate::common::handoff::HandoffId;
 #[cfg(feature = "kvbm-offload")]
 use crate::common::protocols::G1;
 use crate::common::protocols::{
-    DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal,
-    PreemptionMode, PrefillCost, WorkerType,
+    DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
+    PrefillCost, WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
@@ -508,7 +508,7 @@ impl VllmCore {
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         match self
             .apply_command(SchedulerCommand::Submit(request))
-            .expect("ordinary request submission is infallible")
+            .expect("ordinary request ID must be unique")
         {
             SchedulerCommandResult::Submitted(uuid) => uuid,
             _ => unreachable!("submit command must return a request ID"),
@@ -520,8 +520,11 @@ impl VllmCore {
         command: SchedulerCommand,
     ) -> anyhow::Result<SchedulerCommandResult> {
         match command {
-            SchedulerCommand::Submit(request) => {
-                Ok(SchedulerCommandResult::Submitted(self.submit(request)))
+            SchedulerCommand::Submit(mut request) => {
+                let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+                request.uuid = Some(uuid);
+                self.validate_request_id(uuid)?;
+                Ok(SchedulerCommandResult::Submitted(self.submit(request)?))
             }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
@@ -529,8 +532,11 @@ impl VllmCore {
             } => {
                 let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
                 request.uuid = Some(uuid);
+                self.validate_request_id(uuid)?;
                 self.source_holds.register(uuid, handoff_id)?;
-                let submitted = self.submit(request);
+                let submitted = self
+                    .submit(request)
+                    .expect("prevalidated handoff request must submit");
                 Ok(SchedulerCommandResult::Submitted(submitted))
             }
             SchedulerCommand::ReleaseSource { handoff_id }
@@ -545,14 +551,12 @@ impl VllmCore {
                 handoff_id,
                 mut request,
             } => {
-                if self.args.engine_type == EngineType::Trtllm {
+                if !policy::supports_destination_reservation(self.args.scheduling_policy()) {
                     anyhow::bail!("destination reservation is not supported for TRT-LLM");
                 }
                 let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
                 request.uuid = Some(uuid);
-                if self.state.requests.contains_key(&uuid) {
-                    anyhow::bail!("request {uuid} is already active");
-                }
+                self.validate_request_id(uuid)?;
                 self.destination_holds.validate(uuid, handoff_id)?;
                 let request = self.make_request_state(request, RequestStatus::WaitingForRemoteKv);
                 let Some(kv) = self.kv_manager.reserve_destination(&request.sequence) else {
@@ -580,15 +584,28 @@ impl VllmCore {
         }
     }
 
-    fn submit(&mut self, mut request: DirectRequest) -> Uuid {
+    fn validate_request_id(&self, uuid: Uuid) -> anyhow::Result<()> {
+        if self.state.requests.contains_key(&uuid)
+            || self.source_holds.contains_request(uuid)
+            || self.destination_holds.contains_request(uuid)
+        {
+            anyhow::bail!("request {uuid} is already active");
+        }
+        Ok(())
+    }
+
+    fn submit(&mut self, mut request: DirectRequest) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
+        if self.state.requests.contains_key(&uuid) {
+            anyhow::bail!("request {uuid} is already active");
+        }
         let request = self.make_request_state(request, RequestStatus::Waiting);
         self.state.insert_waiting(uuid, request);
         if let Some(request) = self.state.requests.get(&uuid) {
             request.debug_assert_progress(uuid);
         }
-        uuid
+        Ok(uuid)
     }
 
     fn make_request_state(

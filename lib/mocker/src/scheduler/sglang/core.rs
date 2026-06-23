@@ -139,7 +139,7 @@ impl SglangCore {
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         match self
             .apply_command(SchedulerCommand::Submit(request))
-            .expect("ordinary request submission is infallible")
+            .expect("ordinary request ID must be unique")
         {
             SchedulerCommandResult::Submitted(uuid) => uuid,
             _ => unreachable!("submit command must return a request ID"),
@@ -151,8 +151,11 @@ impl SglangCore {
         command: SchedulerCommand,
     ) -> anyhow::Result<SchedulerCommandResult> {
         match command {
-            SchedulerCommand::Submit(request) => {
-                Ok(SchedulerCommandResult::Submitted(self.submit(request)))
+            SchedulerCommand::Submit(mut request) => {
+                let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+                request.uuid = Some(uuid);
+                self.validate_request_id(uuid)?;
+                Ok(SchedulerCommandResult::Submitted(self.submit(request)?))
             }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
@@ -160,8 +163,11 @@ impl SglangCore {
             } => {
                 let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
                 request.uuid = Some(uuid);
+                self.validate_request_id(uuid)?;
                 self.source_holds.register(uuid, handoff_id)?;
-                let submitted = self.submit(request);
+                let submitted = self
+                    .submit(request)
+                    .expect("prevalidated handoff request must submit");
                 Ok(SchedulerCommandResult::Submitted(submitted))
             }
             SchedulerCommand::ReleaseSource { handoff_id }
@@ -178,9 +184,7 @@ impl SglangCore {
             } => {
                 let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
                 request.uuid = Some(uuid);
-                if self.request_is_active(uuid) {
-                    anyhow::bail!("request {uuid} is already active");
-                }
+                self.validate_request_id(uuid)?;
                 self.destination_holds.validate(uuid, handoff_id)?;
                 let request = SglangRequest::from(request);
                 let Some(kv) = self.kv_manager.reserve_destination(&request.prompt_tokens) else {
@@ -211,6 +215,16 @@ impl SglangCore {
         }
     }
 
+    fn validate_request_id(&self, uuid: Uuid) -> anyhow::Result<()> {
+        if self.request_is_active(uuid)
+            || self.source_holds.contains_request(uuid)
+            || self.destination_holds.contains_request(uuid)
+        {
+            anyhow::bail!("request {uuid} is already active");
+        }
+        Ok(())
+    }
+
     fn request_is_active(&self, uuid: Uuid) -> bool {
         self.waiting.iter().any(|request| request.uuid == uuid)
             || self
@@ -220,12 +234,15 @@ impl SglangCore {
             || self.running.iter().any(|request| request.uuid == uuid)
     }
 
-    fn submit(&mut self, request: DirectRequest) -> Uuid {
+    fn submit(&mut self, request: DirectRequest) -> anyhow::Result<Uuid> {
         let request = SglangRequest::from(request);
+        if self.request_is_active(request.uuid) {
+            anyhow::bail!("request {} is already active", request.uuid);
+        }
         request.debug_assert_invariants(self.config.block_size);
         let uuid = request.uuid;
         self.waiting.push_back(request);
-        uuid
+        Ok(uuid)
     }
 
     fn complete_source(&mut self, request: SglangRequest) {
@@ -321,10 +338,10 @@ impl SglangCore {
         mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.promote_prebuilt_ready();
+        let mut admissions = self.promote_prebuilt_ready();
         apply_schedule_policy(&mut self.waiting, &self.kv_manager, &self.config);
 
-        let admit = get_new_batch_prefill(
+        let mut admit = get_new_batch_prefill(
             &mut self.waiting,
             &mut self.kv_manager,
             &self.config,
@@ -336,7 +353,8 @@ impl SglangCore {
             self.new_token_ratio = self.config.init_new_token_ratio;
         }
 
-        for admission in &admit.admissions {
+        admissions.append(&mut admit.admissions);
+        for admission in &admissions {
             if let Some(collector) = collector.as_deref_mut() {
                 collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
             }
@@ -446,7 +464,7 @@ impl SglangCore {
                 .filter(|signal| signal.completed)
                 .count(),
             output_signals: decode.output_signals,
-            admissions: admit.admissions,
+            admissions,
             mocker_metrics: MockerMetrics::from_parts(
                 self.dp_rank,
                 active_decode_blocks,
@@ -490,13 +508,19 @@ impl SglangCore {
         (actual_used + active_reserved).div_ceil(self.config.block_size) as u64
     }
 
-    fn promote_prebuilt_ready(&mut self) {
+    fn promote_prebuilt_ready(&mut self) -> Vec<crate::scheduler::AdmissionEvent> {
+        let mut admissions = Vec::new();
         while self.running.len() < self.config.max_running_requests {
             let Some(request) = self.prebuilt_ready.pop_front() else {
                 break;
             };
+            admissions.push(crate::scheduler::AdmissionEvent {
+                uuid: request.uuid,
+                reused_input_tokens: 0,
+            });
             self.running.push(request);
         }
+        admissions
     }
 }
 

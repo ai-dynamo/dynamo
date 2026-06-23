@@ -77,15 +77,8 @@ impl<T> SourceHolds<T> {
     }
 
     pub(crate) fn register(&mut self, request_id: Uuid, handoff_id: HandoffId) -> Result<()> {
-        if self.pending_by_request.contains_key(&request_id) {
-            bail!("source hold already registered for request {request_id}");
-        }
-        if self
-            .held_prefills
-            .values()
-            .any(|(held_request_id, _)| *held_request_id == request_id)
-        {
-            bail!("source hold already held for request {request_id}");
+        if self.contains_request(request_id) {
+            bail!("source hold already active for request {request_id}");
         }
         if self.pending_by_handoff.contains_key(&handoff_id)
             || self.held_prefills.contains_key(&handoff_id)
@@ -96,6 +89,14 @@ impl<T> SourceHolds<T> {
         self.pending_by_request.insert(request_id, handoff_id);
         self.pending_by_handoff.insert(handoff_id, request_id);
         Ok(())
+    }
+
+    pub(crate) fn contains_request(&self, request_id: Uuid) -> bool {
+        self.pending_by_request.contains_key(&request_id)
+            || self
+                .held_prefills
+                .values()
+                .any(|(held_request_id, _)| *held_request_id == request_id)
     }
 
     pub(crate) fn complete_source(&mut self, request_id: Uuid, payload: T) -> SourceCompletion<T> {
@@ -169,6 +170,10 @@ impl<T> DestinationHolds<T> {
             bail!("destination handoff {handoff_id:?} is already active");
         }
         Ok(())
+    }
+
+    pub(crate) fn contains_request(&self, request_id: Uuid) -> bool {
+        self.by_request.contains_key(&request_id)
     }
 
     pub(crate) fn insert(&mut self, request_id: Uuid, handoff_id: HandoffId, payload: T) {

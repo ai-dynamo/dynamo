@@ -969,6 +969,18 @@ impl KvManager {
                         },
                     );
                     if commit == FullBlockCommit::Reused {
+                        if !stored_seq_hashes.is_empty() {
+                            let local_hashes = std::mem::take(&mut stored_local_hashes);
+                            self.publish_kv_event(
+                                std::mem::take(&mut stored_seq_hashes),
+                                &local_hashes,
+                                first_store_parent,
+                                true,
+                                stored_token_ids.take(),
+                            );
+                            first_store_parent = None;
+                            stored_token_ids = token_ids.as_ref().map(|_| Vec::new());
+                        }
                         metadata_parent_hash = Some(seq_hash);
                         continue;
                     }
@@ -2315,6 +2327,57 @@ mod tests {
         assert_eq!(metadata.parent_hash, None);
         assert_eq!(metadata.local_hash, Some(local_hash));
         assert_eq!(metadata.token_ids.as_deref(), Some(token_ids.as_slice()));
+    }
+
+    #[test]
+    fn destination_activation_splits_stores_across_reused_middle_block() {
+        let (mut mgr, sink) = make_mgr_capturing(8, 4);
+        let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, true);
+        let reservation = mgr
+            .reserve_destination(&sequence)
+            .expect("destination reservation should fit");
+        let signal = sequence
+            .prepare_allocation(sequence.num_input_tokens())
+            .expect("full prompt should require allocation");
+        let MoveBlock::Use(blocks, _, plhs, _, _) = &signal else {
+            panic!("expected full prompt allocation");
+        };
+        let [
+            UniqueBlock::FullBlock(first),
+            UniqueBlock::FullBlock(middle),
+            UniqueBlock::FullBlock(last),
+        ] = blocks.as_slice()
+        else {
+            panic!("expected three full prompt blocks");
+        };
+
+        use_full(&mut mgr, *middle, plhs[1]);
+        sink.events.lock().unwrap().clear();
+
+        mgr.activate_destination(reservation);
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        let KvCacheEventData::Stored(first_store) = &events[0].data else {
+            panic!("expected first Stored event");
+        };
+        assert_eq!(first_store.blocks.len(), 1);
+        assert_eq!(
+            first_store.blocks[0].block_hash,
+            ExternalSequenceBlockHash(*first)
+        );
+        let KvCacheEventData::Stored(last_store) = &events[1].data else {
+            panic!("expected second Stored event");
+        };
+        assert_eq!(last_store.blocks.len(), 1);
+        assert_eq!(
+            last_store.blocks[0].block_hash,
+            ExternalSequenceBlockHash(*last)
+        );
+        assert_eq!(
+            last_store.parent_hash,
+            Some(ExternalSequenceBlockHash(*middle))
+        );
     }
 
     #[test]

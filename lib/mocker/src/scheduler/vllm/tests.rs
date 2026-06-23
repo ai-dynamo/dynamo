@@ -179,6 +179,28 @@ mod source_holds {
         assert!(!core.source_is_held(second_id));
         assert_eq!(core.kv_manager.num_active_blocks(), 0);
     }
+
+    #[test]
+    fn active_request_id_is_rejected_before_source_hold_registration() {
+        let mut core = VllmCore::new(args());
+        let request_id = Uuid::from_u128(104);
+        let handoff_id = HandoffId::from(Uuid::from_u128(204));
+        core.receive(request(request_id));
+
+        assert!(
+            core.apply_command(SchedulerCommand::Submit(request(request_id)))
+                .is_err()
+        );
+        assert!(
+            core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                request: request(request_id),
+            })
+            .is_err()
+        );
+        assert!(!core.source_is_registered(handoff_id));
+        assert_eq!(core.num_requests(), 1);
+    }
 }
 
 mod destination_lifecycle {
