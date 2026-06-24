@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Conservative single-GPU TensorRT-LLM engine config for Dynamo Snapshot
+# checkpoint/restore smoke testing with Qwen/Qwen3-0.6B.
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 1024
+max_batch_size: 1
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: false
+kv_cache_config:
+  free_gpu_memory_fraction: 0.10
