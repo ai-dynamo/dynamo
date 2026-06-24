@@ -411,8 +411,15 @@ navigation:
         contents:
           - page: LWS
             path: kubernetes/lws.md
-          - page: Gateway API Inference Extension (GAIE)
-            path: kubernetes/inference-gateway.md
+          - section: Gateway API Inference Extension (GAIE)
+            path: kubernetes/gateway-api/README.mdx
+            contents:
+              - page: Overview
+                path: kubernetes/gateway-api/README.mdx
+              - page: Vanilla vLLM On-ramp
+                path: kubernetes/gateway-api/vanilla-vllm-onramp.mdx
+              - page: Full Dynamo
+                path: kubernetes/gateway-api/full-dynamo.mdx
 
   # ==================== Design Docs ====================
   - section: Design Docs
