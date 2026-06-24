@@ -39,7 +39,7 @@ use axum::{
         State,
         ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade, close_code},
     },
-    http::{Method, StatusCode},
+    http::Method,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -84,16 +84,12 @@ async fn realtime_ws_handler(
     State(state): State<Arc<service_v2::State>>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !state.is_ready() {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-
     let permit = state.acquire_inflight();
-    // Close the tiny race where shutdown starts after the first readiness
-    // check but before the WebSocket upgrade is accepted.
+    // Count the upgrade attempt before the readiness gate so shutdown cannot
+    // observe zero inflight while this WebSocket admission is in progress.
     if !state.is_ready() {
         drop(permit);
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
     }
 
     upgrade
