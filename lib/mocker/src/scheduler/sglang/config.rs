@@ -26,6 +26,7 @@ pub enum SchedulePolicy {
 pub(super) struct SglangConfig {
     pub(super) schedule_policy: SchedulePolicy,
     pub(super) max_prefill_tokens: usize,
+    pub(super) max_running_requests: usize,
     pub(super) chunked_prefill_size: usize,
     pub(super) clip_max_new_tokens: usize,
     pub(super) init_new_token_ratio: f64,
@@ -68,6 +69,7 @@ impl SglangConfig {
 
         Self {
             schedule_policy,
+            max_running_requests: args.max_num_seqs.unwrap_or(usize::MAX),
             max_prefill_tokens: sglang
                 .and_then(|s| s.max_prefill_tokens)
                 .unwrap_or(DEFAULT_MAX_PREFILL_TOKENS),

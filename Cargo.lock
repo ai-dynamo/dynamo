@@ -2506,6 +2506,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2724,7 +2725,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.3.0"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81297abfd63194518877deca17a6d001ec84d4f157e8e401006f416d5c6bbc09"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2732,8 +2735,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tokio",
- "tokio-test",
  "tracing",
  "url",
  "uuid",
@@ -2741,7 +2742,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "1.3.0"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c110dcbce894dc72ead3efb1c1795c45ab19e08e64b8ace0573c3b6ce43ff82"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2752,7 +2755,6 @@ dependencies = [
  "minijinja-contrib",
  "serde",
  "serde_json",
- "tempfile",
  "tracing",
 ]
 
@@ -2846,7 +2848,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.3.0"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdeae45f2465f48b0abc980a5745add4bc59be15701f87f604a97e1282c8db77"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2859,7 +2863,6 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
- "tempfile",
  "tiktoken-rs",
  "tokenizers 0.21.4",
  "tracing",
@@ -3190,9 +3193,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.2.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "796a262ed47d1458a4b40d0ed831c927e6f54d5b9c1de2683bb4ac9b04f4c7cc"
+checksum = "1f38849fadd9e96f872be6549556d26b3e9f5135b6ac8b616205de554fdd4318"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
@@ -9241,17 +9244,6 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]

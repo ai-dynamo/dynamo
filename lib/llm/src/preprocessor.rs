@@ -322,6 +322,22 @@ impl OpenAIPreprocessor {
         Some(context_length.saturating_sub(prompt_len as u32))
     }
 
+    /// Prompt length for sizing the omitted-`max_tokens` cap. Prefers the
+    /// MM-expanded length; a 0 (serde-default / absent) counts as missing. With
+    /// images but no expanded length, defers to the backend (`None`); text-only
+    /// uses `token_ids_len`.
+    fn effective_prompt_len_for_cap(
+        expanded_prompt_len: Option<usize>,
+        has_images: bool,
+        token_ids_len: usize,
+    ) -> Option<usize> {
+        match expanded_prompt_len {
+            Some(n) if n > 0 => Some(n),
+            _ if has_images => None,
+            _ => Some(token_ids_len),
+        }
+    }
+
     fn nvext_passthrough_args<R: NvExtProvider>(
         request: &R,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -732,12 +748,26 @@ impl OpenAIPreprocessor {
         // If omitted, allow generation up to the remaining context length. Responses requests
         // preserve omission so backend adapters can compute the dynamic cap from their
         // effective prompt length/tokenization.
+        //
+        // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
+        // the MM-expanded length when available, else defer to the backend.
+        let has_images = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|m| m.get("image_url"))
+            .is_some_and(|v| !v.is_empty());
+        let effective_prompt_len = Self::effective_prompt_len_for_cap(
+            preprocessed
+                .mm_routing_info
+                .as_ref()
+                .map(|mm| mm.expanded_prompt_len),
+            has_images,
+            preprocessed.token_ids.len(),
+        );
         if preprocessed.stop_conditions.max_tokens.is_none()
-            && let Some(max_tokens) = Self::omitted_max_tokens_default(
-                preprocessed.token_ids.len(),
-                self.context_length,
-                options,
-            )
+            && let Some(prompt_len) = effective_prompt_len
+            && let Some(max_tokens) =
+                Self::omitted_max_tokens_default(prompt_len, self.context_length, options)
         {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
         }
@@ -1422,6 +1452,9 @@ impl OpenAIPreprocessor {
             }
         }
 
+        // Unpadded expanded length, before the block-padding added below.
+        let expanded_prompt_len = expanded.len();
+
         // Pad to a whole multiple of kv_cache_block_size. The router's
         // compute_block_hash_for_seq only hashes whole blocks, so the partial
         // tail block doesn't influence routing either way; aligning the length
@@ -1448,6 +1481,7 @@ impl OpenAIPreprocessor {
         builder.mm_routing_info(Some(MmRoutingInfo {
             routing_token_ids: expanded,
             block_mm_infos: Vec::new(),
+            expanded_prompt_len,
         }));
         Ok(())
     }
@@ -3424,6 +3458,35 @@ mod tests {
                 PreprocessRequestOptions::default()
             ),
             None
+        );
+    }
+
+    #[test]
+    fn test_effective_prompt_len_for_cap() {
+        // MM-expanded length present: use it, ignoring the unexpanded token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(500), true, 12),
+            Some(500)
+        );
+        // Expanded length 0 (serde-default / absent) with images: defer to backend.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), true, 12),
+            None
+        );
+        // No routing info but images present: defer to backend.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(None, true, 12),
+            None
+        );
+        // Text-only: use the token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(None, false, 12),
+            Some(12)
+        );
+        // Expanded length 0 without images: fall back to the token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), false, 12),
+            Some(12)
         );
     }
 

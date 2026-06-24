@@ -90,6 +90,7 @@ impl TurnTrace {
             arrival_timestamp_ms,
             priority: self.priority,
             strict_priority: self.strict_priority,
+            policy_class: self.policy_class.clone(),
         })
     }
 
@@ -224,6 +225,7 @@ impl Trace {
             let explicit_delay_ms = raw.delay;
             let priority = raw.priority.unwrap_or(0);
             let strict_priority = raw.strict_priority.unwrap_or(0);
+            let policy_class = raw.policy_class.clone();
 
             let session_index = *session_indices
                 .entry(session_id.clone())
@@ -291,6 +293,7 @@ impl Trace {
                 delay_after_previous_ms,
                 priority,
                 strict_priority,
+                policy_class,
             });
             if let Some(timestamp_ms) = timestamp_ms {
                 last_timestamps[session_index] = Some(timestamp_ms);
@@ -1046,6 +1049,7 @@ impl AgenticTrace {
                 delay_after_dependencies_ms,
                 priority: raw.priority.unwrap_or(0),
                 strict_priority: raw.strict_priority.unwrap_or(0),
+                policy_class: raw.policy_class,
                 wait_for: raw.wait_for,
                 prefix_reset: raw.prefix_reset.unwrap_or(false),
             });

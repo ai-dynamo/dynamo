@@ -44,6 +44,7 @@ impl ReplicaSyncConfig {
         }
     }
 
+    #[cfg(feature = "standalone-slot-tracker")]
     pub(crate) fn process_id(&self) -> u64 {
         self.process_id
     }
