@@ -124,3 +124,47 @@ def test_lower_tier_publishers_reuse_borrowed_rank_zero_and_create_missing_ranks
     assert len(created) == 1
     assert created[0]["dp_rank"] == 1
     assert created[0]["enable_local_indexer"] is True
+
+
+def test_direct_publishers_initialize_kv_event_polling_thread(monkeypatch):
+    from dynamo.trtllm import publisher as publisher_mod
+
+    class FakeTask:
+        def add_done_callback(self, callback):
+            return None
+
+    created = []
+
+    def fake_kv_event_publisher(**kwargs):
+        created.append(kwargs)
+        return MagicMock(name=f"direct-rank-{kwargs['dp_rank']}")
+
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", fake_kv_event_publisher)
+    monkeypatch.setattr(
+        publisher_mod, "WorkerMetricsPublisher", lambda: MagicMock()
+    )
+
+    def fake_create_task(coro):
+        coro.close()
+        return FakeTask()
+
+    monkeypatch.setattr(publisher_mod.asyncio, "create_task", fake_create_task)
+
+    engine = MagicMock()
+    engine.get_attention_dp_size.return_value = 2
+    pub = publisher_mod.Publisher(
+        endpoint=MagicMock(),
+        engine=engine,
+        worker_id=1234,
+        kv_block_size=64,
+        metrics_labels=[],
+        component_gauges=MagicMock(),
+        zmq_endpoint=None,
+        enable_local_indexer=True,
+    )
+
+    pub.initialize()
+
+    assert pub.publish_kv_cache_events_thread is not None
+    assert len(created) == 2
+    assert [item["dp_rank"] for item in created] == [0, 1]

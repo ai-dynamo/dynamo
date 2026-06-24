@@ -553,6 +553,10 @@ class Publisher:
                 f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
             )
 
+        # Always initialize the thread - it routes to either ZMQ or NATS
+        # publishers selected above.
+        self._init_publish_kv_cache_events_thread()
+
     def _init_lower_tier_kv_event_publishers(self) -> None:
         """Create direct tier-aware publishers for non-device KV events.
 
@@ -590,9 +594,6 @@ class Publisher:
             ),
             sorted(self._owned_lower_tier_publisher_ranks),
         )
-
-        # Always initialize the thread - it routes to either ZMQ or NATS publisher
-        self._init_publish_kv_cache_events_thread()
 
     def _init_publish_metrics_thread(self):
         # Need to publish stats once so that worker can be selected.
