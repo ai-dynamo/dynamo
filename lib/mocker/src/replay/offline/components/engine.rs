@@ -262,15 +262,12 @@ impl EngineComponent {
                 admissions: executed.admissions,
                 ..EngineEffects::default()
             };
-            let (completion_kv_events, completion_fpm) =
+            let completion_kv_events =
                 if executed.router_event_visibility == RouterEventVisibility::PassStart {
                     effects.pass_start_kv_events = executed.kv_events;
-                    if let Some(fpm) = executed.fpm {
-                        effects.fpm_snapshots.push((worker_id, fpm));
-                    }
-                    (Vec::new(), None)
+                    Vec::new()
                 } else {
-                    (executed.kv_events, executed.fpm)
+                    executed.kv_events
                 };
             let payload = WorkerCompletionPayload {
                 stage: self.stage,
@@ -279,7 +276,7 @@ impl EngineComponent {
                 output_signals: executed.output_signals,
                 lifecycle_events: executed.lifecycle_events,
                 kv_events: completion_kv_events,
-                fpm: completion_fpm,
+                fpm: executed.fpm,
                 accept_length_output_tokens: executed.accept_length_output_tokens,
                 accept_length_decode_forwards: executed.accept_length_decode_forwards,
             };
@@ -455,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn pass_router_effect_visibility_follows_backend_contract() {
+    fn kv_visibility_follows_backend_contract_and_fpm_waits_for_completion() {
         let make_engine = |engine_type| {
             let args = MockEngineArgs::builder()
                 .engine_type(engine_type)
@@ -490,10 +487,10 @@ mod tests {
         vllm.dispatch(0, request(Uuid::from_u128(10))).unwrap();
         let vllm_start = vllm.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(!vllm_start.pass_start_kv_events.is_empty());
-        assert_eq!(vllm_start.fpm_snapshots.len(), 1);
+        assert!(vllm_start.fpm_snapshots.is_empty());
         let vllm_end = take_only_completion(vllm_start);
         assert!(vllm_end.kv_events.is_empty());
-        assert!(vllm_end.fpm.is_none());
+        assert!(vllm_end.fpm.is_some());
 
         let mut sglang = make_engine(EngineType::Sglang);
         sglang.dispatch(0, request(Uuid::from_u128(11))).unwrap();
@@ -601,11 +598,11 @@ mod tests {
         let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(second.admissions.is_empty());
         assert!(second.pass_start_kv_events.is_empty());
-        assert_eq!(second.fpm_snapshots.len(), 1);
-        assert_eq!(second.fpm_snapshots[0].1.num_prefill_requests, 1);
+        assert!(second.fpm_snapshots.is_empty());
         assert_eq!(second.immediate_completions.len(), 1);
         assert!(second.scheduled_completions.is_empty());
         let second = take_only_completion(second);
+        assert_eq!(second.fpm.as_ref().unwrap().num_prefill_requests, 1);
         assert_eq!(second.completed_requests, 0);
         assert!(second.output_signals.is_empty());
         assert!(second.lifecycle_events.is_empty());

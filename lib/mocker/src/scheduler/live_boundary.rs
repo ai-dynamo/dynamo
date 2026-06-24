@@ -72,7 +72,7 @@ pub(crate) struct PendingLivePass {
     pass: EnginePassResult,
     kv_events: Vec<DeferredKvPublish>,
     admissions_published: bool,
-    router_effects_published: bool,
+    pass_start_kv_published: bool,
 }
 
 impl PendingLivePass {
@@ -129,7 +129,7 @@ impl LiveEffectsPublisher {
             pass,
             kv_events: self.captured_kv_events.drain(),
             admissions_published: false,
-            router_effects_published: false,
+            pass_start_kv_published: false,
         }
     }
 
@@ -139,11 +139,8 @@ impl LiveEffectsPublisher {
         self.publish_admissions(&pending.pass.admissions);
         pending.admissions_published = true;
         if pending.pass.router_event_visibility == RouterEventVisibility::PassStart {
-            self.publish_router_effects(
-                std::mem::take(&mut pending.kv_events),
-                pending.pass.fpm.take(),
-            );
-            pending.router_effects_published = true;
+            self.publish_router_effects(std::mem::take(&mut pending.kv_events), None);
+            pending.pass_start_kv_published = true;
         }
     }
 
@@ -162,8 +159,8 @@ impl LiveEffectsPublisher {
         // become visible at pass end, even when pass-start effects are already
         // published.
         let midpass_kv_events = self.captured_kv_events.drain();
-        if pending.router_effects_published {
-            self.publish_router_effects(midpass_kv_events, None);
+        if pending.pass_start_kv_published {
+            self.publish_router_effects(midpass_kv_events, pending.pass.fpm.take());
         } else {
             pending.kv_events.extend(midpass_kv_events);
             self.publish_router_effects(pending.kv_events, pending.pass.fpm.take());
@@ -554,7 +551,6 @@ mod tests {
             &[
                 PublishedEffect::Admissions,
                 PublishedEffect::Kv,
-                PublishedEffect::Fpm,
                 PublishedEffect::Ack,
             ]
         );
@@ -565,9 +561,9 @@ mod tests {
             &[
                 PublishedEffect::Admissions,
                 PublishedEffect::Kv,
-                PublishedEffect::Fpm,
                 PublishedEffect::Ack,
                 PublishedEffect::Kv,
+                PublishedEffect::Fpm,
                 PublishedEffect::Outputs,
                 PublishedEffect::Accounting,
                 PublishedEffect::Lifecycle,
