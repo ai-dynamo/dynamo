@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Amazon Elastic Kubernetes Service (EKS)
+subtitle: Deploys the Dynamo platform on Amazon EKS, including cluster creation, GPU node groups, and add-ons.
 ---
 
 This guide demonstrates the Dynamo platform on Amazon Elastic Kubernetes Service (EKS).

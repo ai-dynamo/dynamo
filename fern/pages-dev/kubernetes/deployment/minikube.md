@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Minikube Setup
+subtitle: Sets up a local Minikube cluster with GPU support and Istio for running the Dynamo Kubernetes Platform.
 ---
 
 Don't have a Kubernetes cluster? No problem! You can set up a local development environment using Minikube. This guide walks through the set up of everything you need to run Dynamo Kubernetes Platform locally.

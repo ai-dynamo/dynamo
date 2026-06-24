@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Installation Guide
+subtitle: Installs the GPU Operator and Dynamo Platform Helm charts along with optional Grove, RDMA, and Prometheus add-ons.
 ---
 
 This guide walks you through installing everything needed to deploy models with Dynamo on Kubernetes. Follow the steps in order — each builds on the previous one.

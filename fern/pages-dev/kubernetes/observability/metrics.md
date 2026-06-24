@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Metrics
+subtitle: Collects and visualizes Dynamo component metrics on Kubernetes with kube-prometheus-stack PodMonitors and Grafana.
 ---
 
 ## Overview

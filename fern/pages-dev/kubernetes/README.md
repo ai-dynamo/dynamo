@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Kubernetes Quickstart
+subtitle: Quickstart for deploying a model on Kubernetes with Helm and the Dynamo operator.
 ---
 
 Get a model running on Kubernetes in minutes.
