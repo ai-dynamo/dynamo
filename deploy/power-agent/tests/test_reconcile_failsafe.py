@@ -19,10 +19,7 @@ still drive a normal reconcile pass.
 import unittest
 from unittest.mock import MagicMock
 
-import pytest
 from power_agent import PowerAgent
-
-pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
 
 def _make_agent(core_v1, device_count: int = 2) -> PowerAgent:

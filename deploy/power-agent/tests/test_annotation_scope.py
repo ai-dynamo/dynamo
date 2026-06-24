@@ -18,10 +18,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import power_agent
-import pytest
 from power_agent import POWER_ANNOTATION_KEY, PowerAgent
-
-pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
 SAFE_DEFAULT = 500
 
