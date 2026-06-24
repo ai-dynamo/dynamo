@@ -521,10 +521,10 @@ jobs:
   # vllm/sglang/trtllm: compliance extract + verify runs as an inline step
   # INSIDE each shipped framework build job (inline_compliance: true above), on
   # the same warm builder — a cache hit + small scratch export instead of a cold
-  # full-image rebuild on a separate fresh builder. archive_sources is threaded
-  # to the build job, so release branches still emit the /sources.zip OSRB
-  # artifact; EFA images are covered (make_efa flows to the extract). A
-  # compliance failure fails the build.
+  # full-image rebuild on a separate fresh builder. archive_sources is currently
+  # false (source archival temporarily disabled), so release branches do not emit
+  # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
+  # extract). A compliance failure fails the build.
   #
   # planner/frontend stay on the legacy shared-compliance scan until they
   # migrate to the inline system.

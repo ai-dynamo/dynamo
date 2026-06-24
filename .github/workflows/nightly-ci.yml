@@ -254,8 +254,9 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       inline_compliance: true
       build_timeout_minutes: 120
-      # Nightly serves as the continuous-compliance source-archival cadence
-      # (post-merge-ci skips main and only archives on release/*.*.* cuts).
+      # Source archival temporarily disabled until the wheel-builder build
+      # context includes deploy/inference-gateway/ext-proc (a cargo vendor
+      # workspace member).
       archive_sources: false
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -301,8 +302,8 @@ jobs:
   # Compliance extract + verify now runs as an inline step INSIDE each build job
   # (inline_compliance: true above), on the same warm builder — a cache hit + small
   # scratch export instead of a cold full-image rebuild on the fresh builder. The
-  # build jobs already set archive_sources: true (the continuous-compliance
-  # source-archival cadence), so /sources.zip is still emitted; /legal + /sboms
+  # build jobs currently set archive_sources: false (archival temporarily
+  # disabled — see above), so /sources.zip is not emitted; /legal + /sboms still
   # upload at the default 30-day retention. A compliance failure fails the build.
 
   # ============================================================================
