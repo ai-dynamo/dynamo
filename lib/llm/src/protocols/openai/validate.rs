@@ -104,6 +104,7 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "detokenize",
     "allowed_token_ids",
     "bad_words_token_ids",
+    "repetition_detection",
 ];
 
 /// Validates that no unsupported fields are present in the request.
@@ -142,6 +143,26 @@ pub fn validate_no_unsupported_fields(
         serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
             |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
         )?;
+    }
+    if let Some(value) = unsupported_fields.get("repetition_detection") {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("`repetition_detection` must be an object"))?;
+        for key in obj.keys() {
+            if !matches!(key.as_str(), "max_pattern_size" | "min_pattern_size" | "min_count") {
+                anyhow::bail!(
+                    "`repetition_detection` contains unknown key `{}`",
+                    key
+                );
+            }
+        }
+        for key in ["max_pattern_size", "min_pattern_size", "min_count"] {
+            if let Some(v) = obj.get(key)
+                && !v.is_u64()
+            {
+                anyhow::bail!("`repetition_detection.{}` must be a non-negative integer", key);
+            }
+        }
     }
     Ok(())
 }
