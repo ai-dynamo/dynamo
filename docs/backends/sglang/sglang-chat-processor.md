@@ -151,4 +151,4 @@ Key differences:
 
 - **[Tool Calling](../../tool-calling/README.md)**: General tool calling guide
 - **[Reference Guide](sglang-reference-guide.md)**: Full SGLang backend reference
-- **[Agentic Workloads](agents.md)**: Priority scheduling and session control for agents
+- **[Agentic Workloads](agents.md)**: Priority scheduling and session-aware radix KV

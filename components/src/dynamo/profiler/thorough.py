@@ -409,6 +409,24 @@ async def run_thorough(
             len(decode_candidates),
         )
 
+    config_modifier = CONFIG_MODIFIERS[backend]
+    if backend == "vllm" and hasattr(
+        config_modifier, "apply_model_runtime_constraints"
+    ):
+        for candidate in prefill_candidates:
+            candidate.dgd_config = config_modifier.apply_model_runtime_constraints(
+                candidate.dgd_config, local_or_hf_model
+            )
+        for candidate in decode_candidates:
+            candidate.dgd_config = config_modifier.apply_model_runtime_constraints(
+                candidate.dgd_config, local_or_hf_model
+            )
+        logger.info(
+            "Applied vLLM model runtime constraints to %d prefill + %d decode candidates.",
+            len(prefill_candidates),
+            len(decode_candidates),
+        )
+
     # Propagate profiling-job tolerations to candidate DGDs
     job_tolerations = get_profiling_job_tolerations(dgdr)
     if job_tolerations:
@@ -426,8 +444,6 @@ async def run_thorough(
             len(prefill_candidates),
             len(decode_candidates),
         )
-
-    config_modifier = CONFIG_MODIFIERS[backend]
 
     # --- Stage 2: Benchmarking ---
     ops.current_phase = ProfilingPhase.SweepingPrefill

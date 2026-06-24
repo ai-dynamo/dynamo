@@ -66,6 +66,29 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
     }
 
 
+def test_replay_policy_config_flag_overrides_router_json(monkeypatch):
+    captured = []
+
+    class FakeKvRouterConfig:
+        @staticmethod
+        def from_json(value):
+            captured.append(value)
+            return value
+
+    monkeypatch.setattr(replay_main, "KvRouterConfig", FakeKvRouterConfig)
+
+    config = replay_main._load_router_config(
+        '{"router_queue_policy":"wspt","router_policy_config":"embedded.yaml"}',
+        "explicit.yaml",
+    )
+
+    assert config == captured[0]
+    assert json.loads(captured[0]) == {
+        "router_queue_policy": "wspt",
+        "router_policy_config": "explicit.yaml",
+    }
+
+
 @pytest.mark.timeout(30)
 def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
     report_path = tmp_path / "synthetic_report.json"

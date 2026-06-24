@@ -615,10 +615,9 @@ def _item_has_marker(item, marker_name):
 
 def _check_sglang_mm_hashes_present(items) -> None:
     """Log whether the installed sglang has the mm_hashes interop hook
-    (sgl-project/sglang#25300). The dynamo sglang image bakes this patch
-    in at build time (`container/deps/sglang/patches/<ver>/`); this check
-    is just for diagnostic clarity when the strong-gate MM-routing
-    assertion later trips on an unpatched image."""
+    (sgl-project/sglang#25300). SGLang v0.5.13+ carries this upstream; this
+    check is just for diagnostic clarity when the strong-gate MM-routing
+    assertion later trips on an older image."""
     if not any("test_sglang" in i.nodeid and "mm_" in i.nodeid for i in items):
         return
     try:

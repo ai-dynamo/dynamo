@@ -1123,12 +1123,14 @@ def _probe_overload_503_and_assert(
     is responsible for starting the frontend (with the desired thresholds and,
     for disagg, ``enforce_disagg=True``) and for waiting until it is ready.
 
-    Sends unique (shuffled) prompts 0.1s apart to exhaust worker resources, then
+    Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
     asserts:
-    1. At least one request succeeds (routed before the busy state propagates)
-    2. At least one request is rejected with 503 (all eligible workers busy)
-    3. No other status codes appear
-    4. The frontend ``model_rejection_total`` metric matches the 503 count
+    1. At least one request is rejected with 503 (the threshold gates the pool)
+    2. No other status codes appear
+    3. The frontend ``model_rejection_total`` metric matches the 503 count
+
+    Successes are not required: a single overload-shaped request can exceed the
+    threshold before dispatch, so an all-503 burst is a valid outcome.
     """
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
     test_payload_503 = {
@@ -1230,7 +1232,6 @@ def _probe_overload_503_and_assert(
         num_other == 0
     ), f"Expected only 200 or 503 responses, but got {num_other} other"
     assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
-    assert num_succeeded > 0, f"Expected at least 1 success, but got {num_succeeded}"
 
     # Verify rejection metrics from frontend /metrics endpoint
     model_name = test_payload.get("model", "")
@@ -2358,207 +2359,6 @@ def _test_router_decisions_disagg(
         )
 
 
-def _test_disagg_background_prefill_sticky_routing(
-    prefill_workers,
-    decode_workers,
-    block_size: int,
-    request,
-    frontend_port: int,
-    model_name: str,
-    store_backend: str = "file",
-    request_plane: str = "tcp",
-    event_plane: str = "zmq",
-    frontend_already_running: bool = False,
-):
-    """Verify sticky prefill routing overrides normal KV choice in bootstrap disagg."""
-
-    frontend_context = contextlib.nullcontext()
-    if not frontend_already_running:
-        frontend_context = FrontendRouterProcess(
-            request,
-            block_size,
-            frontend_port,
-            decode_workers.namespace,
-            store_backend,
-            enforce_disagg=True,
-            request_plane=request_plane,
-            event_plane=event_plane,
-            durable_kv_events=False,
-            min_initial_workers=decode_workers.num_workers,
-        )
-
-    with frontend_context:
-        frontend_url = f"http://localhost:{frontend_port}"
-        chat_url = f"{frontend_url}/v1/chat/completions"
-
-        async def send_chat(
-            session: aiohttp.ClientSession,
-            content: str,
-            *,
-            session_control: Optional[dict[str, Any]] = None,
-        ) -> tuple[int, int]:
-            payload: dict[str, Any] = {
-                "model": model_name,
-                "messages": [{"role": "user", "content": content}],
-                "stream": True,
-                "max_tokens": 2,
-                "nvext": {"extra_fields": ["worker_id", "timing"]},
-            }
-            if session_control is not None:
-                payload["nvext"]["session_control"] = session_control
-
-            async with session.post(chat_url, json=payload) as response:
-                body = []
-                assert response.status == 200, (
-                    f"Request failed with status {response.status}: "
-                    f"{await response.text()}"
-                )
-
-                prefill_worker_id = None
-                prefill_dp_rank = None
-                async for line in response.content:
-                    line_str = line.decode("utf-8", errors="replace").strip()
-                    body.append(line_str)
-                    if not line_str.startswith("data:"):
-                        continue
-                    data_str = line_str[5:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-                    worker_id = data.get("nvext", {}).get("worker_id", {})
-                    prefill_worker_id = worker_id.get(
-                        "prefill_worker_id", prefill_worker_id
-                    )
-                    prefill_dp_rank = worker_id.get("prefill_dp_rank", prefill_dp_rank)
-
-                assert (
-                    prefill_worker_id is not None
-                ), "Missing prefill_worker_id in response body: " + "\n".join(body)
-                assert (
-                    prefill_dp_rank is not None
-                ), "Missing prefill_dp_rank in response body: " + "\n".join(body)
-                return int(prefill_worker_id), int(prefill_dp_rank)
-
-        async def test_sync():
-            await wait_for_frontend_ready(
-                frontend_url=frontend_url,
-                expected_num_workers=(
-                    prefill_workers.num_workers + decode_workers.num_workers
-                ),
-                timeout=120,
-                engine_workers=[prefill_workers, decode_workers],
-                store_backend=store_backend,
-                request_plane=request_plane,
-            )
-
-            runtime = get_runtime(
-                store_backend=store_backend, request_plane=request_plane
-            )
-            prefill_endpoint = runtime.endpoint(
-                f"{prefill_workers.namespace}.prefill.generate"
-            )
-            prefill_session_control_endpoint = runtime.endpoint(
-                f"{prefill_workers.namespace}.prefill.session_control"
-            )
-            await poll_for_worker_instances(
-                prefill_endpoint,
-                prefill_workers.num_workers,
-                max_wait_time=120,
-            )
-            await poll_for_worker_instances(
-                prefill_session_control_endpoint,
-                prefill_workers.num_workers,
-                max_wait_time=120,
-            )
-
-            suffix = random.randint(100_000, 999_999)
-            session_a = f"sticky-a-{suffix}"
-            session_b = f"sticky-b-{suffix}"
-            prompt_a = (
-                f"session alpha {suffix}: "
-                "redwood vectors amber matrix northbound lantern " * 20
-            )
-
-            async with aiohttp.ClientSession() as session:
-                session_a_pair = await send_chat(
-                    session,
-                    prompt_a,
-                    session_control={
-                        "session_id": session_a,
-                        "action": "open",
-                        "timeout": 300,
-                    },
-                )
-
-                competing_pair = None
-                competing_prompt = None
-                for attempt in range(6):
-                    candidate = (
-                        f"session beta {suffix} attempt {attempt}: "
-                        "cerulean ledger quartz valley transit cacheline " * 20
-                    )
-                    pair = await send_chat(
-                        session,
-                        candidate,
-                        session_control={
-                            "session_id": f"{session_b}-{attempt}",
-                            "action": "open",
-                            "timeout": 300,
-                        },
-                    )
-                    if pair != session_a_pair:
-                        competing_pair = pair
-                        competing_prompt = candidate
-                        break
-
-                assert competing_pair is not None, (
-                    "Could not warm a competing prefill worker/rank different from "
-                    f"session A pair {session_a_pair}"
-                )
-
-                control_pair = None
-                for _ in range(10):
-                    control_pair = await send_chat(
-                        session,
-                        competing_prompt
-                        + " control continuation proving normal kv routing",
-                    )
-                    if control_pair == competing_pair:
-                        break
-                    await asyncio.sleep(0.5)
-
-                assert control_pair == competing_pair, (
-                    "No-sticky control did not follow normal KV overlap routing: "
-                    f"expected {competing_pair}, got {control_pair}"
-                )
-
-                followups = [
-                    competing_prompt + f" sticky continuation {idx} {suffix}"
-                    for idx in range(3)
-                ]
-                results = await asyncio.gather(
-                    *[
-                        send_chat(
-                            session,
-                            content,
-                            session_control={"session_id": session_a},
-                        )
-                        for content in followups
-                    ]
-                )
-
-            assert results == [session_a_pair] * len(results), (
-                "Sticky follow-ups should stay pinned to session A prefill pair "
-                f"{session_a_pair}, but got {results}; competing pair was "
-                f"{competing_pair}"
-            )
-
-        asyncio.run(test_sync())
-
-
 def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
     decode_workers,
     block_size: int,
@@ -3528,7 +3328,8 @@ def _test_disagg_direct_mode(
     """E2E test for disaggregated Direct routing mode (simulating GAIE EPP).
 
     In Direct mode, the router does not select workers itself.
-    Worker IDs must be provided via x-worker-instance-id and x-prefill-instance-id
+    Worker IDs must be provided via x-dynamo-worker-instance-id and
+    x-dynamo-prefill-instance-id
     HTTP headers. The test verifies:
       1. Requests with explicit worker ID headers succeed and return a valid response.
       2. Requests without headers fail (Direct mode rejects unaddressed requests).
@@ -3570,10 +3371,10 @@ def _test_disagg_direct_mode(
                 decode_workers.num_workers,
             )
             headers = {
-                "x-worker-instance-id": str(decode_ids[0]),
-                "x-prefill-instance-id": str(prefill_ids[0]),
-                "x-dp-rank": "0",
-                "x-prefill-dp-rank": "0",
+                "x-dynamo-worker-instance-id": str(decode_ids[0]),
+                "x-dynamo-prefill-instance-id": str(prefill_ids[0]),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
             }
             await wait_for_frontend_ready(
                 frontend_url=frontend_url,
@@ -3602,10 +3403,10 @@ def _test_disagg_direct_mode(
                 "stream": False,
             }
             headers = {
-                "x-worker-instance-id": str(target_decode),
-                "x-prefill-instance-id": str(target_prefill),
-                "x-dp-rank": "0",
-                "x-prefill-dp-rank": "0",
+                "x-dynamo-worker-instance-id": str(target_decode),
+                "x-dynamo-prefill-instance-id": str(target_prefill),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
             }
 
             async with aiohttp.ClientSession() as session:
