@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Dynamo Router on-ramp (raw vLLM, no Dynamo control plane)
+# Dynamo Router on-ramp (raw vLLM workers, no Dynamo control plane)
 
 This directory is the **smallest possible** way to put Dynamo's KV/load-aware
 router in front of an existing **vanilla `vllm serve`** fleet that already sits
@@ -41,7 +41,13 @@ Data Parallelism | Not supported
 - `agg.yaml` — aggregated: one vLLM pool, KV-aware load balancing.
 - `disagg.yaml` — disaggregated: prefill + decode pools, KV-aware P/D selection. Note that for the disaggregated serving you need to also build the sidecar to orchestrate the pull of the kv cache from the prefill worker.
 
-## Prerequisites
+## Installation Steps
+
+### 1. Prerequisites
+
+Set up a Gateway-API gateway + Inference Extension (GAIE) if you don't have one
+yet, and create the HuggingFace token secret the EPP uses to download the
+tokenizer:
 
 ```bash
 # Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`
@@ -50,10 +56,95 @@ deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
 # HF token secret (the EPP downloads the tokenizer to tokenize for routing)
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-token>
 ```
-The Dynamo EPP image is named "frontend" and provided to you with each release.
-For disaggreaged serving you also need to use the "sidecar" image provided with the release or build it with commands below.
 
-### Build the P/D routing sidecar image (disaggregated only)
+### 2. Wire the InferencePool and HTTPRoute
+
+Point the `InferencePool` at your vLLM workers:
+
+- `spec.selector` — labels matching your vLLM pods.
+- `spec.targetPorts[].number` — the vLLM serving port (usually `8000`).
+- `spec.endpointPickerRef` (a.k.a. `spec.extensionRef`) — the EPP service + port.
+
+Attach the `HTTPRoute` to the gateway and target the pool:
+
+- `spec.rules[].backendRefs[]` — targets the `InferencePool`.
+- `spec.parentRefs[]` — your gateway (set `namespace` + `sectionName` when the
+  gateway lives in another namespace, e.g. `agentgateway-system`).
+
+### 3. Label the workers
+
+Add labels to your vLLM pods that match `InferencePool.spec.selector` (and the
+EPP's `DYN_EPP_POD_SELECTOR`):
+
+```bash
+kubectl -n <ns> label deployment <vllm-deployment> app=vllm-qwen --overwrite
+```
+
+### 4. Add the EPP to your deployment
+
+Remove the vLLM router and replace it with the EPP (Dynamo Router).
+Add the EPP as a `Deployment` + `Service` (see the
+[`qwen-epp` Deployment in `agg.yaml`](./agg.yaml) for a complete example) and set:
+
+```yaml
+kind: Deployment
+metadata:
+  name: qwen-epp
+  labels:
+    app: qwen-epp
+```
+
+1. **Set the EPP image.** The Dynamo EPP ships as the "frontend" image with each
+   release. (Disaggregated serving also needs the "sidecar" image — use the
+   released one or build it, see step 5.)
+
+2. **Point the EPP at the workers' KV-event socket.** The worker publishes KV
+   events via `--kv-events-config`; the EPP subscribes on the matching port.
+
+   vLLM worker arg:
+
+   ```text
+   --kv-events-config '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
+   ```
+
+   EPP env:
+
+   ```yaml
+   - name: DYN_EPP_KV_EVENT_PORT
+     value: "5557"
+   ```
+
+3. **Set the model/tokenizer.** The EPP downloads this tokenizer (HF id) to
+   tokenize prompts for routing — it MUST match the model the workers serve:
+
+   ```yaml
+   - name: DYN_MODEL_NAME
+     value: "Qwen/Qwen3-0.6B"
+   ```
+
+4. **Match the ZMQ topic.** Must equal the worker's `--kv-events-config` topic
+   (default `""`):
+
+   ```yaml
+   - name: DYN_EPP_KV_EVENT_TOPIC
+     value: ""
+   ```
+
+5. **(Optional) Tune KV routing:**
+
+   ```yaml
+   # Subscribe to per-pod ZMQ KV events; turn off to fall back to load-only routing.
+   - name: DYN_EPP_KV_EVENTS
+     value: "true"
+   # How heavily prefix-cache (KV) overlap counts vs. load.
+   - name: DYN_OVERLAP_SCORE_WEIGHT
+     value: "1.0"
+   ```
+
+   See the full list in the
+   [environment contract](#router-only-mode-environment-contract) below.
+
+### 5. (Disaggregated only) Build the P/D routing sidecar image
 
 The sidecar is a standalone Rust crate at `deploy/inference-gateway/pd-sidecar/`.
 It is a workspace member, so build it with the **repo root as the `dynamo` build
@@ -80,7 +171,6 @@ runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
 
 ```bash
 kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml
-kubectl apply  -n <ns> -f http-route.yaml # adjust per your namespace
 
 # terminal 1
 kubectl -n agentgateway-system port-forward svc/inference-gateway 8000:80
