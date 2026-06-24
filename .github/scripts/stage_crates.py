@@ -119,6 +119,23 @@ def inject_registry(root: Path, names: list[str], alias: str) -> None:
             manifest.write_text(new)
 
 
+def rewrite_versions(root: Path, old: str, new: str) -> int:
+    """Replace `version = "<old>"` with `version = "<new>"` across the workspace
+    manifests (root + lib/*) — both [workspace.package].version and the path-dep
+    pins that share it. Used to stamp the internal staging rc version (e.g.
+    0.1.0-rc0) without re-bumping the commit; mirrors the bump's version replace.
+    Returns the number of manifests changed."""
+    pat = re.compile(rf'(\bversion\s*=\s*"){re.escape(old)}(")')
+    changed = 0
+    for manifest in [root / "Cargo.toml", *sorted((root / "lib").glob("*/Cargo.toml"))]:
+        text = manifest.read_text()
+        new_text = pat.sub(lambda m: f"{m.group(1)}{new}{m.group(2)}", text)
+        if new_text != text:
+            manifest.write_text(new_text)
+            changed += 1
+    return changed
+
+
 def crate_exists(raw_base: str, name: str, version: str, token: str) -> bool:
     url = f"{raw_base}/{name}/{name}-{version}.crate"
     req = urllib.request.Request(url, method="HEAD", headers={"Authorization": f"Bearer {token}"})
@@ -163,6 +180,11 @@ def main() -> int:
     ap.add_argument("--only", default=os.environ.get("CRATE_SUBSET", ""),
                     help="csv of crate names to publish (strict: must be dependency-closed); "
                          "empty/'all' = every publishable crate")
+    ap.add_argument("--stage-version", default=os.environ.get("STAGE_VERSION", ""),
+                    help="rewrite every publishable crate's version to this exact value before "
+                         "publishing (internal staging rc disambiguator, e.g. 0.1.0-rc0), so a "
+                         "re-stage of the same release doesn't collide on the immutable registry. "
+                         "Empty = leave the committed versions as-is")
     args = ap.parse_args()
 
     # ARTIFACTORY ONLY — never crates.io. Refuse a crates.io alias outright; every
@@ -212,6 +234,25 @@ def main() -> int:
         order = [n for n in order if n in selected]
         print("Selected crates (dependency-closed):", " ".join(order))
 
+    # Internal staging: rewrite the bumped workspace version to the rc-suffixed staging
+    # version (e.g. 0.1.0 -> 0.1.0-rc0) so each re-stage publishes a distinct,
+    # non-colliding version on the immutable registry. The expect-version gate below
+    # then validates the new value, and cargo publish uploads it (--allow-dirty).
+    stage_version = args.stage_version.strip()
+    if stage_version:
+        wm = re.search(r'\[workspace\.package\][^\[]*?\n\s*version\s*=\s*"([^"]+)"',
+                       (root / "Cargo.toml").read_text())
+        if not wm:
+            print("::error::--stage-version: cannot read [workspace.package].version", file=sys.stderr)
+            return 1
+        cur = wm.group(1)
+        if cur != stage_version:
+            n = rewrite_versions(root, cur, stage_version)
+            print(f"stage-version: rewrote {cur} -> {stage_version} across {n} manifest(s)")
+            for nm in pkgs:
+                if pkgs[nm]["version"] == cur:
+                    pkgs[nm]["version"] = stage_version
+
     # Fail fast BEFORE any build/publish if a crate carries an unexpected version
     # (e.g. a hardcoded version the bump missed) — never silently publish wrong tags.
     if args.expect_version:
@@ -229,6 +270,10 @@ def main() -> int:
     env = dict(os.environ)
     env[f"CARGO_REGISTRIES_{args.registry.upper()}_TOKEN"] = f"Bearer {token}"
     env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} --cfg tokio_unstable".strip()
+    # If we rewrote versions, resync Cargo.lock to the staged versions (workspace
+    # members only; external deps untouched) so cargo publish doesn't re-resolve.
+    if stage_version:
+        subprocess.run(["cargo", "update", "--workspace"], cwd=root, env=env)
     subprocess.run(["cargo", "update", "tokio", "--precise", "1.43.0"], cwd=root, env=env)
 
     published = skipped = 0

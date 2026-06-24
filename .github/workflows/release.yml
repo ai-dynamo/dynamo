@@ -30,12 +30,12 @@ on:
         type: string
         default: ''
       on_demand:
-        description: 'On-demand release: bare X.Y.Z[.postN] NGC tag (no rc), set by on-demand-release.yml. Requires release_version.'
+        description: 'On-demand release: bare X.Y.Z[.devN|.postN] NGC tag (no rc), set by on-demand-release.yml. Requires release_version.'
         required: false
         type: boolean
         default: false
       release_version:
-        description: 'Release version X.Y.Z[.postN] for on_demand runs (already committed on the release branch).'
+        description: 'Release version X.Y.Z[.devN|.postN] for on_demand runs (already committed on the release branch).'
         required: false
         type: string
         default: ''
@@ -161,8 +161,8 @@ jobs:
           if [[ "${ON_DEMAND}" == "true" ]]; then
             # Branch + version bump are created/validated by on-demand-release.yml;
             # the version is passed explicitly rather than derived from the ref.
-            if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
-              echo "Error: on_demand=true requires release_version X.Y.Z[.postN] (got: '${RELEASE_VERSION}')"
+            if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
+              echo "Error: on_demand=true requires release_version X.Y.Z[.devN|.postN] (got: '${RELEASE_VERSION}')"
               exit 1
             fi
             VERSION="${RELEASE_VERSION}"
@@ -214,9 +214,10 @@ jobs:
 
           # Base version pinned in pyproject.toml at the source SHA. Same value
           # cargo and maturin stamp into the wheel filename / METADATA. The
-          # optional .postN tail covers post-release respins.
+          # optional .devN (pre-release) / .postN (post-release) tail covers dev
+          # builds and post-release respins.
           BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' pyproject.toml)
-          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
+          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
             echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
             exit 1
           fi
@@ -239,17 +240,30 @@ jobs:
           fi
 
           if [[ "${ON_DEMAND}" == "true" ]]; then
-            # Bare GA tags (no rc suffix). NGC tag keeps PEP 440 form (e.g.
-            # 0.8.1.post1); Helm needs SemVer (.postN -> -postN); crate version
-            # uses SemVer build metadata (.postN -> +postN).
-            HELM_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
-            CRATE_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1+\2/')
-            echo "rc_number=" >> $GITHUB_OUTPUT
-            echo "ngc_version_tag=${VERSION}" >> $GITHUB_OUTPUT
-            echo "helm_chart_version=${HELM_VERSION}" >> $GITHUB_OUTPUT
+            # Internal staging carries an auto-incrementing rc disambiguator: the
+            # crate/helm registries are immutable, so each re-stage of the same
+            # version needs a distinct internal version. GA stays clean — the GitLab
+            # trigger forwards RELEASE_VERSION=${VERSION} + RC_NUMBER and promotes the
+            # rc-staged artifacts to the clean version.
+            #   NGC tag (docker string): ${VERSION}-rcN     (e.g. 0.1.0-rc0, 0.1.0.dev3-rc0)
+            #   helm + crate (SemVer):   ${SEMVER_BASE}-rcN  where .devN/.postN become a
+            #                            -devN/-postN pre-release (e.g. 0.1.0-rc0, 0.1.0-post3-rc0)
+            #   wheel: clean version, disambiguated by the rcN upload subpath.
+            # Computed by on-demand-release.yml from the v<version>-rc* tags. Require
+            # it (don't default to 0) so a broken hand-off fails loud instead of
+            # silently colliding on rc0.
+            RC_NUM="${INPUT_RC_NUMBER}"
+            if ! [[ "${RC_NUM}" =~ ^[0-9]+$ ]]; then
+              echo "Error: on_demand requires a non-negative integer rc_number (got '${RC_NUM}')"
+              exit 1
+            fi
+            SEMVER_BASE=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
+            echo "rc_number=${RC_NUM}" >> $GITHUB_OUTPUT
+            echo "ngc_version_tag=${VERSION}-rc${RC_NUM}" >> $GITHUB_OUTPUT
+            echo "helm_chart_version=${SEMVER_BASE}-rc${RC_NUM}" >> $GITHUB_OUTPUT
             echo "wheel_version=${BASE_VERSION}" >> $GITHUB_OUTPUT
-            echo "crate_version=${CRATE_VERSION}" >> $GITHUB_OUTPUT
-            echo "On-demand release: NGC ${VERSION}, helm ${HELM_VERSION}, wheel ${BASE_VERSION}, crate ${CRATE_VERSION}"
+            echo "crate_version=${SEMVER_BASE}-rc${RC_NUM}" >> $GITHUB_OUTPUT
+            echo "On-demand internal staging (rc${RC_NUM}): NGC ${VERSION}-rc${RC_NUM}, helm ${SEMVER_BASE}-rc${RC_NUM}, wheel ${BASE_VERSION} @ rc${RC_NUM}, crate ${SEMVER_BASE}-rc${RC_NUM}"
             exit 0
           fi
 
@@ -978,8 +992,9 @@ jobs:
           if [[ "${NIGHTLY}" == "true" ]]; then
             SUBPATH="nightly/${{ github.run_id }}"
           elif [[ "${ON_DEMAND}" == "true" ]]; then
-            # GA release: no rc segment (matches wheels.sh release/<version>/).
-            SUBPATH="release/${VERSION}"
+            # Internal staging: rc subpath disambiguates re-stages of the same version
+            # (the wheel filename keeps the clean version). GA promotion drops the rc.
+            SUBPATH="release/${VERSION}/rc${RC_NUMBER}"
           else
             if [ -z "${RC_NUMBER}" ]; then
               echo "Error: RC_NUMBER is empty for a non-nightly release"
@@ -1101,6 +1116,10 @@ jobs:
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_CARGO_INDEX: ${{ secrets.ARTIFACTORY_CARGO_INDEX }}
           EXPECT_VERSION: ${{ needs.prepare-release.outputs.crate_version }}
+          # Same rc-suffixed value: stage_crates.py rewrites every publishable crate's
+          # version to this before publishing, so re-stages don't collide on the
+          # immutable cargo registry. GA promotion (GitLab) republishes the clean version.
+          STAGE_VERSION: ${{ needs.prepare-release.outputs.crate_version }}
           CRATE_SUBSET: ${{ inputs.crates }}
         run: |
           set -euo pipefail
@@ -1116,6 +1135,7 @@ jobs:
             -e ARTIFACTORY_TOKEN \
             -e ARTIFACTORY_CARGO_INDEX \
             -e EXPECT_VERSION \
+            -e STAGE_VERSION \
             -e CRATE_SUBSET \
             "${ECR_IMAGE}" \
             bash -lc 'python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory --only "${CRATE_SUBSET}"'
@@ -1313,6 +1333,7 @@ jobs:
             --form "variables[WHEEL_VERSION]=${WHEEL_VERSION}" \
             --form "variables[CRATE_VERSION]=${CRATE_VERSION}" \
             --form "variables[CONTAINER_TAG]=${NGC_VERSION_TAG}" \
+            --form "variables[RC_NUMBER]=${RC_NUMBER}" \
             --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
             --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
             --form "variables[ARTIFACTS]=${ARTIFACTS}" \

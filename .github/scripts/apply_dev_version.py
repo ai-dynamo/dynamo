@@ -13,11 +13,13 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
 
-With `--set-version X.Y.Z[.postN]` it instead SETS an absolute release version:
-it replaces the current workspace version M wherever it appears in those same
-files, plus the Helm Chart.yaml version/appVersion/dependency sites. Python
-keeps PEP 440 form ('0.8.1.post1'); Cargo/Helm use SemVer build metadata
-('0.8.1+post1'). Sites holding an independent version (not M) are left alone.
+With `--set-version X.Y.Z[.devN|.postN]` it instead SETS an absolute release
+version: it replaces the current workspace version M wherever it appears in those
+same files, plus the Helm Chart.yaml version/appVersion/dependency sites. Python
+keeps PEP 440 form ('0.8.1.post1', '0.8.1.dev3'); for Cargo/Helm a .devN becomes a
+SemVer pre-release ('0.8.1-dev3', sorts before 0.8.1) and a .postN becomes SemVer
+build metadata ('0.8.1+post1'). Sites holding an independent version (not M) are
+left alone.
 """
 from __future__ import annotations
 
@@ -86,8 +88,9 @@ CONTAINER_TOKENS = {
 }
 HELM_TOKENS = {"platform", "snapshot"}
 
-# X.Y.Z.postN -> X.Y.Z+postN so SemVer ecosystems (Cargo, Helm) stay valid.
-SET_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(post\d+))?$")
+# .devN is a PRE-release (sorts before X.Y.Z) -> SemVer '-devN'; .postN is a
+# post-release -> SemVer build metadata '+postN'. Both keep PEP 440 form for Python.
+SET_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(dev\d+|post\d+))?$")
 
 # Line-anchored: matches `version = "X.Y.Z"` lines. Skips `version.workspace = true`
 # (no quotes) and `version = { ... }` (no string). Safe for sub-crate Cargo.tomls
@@ -204,9 +207,13 @@ def _workspace_version(root: Path) -> str:
 def _semver_form(new: str) -> str:
     m = SET_RE.match(new)
     if not m:
-        raise RuntimeError(f"--set-version must be X.Y.Z or X.Y.Z.postN (got '{new}')")
+        raise RuntimeError(f"--set-version must be X.Y.Z, X.Y.Z.devN, or X.Y.Z.postN (got '{new}')")
     base = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
-    return f"{base}+{m.group(4)}" if m.group(4) else base
+    suffix = m.group(4)
+    if not suffix:
+        return base
+    # dev -> pre-release '-devN' (sorts before base); post -> build metadata '+postN'.
+    return f"{base}-{suffix}" if suffix.startswith("dev") else f"{base}+{suffix}"
 
 
 def set_pyproject(path: Path, old: str, new: str, is_root: bool) -> None:
@@ -314,7 +321,7 @@ def main() -> int:
     ap.add_argument("suffix", nargs="?", default="", help="e.g. .dev20260423 (empty = no-op)")
     ap.add_argument("root", nargs="?", default=".", help="repo root")
     ap.add_argument("--set-version", dest="set_version", default="",
-                    help="set an absolute release version X.Y.Z[.postN] instead of appending a suffix")
+                    help="set an absolute release version X.Y.Z[.devN|.postN] instead of appending a suffix")
     ap.add_argument("--containers", default="all",
                     help="normalized container subset (all|none|csv) gating image-tag bumps")
     ap.add_argument("--helm", default="all",
