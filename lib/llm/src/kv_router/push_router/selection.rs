@@ -46,6 +46,11 @@ impl<'a> RoutingRequestParts<'a> {
     }
 }
 
+pub(super) struct SelectionOptions {
+    pub(super) affinity_worker: Option<WorkerWithDpRank>,
+    pub(super) policy_class: Option<String>,
+}
+
 struct BestMatchArgs<'a> {
     context_id: &'a str,
     routing_parts: RoutingRequestParts<'a>,
@@ -113,8 +118,7 @@ impl KvPushRouter {
         routing_parts: RoutingRequestParts<'_>,
         phase: RequestPhase,
         is_query_only: bool,
-        affinity_worker: Option<WorkerWithDpRank>,
-        policy_class: Option<String>,
+        options: SelectionOptions,
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
@@ -133,7 +137,9 @@ impl KvPushRouter {
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
         let explicit_pin = pinned_worker_hint(phase, routing);
-        let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let affinity_pin = options
+            .affinity_worker
+            .map(|worker| (worker.worker_id, Some(worker.dp_rank)));
         let Some((pinned_worker_id, requested_dp_rank)) =
             merge_affinity_pin(explicit_pin, affinity_pin)
         else {
@@ -148,7 +154,7 @@ impl KvPushRouter {
                     lora_name,
                     priority_jump,
                     strict_priority,
-                    policy_class: policy_class.clone(),
+                    policy_class: options.policy_class.clone(),
                     expected_output_tokens,
                     pinned_worker: None,
                     allowed_worker_ids,
@@ -218,7 +224,7 @@ impl KvPushRouter {
             lora_name,
             priority_jump,
             strict_priority,
-            policy_class,
+            policy_class: options.policy_class,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,

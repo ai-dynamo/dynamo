@@ -34,7 +34,7 @@ mod selection;
 
 use cancellation::{cancel_on_stop, cancelled_error};
 use request_guard::RequestGuard;
-use selection::{RoutingRequestParts, WorkerSelection};
+use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
@@ -82,8 +82,10 @@ impl KvPushRouter {
                 routing_parts,
                 phase,
                 is_query_only,
-                affinity_worker,
-                policy_class,
+                SelectionOptions {
+                    affinity_worker,
+                    policy_class,
+                },
             )
             .instrument(tracing::info_span!("kv_router.select_worker"))
             .await
