@@ -103,11 +103,13 @@ pub struct TcpStreamServer {
 struct RequestedSendConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamSender, String>>,
+    buffer_count: usize,
 }
 
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    buffer_count: usize,
 }
 
 // /// When registering a new TcpStream on the server, the registration method will return a [`Connections`] object.
@@ -396,6 +398,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedSendConnection {
                 context: options.context.clone(),
                 connection: pending_sender_tx,
+                buffer_count: options.send_buffer_count,
             };
 
             let mut state = self.state.lock().await;
@@ -443,6 +446,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedRecvConnection {
                 context: options.context.clone(),
                 connection: pending_recver_tx,
+                buffer_count: options.recv_buffer_count,
             };
 
             let mut state = self.state.lock().await;
@@ -488,6 +492,18 @@ impl ResponseService for TcpStreamServer {
             recv_stream,
         }
     }
+}
+
+fn stream_channel<T>(
+    buffer_count: usize,
+    stream_kind: &str,
+) -> Result<(mpsc::Sender<T>, mpsc::Receiver<T>)> {
+    if buffer_count == 0 {
+        return Err(error!(
+            "{stream_kind} stream buffer count must be greater than zero"
+        ));
+    }
+    Ok(mpsc::channel(buffer_count))
 }
 
 // this method listens on a tcp port for incoming connections
@@ -652,11 +668,10 @@ async fn tcp_listener(
         let RequestedSendConnection {
             context,
             connection,
+            buffer_count,
         } = request_stream;
 
-        // Buffer size matches `process_response_stream`; both should be driven
-        // by the registration options rather than hard-coded. See #10293.
-        let (request_tx, request_rx) = mpsc::channel(64);
+        let (request_tx, request_rx) = stream_channel(buffer_count, "request")?;
 
         if connection
             .send(Ok(crate::pipeline::network::StreamSender {
@@ -769,6 +784,7 @@ async fn tcp_listener(
         let RequestedRecvConnection {
             context,
             connection,
+            buffer_count,
         } = response_stream;
 
         // the [`Prologue`]
@@ -807,9 +823,7 @@ async fn tcp_listener(
             return Err(error!("Received error prologue: {}", error));
         }
 
-        // Buffer size should be driven by the registration options rather than
-        // hard-coded; the same applies to `process_request_stream`. See #10293.
-        let (response_tx, response_rx) = mpsc::channel(64);
+        let (response_tx, response_rx) = stream_channel(buffer_count, "response")?;
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
@@ -1139,6 +1153,56 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_register_records_stream_buffer_counts() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(3)
+            .recv_buffer_count(5)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let send_info: TcpStreamConnectionInfo = pending
+            .send_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone()
+            .try_into()
+            .unwrap();
+        let recv_info: TcpStreamConnectionInfo = pending
+            .recv_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone()
+            .try_into()
+            .unwrap();
+
+        let state = server.state.lock().await;
+        assert_eq!(
+            state
+                .tx_subjects
+                .get(&send_info.subject)
+                .expect("request stream should be registered")
+                .buffer_count,
+            3
+        );
+        assert_eq!(
+            state
+                .rx_subjects
+                .get(&recv_info.subject)
+                .expect("response stream should be registered")
+                .buffer_count,
+            5
+        );
     }
 
     /// Helper: register a response stream and extract its subject string.
@@ -1688,10 +1752,16 @@ mod tests {
     type TestFramedWrite = FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>;
     type TestResponseStream = (TestFramedRead, TestFramedWrite, StreamReceiver);
 
+    async fn open_registered_response_stream() -> TestResponseStream {
+        open_registered_response_stream_with_buffer_count(64).await
+    }
+
     /// Stand up a TcpStreamServer, register a response stream, connect a
     /// client, drive the handshake + prologue, and return the client-side
     /// framed reader/writer along with the receiver.
-    async fn open_registered_response_stream() -> TestResponseStream {
+    async fn open_registered_response_stream_with_buffer_count(
+        recv_buffer_count: usize,
+    ) -> TestResponseStream {
         let options = ServerOptions::builder().port(0).build().unwrap();
         let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
             .await
@@ -1701,6 +1771,7 @@ mod tests {
             .context(context.context())
             .enable_request_stream(false)
             .enable_response_stream(true)
+            .recv_buffer_count(recv_buffer_count)
             .build()
             .unwrap();
         let pending_connection = server.register(stream_options).await;
@@ -1741,6 +1812,14 @@ mod tests {
             .expect("response stream should be accepted");
 
         (framed_reader, framed_writer, receiver)
+    }
+
+    #[tokio::test]
+    async fn test_response_stream_uses_registered_buffer_count() {
+        let (_framed_reader, _framed_writer, receiver) =
+            open_registered_response_stream_with_buffer_count(5).await;
+
+        assert_eq!(receiver.rx.max_capacity(), 5);
     }
 
     async fn recv_control_message(framed_reader: &mut TestFramedRead) -> ControlMessage {
@@ -1900,11 +1979,23 @@ mod tests {
         super::StreamSender,
         Arc<dyn AsyncEngineContext>,
     ) {
+        register_and_dial_request_stream_with_buffer_count(server, 64).await
+    }
+
+    async fn register_and_dial_request_stream_with_buffer_count(
+        server: &TcpStreamServer,
+        send_buffer_count: usize,
+    ) -> (
+        FramedRead<tokio::io::ReadHalf<TcpStream>, TwoPartCodec>,
+        super::StreamSender,
+        Arc<dyn AsyncEngineContext>,
+    ) {
         let upstream_ctx = Context::new(()).context();
         let options = StreamOptions::builder()
             .context(upstream_ctx.clone())
             .enable_request_stream(true)
             .enable_response_stream(false)
+            .send_buffer_count(send_buffer_count)
             .build()
             .unwrap();
 
@@ -1931,6 +2022,15 @@ mod tests {
 
         let sender = send_provider.await.unwrap().unwrap();
         (framed_reader, sender, upstream_ctx)
+    }
+
+    #[tokio::test]
+    async fn test_request_stream_uses_registered_buffer_count() {
+        let server = test_server().await;
+        let (_reader, sender, _ctx) =
+            register_and_dial_request_stream_with_buffer_count(&server, 3).await;
+
+        assert_eq!(sender.tx.max_capacity(), 3);
     }
 
     /// Pull frames off the raw client reader until the first `ControlMessage`
