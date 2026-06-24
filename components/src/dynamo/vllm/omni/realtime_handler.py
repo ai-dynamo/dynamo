@@ -63,11 +63,11 @@ StreamingInputFactory = Callable[
 ]
 
 
-def _event_id() -> str:
+def event_id() -> str:
     return f"event_{uuid.uuid4().hex}"
 
 
-def _response_payload(response_id: str, status: str) -> dict:
+def response_payload(response_id: str, status: str) -> dict:
     """Minimal ``RealtimeResponse`` payload accepted by the frontend's reader.
 
     The typed reader requires ``id``, ``max_output_tokens``, ``object``,
@@ -84,23 +84,23 @@ def _response_payload(response_id: str, status: str) -> dict:
     }
 
 
-def _session_updated_event(session: Any) -> dict:
+def session_updated_event(session: Any) -> dict:
     """Echo a client ``session.update`` back as the spec ``session.updated``."""
     return {
         "type": "session.updated",
-        "event_id": _event_id(),
+        "event_id": event_id(),
         "session": session,
     }
 
 
-class _Turn:
+class Turn:
     """One request->response cycle: a committed span of input audio and the
     single OpenAI-spec ``response`` it produces.
 
-    Owns its engine drive and output extraction (``_drive_engine``: it feeds its
+    Owns its engine drive and output extraction (``drive_engine``: it feeds its
     buffered audio into the engine and yields ``(transcript, audio_chunks)`` per
     step); ``RealtimeOmniHandler`` orchestrates turns and translates those into
-    OpenAI-spec server events (see ``RealtimeOmniHandler._run_turn``).
+    OpenAI-spec server events (see ``RealtimeOmniHandler.run_turn``).
 
     Fields: ``response_id`` / ``item_id`` tag every event of this turn;
     ``audio_queue`` carries the float32 input (``None`` = end of input);
@@ -138,7 +138,7 @@ class _Turn:
         self._streaming_input_factory = streaming_input_factory
         self._default_sampling_params_list = default_sampling_params_list
 
-    async def _drive_engine(
+    async def drive_engine(
         self,
     ) -> AsyncGenerator[tuple[str | None, list[np.ndarray] | None], None]:
         """Feed this turn's buffered audio into the engine and yield, per engine
@@ -180,15 +180,15 @@ class _Turn:
             generate_kwargs["output_modalities"] = self.output_modalities
 
         async for output in self._engine_client.generate(**generate_kwargs):
-            token_ids = self._thinker_token_ids(output)
+            token_ids = self.thinker_token_ids(output)
             if token_ids:
                 input_stream.put_nowait(token_ids)
-            transcript = self._extract_transcript(output) or None
-            audio_chunks = self._extract_audio_chunks(output) or None
+            transcript = self.extract_transcript(output) or None
+            audio_chunks = self.extract_audio_chunks(output) or None
             yield transcript, audio_chunks
 
     @staticmethod
-    def _thinker_token_ids(output: Any) -> list[int]:
+    def thinker_token_ids(output: Any) -> list[int]:
         """Stage-0 (thinker) per-step token ids to feed back to the talker."""
         if getattr(output, "stage_id", None) != 0:
             return []
@@ -199,7 +199,7 @@ class _Turn:
         return list(token_ids) if token_ids else []
 
     @staticmethod
-    def _extract_transcript(output: Any) -> str:
+    def extract_transcript(output: Any) -> str:
         """Pull incremental thinker text from a stage-0 LLM output, if any."""
         if getattr(output, "stage_id", None) != 0:
             return ""
@@ -208,12 +208,12 @@ class _Turn:
             return ""
         return getattr(outputs[0], "text", "") or ""
 
-    def _extract_audio_chunks(self, output: Any) -> list[np.ndarray]:
+    def extract_audio_chunks(self, output: Any) -> list[np.ndarray]:
         """Extract per-step audio deltas from an engine output.
 
         Audio lives in ``output.multimodal_output['audio'|'model_outputs']`` as a
         float32 waveform (or list of them). Some engine paths emit a growing
-        cumulative waveform; ``_waveform_to_deltas`` reconciles both shapes
+        cumulative waveform; ``waveform_to_deltas`` reconciles both shapes
         against ``self.audio_ref`` so the client never hears duplicates.
         """
         mm = getattr(output, "multimodal_output", None)
@@ -232,15 +232,15 @@ class _Turn:
         if isinstance(raw_audio, (list, tuple)):
             if not raw_audio:
                 return []
-            arr = _tensor_to_numpy(raw_audio[-1])
+            arr = tensor_to_numpy(raw_audio[-1])
         else:
-            arr = _tensor_to_numpy(raw_audio)
+            arr = tensor_to_numpy(raw_audio)
 
         if arr is None or arr.size == 0:
             return []
-        return self._waveform_to_deltas(arr)
+        return self.waveform_to_deltas(arr)
 
-    def _waveform_to_deltas(self, arr: np.ndarray) -> list[np.ndarray]:
+    def waveform_to_deltas(self, arr: np.ndarray) -> list[np.ndarray]:
         """Convert one streaming PCM f32 chunk into incremental piece(s)."""
         if arr.size == 0:
             return []
@@ -248,7 +248,7 @@ class _Turn:
         if ref is None:
             self.audio_ref = arr.copy()
             return [arr]
-        if _numpy_audio_prefix_match(ref, arr):
+        if numpy_audio_prefix_match(ref, arr):
             delta = arr[ref.shape[0] :]
             self.audio_ref = arr.copy()
             return [delta] if delta.size > 0 else []
@@ -264,7 +264,7 @@ class RealtimeOmniHandler:
 
     Owns the per-connection orchestration (event demux, concurrent turns whose
     responses are forwarded in turn order) and the conversion between the
-    realtime API and model output: it drives each ``_Turn``'s engine generation
+    realtime API and model output: it drives each ``Turn``'s engine generation
     and translates the engine's stage outputs into OpenAI-spec server events.
     """
 
@@ -283,15 +283,15 @@ class RealtimeOmniHandler:
         self._default_sampling_params_list = default_sampling_params_list
         self._emit_transcript = emit_transcript
 
-    def _new_turn(self, output_modalities: list[str] | None) -> _Turn:
-        return _Turn(
+    def new_turn(self, output_modalities: list[str] | None) -> Turn:
+        return Turn(
             engine_client=self.engine_client,
             streaming_input_factory=self._streaming_input_factory,
             default_sampling_params_list=self._default_sampling_params_list,
             output_modalities=output_modalities,
         )
 
-    async def _run_turn(self, turn: _Turn, context: Context) -> None:
+    async def run_turn(self, turn: Turn, context: Context) -> None:
         """Drive one turn's engine generation and buffer its server events.
 
         Events are appended to ``turn.events`` rather than sent to the client
@@ -302,55 +302,55 @@ class RealtimeOmniHandler:
         """
         events = turn.events
         try:
-            await events.put(self._response_created_event(turn))
+            await events.put(self.response_created_event(turn))
 
             sent_audio = False
-            async for transcript, audio_chunks in turn._drive_engine():
+            async for transcript, audio_chunks in turn.drive_engine():
                 if context.is_stopped():
                     break
 
                 if transcript and self._emit_transcript:
-                    await events.put(self._transcript_delta_event(turn, transcript))
+                    await events.put(self.transcript_delta_event(turn, transcript))
 
                 for chunk in audio_chunks or ():
                     sent_audio = True
-                    await events.put(self._audio_delta_event(turn, chunk))
+                    await events.put(self.audio_delta_event(turn, chunk))
 
             if context.is_stopped():
                 # Connection torn down mid-turn; don't claim a completed response.
                 return
 
             if sent_audio:
-                await events.put(self._audio_done_event(turn))
-            await events.put(self._response_done_event(turn))
+                await events.put(self.audio_done_event(turn))
+            await events.put(self.response_done_event(turn))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
             logger.exception("realtime omni turn failed: %s", exc)
-            await events.put(self._error_event(exc))
+            await events.put(self.error_event(exc))
         finally:
             await events.put(None)
 
     # -- response lifecycle events --------------------------------------------
 
-    def _response_created_event(self, turn: _Turn) -> dict:
+    def response_created_event(self, turn: Turn) -> dict:
         return {
             "type": "response.created",
-            "event_id": _event_id(),
-            "response": _response_payload(turn.response_id, "in_progress"),
+            "event_id": event_id(),
+            "response": response_payload(turn.response_id, "in_progress"),
         }
 
-    def _response_done_event(self, turn: _Turn) -> dict:
+    def response_done_event(self, turn: Turn) -> dict:
         return {
             "type": "response.done",
-            "event_id": _event_id(),
-            "response": _response_payload(turn.response_id, "completed"),
+            "event_id": event_id(),
+            "response": response_payload(turn.response_id, "completed"),
         }
 
-    def _error_event(self, exc: Exception) -> dict:
+    def error_event(self, exc: Exception) -> dict:
         return {
             "type": "error",
-            "event_id": _event_id(),
+            "event_id": event_id(),
             "error": {
                 "type": "server_error",
                 "code": "omni_generation_error",
@@ -360,31 +360,31 @@ class RealtimeOmniHandler:
 
     # -- output translation (ported from vllm-omni realtime_connection.py) ----
 
-    def _audio_delta_event(self, turn: _Turn, chunk: np.ndarray) -> dict:
+    def audio_delta_event(self, turn: Turn, chunk: np.ndarray) -> dict:
         return {
             "type": "response.output_audio.delta",
-            "event_id": _event_id(),
+            "event_id": event_id(),
             "response_id": turn.response_id,
             "item_id": turn.item_id,
             "output_index": 0,
             "content_index": 0,
-            "delta": _pcm16_b64(chunk),
+            "delta": pcm16_b64(chunk),
         }
 
-    def _audio_done_event(self, turn: _Turn) -> dict:
+    def audio_done_event(self, turn: Turn) -> dict:
         return {
             "type": "response.output_audio.done",
-            "event_id": _event_id(),
+            "event_id": event_id(),
             "response_id": turn.response_id,
             "item_id": turn.item_id,
             "output_index": 0,
             "content_index": 0,
         }
 
-    def _transcript_delta_event(self, turn: _Turn, delta: str) -> dict:
+    def transcript_delta_event(self, turn: Turn, delta: str) -> dict:
         return {
             "type": "response.output_audio_transcript.delta",
-            "event_id": _event_id(),
+            "event_id": event_id(),
             "response_id": turn.response_id,
             "item_id": turn.item_id,
             "output_index": 0,
@@ -405,24 +405,24 @@ class RealtimeOmniHandler:
         while their responses never interleave.
         """
         # Ordered hand-off: each item is either a standalone server event (dict)
-        # to forward as-is, or a ``_Turn`` whose buffered events are drained in
+        # to forward as-is, or a ``Turn`` whose buffered events are drained in
         # order once reached. Low-volume (one item per turn / session.update) so
         # unbounded; per-turn audio backpressure lives on each turn's ``events``.
         out_stream: asyncio.Queue[Any] = asyncio.Queue()
-        active_turn: _Turn | None = None
-        turns: list[_Turn] = []
+        active_turn: Turn | None = None
+        turns: list[Turn] = []
         # Latest output modalities requested by the client via session.update;
         # snapshotted into each turn so the engine emits text/audio accordingly.
         session_output_modalities: list[str] | None = None
 
-        def ensure_turn() -> _Turn:
+        def ensure_turn() -> Turn:
             nonlocal active_turn
             if active_turn is None:
-                active_turn = self._new_turn(session_output_modalities)
+                active_turn = self.new_turn(session_output_modalities)
                 turns.append(active_turn)
                 out_stream.put_nowait(active_turn)
                 active_turn.task = asyncio.create_task(
-                    self._run_turn(active_turn, context)
+                    self.run_turn(active_turn, context)
                 )
             return active_turn
 
@@ -440,13 +440,13 @@ class RealtimeOmniHandler:
 
                     if etype == "session.update":
                         session = client_event.get("session")
-                        modalities = _parse_output_modalities(session)
+                        modalities = parse_output_modalities(session)
                         if modalities is not None:
                             session_output_modalities = modalities
-                        out_stream.put_nowait(_session_updated_event(session))
+                        out_stream.put_nowait(session_updated_event(session))
                     elif etype == "input_audio_buffer.append":
                         turn = ensure_turn()
-                        waveform = _decode_pcm16(client_event.get("audio", ""))
+                        waveform = decode_pcm16(client_event.get("audio", ""))
                         if waveform is not None:
                             turn.audio_queue.put_nowait(waveform)
                     elif etype == "input_audio_buffer.commit":
@@ -463,7 +463,7 @@ class RealtimeOmniHandler:
                         # (that's response.cancel). After a final commit active_turn
                         # is None, so a clear correctly no-ops.
                         if active_turn is not None:
-                            _drain_queue(active_turn.audio_queue)
+                            drain_queue(active_turn.audio_queue)
                     else:
                         # The frontend forwards every client event; ones we don't
                         # drive (conversation.item.*, response.*, etc.) are logged
@@ -486,9 +486,9 @@ class RealtimeOmniHandler:
                 item = await out_stream.get()
                 if item is None:
                     break
-                if isinstance(item, _Turn):
+                if isinstance(item, Turn):
                     # Forward this turn's response in full before the next turn;
-                    # _run_turn always closes the buffer with a None sentinel.
+                    # run_turn always closes the buffer with a None sentinel.
                     while True:
                         event = await item.events.get()
                         if event is None:
@@ -505,7 +505,7 @@ class RealtimeOmniHandler:
             # cancellation can propagate, then drive every task to completion --
             # this closes each engine generate() async-gen instead of leaking it.
             for turn in turns:
-                _drain_queue(turn.events)
+                drain_queue(turn.events)
             await asyncio.gather(
                 pump_task,
                 *(turn.task for turn in turns if turn.task is not None),
@@ -513,7 +513,7 @@ class RealtimeOmniHandler:
             )
 
 
-def _parse_output_modalities(session: Any) -> list[str] | None:
+def parse_output_modalities(session: Any) -> list[str] | None:
     """Extract requested output modalities from a session.update `session` block.
 
     Reads OpenAI Realtime ``output_modalities`` (falling back to the older
@@ -530,7 +530,7 @@ def _parse_output_modalities(session: Any) -> list[str] | None:
     return None
 
 
-def _decode_pcm16(audio_b64: str) -> np.ndarray | None:
+def decode_pcm16(audio_b64: str) -> np.ndarray | None:
     """Decode a base64 PCM16 chunk to a float32 waveform in [-1, 1].
 
     Mirrors vLLM's realtime connection decode (int16 / 32768). Empty / blank
@@ -550,7 +550,7 @@ def _decode_pcm16(audio_b64: str) -> np.ndarray | None:
     return waveform if waveform.size else None
 
 
-def _drain_queue(queue: asyncio.Queue) -> None:
+def drain_queue(queue: asyncio.Queue) -> None:
     while not queue.empty():
         try:
             queue.get_nowait()
@@ -558,7 +558,7 @@ def _drain_queue(queue: asyncio.Queue) -> None:
             break
 
 
-def _tensor_to_numpy(value: Any) -> np.ndarray | None:
+def tensor_to_numpy(value: Any) -> np.ndarray | None:
     if value is None:
         return None
     if isinstance(value, np.ndarray):
@@ -575,7 +575,7 @@ def _tensor_to_numpy(value: Any) -> np.ndarray | None:
     return arr.astype(np.float32, copy=False)
 
 
-def _numpy_audio_prefix_match(prev: np.ndarray, curr: np.ndarray) -> bool:
+def numpy_audio_prefix_match(prev: np.ndarray, curr: np.ndarray) -> bool:
     n = prev.shape[0]
     if n == 0:
         return True
@@ -584,7 +584,7 @@ def _numpy_audio_prefix_match(prev: np.ndarray, curr: np.ndarray) -> bool:
     return bool(np.allclose(curr[:n], prev, rtol=1e-3, atol=2e-4))
 
 
-def _pcm16_b64(audio_f32: np.ndarray) -> str:
+def pcm16_b64(audio_f32: np.ndarray) -> str:
     clipped = np.clip(audio_f32, -1.0, 1.0)
     pcm16 = (clipped * 32767.0).astype(np.int16)
     return base64.b64encode(pcm16.tobytes()).decode("utf-8")
