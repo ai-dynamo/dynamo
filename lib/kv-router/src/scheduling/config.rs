@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
 use crate::protocols::{
-    compute_block_hash_for_seq, compute_seq_hash_for_block, BlockHashOptions, LocalBlockHash,
+    BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 
 const fn default_track_prefill_tokens() -> bool {
@@ -1235,9 +1235,11 @@ models:
         let profile = config.configured_policy_profile().unwrap();
         assert_eq!(profile.default_class().name, "selected");
         assert_eq!(profile.default_class().quantum, 9);
-        assert!(!serde_json::to_string(&config)
-            .unwrap()
-            .contains("replay-model"));
+        assert!(
+            !serde_json::to_string(&config)
+                .unwrap()
+                .contains("replay-model")
+        );
 
         std::fs::remove_file(path).unwrap();
     }
