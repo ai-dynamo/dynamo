@@ -2565,10 +2565,12 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// Only attempt DestinationRule reconciliation when the Istio CRDs are
 	// present on the cluster; otherwise the API call would fail on every
 	// reconcile for Istio-less clusters.
+	// IsEnabled controls service mesh creation/update. When disabled, still
+	// best-effort clean up previously owned DestinationRules if the API exists.
 	meshEnabled := r.Config.ServiceMesh.IsEnabled()
-	istioAvailable := r.RuntimeConfig.IstioAvailable
+	istioAvailable := r.RuntimeConfig.IstioEnabled
 	if !meshEnabled && !istioAvailable {
-		istioAvailable = commoncontroller.DetectIstioAvailabilityFromConfig(ctx, r.RestConfig)
+		istioAvailable = commoncontroller.DetectIstioDestinationRuleAvailabilityFromConfig(ctx, r.RestConfig)
 	}
 	if istioAvailable {
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
@@ -2650,7 +2652,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
-	if r.RuntimeConfig.IstioAvailable {
+	if r.RuntimeConfig.IstioEnabled {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

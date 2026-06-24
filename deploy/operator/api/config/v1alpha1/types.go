@@ -262,8 +262,6 @@ const (
 // correctly without double-TLS issues.
 type ServiceMeshConfiguration struct {
 	// Enabled overrides service mesh auto-detection. nil = auto-detect.
-	// Setting false disables service mesh resource watches and reconciliation
-	// even if service mesh CRDs are present.
 	Enabled *bool `json:"enabled,omitempty"`
 	// Provider selects the service mesh implementation. Supported: "istio", "".
 	// Empty string disables service mesh resource generation.
@@ -272,7 +270,8 @@ type ServiceMeshConfiguration struct {
 	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
 }
 
-// IsEnabled returns true if a supported service mesh provider is configured.
+// IsEnabled returns true if service mesh resources should be created or updated.
+// Cleanup of previously owned resources is handled separately during reconcile.
 func (s *ServiceMeshConfiguration) IsEnabled() bool {
 	if s.Enabled != nil && !*s.Enabled {
 		return false

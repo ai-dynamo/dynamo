@@ -71,18 +71,18 @@ func DetectDRAAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, resourcev1.SchemeGroupVersion.Group, &version)
 }
 
-// DetectIstioAvailability checks if Istio is available by checking if the
+// DetectIstioDestinationRuleAvailability checks if Istio is available by checking if the
 // DestinationRule API is registered. Used to guard DestinationRule
 // reconciliation so the operator doesn't error on clusters without Istio CRDs
 // or with only a partially installed networking.istio.io API group.
-func DetectIstioAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return DetectIstioAvailabilityFromConfig(ctx, mgr.GetConfig())
+func DetectIstioDestinationRuleAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return DetectIstioDestinationRuleAvailabilityFromConfig(ctx, mgr.GetConfig())
 }
 
-// DetectIstioAvailabilityFromConfig checks if the DestinationRule API is
+// DetectIstioDestinationRuleAvailabilityFromConfig checks if the DestinationRule API is
 // registered using a rest.Config. This is used by reconcilers that need a
 // best-effort cleanup path without enabling startup-time Istio discovery.
-func DetectIstioAvailabilityFromConfig(ctx context.Context, cfg *rest.Config) bool {
+func DetectIstioDestinationRuleAvailabilityFromConfig(ctx context.Context, cfg *rest.Config) bool {
 	return detectAPIResourceAvailability(ctx, cfg, "networking.istio.io/v1beta1", "destinationrules")
 }
 
