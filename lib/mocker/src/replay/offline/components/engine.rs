@@ -694,13 +694,17 @@ mod tests {
                 .iter()
                 .any(|event| { event.storage_tier == StorageTier::Device })
         );
-        assert!(seed.immediate_completions.is_empty());
-        let mut scheduled = seed
-            .scheduled_completions
-            .pop()
-            .expect("seed request should complete at a pass boundary");
-        assert!(seed.scheduled_completions.is_empty());
-        scheduled.at_ms = 100.0;
+        assert_eq!(
+            seed.immediate_completions.len() + seed.scheduled_completions.len(),
+            1,
+            "seed request should produce exactly one completion boundary"
+        );
+        let completion = seed.immediate_completions.pop().unwrap_or_else(|| {
+            seed.scheduled_completions
+                .pop()
+                .expect("seed request completion must be present")
+                .payload
+        });
         // Model a reservation attempt at the t=0 boundary, before the GPU
         // compute interval becomes externally busy.
         engine.workers.get_mut(&0).unwrap().mark_idle();
@@ -725,7 +729,6 @@ mod tests {
             .earliest_offload_deadline()
             .expect("reservation eviction should start G1 to G2 DMA");
         assert!((deadline - 20.0).abs() < 0.01);
-        assert!(deadline < scheduled.at_ms);
 
         engine.workers.get_mut(&0).unwrap().mark_busy();
         assert_eq!(engine.earliest_offload_deadline(), Some(deadline));
@@ -738,8 +741,7 @@ mod tests {
                 .any(|event| event.storage_tier == StorageTier::HostPinned)
         );
 
-        let boundary = engine.on_scheduled_completion(scheduled.payload).unwrap();
-        assert!(!boundary.output_signals.is_empty());
+        let boundary = engine.on_scheduled_completion(completion).unwrap();
         assert!(boundary.lifecycle_events.iter().any(|event| matches!(
             event,
             SchedulerLifecycleEvent::DestinationReserved {

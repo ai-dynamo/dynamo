@@ -11,6 +11,7 @@ use super::*;
 use crate::common::handoff::HandoffCoordinatorCore;
 use crate::common::protocols::{EngineType, MockEngineArgs, SglangArgs, WorkerType};
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
+use crate::replay::TraceSimulationReport;
 
 #[test]
 fn action_queue_membership_balances_across_defer_wake_and_removal() {
@@ -266,6 +267,28 @@ fn request(
         arrival_timestamp_ms: Some(arrival_ms),
         ..Default::default()
     }
+}
+
+fn run_trace_with_details(
+    config: &OfflineDisaggReplayConfig,
+    requests: Vec<DirectRequest>,
+    router_config: Option<KvRouterConfig>,
+    router_mode: ReplayRouterMode,
+) -> TraceSimulationReport {
+    let pending = crate::replay::normalize_trace_requests(requests, 1.0).unwrap();
+    let (collector, _) = DisaggRuntime::new(
+        config,
+        router_config,
+        None,
+        pending,
+        ReplayMode::Trace,
+        router_mode,
+    )
+    .unwrap()
+    .with_per_request_records(true)
+    .run()
+    .unwrap();
+    collector.finish()
 }
 
 fn multiturn_trace() -> Trace {
@@ -583,24 +606,105 @@ fn test_source_release_waits_for_destination_activation() {
 }
 
 #[test]
+fn per_request_handoff_detail_preserves_backend_causality_and_stage_reuse() {
+    for (engine_type, config) in [
+        (EngineType::Vllm, disagg_config()),
+        (EngineType::Sglang, sglang_disagg_config()),
+    ] {
+        let report = run_trace_with_details(
+            &config,
+            vec![request(1, 128, 2, 0.0), request(2, 128, 2, 100.0)],
+            Some(router_config()),
+            ReplayRouterMode::KvRouter,
+        );
+
+        assert_eq!(report.per_request.len(), 2);
+        let first = &report.per_request[0];
+        let second = &report.per_request[1];
+        for record in &report.per_request {
+            assert_eq!(record.terminal_status, ReplayTerminalStatus::Completed);
+            let prefill_admit = record.prefill_admit_ms.unwrap();
+            let source_held = record.source_held_ms.unwrap();
+            let destination_reserved = record.destination_reserved_ms.unwrap();
+            let destination_activated = record.destination_activated_ms.unwrap();
+            let source_released = record.source_released_ms.unwrap();
+            let decode_admit = record.decode_admit_ms.unwrap();
+            assert!(prefill_admit <= source_held);
+            assert!(source_held <= source_released);
+            assert!(destination_reserved <= destination_activated);
+            assert!(destination_activated <= source_released);
+            assert!(destination_activated <= decode_admit);
+            match engine_type {
+                EngineType::Vllm => assert!(source_held <= destination_reserved),
+                EngineType::Sglang => assert!(destination_reserved <= prefill_admit),
+                EngineType::Trtllm => unreachable!(),
+            }
+        }
+
+        assert_eq!(first.prefill_route_overlap_tokens, Some(0));
+        assert_eq!(first.prefill_admit_ms, first.first_admit_ms);
+        assert_eq!(first.decode_reused_input_tokens, Some(0));
+        assert_eq!(second.prefill_route_overlap_tokens, Some(128));
+        assert_eq!(second.decode_route_overlap_tokens, Some(0));
+        assert!(second.reused_input_tokens > 0);
+    }
+}
+
+#[test]
+fn rejected_prefill_remains_rejected_during_failed_handoff_cleanup() {
+    let mut config = disagg_config();
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    config.prefill_args.num_gpu_blocks = 1;
+
+    let report = run_trace_with_details(
+        &config,
+        vec![request(1, 128, 2, 0.0)],
+        None,
+        ReplayRouterMode::RoundRobin,
+    );
+
+    assert_eq!(report.per_request.len(), 1);
+    let record = &report.per_request[0];
+    assert_eq!(record.terminal_status, ReplayTerminalStatus::Rejected);
+    assert!(record.first_token_ms.is_none());
+    assert!(record.last_token_ms.is_none());
+    assert!(record.ttft_ms.is_none());
+    assert!(record.e2e_latency_ms.is_none());
+}
+
+#[test]
 fn test_permanently_unavailable_destination_unwinds_without_stalling() {
     for mut config in [disagg_config(), sglang_disagg_config()] {
         config.num_prefill_workers = 1;
         config.num_decode_workers = 1;
         config.decode_args.num_gpu_blocks = 1;
 
-        let (collector, stats) = run_trace_collect(
+        let pending =
+            crate::replay::normalize_trace_requests(vec![request(1, 128, 2, 0.0)], 1.0).unwrap();
+        let (collector, stats) = DisaggRuntime::new(
             &config,
-            vec![request(1, 128, 2, 0.0)],
             None,
-            1.0,
+            None,
+            pending,
+            ReplayMode::Trace,
             ReplayRouterMode::RoundRobin,
-        );
+        )
+        .unwrap()
+        .with_per_request_records(true)
+        .run()
+        .unwrap();
         let report = collector.finish();
         let uuid = Uuid::from_u128(1);
 
         assert_eq!(stats.request_snapshots[&uuid].phase, DisaggPhase::Done);
         assert_eq!(report.request_counts.completed_requests, 0);
+        assert_eq!(report.per_request.len(), 1);
+        assert_eq!(
+            report.per_request[0].terminal_status,
+            ReplayTerminalStatus::Failed
+        );
+        assert!(report.per_request[0].first_token_ms.is_none());
         assert!(
             stats
                 .transition_log
@@ -668,7 +772,8 @@ fn test_cancellation_during_transfer_ignores_retired_completion_event() {
         ReplayMode::Trace,
         ReplayRouterMode::RoundRobin,
     )
-    .unwrap();
+    .unwrap()
+    .with_per_request_records(true);
 
     runtime.drain_current_timestamp().unwrap();
     for _ in 0..16 {
@@ -710,6 +815,9 @@ fn test_cancellation_during_transfer_ignores_retired_completion_event() {
             .transition_log
             .contains(&DisaggTransition::DestinationActivated { uuid })
     );
+    let records = runtime.collector.per_request_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].terminal_status, ReplayTerminalStatus::Canceled);
 }
 
 #[test]

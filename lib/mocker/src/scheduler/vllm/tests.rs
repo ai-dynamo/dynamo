@@ -2396,7 +2396,7 @@ mod offload {
     async fn live_destination_eviction_uses_command_application_time() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
-            .num_gpu_blocks(1)
+            .num_gpu_blocks(2)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
             .max_num_seqs(Some(2))
@@ -2406,30 +2406,6 @@ mod offload {
             .build()
             .unwrap();
         let mut core = VllmCore::new_with_kv_capture(args, 7);
-
-        let cached_uuid = Uuid::from_u128(1);
-        core.receive(DirectRequest {
-            tokens: (0..block_size as u32).collect(),
-            max_output_tokens: 1,
-            uuid: Some(cached_uuid),
-            ..Default::default()
-        });
-        let cache_signal = core
-            .state
-            .requests
-            .get(&cached_uuid)
-            .unwrap()
-            .sequence
-            .prepare_allocation(block_size)
-            .expect("cache allocation signal");
-        let cached_blocks = match &cache_signal {
-            MoveBlock::Use(blocks, ..) => blocks.clone(),
-            _ => panic!("expected cache Use signal"),
-        };
-        assert_eq!(core.kv_manager.process(&cache_signal), 1);
-        assert_eq!(core.kv_manager.process(&MoveBlock::Deref(cached_blocks)), 1);
-        core.drain_kv_events();
-
         let config = KvbmOffloadConfig {
             block_size_tokens: block_size,
             block_size_bytes: Some(20_000_000),
@@ -2439,6 +2415,43 @@ mod offload {
         let engine = MockOffloadEngine::new(config).await.expect("engine build");
         engine.tick(0.0);
         core.kv_manager.attach_new_offload_engine(engine);
+
+        let cached_uuid = Uuid::from_u128(1);
+        core.receive(DirectRequest {
+            tokens: (0..block_size as u32).collect(),
+            max_output_tokens: 1,
+            uuid: Some(cached_uuid),
+            ..Default::default()
+        });
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut now_ms = 0.0;
+        let completed = (0..4).any(|_| {
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms;
+            pass.output_signals
+                .iter()
+                .any(|signal| signal.uuid == cached_uuid && signal.completed)
+        });
+        assert!(completed, "cache seed request should complete normally");
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        assert_eq!(core.kv_manager.num_inactive_blocks(), 1);
+        core.drain_kv_events();
+
+        let blocker_uuid = Uuid::from_u128(3);
+        core.receive(DirectRequest {
+            tokens: vec![9; block_size - 1],
+            max_output_tokens: 100,
+            uuid: Some(blocker_uuid),
+            ..Default::default()
+        });
+        let blocker_pass = core.execute_pass(&mut collector, now_ms);
+        now_ms = blocker_pass.end_ms;
+        assert!(blocker_pass
+            .output_signals
+            .iter()
+            .any(|signal| signal.uuid == blocker_uuid && !signal.completed));
+        assert_eq!(core.kv_manager.num_active_blocks(), 1);
+        assert_eq!(core.kv_manager.num_inactive_blocks(), 1);
 
         let handoff_id = HandoffId::from(Uuid::from_u128(2));
         let effects = core
@@ -2474,7 +2487,7 @@ mod offload {
         assert!(transport.kv_events.iter().any(|event| {
             event.storage_tier == dynamo_kv_router::protocols::StorageTier::HostPinned
         }));
-        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        assert_eq!(core.kv_manager.num_active_blocks(), 1);
         assert!(core.destination_block_ids(handoff_id).is_empty());
 
         let reserved = core.retry_pending_destinations();

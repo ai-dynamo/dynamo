@@ -978,74 +978,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::MockEngine;
-    use super::no_bootstrap_handoff_delay;
-    use dynamo_mocker::common::protocols::{MockEngineArgs, WorkerType};
-    use std::time::Duration;
-
-    #[test]
-    fn response_loop_delay_is_owned_only_by_no_bootstrap_prefill() {
-        assert_eq!(
-            no_bootstrap_handoff_delay(true, false, Some(25.0)),
-            Some(Duration::from_millis(25))
-        );
-        assert_eq!(no_bootstrap_handoff_delay(true, true, Some(25.0)), None);
-        assert_eq!(no_bootstrap_handoff_delay(false, false, Some(25.0)), None);
-    }
-
-    #[test]
-    fn unbounded_sequence_limit_uses_finite_multi_handoff_capacity() {
-        let args = MockEngineArgs::builder()
-            .num_gpu_blocks(3)
-            .max_num_seqs(None)
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
-
-        assert_eq!(args.effective_handoff_capacity(), 3);
-        let permits = tokio::sync::Semaphore::new(args.effective_handoff_capacity());
-        let held = (0..3)
-            .map(|_| permits.try_acquire().unwrap())
-            .collect::<Vec<_>>();
-        assert!(permits.try_acquire().is_err());
-        drop(held);
-    }
-
-    #[tokio::test]
-    async fn bootstrap_bind_failure_leaves_startup_state_retryable() {
-        let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
-        let port = occupied.local_addr().unwrap().port();
-        let args = MockEngineArgs::builder()
-            .worker_type(WorkerType::Prefill)
-            .bootstrap_port(Some(port))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
-        let engine = MockEngine::new(args);
-
-        assert!(engine.prepare_bootstrap().await.is_err());
-        assert!(engine.request_senders.get().is_none());
-        assert!(engine.command_senders.get().is_none());
-        assert!(engine.handoff_session_permits.get().is_none());
-        assert!(engine._schedulers.get().is_none());
-        assert!(!engine.handoff_shutdown.is_cancelled());
-        assert!(!engine.scheduler_shutdown.is_cancelled());
-
-        drop(occupied);
-        let prepared = engine
-            .prepare_bootstrap()
-            .await
-            .unwrap()
-            .expect("released bootstrap port must be reusable");
-        engine.handoff_shutdown.cancel();
-        prepared.server.wait_closed().await;
-    }
-}
-
 pub struct AnnotatedMockEngine {
     inner: Arc<MockEngine>,
 }
@@ -1124,4 +1056,72 @@ pub async fn make_mocker_engine(
         AnnotatedMockEngine::new(MockEngine::new(args), distributed_runtime, endpoint_id);
 
     Ok(Arc::new(annotated_engine))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MockEngine;
+    use super::no_bootstrap_handoff_delay;
+    use dynamo_mocker::common::protocols::{MockEngineArgs, WorkerType};
+    use std::time::Duration;
+
+    #[test]
+    fn response_loop_delay_is_owned_only_by_no_bootstrap_prefill() {
+        assert_eq!(
+            no_bootstrap_handoff_delay(true, false, Some(25.0)),
+            Some(Duration::from_millis(25))
+        );
+        assert_eq!(no_bootstrap_handoff_delay(true, true, Some(25.0)), None);
+        assert_eq!(no_bootstrap_handoff_delay(false, false, Some(25.0)), None);
+    }
+
+    #[test]
+    fn unbounded_sequence_limit_uses_finite_multi_handoff_capacity() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(3)
+            .max_num_seqs(None)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.effective_handoff_capacity(), 3);
+        let permits = tokio::sync::Semaphore::new(args.effective_handoff_capacity());
+        let held = (0..3)
+            .map(|_| permits.try_acquire().unwrap())
+            .collect::<Vec<_>>();
+        assert!(permits.try_acquire().is_err());
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_bind_failure_leaves_startup_state_retryable() {
+        let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let args = MockEngineArgs::builder()
+            .worker_type(WorkerType::Prefill)
+            .bootstrap_port(Some(port))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        let engine = MockEngine::new(args);
+
+        assert!(engine.prepare_bootstrap().await.is_err());
+        assert!(engine.request_senders.get().is_none());
+        assert!(engine.command_senders.get().is_none());
+        assert!(engine.handoff_session_permits.get().is_none());
+        assert!(engine._schedulers.get().is_none());
+        assert!(!engine.handoff_shutdown.is_cancelled());
+        assert!(!engine.scheduler_shutdown.is_cancelled());
+
+        drop(occupied);
+        let prepared = engine
+            .prepare_bootstrap()
+            .await
+            .unwrap()
+            .expect("released bootstrap port must be reusable");
+        engine.handoff_shutdown.cancel();
+        prepared.server.wait_closed().await;
+    }
 }

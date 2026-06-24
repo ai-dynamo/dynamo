@@ -630,7 +630,7 @@ mod tests {
     #[tokio::test]
     async fn idle_destination_reservation_wakes_at_offload_deadline() {
         let args = MockEngineArgs::builder()
-            .num_gpu_blocks(1)
+            .num_gpu_blocks(2)
             .block_size(4)
             .max_num_batched_tokens(Some(16))
             .max_num_seqs(Some(1))
@@ -661,12 +661,59 @@ mod tests {
             uuid: Some(uuid::Uuid::from_u128(1)),
             ..Default::default()
         });
-        let seed = tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
-            .await
-            .expect("seed request should complete")
-            .expect("output channel should stay open");
-        assert!(seed.iter().any(|signal| signal.completed));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let seed = output_rx
+                    .recv()
+                    .await
+                    .expect("output channel should stay open");
+                if seed.iter().any(|signal| signal.completed) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("seed request should complete");
         sink.events.lock().unwrap().clear();
+
+        let source_handoff_id =
+            crate::common::handoff::HandoffId::from(uuid::Uuid::from_u128(10));
+        let source_request_id = uuid::Uuid::from_u128(11);
+        let (source_reply, source_reply_rx) = tokio::sync::oneshot::channel();
+        scheduler
+            .command_sender()
+            .send(SchedulerCommandEnvelope {
+                command: SchedulerCommand::SubmitHandoffPrefill {
+                    handoff_id: source_handoff_id,
+                    request: DirectRequest {
+                        tokens: vec![3; 3],
+                        max_output_tokens: 1,
+                        uuid: Some(source_request_id),
+                        ..Default::default()
+                    },
+                },
+                reply: source_reply,
+            })
+            .await
+            .unwrap();
+        let submitted = source_reply_rx.await.unwrap().unwrap();
+        assert!(matches!(
+            submitted.result,
+            crate::scheduler::SchedulerCommandResult::Submitted(observed)
+                if observed == source_request_id
+        ));
+        let held = tokio::time::timeout(Duration::from_secs(1), lifecycle_rx.recv())
+            .await
+            .expect("source hold should complete")
+            .expect("lifecycle channel should stay open");
+        assert!(matches!(
+            held,
+            SchedulerLifecycleEvent::SourceHeld {
+                handoff_id: observed,
+                request_id: observed_request,
+                ..
+            } if observed == source_handoff_id && observed_request == source_request_id
+        ));
 
         let handoff_id = crate::common::handoff::HandoffId::from(uuid::Uuid::from_u128(2));
         let request_id = uuid::Uuid::from_u128(3);
@@ -719,8 +766,43 @@ mod tests {
                 .count()
         };
         assert_eq!(host_stores(), 1);
-        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let (barrier_reply, barrier_rx) = tokio::sync::oneshot::channel();
+        scheduler
+            .command_sender()
+            .send(SchedulerCommandEnvelope {
+                command: SchedulerCommand::CancelDestination {
+                    handoff_id: crate::common::handoff::HandoffId::from(uuid::Uuid::from_u128(99)),
+                },
+                reply: barrier_reply,
+            })
+            .await
+            .unwrap();
+        let barrier = barrier_rx.await.unwrap().unwrap();
+        assert_eq!(
+            barrier.result,
+            crate::scheduler::SchedulerCommandResult::Noop
+        );
         assert!(lifecycle_rx.try_recv().is_err());
         assert_eq!(host_stores(), 1);
+
+        for command in [
+            SchedulerCommand::CancelDestination { handoff_id },
+            SchedulerCommand::CancelSource {
+                handoff_id: source_handoff_id,
+            },
+        ] {
+            let (reply, reply_rx) = tokio::sync::oneshot::channel();
+            scheduler
+                .command_sender()
+                .send(SchedulerCommandEnvelope { command, reply })
+                .await
+                .unwrap();
+            let cleanup = reply_rx.await.unwrap().unwrap();
+            assert_eq!(
+                cleanup.result,
+                crate::scheduler::SchedulerCommandResult::Applied
+            );
+        }
     }
 }

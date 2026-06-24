@@ -23,7 +23,10 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
-use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds, TraceCollector};
+use crate::replay::{
+    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus, SlaThresholds,
+    TraceCollector,
+};
 use anyhow::bail;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RouterEvent;
@@ -444,6 +447,12 @@ impl AggRuntime {
     fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
         let mut admissions = Vec::new();
         if signal.completed {
+            let status = if signal.rejected {
+                ReplayTerminalStatus::Rejected
+            } else {
+                ReplayTerminalStatus::Completed
+            };
+            self.collector.on_terminal(signal.uuid, status);
             #[cfg(test)]
             self.remove_active_request(signal.uuid);
             if let Some(router) = self.router.as_mut() {

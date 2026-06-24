@@ -33,8 +33,8 @@ use crate::common::protocols::{
 };
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds,
-    TraceCollector,
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus,
+    SlaThresholds, TraceCollector,
 };
 use crate::scheduler::{
     AdmissionEvent, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
@@ -273,6 +273,8 @@ pub(in crate::replay) struct DisaggRuntime {
     requests: HashMap<Uuid, DisaggRequestState>,
     requests_by_handoff: HashMap<HandoffId, Uuid>,
     handoff_order: HandoffOrder,
+    prefill_block_size: usize,
+    decode_block_size: usize,
     action_queues: DisaggActionQueues,
     logical_in_flight: usize,
     stale_transfer_events: usize,
@@ -443,6 +445,8 @@ impl DisaggRuntime {
             requests: HashMap::new(),
             requests_by_handoff: HashMap::new(),
             handoff_order,
+            prefill_block_size: config.prefill_args.block_size,
+            decode_block_size: config.decode_args.block_size,
             action_queues: DisaggActionQueues::default(),
             logical_in_flight: 0,
             stale_transfer_events: 0,
@@ -562,6 +566,10 @@ impl DisaggRuntime {
         action: IssuedHandoffAction,
         outcome: HandoffActionOutcome,
     ) -> Result<()> {
+        if matches!(outcome, HandoffActionOutcome::Failed(_)) {
+            self.collector
+                .on_terminal(uuid, ReplayTerminalStatus::Failed);
+        }
         let actions = self
             .state_mut(uuid)?
             .coordinator
@@ -571,6 +579,16 @@ impl DisaggRuntime {
     }
 
     fn apply_handoff_fact(&mut self, uuid: Uuid, fact: HandoffFact) -> Result<()> {
+        let terminal_status = match fact {
+            HandoffFact::Failed { .. } | HandoffFact::TimedOut { .. } => {
+                Some(ReplayTerminalStatus::Failed)
+            }
+            HandoffFact::Canceled { .. } => Some(ReplayTerminalStatus::Canceled),
+            _ => None,
+        };
+        if let Some(status) = terminal_status {
+            self.collector.on_terminal(uuid, status);
+        }
         let actions = self.state_mut(uuid)?.coordinator.on_fact(fact)?;
         self.action_queues.enqueue_all(uuid, actions);
         Ok(())
@@ -678,6 +696,11 @@ impl DisaggRuntime {
         } in admissions
         {
             self.traffic.on_admission(overlap_blocks, isl_blocks);
+            let input_tokens = self.state(uuid)?.original_request()?.tokens.len();
+            let overlap_tokens =
+                (overlap_blocks as usize * self.prefill_block_size).min(input_tokens);
+            self.collector
+                .on_prefill_route_overlap(uuid, overlap_tokens);
             if self.state(uuid)?.phase != DisaggPhase::QueuedPrefill {
                 bail!("offline disagg replay expected queued prefill request for {uuid}");
             }
@@ -694,9 +717,16 @@ impl DisaggRuntime {
     /// Turn decode-router admissions into destination ownership commands.
     fn dispatch_decode_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
         for WorkerAdmission {
-            uuid, worker_idx, ..
+            uuid,
+            worker_idx,
+            overlap_blocks,
+            ..
         } in admissions
         {
+            let input_tokens = self.state(uuid)?.original_request()?.tokens.len();
+            let overlap_tokens =
+                (overlap_blocks as usize * self.decode_block_size).min(input_tokens);
+            self.collector.on_decode_route_overlap(uuid, overlap_tokens);
             if self.state(uuid)?.phase != DisaggPhase::AwaitingDestination {
                 bail!("offline disagg replay expected destination-waiting request for {uuid}");
             }
@@ -713,6 +743,7 @@ impl DisaggRuntime {
     fn route_prefill(&mut self, uuid: Uuid, action: IssuedHandoffAction) -> Result<()> {
         self.state_mut(uuid)?.phase = DisaggPhase::QueuedPrefill;
         if self.prefill_router.is_none() {
+            self.collector.on_prefill_route_overlap(uuid, 0);
             let worker_idx = self.next_prefill_worker();
             return self.dispatch_prefill(uuid, worker_idx, action);
         }
@@ -736,6 +767,7 @@ impl DisaggRuntime {
     fn route_destination(&mut self, uuid: Uuid, action: IssuedHandoffAction) -> Result<()> {
         self.state_mut(uuid)?.await_destination();
         if self.decode_router.is_none() {
+            self.collector.on_decode_route_overlap(uuid, 0);
             let worker_idx = self.next_decode_worker();
             return self.reserve_destination(uuid, worker_idx, action);
         }
@@ -863,6 +895,7 @@ impl DisaggRuntime {
                         .push(NormalizedHandoffEvent::DestinationActivated);
                 }
                 self.state_mut(uuid)?.ready_decode();
+                self.collector.on_destination_activated(uuid, self.now_ms);
                 #[cfg(test)]
                 self.stats
                     .transition_log
@@ -900,6 +933,7 @@ impl DisaggRuntime {
                         .push(NormalizedHandoffEvent::SourceReleased);
                 }
                 self.apply_prefill_router_events(effects.kv_events)?;
+                self.collector.on_source_released(uuid, self.now_ms);
                 self.acknowledge_action(uuid, issued, outcome)?;
                 self.process_lifecycle_events(effects.lifecycle_events)?;
             }
@@ -969,6 +1003,7 @@ impl DisaggRuntime {
                     if let Some(capture) = self.conformance_capture.as_mut() {
                         capture.lifecycle.push(NormalizedHandoffEvent::SourceHeld);
                     }
+                    self.collector.on_source_held(uuid, self.now_ms);
                     self.apply_handoff_fact(
                         uuid,
                         HandoffFact::SourceHeld {
@@ -994,6 +1029,7 @@ impl DisaggRuntime {
                             .lifecycle
                             .push(NormalizedHandoffEvent::DestinationReserved);
                     }
+                    self.collector.on_destination_reserved(uuid, self.now_ms);
                     self.apply_handoff_fact(uuid, HandoffFact::DestinationReserved { handoff_id })?;
                 }
             }
@@ -1085,6 +1121,8 @@ impl DisaggRuntime {
                 self.retire_completed_request(uuid)?;
             }
             Some(HandoffCompletion::Canceled) => {
+                self.collector
+                    .on_terminal(uuid, ReplayTerminalStatus::Canceled);
                 self.cancel_prefill_route(uuid)?;
                 self.cancel_decode_route(uuid)?;
                 self.finish_logical_request(uuid, true)?;
@@ -1287,6 +1325,8 @@ impl DisaggRuntime {
 
         if signal.rejected {
             let handoff_id = self.state(signal.uuid)?.handoff_id;
+            self.collector
+                .on_terminal(signal.uuid, ReplayTerminalStatus::Rejected);
             return self.apply_handoff_fact(signal.uuid, HandoffFact::Failed { handoff_id });
         }
 
@@ -1345,6 +1385,12 @@ impl DisaggRuntime {
             self.traffic
                 .on_request(input_tokens, output_tokens, latencies);
         }
+        let terminal_status = if signal.rejected {
+            ReplayTerminalStatus::Rejected
+        } else {
+            ReplayTerminalStatus::Completed
+        };
+        self.collector.on_terminal(signal.uuid, terminal_status);
         self.finish_logical_request(signal.uuid, false)?;
         self.dispatch_decode_admissions(admissions)?;
         Ok(())
@@ -1521,13 +1567,21 @@ impl DisaggRuntime {
 
     fn record_prefill_admissions(&mut self, admissions: Vec<AdmissionEvent>) {
         for admission in admissions {
-            self.collector
-                .on_admit(admission.uuid, self.now_ms, admission.reused_input_tokens);
+            self.collector.on_prefill_admit(
+                admission.uuid,
+                self.now_ms,
+                admission.reused_input_tokens,
+            );
         }
     }
 
     fn record_decode_admissions(&mut self, admissions: Vec<AdmissionEvent>) -> Result<()> {
         for admission in admissions {
+            self.collector.on_decode_admit(
+                admission.uuid,
+                self.now_ms,
+                admission.reused_input_tokens,
+            );
             match self.state(admission.uuid)?.phase {
                 DisaggPhase::ReadyDecode => {
                     self.state_mut(admission.uuid)?.start_decode();
