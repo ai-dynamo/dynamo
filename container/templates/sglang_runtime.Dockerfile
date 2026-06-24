@@ -10,7 +10,7 @@
 {% if device == "xpu" %}
 FROM framework AS runtime
 {% else %}
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG MODELEXPRESS_VERSION
@@ -166,7 +166,7 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/comp
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/sglang /workspace/components/src/dynamo/sglang
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
@@ -196,6 +196,28 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 {% if device == "xpu" %}
 CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
 {% else %}
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+{% endif %}
+
+
+{% if device != "xpu" %}
+{# Compliance is skipped for dev/local-dev: those images are not shipped (release
+   ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
+   already skips them, and their pre_runtime carries no dynamo venv to scan. #}
+{% if target not in ("dev", "local-dev") %}
+{% include "templates/compliance.Dockerfile" %}
+{% endif %}
+
+
+#######################################
+########## Final runtime image ########
+#######################################
+
+FROM pre_runtime AS runtime
+{% if target not in ("dev", "local-dev") %}
+COPY --from=licenses /legal /legal
+{% endif %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 {% endif %}

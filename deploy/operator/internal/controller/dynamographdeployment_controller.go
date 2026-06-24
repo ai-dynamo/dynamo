@@ -1068,6 +1068,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				DynamoNamespace: dynamoNamespace,
 				ComponentName:   componentName,
 				Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
+				Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component),
 				IsK8sDiscovery:  isK8sDiscoveryEnabled,
 			})
 			if err != nil {
@@ -1082,6 +1083,25 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
 			}
 			if syncedMainComponentService != nil {
+				if syncedMainComponentService.Annotations == nil {
+					syncedMainComponentService.Annotations = make(map[string]string)
+				}
+				desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component)
+				var updateAnnotations bool
+				for key, value := range desiredAnnotations {
+					if val, ok := syncedMainComponentService.Annotations[key]; !ok || val != value {
+						syncedMainComponentService.Annotations[key] = value
+						updateAnnotations = true
+					}
+				}
+				if updateAnnotations {
+					err = r.Update(ctx, syncedMainComponentService)
+					if err != nil {
+						logger.Error(err, fmt.Sprintf("Failed to update main component service %s.", componentName))
+						r.GetRecorder().Eventf(dynamoDeployment, corev1.EventTypeWarning, "UpdateService", "Failed to update Service %s: %s", componentName, err)
+						return ReconcileResult{}, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
+					}
+				}
 				mainComponentServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentService,
 					func() (bool, string) {
 						return true, ""
