@@ -18,10 +18,22 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      build_snapshot:
+        description: 'Build and push snapshot-agent image, tagged with branch name'
+        type: boolean
+        default: false
+      build_placeholder:
+        description: 'Build and push TRTLLM placeholder image from the freshly built TRTLLM runtime'
+        type: boolean
+        default: false
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      trtllm_runtime_image:
+        description: 'Existing TRTLLM runtime image to use as the placeholder base when skipping build_trtllm'
+        type: string
+        default: ''
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -86,7 +98,7 @@ jobs:
       framework: trtllm
       target: runtime
       cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
@@ -101,6 +113,151 @@ jobs:
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
+
+  # ============================================================================
+  # SNAPSHOT AGENT AND PLACEHOLDER
+  # ============================================================================
+
+  snapshot-agent:
+    needs: [init]
+    if: inputs.build_snapshot
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  trtllm-placeholder:
+    needs: [init, snapshot-agent, trtllm-build]
+    if: >-
+      ${{
+        always() &&
+        inputs.build_placeholder &&
+        needs.snapshot-agent.result == 'success' &&
+        (inputs.trtllm_runtime_image != '' || needs.trtllm-build.result == 'success')
+      }}
+    name: TRTLLM Placeholder
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: general
+          arch: linux/amd64
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Stage TRTLLM snapshot hook overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deploy/snapshot/trtllm_overlay/workers
+          cp components/src/dynamo/trtllm/__main__.py \
+            deploy/snapshot/trtllm_overlay/__main__.py
+          cp components/src/dynamo/trtllm/main.py \
+            deploy/snapshot/trtllm_overlay/main.py
+          cp components/src/dynamo/trtllm/snapshot.py \
+            deploy/snapshot/trtllm_overlay/snapshot.py
+          cp components/src/dynamo/trtllm/workers/llm_worker.py \
+            deploy/snapshot/trtllm_overlay/workers/llm_worker.py
+      - name: Build and push placeholder
+        shell: bash
+        working-directory: ./deploy/snapshot
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.trtllm_runtime_image }}" ]; then
+            RUNTIME_IMAGE="${{ inputs.trtllm_runtime_image }}"
+          else
+            RUNTIME_IMAGE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${{ github.sha }}-trtllm-runtime"
+          fi
+          SNAPSHOT_AGENT_IMAGE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${{ github.sha }}-snapshot-agent"
+          ECR_PLACEHOLDER="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${{ github.sha }}-trtllm-placeholder"
+          ACR_PLACEHOLDER="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${{ github.sha }}-trtllm-placeholder"
+          cat > Dockerfile.placeholder-overlay <<'EOF'
+          ARG BASE_IMAGE
+          ARG SNAPSHOT_AGENT_IMAGE
+          FROM ${SNAPSHOT_AGENT_IMAGE} AS snapshot_agent
+          FROM ${BASE_IMAGE} AS placeholder
+          USER root
+          ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              libbsd0 \
+              libcap2 \
+              libnet1 \
+              libnl-3-200 \
+              libnl-route-3-200 \
+              libprotobuf-c1 \
+              libgnutls30t64 \
+              libnftables1 \
+              iproute2 \
+              iptables \
+              procps \
+              uuid-runtime \
+              tar \
+              ca-certificates \
+              && rm -rf /var/lib/apt/lists/*
+          COPY --from=snapshot_agent /usr/local/bin/nsrestore /usr/local/bin/nsrestore
+          COPY --from=snapshot_agent /usr/local/bin/cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+          COPY --from=snapshot_agent /usr/local/sbin/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
+          COPY --from=snapshot_agent /usr/local/sbin/criu /usr/local/sbin/criu
+          COPY --from=snapshot_agent /usr/local/sbin/criu-ns /usr/local/sbin/criu-ns
+          COPY --from=snapshot_agent /usr/local/lib/criu /usr/local/lib/criu
+          COPY --from=snapshot_agent /usr/local/lib/snapshot /usr/local/lib/snapshot
+          COPY --from=snapshot_agent /usr/local/libexec/criu /usr/local/libexec/criu
+          COPY --from=snapshot_agent /usr/local/lib/x86_64-linux-gnu/libcriu* /usr/local/lib/x86_64-linux-gnu/
+          COPY trtllm_overlay/__main__.py /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/__main__.py
+          COPY trtllm_overlay/main.py /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/main.py
+          COPY trtllm_overlay/snapshot.py /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/snapshot.py
+          COPY trtllm_overlay/workers/llm_worker.py /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/workers/llm_worker.py
+          RUN chmod +x /usr/local/bin/nsrestore \
+              /usr/local/bin/cuda-checkpoint-helper \
+              /usr/local/sbin/cuda-checkpoint \
+              /usr/local/sbin/criu \
+              /usr/local/sbin/criu-ns \
+              && mkdir -p /checkpoints /var/run/criu /var/criu-work \
+              && criu --version
+          EOF
+          docker buildx build --push \
+            --platform linux/amd64 \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASE_IMAGE="${RUNTIME_IMAGE}" \
+            --build-arg SNAPSHOT_AGENT_IMAGE="${SNAPSHOT_AGENT_IMAGE}" \
+            --tag "${ECR_PLACEHOLDER}" \
+            --tag "${ACR_PLACEHOLDER}" \
+            -f Dockerfile.placeholder-overlay .
+          {
+            echo "### TRTLLM Placeholder"
+            echo ""
+            echo "- Base runtime: \`${RUNTIME_IMAGE}\`"
+            echo "- Snapshot agent tooling: \`${SNAPSHOT_AGENT_IMAGE}\`"
+            echo "- ECR image: \`${ECR_PLACEHOLDER}\`"
+            echo "- ACR image: \`${ACR_PLACEHOLDER}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
@@ -194,7 +351,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-agent, trtllm-placeholder]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
