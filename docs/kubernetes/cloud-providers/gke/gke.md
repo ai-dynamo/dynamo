@@ -105,7 +105,7 @@ export HF_TOKEN=<your Hugging Face token>
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${HF_TOKEN} -n ${INFERENCE_NAMESPACE}
 ```
 
-### Inspect the Graph Deployment
+### Inspect the deployment manifest
 
 Clone the Dynamo GitHub repository:
 
