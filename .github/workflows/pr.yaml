@@ -61,8 +61,6 @@ jobs:
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
       - power-agent
-      - power-agent-test
-      - power-agent-helm-tests
       - vllm-build
       - vllm-dev-build
       - vllm-test
@@ -229,29 +227,21 @@ jobs:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-
-  power-agent-test:
-    needs: changed-files
-    if: needs.changed-files.outputs.power_agent == 'true'
-    name: Power Agent  # group under the same UI umbrella as the build job
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Run unit tests inside the container image
         # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
         # the suite against the exact shipped image (Python 3.12 + baked deps),
         # validating the container itself rather than a pip-installed runner env.
-        run: docker build --target test -f deploy/power-agent/Dockerfile deploy/power-agent
-
-  power-agent-helm-tests:
-    needs: changed-files
-    if: needs.changed-files.outputs.power_agent == 'true'
-    name: Power Agent  # group under the same UI umbrella as the build job
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # push: false — the test stage is never shipped; the build still runs the
+        # suite. Same builder as above, so the runtime layers are a cache hit.
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: power-agent
+          target: test
+          push: false
+          image_tag: ${{ github.sha }}-power-agent-test
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Set up Helm
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
         with:
