@@ -198,7 +198,7 @@ impl
         if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
             return Err(anyhow::anyhow!(
                 "Prefill worker ID required in Direct routing mode but none found in request. \
-                 Expected prefill_worker_id to be set via x-prefill-instance-id header by external router (e.g., EPP)."
+                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
             ));
         }
 

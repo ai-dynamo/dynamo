@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Verifies that the digests recorded in container/compliance/base_sboms/manifest.json
+# still match what the registry serves. Replaces the planned weekly cron:
+# every PR / post-merge run gates on this check, so any base-image rebuild
+# surfaces immediately as a build-blocking failure instead of going
+# unnoticed until the next cron tick.
+#
+# When this fails, the job summary prints the exact command(s) to run. The
+# remediation is:
+#   1. Run container/compliance/base_sboms/capture_baseline_sbom.py with the
+#      --from / --baseline printed in the summary to regenerate the slim
+#      CycloneDX SBOM and update manifest.json for the drifted base image.
+#   2. Open a PR; the bot's own CI re-runs policy/validate.py against the
+#      new SBOM and blocks merge if a new disallowed license appears.
+
+name: Compliance — Base-Image Drift
+
+on:
+  pull_request:
+    paths:
+      - 'container/compliance/base_sboms/**'
+      - '.github/workflows/compliance-base-drift.yml'
+  push:
+    branches:
+      - main
+      - 'release/*.*.*'
+  schedule:
+    # Belt-and-suspenders: PR/push triggers cover code paths that touch
+    # the corpus, but base images can be rebuilt at any time. A daily
+    # tick catches drift that would otherwise sit unnoticed until the
+    # next PR happens to land. Cheap (<30s of registry HEAD requests)
+    # so it's fine to run unconditionally.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+
+      - name: Verify buildx is available
+        run: docker buildx version
+
+      - name: Check base-image digest drift
+        run: python3 container/compliance/base_sboms/check_drift.py

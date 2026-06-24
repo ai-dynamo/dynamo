@@ -1022,14 +1022,17 @@ impl EndpointPicker for Router {
         }
 
         // Build routing headers matching the Go EPP's disagg plugin:
-        // x-worker-instance-id, x-dp-rank, x-prefill-instance-id,
-        // x-prefill-dp-rank, x-dynamo-routing-mode
+        // x-dynamo-worker-instance-id, x-dynamo-dp-rank,
+        // x-dynamo-prefill-instance-id, x-dynamo-prefill-dp-rank, x-dynamo-routing-mode
         let mut headers = vec![
             (
-                "x-worker-instance-id".to_string(),
+                "x-dynamo-worker-instance-id".to_string(),
                 format!("{}", decode_worker.worker_id),
             ),
-            ("x-dp-rank".to_string(), decode_worker.dp_rank.to_string()),
+            (
+                "x-dynamo-dp-rank".to_string(),
+                decode_worker.dp_rank.to_string(),
+            ),
         ];
 
         if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
@@ -1038,11 +1041,11 @@ impl EndpointPicker for Router {
                 "disaggregated".to_string(),
             ));
             headers.push((
-                "x-prefill-instance-id".to_string(),
+                "x-dynamo-prefill-instance-id".to_string(),
                 format!("{}", prefill_worker_id),
             ));
             if let Some(rank) = prefill_dp_rank {
-                headers.push(("x-prefill-dp-rank".to_string(), rank.to_string()));
+                headers.push(("x-dynamo-prefill-dp-rank".to_string(), rank.to_string()));
             }
         } else {
             headers.push((

@@ -501,6 +501,18 @@ func GetDGDComponentResourceLabels(dgd *v1beta1.DynamoGraphDeployment, component
 	return labels
 }
 
+// GetDGDComponentResourceAnnotations returns annotations that should be applied to resources
+// created directly for a DGD component.
+func GetDGDComponentResourceAnnotations(dgd *v1beta1.DynamoGraphDeployment, componentName string, component *v1beta1.DynamoComponentDeploymentSharedSpec) map[string]string {
+	annotations := map[string]string{}
+	if dgd != nil {
+		maps.Copy(annotations, dgd.Spec.Annotations)
+		maps.Copy(annotations, getDGDComponentAlphaAnnotations(dgd, componentName))
+	}
+	maps.Copy(annotations, GetPodTemplateAnnotations(component))
+	return annotations
+}
+
 // GetDGDComponentPreservedIngressSpec returns an alpha component ingress spec that
 // was preserved during conversion to v1beta1.
 func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, componentName string) (IngressSpec, bool) {

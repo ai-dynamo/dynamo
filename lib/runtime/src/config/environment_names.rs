@@ -307,8 +307,8 @@ pub mod llm {
     /// Default `true`. Falsy values (`0` / `false` / `no` / `off`,
     /// case-insensitive) cause the frontend to drop `request.nvext` at
     /// handler entry, ignore the routing-override headers
-    /// (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
-    /// `x-prefill-dp-rank`), and silently ignore the response-side
+    /// (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`,
+    /// `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
     /// `extra_fields` opt-in.
     pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
 
