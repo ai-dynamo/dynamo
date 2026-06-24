@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::protocols::EngineType;
+use super::protocols::{EngineType, KvTransferTimingMode};
 
 /// Stable identifier for one prefill-to-decode handoff attempt.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -43,14 +43,49 @@ pub enum HandoffOrder {
     DestinationFirst,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HandoffTransferTiming {
+    pub mode: KvTransferTimingMode,
+    pub full_prompt_tokens: usize,
+    pub kv_bytes_per_token: Option<usize>,
+    pub bandwidth_gb_s: Option<f64>,
+}
+
+impl HandoffTransferTiming {
+    pub fn delay_ms(self, destination_missing_tokens: usize) -> Option<f64> {
+        let tokens = match self.mode {
+            KvTransferTimingMode::FullPrompt => self.full_prompt_tokens,
+            KvTransferTimingMode::DestinationMissing => destination_missing_tokens,
+        };
+        let (Some(bytes_per_token), Some(bandwidth_gb_s)) =
+            (self.kv_bytes_per_token, self.bandwidth_gb_s)
+        else {
+            return None;
+        };
+        if bandwidth_gb_s <= 0.0 {
+            return None;
+        }
+        Some(tokens as f64 * bytes_per_token as f64 / (bandwidth_gb_s * 1e9) * 1000.0)
+    }
+
+    pub fn full_prompt_delay_ms(self) -> Option<f64> {
+        let full_prompt = Self {
+            mode: KvTransferTimingMode::FullPrompt,
+            ..self
+        };
+        full_prompt.delay_ms(0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HandoffFact {
     SourceHeld {
         handoff_id: HandoffId,
-        transfer_delay_ms: Option<f64>,
+        transfer_timing: HandoffTransferTiming,
     },
     DestinationReserved {
         handoff_id: HandoffId,
+        transferable_prompt_tokens: usize,
     },
     TransferCompleted {
         handoff_id: HandoffId,
@@ -70,7 +105,7 @@ impl HandoffFact {
     fn handoff_id(&self) -> HandoffId {
         match *self {
             Self::SourceHeld { handoff_id, .. }
-            | Self::DestinationReserved { handoff_id }
+            | Self::DestinationReserved { handoff_id, .. }
             | Self::TransferCompleted { handoff_id }
             | Self::Failed { handoff_id }
             | Self::TimedOut { handoff_id }
@@ -284,7 +319,7 @@ struct SourceProgress {
     submit_issued: bool,
     submitted: bool,
     held: bool,
-    delay_ms: Option<f64>,
+    transfer_timing: Option<HandoffTransferTiming>,
     release_issued: bool,
     cancel_issued: bool,
     cleanup_done: bool,
@@ -295,6 +330,7 @@ struct DestinationProgress {
     reserve_issued: bool,
     accepted: bool,
     reserved: bool,
+    transferable_prompt_tokens: Option<usize>,
     activation_issued: bool,
     activation_applied: bool,
     cancel_issued: bool,
@@ -358,7 +394,7 @@ impl HandoffCoordinatorCore {
 
         match fact {
             HandoffFact::SourceHeld {
-                transfer_delay_ms, ..
+                transfer_timing, ..
             } => {
                 if self.source.held {
                     return Ok(Vec::new());
@@ -366,12 +402,15 @@ impl HandoffCoordinatorCore {
                 if !self.source.submitted {
                     bail!("source held before prefill submission was acknowledged");
                 }
-                validate_transfer_delay_ms(transfer_delay_ms)?;
+                validate_transfer_timing(transfer_timing)?;
                 self.source.held = true;
-                self.source.delay_ms = transfer_delay_ms;
+                self.source.transfer_timing = Some(transfer_timing);
                 self.advance_active()
             }
-            HandoffFact::DestinationReserved { .. } => {
+            HandoffFact::DestinationReserved {
+                transferable_prompt_tokens,
+                ..
+            } => {
                 if self.destination.reserved {
                     return Ok(Vec::new());
                 }
@@ -379,6 +418,7 @@ impl HandoffCoordinatorCore {
                     bail!("destination reserved before ownership was accepted");
                 }
                 self.destination.reserved = true;
+                self.destination.transferable_prompt_tokens = Some(transferable_prompt_tokens);
                 self.advance_active()
             }
             HandoffFact::TransferCompleted { .. } => {
@@ -497,10 +537,22 @@ impl HandoffCoordinatorCore {
         }
         if self.source.held && self.destination.reserved && !self.transfer.issued {
             self.transfer.issued = true;
-            return Ok(vec![self.issue(HandoffAction::StartTransfer {
-                handoff_id: self.handoff_id,
-                delay_ms: self.source.delay_ms.unwrap_or_default(),
-            })]);
+            let transfer_timing = self
+                .source
+                .transfer_timing
+                .expect("held source must retain transfer timing");
+            let transferable_prompt_tokens = self
+                .destination
+                .transferable_prompt_tokens
+                .expect("reserved destination must report its transferable footprint");
+            return Ok(vec![
+                self.issue(HandoffAction::StartTransfer {
+                    handoff_id: self.handoff_id,
+                    delay_ms: transfer_timing
+                        .delay_ms(transferable_prompt_tokens)
+                        .unwrap_or_default(),
+                }),
+            ]);
         }
         if self.transfer.completed && !self.destination.activation_issued {
             self.destination.activation_issued = true;
@@ -611,6 +663,15 @@ pub fn validate_transfer_delay_ms(transfer_delay_ms: Option<f64>) -> Result<()> 
         bail!("invalid handoff transfer delay {delay_ms}");
     }
     Ok(())
+}
+
+pub fn validate_transfer_timing(transfer_timing: HandoffTransferTiming) -> Result<()> {
+    if let Some(bandwidth_gb_s) = transfer_timing.bandwidth_gb_s
+        && (!bandwidth_gb_s.is_finite() || bandwidth_gb_s <= 0.0)
+    {
+        bail!("invalid handoff transfer bandwidth {bandwidth_gb_s}");
+    }
+    validate_transfer_delay_ms(transfer_timing.full_prompt_delay_ms())
 }
 
 fn require_outcome(outcome: &HandoffActionOutcome, allowed: &[HandoffActionOutcome]) -> Result<()> {

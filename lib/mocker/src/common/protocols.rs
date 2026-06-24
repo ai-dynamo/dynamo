@@ -378,6 +378,31 @@ impl FromStr for WorkerType {
     }
 }
 
+/// Physical KV footprint used to model a coordinated disaggregated transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvTransferTimingMode {
+    /// Charge the source request's full logical prompt length.
+    #[default]
+    FullPrompt,
+    /// Charge only the physical prompt footprint missing at the destination.
+    DestinationMissing,
+}
+
+impl FromStr for KvTransferTimingMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "full_prompt" => Ok(Self::FullPrompt),
+            "destination_missing" => Ok(Self::DestinationMissing),
+            _ => Err(format!(
+                "Invalid kv_transfer_timing_mode '{value}'. Must be 'full_prompt' or 'destination_missing'."
+            )),
+        }
+    }
+}
+
 /// Configuration for reasoning/thinking token output in the mocker.
 ///
 /// When set, the mocker wraps the first portion of each response in thinking
@@ -521,6 +546,7 @@ struct MockEngineArgsSerde {
     handoff_session_timeout_ms: OptionalConfigValue<u64>,
     kv_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
+    kv_transfer_timing_mode: OptionalConfigValue<String>,
     num_g2_blocks: OptionalConfigValue<usize>,
     num_g3_blocks: OptionalConfigValue<usize>,
     enable_g4_storage: OptionalConfigValue<bool>,
@@ -736,6 +762,11 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
+
+    /// Selects whether disaggregated transfer timing charges the full prompt
+    /// or only the physical prompt footprint missing at the destination.
+    #[builder(default = "KvTransferTimingMode::FullPrompt")]
+    pub kv_transfer_timing_mode: KvTransferTimingMode,
 
     /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
     /// feature is enabled, setting this explicitly opts the mocker into
@@ -1075,6 +1106,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);
         }
+        if let Some(mode) = compat
+            .kv_transfer_timing_mode
+            .into_non_null("kv_transfer_timing_mode")?
+        {
+            builder = builder.kv_transfer_timing_mode(mode.parse()?);
+        }
         if let Some(num_g2_blocks) = compat.num_g2_blocks.into_nullable() {
             builder = builder.num_g2_blocks(num_g2_blocks);
         }
@@ -1364,6 +1401,7 @@ mod tests {
             "handoff_session_timeout_ms": args.handoff_session_timeout_ms,
             "kv_bytes_per_token": args.kv_bytes_per_token,
             "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
+            "kv_transfer_timing_mode": "full_prompt",
             "num_g2_blocks": args.num_g2_blocks,
             "num_g3_blocks": args.num_g3_blocks,
             "enable_g4_storage": args.enable_g4_storage,
@@ -1388,6 +1426,10 @@ mod tests {
         assert_eq!(restored.worker_type, WorkerType::Decode);
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+        assert_eq!(
+            restored.kv_transfer_timing_mode,
+            KvTransferTimingMode::FullPrompt
+        );
     }
 
     #[test]

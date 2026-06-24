@@ -385,6 +385,7 @@ mod tests {
                     .push(SchedulerLifecycleEvent::DestinationReserved {
                         handoff_id: HandoffId::from(Uuid::from_u128(2)),
                         request_id: Uuid::from_u128(3),
+                        transferable_prompt_tokens: 4,
                     });
             }
             Ok(effects)
@@ -425,6 +426,7 @@ mod tests {
             lifecycle_events: vec![SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id: HandoffId::from(Uuid::from_u128(2)),
                 request_id,
+                transferable_prompt_tokens: 4,
             }],
             mocker_metrics: MockerMetrics::default(),
             router_event_visibility: RouterEventVisibility::PassEnd,

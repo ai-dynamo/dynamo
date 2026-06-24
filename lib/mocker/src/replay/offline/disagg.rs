@@ -990,7 +990,7 @@ impl DisaggRuntime {
                 SchedulerLifecycleEvent::SourceHeld {
                     handoff_id,
                     request_id,
-                    transfer_delay_ms,
+                    transfer_timing,
                 } => {
                     let uuid = self.uuid_for_handoff(handoff_id)?;
                     if uuid != request_id {
@@ -1008,13 +1008,14 @@ impl DisaggRuntime {
                         uuid,
                         HandoffFact::SourceHeld {
                             handoff_id,
-                            transfer_delay_ms,
+                            transfer_timing,
                         },
                     )?;
                 }
                 SchedulerLifecycleEvent::DestinationReserved {
                     handoff_id,
                     request_id,
+                    transferable_prompt_tokens,
                 } => {
                     let uuid = self.uuid_for_handoff(handoff_id)?;
                     if uuid != request_id {
@@ -1030,7 +1031,13 @@ impl DisaggRuntime {
                             .push(NormalizedHandoffEvent::DestinationReserved);
                     }
                     self.collector.on_destination_reserved(uuid, self.now_ms);
-                    self.apply_handoff_fact(uuid, HandoffFact::DestinationReserved { handoff_id })?;
+                    self.apply_handoff_fact(
+                        uuid,
+                        HandoffFact::DestinationReserved {
+                            handoff_id,
+                            transferable_prompt_tokens,
+                        },
+                    )?;
                 }
             }
         }

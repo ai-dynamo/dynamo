@@ -23,7 +23,7 @@ use crate::common::protocols::{
 };
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
-use crate::common::utils::compute_prefill_handoff_delay_ms;
+use crate::common::utils::{compute_prefill_handoff_delay_ms, prefill_handoff_transfer_timing};
 use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
@@ -737,6 +737,7 @@ impl VllmCore {
         let Some(kv) = reservation else {
             return Vec::new();
         };
+        let transferable_prompt_tokens = kv.transferable_prompt_tokens(self.args.block_size);
         let (handoff_id, request_id, request) = self
             .pending_destinations
             .pop_front()
@@ -746,6 +747,7 @@ impl VllmCore {
         vec![SchedulerLifecycleEvent::DestinationReserved {
             handoff_id,
             request_id,
+            transferable_prompt_tokens,
         }]
     }
 
@@ -850,13 +852,12 @@ impl VllmCore {
     }
 
     fn complete_source(&mut self, uuid: Uuid, deferred_deref: Vec<MoveBlock>) {
-        let transfer_delay_ms = self.state.requests.get(&uuid).and_then(|request| {
-            compute_prefill_handoff_delay_ms(
-                self.args.worker_type,
-                true,
+        let transfer_timing = self.state.requests.get(&uuid).map(|request| {
+            prefill_handoff_transfer_timing(
                 request.sequence.num_input_tokens(),
                 self.args.kv_transfer_bandwidth,
                 self.args.kv_bytes_per_token,
+                self.args.kv_transfer_timing_mode,
             )
         });
         let request = self
@@ -876,7 +877,8 @@ impl VllmCore {
                     .push(SchedulerLifecycleEvent::SourceHeld {
                         handoff_id,
                         request_id: uuid,
-                        transfer_delay_ms,
+                        transfer_timing: transfer_timing
+                            .expect("completed source request must retain transfer timing"),
                     });
             }
         }

@@ -4,10 +4,11 @@
 use super::*;
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
 use dynamo_mocker::common::handoff::{
-    HandoffCompletion, NormalizedHandoffConformance, NormalizedStoredTiming,
+    HandoffCompletion, HandoffTransferTiming, NormalizedHandoffConformance, NormalizedStoredTiming,
 };
 use dynamo_mocker::common::protocols::{
-    FpmPublisher, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal, WorkerType,
+    FpmPublisher, KvCacheEventSink, KvEventPublishers, KvTransferTimingMode, MockEngineArgs,
+    OutputSignal, WorkerType,
 };
 use dynamo_mocker::engine::create_engine;
 use dynamo_mocker::scheduler::{MockerMetrics, SchedulerHandle};
@@ -18,6 +19,14 @@ use dynamo_mocker::services::bootstrap::{
 use uuid::Uuid;
 
 fn args(engine_type: EngineType, worker_type: WorkerType) -> MockEngineArgs {
+    args_with_mode(engine_type, worker_type, KvTransferTimingMode::FullPrompt)
+}
+
+fn args_with_mode(
+    engine_type: EngineType,
+    worker_type: WorkerType,
+    transfer_timing_mode: KvTransferTimingMode,
+) -> MockEngineArgs {
     let mut builder = MockEngineArgs::builder()
         .engine_type(engine_type)
         .block_size(4)
@@ -28,7 +37,8 @@ fn args(engine_type: EngineType, worker_type: WorkerType) -> MockEngineArgs {
         .speedup_ratio(1000.0)
         .decode_speedup_ratio(1000.0)
         .kv_transfer_bandwidth(Some(1.0))
-        .kv_bytes_per_token(Some(1_000_000));
+        .kv_bytes_per_token(Some(1_000_000))
+        .kv_transfer_timing_mode(transfer_timing_mode);
     if engine_type == EngineType::Sglang {
         builder = builder.sglang(Some(Default::default()));
     }
@@ -42,6 +52,33 @@ fn request(uuid: Uuid, output_tokens: usize) -> DirectRequest {
         uuid: Some(uuid),
         ..Default::default()
     }
+}
+
+fn transfer_timing(delay_ms: Option<f64>) -> HandoffTransferTiming {
+    HandoffTransferTiming {
+        mode: KvTransferTimingMode::FullPrompt,
+        full_prompt_tokens: 1,
+        kv_bytes_per_token: delay_ms.map(|delay_ms| (delay_ms * 1_000_000.0) as usize),
+        bandwidth_gb_s: delay_ms.map(|_| 1.0),
+    }
+}
+
+#[test]
+fn timeout_delay_resolves_at_the_mode_specific_boundary() {
+    let full = HandoffTransferTiming {
+        mode: KvTransferTimingMode::FullPrompt,
+        full_prompt_tokens: 8,
+        kv_bytes_per_token: Some(1_000_000),
+        bandwidth_gb_s: Some(1.0),
+    };
+    assert_eq!(transfer_timeout_delay(full, None), Some(Some(8.0)));
+
+    let missing = HandoffTransferTiming {
+        mode: KvTransferTimingMode::DestinationMissing,
+        ..full
+    };
+    assert_eq!(transfer_timeout_delay(missing, None), None);
+    assert_eq!(transfer_timeout_delay(missing, Some(4)), Some(Some(4.0)));
 }
 
 fn start_scheduler(
@@ -64,6 +101,27 @@ fn start_scheduler(
     (scheduler, output_rx)
 }
 
+fn start_scheduler_with_mode(
+    engine_type: EngineType,
+    worker_type: WorkerType,
+    transfer_timing_mode: KvTransferTimingMode,
+    cancel: CancellationToken,
+) -> (
+    Box<dyn SchedulerHandle>,
+    mpsc::UnboundedReceiver<Vec<OutputSignal>>,
+) {
+    let (output_tx, output_rx) = mpsc::unbounded_channel();
+    let scheduler = create_engine(
+        args_with_mode(engine_type, worker_type, transfer_timing_mode),
+        0,
+        Some(output_tx),
+        KvEventPublishers::default(),
+        Some(cancel),
+        FpmPublisher::default(),
+    );
+    (scheduler, output_rx)
+}
+
 #[derive(Clone)]
 struct CapturingKvSink {
     tx: mpsc::UnboundedSender<KvCacheEvent>,
@@ -77,9 +135,10 @@ impl KvCacheEventSink for CapturingKvSink {
     }
 }
 
-fn start_scheduler_with_kv_events(
+fn start_scheduler_with_kv_events_and_mode(
     engine_type: EngineType,
     worker_type: WorkerType,
+    transfer_timing_mode: KvTransferTimingMode,
     cancel: CancellationToken,
 ) -> (
     Box<dyn SchedulerHandle>,
@@ -89,7 +148,7 @@ fn start_scheduler_with_kv_events(
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let scheduler = create_engine(
-        args(engine_type, worker_type),
+        args_with_mode(engine_type, worker_type, transfer_timing_mode),
         0,
         Some(output_tx),
         KvEventPublishers::new(Some(Arc::new(CapturingKvSink { tx: event_tx })), None),
@@ -245,6 +304,7 @@ async fn destination_reservation_ack_precedes_an_early_lifecycle_fact() {
         .deliver_and_wait(SchedulerLifecycleEvent::DestinationReserved {
             handoff_id,
             request_id,
+            transferable_prompt_tokens: 1,
         })
         .await;
     envelope
@@ -267,6 +327,7 @@ async fn destination_reservation_ack_precedes_an_early_lifecycle_fact() {
         source.recv().await.unwrap(),
         Some(BootstrapMessage::Fact(HandoffFact::DestinationReserved {
             handoff_id: observed,
+            ..
         })) if observed == handoff_id
     ));
 
@@ -277,7 +338,10 @@ async fn destination_reservation_ack_precedes_an_early_lifecycle_fact() {
             .is_empty()
     );
     let submit = coordinator
-        .on_fact(HandoffFact::DestinationReserved { handoff_id })
+        .on_fact(HandoffFact::DestinationReserved {
+            handoff_id,
+            transferable_prompt_tokens: 1,
+        })
         .unwrap()
         .pop()
         .unwrap();
@@ -291,7 +355,7 @@ async fn destination_reservation_ack_precedes_an_early_lifecycle_fact() {
     let transfer = coordinator
         .on_fact(HandoffFact::SourceHeld {
             handoff_id,
-            transfer_delay_ms: Some(0.0),
+            transfer_timing: transfer_timing(Some(0.0)),
         })
         .unwrap()
         .pop()
@@ -418,6 +482,7 @@ async fn premature_complete_keeps_destination_cleanup_active() {
         .deliver_and_wait(SchedulerLifecycleEvent::DestinationReserved {
             handoff_id,
             request_id,
+            transferable_prompt_tokens: 1,
         })
         .await;
     assert!(matches!(
@@ -438,7 +503,10 @@ async fn premature_complete_keeps_destination_cleanup_active() {
         .on_action_outcome(reserve.id, HandoffActionOutcome::Accepted)
         .unwrap();
     let submit = coordinator
-        .on_fact(HandoffFact::DestinationReserved { handoff_id })
+        .on_fact(HandoffFact::DestinationReserved {
+            handoff_id,
+            transferable_prompt_tokens: 1,
+        })
         .unwrap()
         .pop()
         .unwrap();
@@ -448,7 +516,7 @@ async fn premature_complete_keeps_destination_cleanup_active() {
     let transfer = coordinator
         .on_fact(HandoffFact::SourceHeld {
             handoff_id,
-            transfer_delay_ms: None,
+            transfer_timing: transfer_timing(None),
         })
         .unwrap()
         .pop()
@@ -571,7 +639,7 @@ async fn source_held_waits_for_submit_outcome_before_progressing() {
         .deliver_and_wait(SchedulerLifecycleEvent::SourceHeld {
             handoff_id,
             request_id,
-            transfer_delay_ms: Some(0.0),
+            transfer_timing: transfer_timing(Some(0.0)),
         })
         .await;
     submit
@@ -587,8 +655,9 @@ async fn source_held_waits_for_submit_outcome_before_progressing() {
         destination.recv().await.unwrap(),
         Some(BootstrapMessage::Fact(HandoffFact::SourceHeld {
             handoff_id: observed,
-            transfer_delay_ms: Some(0.0),
+            transfer_timing: observed_timing,
         })) if observed == handoff_id
+            && observed_timing == transfer_timing(Some(0.0))
     ));
     let reserve = match destination.recv().await.unwrap().unwrap() {
         BootstrapMessage::Action(
@@ -609,6 +678,7 @@ async fn source_held_waits_for_submit_outcome_before_progressing() {
     destination
         .send(BootstrapMessage::Fact(HandoffFact::DestinationReserved {
             handoff_id,
+            transferable_prompt_tokens: 1,
         }))
         .await
         .unwrap();
@@ -850,6 +920,7 @@ fn destination_command_proxy(
 
 async fn run_live_handoff_conformance(
     engine_type: EngineType,
+    transfer_timing_mode: KvTransferTimingMode,
     source_arrives_first: bool,
     case: usize,
 ) -> NormalizedHandoffConformance {
@@ -868,10 +939,19 @@ async fn run_live_handoff_conformance(
     let manager =
         SourceHandoffManager::start(incoming, 2, Duration::from_secs(2), shutdown.clone());
 
-    let (mut source_scheduler, mut source_output) =
-        start_scheduler(engine_type, WorkerType::Prefill, shutdown.clone());
+    let (mut source_scheduler, mut source_output) = start_scheduler_with_mode(
+        engine_type,
+        WorkerType::Prefill,
+        transfer_timing_mode,
+        shutdown.clone(),
+    );
     let (mut destination_scheduler, mut destination_output, destination_kv_events) =
-        start_scheduler_with_kv_events(engine_type, WorkerType::Decode, shutdown.clone());
+        start_scheduler_with_kv_events_and_mode(
+            engine_type,
+            WorkerType::Decode,
+            transfer_timing_mode,
+            shutdown.clone(),
+        );
     let (destination_command_tx, destination_kv_observer) = destination_command_proxy(
         destination_scheduler.command_sender(),
         destination_kv_events,
@@ -1036,18 +1116,32 @@ async fn run_live_handoff_conformance(
 
 #[tokio::test]
 async fn live_and_offline_handoff_surfaces_share_one_conformance_report() {
-    for (case, (engine_type, source_arrives_first)) in [
-        (EngineType::Vllm, true),
-        (EngineType::Vllm, false),
-        (EngineType::Sglang, true),
-        (EngineType::Sglang, false),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let live = run_live_handoff_conformance(engine_type, source_arrives_first, case).await;
-        let offline = dynamo_mocker::replay::run_offline_handoff_conformance(engine_type).unwrap();
-        assert_eq!(live, offline);
+    let mut case = 0;
+    for transfer_timing_mode in [
+        KvTransferTimingMode::FullPrompt,
+        KvTransferTimingMode::DestinationMissing,
+    ] {
+        for (engine_type, source_arrives_first) in [
+            (EngineType::Vllm, true),
+            (EngineType::Vllm, false),
+            (EngineType::Sglang, true),
+            (EngineType::Sglang, false),
+        ] {
+            let live = run_live_handoff_conformance(
+                engine_type,
+                transfer_timing_mode,
+                source_arrives_first,
+                case,
+            )
+            .await;
+            let offline = dynamo_mocker::replay::run_offline_handoff_conformance(
+                engine_type,
+                transfer_timing_mode,
+            )
+            .unwrap();
+            assert_eq!(live, offline);
+            case += 1;
+        }
     }
 }
 
@@ -1190,7 +1284,7 @@ async fn assert_destination_disconnect_cleans_ownership(
             coordinator
                 .on_fact(HandoffFact::SourceHeld {
                     handoff_id,
-                    transfer_delay_ms: None,
+                    transfer_timing: transfer_timing(None),
                 })
                 .unwrap()
                 .pop()
@@ -1213,6 +1307,7 @@ async fn assert_destination_disconnect_cleans_ownership(
             }
             BootstrapMessage::Fact(HandoffFact::DestinationReserved {
                 handoff_id: observed,
+                ..
             }) if observed == handoff_id => reserved = true,
             other => panic!("unexpected destination message: {other:?}"),
         }
@@ -1222,7 +1317,10 @@ async fn assert_destination_disconnect_cleans_ownership(
             .on_action_outcome(reserve.id, HandoffActionOutcome::Accepted)
             .unwrap();
         let after_reserved = coordinator
-            .on_fact(HandoffFact::DestinationReserved { handoff_id })
+            .on_fact(HandoffFact::DestinationReserved {
+                handoff_id,
+                transferable_prompt_tokens: 1,
+            })
             .unwrap();
         let transfer = match order {
             HandoffOrder::SourceFirst => after_reserved.into_iter().next().unwrap(),
@@ -1234,7 +1332,7 @@ async fn assert_destination_disconnect_cleans_ownership(
                 coordinator
                     .on_fact(HandoffFact::SourceHeld {
                         handoff_id,
-                        transfer_delay_ms: None,
+                        transfer_timing: transfer_timing(None),
                     })
                     .unwrap()
                     .pop()
@@ -1353,7 +1451,7 @@ async fn lost_reserve_or_activation_ack_cleans_ambiguous_destination_ownership()
         let reserve = coordinator
             .on_fact(HandoffFact::SourceHeld {
                 handoff_id,
-                transfer_delay_ms: None,
+                transfer_timing: transfer_timing(None),
             })
             .unwrap()
             .pop()
@@ -1377,7 +1475,10 @@ async fn lost_reserve_or_activation_ack_cleans_ambiguous_destination_ownership()
                 ))
             ));
             let transfer = coordinator
-                .on_fact(HandoffFact::DestinationReserved { handoff_id })
+                .on_fact(HandoffFact::DestinationReserved {
+                    handoff_id,
+                    transferable_prompt_tokens: 1,
+                })
                 .unwrap()
                 .pop()
                 .unwrap();
@@ -1450,7 +1551,7 @@ async fn duplicate_lifecycle_route_does_not_replace_the_active_route() {
         .deliver(SchedulerLifecycleEvent::SourceHeld {
             handoff_id,
             request_id,
-            transfer_delay_ms: None,
+            transfer_timing: transfer_timing(None),
         })
         .await;
 
@@ -1951,6 +2052,7 @@ async fn expired_destination_session_deadline_still_cleans_reserved_ownership() 
             }
             BootstrapMessage::Fact(HandoffFact::DestinationReserved {
                 handoff_id: observed,
+                ..
             }) if observed == handoff_id => reserved = true,
             other => panic!("unexpected destination message: {other:?}"),
         }

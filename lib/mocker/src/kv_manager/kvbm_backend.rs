@@ -138,8 +138,12 @@ pub struct VllmDestinationReservation {
     layout: Option<MoveBlock>,
 }
 
-#[cfg(test)]
 impl VllmDestinationReservation {
+    pub(crate) fn transferable_prompt_tokens(&self, block_size: usize) -> usize {
+        self.unpublished_blocks.len().saturating_mul(block_size)
+    }
+
+    #[cfg(test)]
     pub(crate) fn block_ids(&self) -> Vec<usize> {
         self.cached_prefix
             .iter()
@@ -2344,6 +2348,42 @@ mod tests {
         assert_eq!(metadata.parent_hash, None);
         assert_eq!(metadata.local_hash, Some(local_hash));
         assert_eq!(metadata.token_ids.as_deref(), Some(token_ids.as_slice()));
+    }
+
+    #[test]
+    fn destination_transfer_footprint_uses_missing_physical_blocks() {
+        let (mut mgr, _) = make_mgr_capturing(16, 4);
+
+        let cold = ActiveSequence::new((0..10).collect(), 1, Some(4), true, true);
+        let cold_reservation = mgr
+            .reserve_destination_at(&cold, None)
+            .expect("cold destination reservation should fit");
+        assert_eq!(cold_reservation.transferable_prompt_tokens(4), 12);
+        drop(cold_reservation);
+
+        let mut prefix = ActiveSequence::new((0..4).collect(), 1, Some(4), true, true);
+        let prefix_allocation = prefix
+            .prepare_allocation(prefix.num_input_tokens())
+            .expect("prefix should require one full block");
+        assert_eq!(mgr.process(&prefix_allocation), 1);
+        prefix.commit_allocation(prefix.num_input_tokens());
+
+        let partial = mgr
+            .reserve_destination_at(&cold, None)
+            .expect("partially cached destination reservation should fit");
+        assert_eq!(partial.transferable_prompt_tokens(4), 8);
+        drop(partial);
+
+        let mut aligned = ActiveSequence::new((20..28).collect(), 1, Some(4), true, true);
+        let aligned_allocation = aligned
+            .prepare_allocation(aligned.num_input_tokens())
+            .expect("aligned prompt should require two full blocks");
+        assert_eq!(mgr.process(&aligned_allocation), 2);
+        aligned.commit_allocation(aligned.num_input_tokens());
+        let full_hit = mgr
+            .reserve_destination_at(&aligned, None)
+            .expect("fully cached destination reservation should fit");
+        assert_eq!(full_hit.transferable_prompt_tokens(4), 0);
     }
 
     #[test]

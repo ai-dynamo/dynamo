@@ -364,6 +364,35 @@ mod destination_lifecycle {
         assert_eq!(core.mocker_metrics().waiting_requests, 0);
     }
 
+    #[test]
+    fn destination_transfer_footprint_excludes_decode_headroom() {
+        let footprint = |max_output_tokens| {
+            let mut core = SglangCore::new(args(WorkerType::Decode));
+            let effects = core
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: HandoffId::new(),
+                        request: request(Uuid::new_v4(), (0..10).collect(), max_output_tokens),
+                    },
+                    true,
+                )
+                .unwrap();
+            let [
+                SchedulerLifecycleEvent::DestinationReserved {
+                    transferable_prompt_tokens,
+                    ..
+                },
+            ] = effects.lifecycle_events.as_slice()
+            else {
+                panic!("destination reservation should complete immediately");
+            };
+            *transferable_prompt_tokens
+        };
+
+        assert_eq!(footprint(1), 12);
+        assert_eq!(footprint(128), 12);
+    }
+
     async fn send_live_command(
         scheduler: &SglangScheduler,
         command: SchedulerCommand,
@@ -534,17 +563,29 @@ mod destination_lifecycle {
         );
 
         let usage_before_reservation = occupied_tokens(&destination);
-        assert_eq!(
-            destination
-                .apply_command(SchedulerCommand::ReserveDestination {
+        let reserved = destination
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
                     handoff_id,
                     request: request(logical_uuid, logical_tokens, 2),
-                })
-                .unwrap(),
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            reserved.result,
             SchedulerCommandResult::DestinationAccepted {
                 request_id: logical_uuid
             }
         );
+        assert!(matches!(
+            reserved.lifecycle_events.as_slice(),
+            [SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id: reserved_handoff,
+                request_id: reserved_request,
+                transferable_prompt_tokens: 4,
+            }] if *reserved_handoff == handoff_id && *reserved_request == logical_uuid
+        ));
         assert!(destination.destination_is_held(handoff_id));
         assert!(!destination.is_drained());
         assert_eq!(destination.running.len(), 1);
@@ -736,6 +777,7 @@ mod destination_lifecycle {
             [SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id,
                 request_id,
+                ..
             }] if *handoff_id == follower_handoff && *request_id == follower_request
         ));
 

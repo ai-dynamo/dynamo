@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
-use crate::common::utils::compute_prefill_handoff_delay_ms;
+use crate::common::utils::prefill_handoff_transfer_timing;
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::SglangDestinationReservation;
 use crate::replay::TraceCollector;
@@ -313,6 +313,7 @@ impl SglangCore {
         let Some(kv) = reservation else {
             return Vec::new();
         };
+        let transferable_prompt_tokens = kv.transferable_prompt_tokens();
         let (handoff_id, request_id, request) = self
             .pending_destinations
             .pop_front()
@@ -322,6 +323,7 @@ impl SglangCore {
         vec![SchedulerLifecycleEvent::DestinationReserved {
             handoff_id,
             request_id,
+            transferable_prompt_tokens,
         }]
     }
 
@@ -359,12 +361,11 @@ impl SglangCore {
 
     fn complete_source(&mut self, request: SglangRequest) {
         let uuid = request.uuid;
-        let transfer_delay_ms = compute_prefill_handoff_delay_ms(
-            self.config.worker_type,
-            true,
+        let transfer_timing = prefill_handoff_transfer_timing(
             request.prompt_len(),
             self.config.kv_transfer_bandwidth,
             self.config.kv_bytes_per_token,
+            self.config.kv_transfer_timing_mode,
         );
         let payload = HeldSglangPrefill { request };
         let released = match self.source_holds.complete_source(uuid, payload) {
@@ -377,7 +378,7 @@ impl SglangCore {
                     .push(SchedulerLifecycleEvent::SourceHeld {
                         handoff_id,
                         request_id: uuid,
-                        transfer_delay_ms,
+                        transfer_timing,
                     });
                 false
             }

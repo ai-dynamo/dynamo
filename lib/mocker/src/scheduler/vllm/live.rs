@@ -741,6 +741,7 @@ mod tests {
             SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id: observed,
                 request_id: observed_request,
+                ..
             } if observed == handoff_id && observed_request == request_id
         ));
         let host_stores = || {

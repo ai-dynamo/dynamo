@@ -752,6 +752,7 @@ mod tests {
                 [SchedulerLifecycleEvent::DestinationReserved {
                     handoff_id,
                     request_id,
+                    ..
                 }] if *handoff_id == second_handoff && *request_id == second_request
             ));
         }
@@ -919,6 +920,7 @@ mod tests {
                 [SchedulerLifecycleEvent::DestinationReserved {
                     handoff_id,
                     request_id,
+                    ..
                 }] if *handoff_id == pending_handoff && *request_id == pending_request
             ));
             assert_eq!(
@@ -1004,6 +1006,7 @@ mod tests {
             [SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id,
                 request_id,
+                ..
             }] if *handoff_id == pending_handoff && *request_id == pending_request
         ));
         assert_eq!(

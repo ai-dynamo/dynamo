@@ -10,10 +10,10 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use dynamo_mocker::common::handoff::{
     HandoffAction, HandoffActionId, HandoffActionOutcome, HandoffCoordinatorCore, HandoffFact,
-    HandoffId, HandoffOrder, IssuedHandoffAction, NormalizedHandoffEvent,
-    validate_transfer_delay_ms,
+    HandoffId, HandoffOrder, HandoffTransferTiming, IssuedHandoffAction, NormalizedHandoffEvent,
+    validate_transfer_delay_ms, validate_transfer_timing,
 };
-use dynamo_mocker::common::protocols::{DirectRequest, EngineType};
+use dynamo_mocker::common::protocols::{DirectRequest, EngineType, KvTransferTimingMode};
 use dynamo_mocker::scheduler::{
     SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult,
     SchedulerLifecycleEvent,
@@ -37,6 +37,18 @@ fn session_deadline_with_transfer(
     Ok(session_started
         + session_timeout
         + Duration::from_secs_f64(transfer_delay_ms.unwrap_or_default() / 1000.0))
+}
+
+fn transfer_timeout_delay(
+    transfer_timing: HandoffTransferTiming,
+    destination_missing_tokens: Option<usize>,
+) -> Option<Option<f64>> {
+    match transfer_timing.mode {
+        KvTransferTimingMode::FullPrompt => Some(transfer_timing.full_prompt_delay_ms()),
+        KvTransferTimingMode::DestinationMissing => {
+            destination_missing_tokens.map(|tokens| transfer_timing.delay_ms(tokens))
+        }
+    }
 }
 
 pub(crate) fn order_for_engine(engine_type: EngineType) -> Result<HandoffOrder> {
@@ -742,17 +754,17 @@ fn apply_source_held(
     observer: &Option<mpsc::UnboundedSender<NormalizedHandoffEvent>>,
     observed_source_held: &mut bool,
     handoff_id: HandoffId,
-    transfer_delay_ms: Option<f64>,
+    transfer_timing: HandoffTransferTiming,
 ) -> Result<()> {
     let next = coordinator.on_fact(HandoffFact::SourceHeld {
         handoff_id,
-        transfer_delay_ms,
+        transfer_timing,
     })?;
     queue_source_message(
         outbound_tx,
         BootstrapMessage::Fact(HandoffFact::SourceHeld {
             handoff_id,
-            transfer_delay_ms,
+            transfer_timing,
         }),
     )?;
     actions.extend(next);
@@ -817,6 +829,8 @@ async fn run_source_session(
     let mut observed_destination_reserved = false;
     let mut pending_submit_action = None;
     let mut pending_source_held = None;
+    let mut source_transfer_timing = None;
+    let mut destination_transferable_prompt_tokens = None;
 
     tasks.spawn(run_source_transport(
         connection,
@@ -1015,26 +1029,31 @@ async fn run_source_session(
             match event {
                 SourceSessionEvent::Scheduler(SchedulerLifecycleEvent::SourceHeld {
                     handoff_id: observed,
-                    transfer_delay_ms,
+                    transfer_timing,
                     ..
                 }) if observed == handoff_id => {
-                    if transfer_delay_ms.is_some() {
+                    validate_transfer_timing(transfer_timing)?;
+                    source_transfer_timing = Some(transfer_timing);
+                    if let Some(Some(timeout_delay)) = transfer_timeout_delay(
+                        transfer_timing,
+                        destination_transferable_prompt_tokens,
+                    ) {
                         session_deadline = session_deadline_with_transfer(
                             session_started,
                             session_timeout,
-                            transfer_delay_ms,
+                            Some(timeout_delay),
                         )?;
                         deadline.as_mut().reset(session_deadline);
                     }
                     if pending_submit_action.is_some() {
                         if let Some(previous) = pending_source_held
-                            && previous != transfer_delay_ms
+                            && previous != transfer_timing
                         {
                             bail!(
-                                "source changed its modeled transfer delay before submission ACK"
+                                "source changed its modeled transfer timing before submission ACK"
                             );
                         }
-                        pending_source_held = Some(transfer_delay_ms);
+                        pending_source_held = Some(transfer_timing);
                         continue;
                     }
                     apply_source_held(
@@ -1044,7 +1063,7 @@ async fn run_source_session(
                         &observer,
                         &mut observed_source_held,
                         handoff_id,
-                        transfer_delay_ms,
+                        transfer_timing,
                     )?;
                 }
                 SourceSessionEvent::Scheduler(SchedulerLifecycleEvent::SourceHeld { .. }) => {
@@ -1066,15 +1085,31 @@ async fn run_source_session(
                 SourceSessionEvent::Remote(Ok(Some(BootstrapMessage::Fact(
                     HandoffFact::DestinationReserved {
                         handoff_id: observed,
+                        transferable_prompt_tokens,
                     },
                 )))) if observed == handoff_id => {
+                    destination_transferable_prompt_tokens = Some(transferable_prompt_tokens);
                     if !observed_destination_reserved {
                         observe_handoff(&observer, NormalizedHandoffEvent::DestinationReserved);
                         observed_destination_reserved = true;
                     }
-                    actions.extend(
-                        coordinator.on_fact(HandoffFact::DestinationReserved { handoff_id })?,
-                    );
+                    if let Some(Some(timeout_delay)) = source_transfer_timing
+                        .filter(|timing| timing.mode == KvTransferTimingMode::DestinationMissing)
+                        .and_then(|timing| {
+                            transfer_timeout_delay(timing, Some(transferable_prompt_tokens))
+                        })
+                    {
+                        session_deadline = session_deadline_with_transfer(
+                            session_started,
+                            session_timeout,
+                            Some(timeout_delay),
+                        )?;
+                        deadline.as_mut().reset(session_deadline);
+                    }
+                    actions.extend(coordinator.on_fact(HandoffFact::DestinationReserved {
+                        handoff_id,
+                        transferable_prompt_tokens,
+                    })?);
                 }
                 SourceSessionEvent::Remote(Ok(Some(BootstrapMessage::Abort { message })))
                 | SourceSessionEvent::Remote(Ok(Some(BootstrapMessage::ProtocolError {
@@ -1095,7 +1130,7 @@ async fn run_source_session(
                     actions.extend(coordinator.on_action_outcome(action_id, outcome)?);
                     if completes_submit {
                         pending_submit_action = None;
-                        if let Some(transfer_delay_ms) = pending_source_held.take() {
+                        if let Some(transfer_timing) = pending_source_held.take() {
                             if !submitted {
                                 bail!("source was held after its submission failed");
                             }
@@ -1106,7 +1141,7 @@ async fn run_source_session(
                                 &observer,
                                 &mut observed_source_held,
                                 handoff_id,
-                                transfer_delay_ms,
+                                transfer_timing,
                             )?;
                         }
                     }
@@ -1170,14 +1205,15 @@ pub(crate) async fn run_destination_session(
     let mut complete = false;
     let mut session_started = None;
     let mut session_deadline = tokio::time::Instant::now() + PARTICIPANT_RENDEZVOUS_TIMEOUT;
-    let mut transfer_delay_ms = None;
+    let mut transfer_timing: Option<HandoffTransferTiming> = None;
+    let mut transferable_prompt_tokens = None;
     let action_stop = CancellationToken::new();
     let action_tasks = TaskTracker::new();
     let (action_result_tx, mut action_result_rx) =
         mpsc::channel::<(IssuedHandoffAction, HandoffActionOutcome)>(1);
     let mut pending_action: Option<IssuedHandoffAction> = None;
     let mut reserve_ack_sent = false;
-    let mut pending_destination_reserved = false;
+    let mut pending_destination_reserved = None;
     let mut destination_reserved_sent = false;
     let deadline = tokio::time::sleep_until(session_deadline);
     tokio::pin!(deadline);
@@ -1216,16 +1252,16 @@ pub(crate) async fn run_destination_session(
                 }).await?;
                 if accepted_reservation {
                     reserve_ack_sent = true;
-                    if pending_destination_reserved {
+                    if let Some(transferable_prompt_tokens) = pending_destination_reserved.take() {
                         connection
                             .send(BootstrapMessage::Fact(HandoffFact::DestinationReserved {
                                 handoff_id,
+                                transferable_prompt_tokens,
                             }))
                             .await?;
-                        pending_destination_reserved = false;
                         destination_reserved_sent = true;
                     }
-                } else if pending_destination_reserved
+                } else if pending_destination_reserved.is_some()
                     && matches!(action.action, HandoffAction::ReserveDestination { .. })
                 {
                     bail!("destination reservation lifecycle accompanied a failed reservation");
@@ -1236,16 +1272,43 @@ pub(crate) async fn run_destination_session(
                     break;
                 };
                 match event {
-                    SchedulerLifecycleEvent::DestinationReserved { handoff_id: observed, .. }
+                    SchedulerLifecycleEvent::DestinationReserved {
+                        handoff_id: observed,
+                        transferable_prompt_tokens: observed_transferable_prompt_tokens,
+                        ..
+                    }
                         if observed == handoff_id =>
                     {
-                        if destination_reserved_sent || pending_destination_reserved {
+                        if destination_reserved_sent || pending_destination_reserved.is_some() {
                             continue;
+                        }
+                        transferable_prompt_tokens = Some(observed_transferable_prompt_tokens);
+                        if let Some(Some(timeout_delay)) = transfer_timing
+                            .filter(|timing| {
+                                timing.mode == KvTransferTimingMode::DestinationMissing
+                            })
+                            .and_then(|timing| {
+                                transfer_timeout_delay(
+                                    timing,
+                                    Some(observed_transferable_prompt_tokens),
+                                )
+                            })
+                        {
+                            session_deadline = session_deadline_with_transfer(
+                                session_started.ok_or_else(|| {
+                                    anyhow!("destination reserved before source registration")
+                                })?,
+                                session_timeout,
+                                Some(timeout_delay),
+                            )?;
+                            deadline.as_mut().reset(session_deadline);
                         }
                         if reserve_ack_sent {
                             connection
                                 .send(BootstrapMessage::Fact(HandoffFact::DestinationReserved {
                                     handoff_id,
+                                    transferable_prompt_tokens:
+                                        observed_transferable_prompt_tokens,
                                 }))
                                 .await?;
                             destination_reserved_sent = true;
@@ -1253,7 +1316,8 @@ pub(crate) async fn run_destination_session(
                             pending_action.map(|action| action.action),
                             Some(HandoffAction::ReserveDestination { .. })
                         ) {
-                            pending_destination_reserved = true;
+                            pending_destination_reserved =
+                                Some(observed_transferable_prompt_tokens);
                         } else {
                             bail!("destination reserved before its action was pending");
                         }
@@ -1280,21 +1344,25 @@ pub(crate) async fn run_destination_session(
                     }
                     BootstrapMessage::Fact(HandoffFact::SourceHeld {
                         handoff_id: observed,
-                        transfer_delay_ms: observed_delay,
+                        transfer_timing: observed_timing,
                     }) if observed == handoff_id => {
-                        if let Some(previous) = transfer_delay_ms
-                            && previous != observed_delay
+                        validate_transfer_timing(observed_timing)?;
+                        if let Some(previous) = transfer_timing
+                            && previous != observed_timing
                         {
-                            bail!("source changed the modeled transfer delay");
+                            bail!("source changed the modeled transfer timing");
                         }
-                        transfer_delay_ms = Some(observed_delay);
-                        if observed_delay.is_some() {
+                        transfer_timing = Some(observed_timing);
+                        if let Some(Some(timeout_delay)) = transfer_timeout_delay(
+                            observed_timing,
+                            transferable_prompt_tokens,
+                        ) {
                             session_deadline = session_deadline_with_transfer(
                                 session_started.ok_or_else(|| {
                                     anyhow!("source fact arrived before registration")
                                 })?,
                                 session_timeout,
-                                observed_delay,
+                                Some(timeout_delay),
                             )?;
                             deadline.as_mut().reset(session_deadline);
                         }
