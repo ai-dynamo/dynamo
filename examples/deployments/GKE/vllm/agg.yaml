@@ -16,7 +16,6 @@ spec:
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
-      subComponentType: decode
       replicas: 1
       resources:
         limits:
