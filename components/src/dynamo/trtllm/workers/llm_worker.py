@@ -746,6 +746,11 @@ async def init_llm_worker(
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
+                lower_tier_kv_event_publishers=(
+                    {0: consolidator_publisher}
+                    if consolidator_publisher is not None
+                    else None
+                ),
             ) as publisher:
                 handler_config.publisher = publisher
 

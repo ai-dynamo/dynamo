@@ -395,6 +395,7 @@ class Publisher:
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
+        lower_tier_kv_event_publishers: Optional[Dict[int, KvEventPublisher]] = None,
     ) -> None:
         self.endpoint = endpoint
         self.engine = engine
@@ -437,6 +438,10 @@ class Publisher:
         self.kv_event_publishers: Optional[
             Dict[int, KvEventPublisher]
         ] = None  # One per attention_dp_rank
+        self.lower_tier_kv_event_publishers: Dict[int, KvEventPublisher] = dict(
+            lower_tier_kv_event_publishers or {}
+        )
+        self._owned_lower_tier_publisher_ranks: set[int] = set()
         self.zmq_kv_event_publisher = None  # ZMQ publisher for consolidator
         self.publish_kv_cache_events_thread: Optional[ManagedThread] = None
         self.publish_stats_thread: Optional[ManagedThread] = None
@@ -528,8 +533,9 @@ class Publisher:
         if self.zmq_kv_event_publisher:
             logging.info(
                 "KV Event Consolidator enabled - using ZMQ publisher only. "
-                "Consolidator will publish consolidated events to NATS."
+                "Consolidator will publish consolidated device events to NATS."
             )
+            self._init_lower_tier_kv_event_publishers()
             self.kv_event_publishers = None
         else:
             # No consolidator: use NATS publisher (router subscribes directly)
@@ -546,6 +552,44 @@ class Publisher:
             logging.info(
                 f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
             )
+
+    def _init_lower_tier_kv_event_publishers(self) -> None:
+        """Create direct tier-aware publishers for non-device KV events.
+
+        The ZMQ consolidator wire format is vLLM-compatible and does not carry
+        storage tier. Device events stay on ZMQ; lower-tier events are sent
+        through direct KvEventPublisher instances so the router can populate
+        HostPinned/Disk/External indexes.
+        """
+        if not self.zmq_kv_event_publisher:
+            return
+
+        if not hasattr(self, "lower_tier_kv_event_publishers"):
+            self.lower_tier_kv_event_publishers = {}
+        if not hasattr(self, "_owned_lower_tier_publisher_ranks"):
+            self._owned_lower_tier_publisher_ranks = set()
+
+        for rank in range(self.attention_dp_size):
+            if rank in self.lower_tier_kv_event_publishers:
+                continue
+            self.lower_tier_kv_event_publishers[rank] = KvEventPublisher(
+                endpoint=self.endpoint,
+                worker_id=self.worker_id,
+                kv_block_size=self.kv_block_size,
+                dp_rank=rank,
+                enable_local_indexer=self.enable_local_indexer,
+            )
+            self._owned_lower_tier_publisher_ranks.add(rank)
+        logging.info(
+            "Created %d lower-tier direct KV event publisher(s) for ZMQ "
+            "consolidator path; borrowed ranks=%s owned ranks=%s",
+            len(self.lower_tier_kv_event_publishers),
+            sorted(
+                set(self.lower_tier_kv_event_publishers)
+                - self._owned_lower_tier_publisher_ranks
+            ),
+            sorted(self._owned_lower_tier_publisher_ranks),
+        )
 
         # Always initialize the thread - it routes to either ZMQ or NATS publisher
         self._init_publish_kv_cache_events_thread()
@@ -1048,29 +1092,46 @@ class Publisher:
         """Route a BlockStored event to ZMQ (consolidator) or NATS (direct).
 
         `storage_tier` is "device", "host_pinned", "disk", or "external".
-        Only the NATS direct path is tier-aware today; the ZMQ path remains
-        on the vLLM-compatible schema (always device) until the consolidator
-        learns to carry the tier field.
+        Device events use ZMQ when the consolidator is active. Lower-tier
+        events bypass the tierless ZMQ schema and use direct tier-aware
+        publishers so the router's lower-tier indexes stay populated.
         """
         if not block_hashes:
             return
         if self.zmq_kv_event_publisher:
-            if storage_tier != "device":
+            if storage_tier == "device":
+                self.zmq_kv_event_publisher.publish_stored(
+                    token_ids,
+                    num_block_tokens,
+                    block_hashes,
+                    parent_hash,
+                    block_mm_infos,
+                    attention_dp_rank,
+                    lora_name,
+                )
+            else:
+                publisher = self.lower_tier_kv_event_publishers.get(attention_dp_rank)
+                if publisher is None:
+                    logging.warning(
+                        "No lower-tier KV event publisher for "
+                        f"attention_dp_rank={attention_dp_rank}, "
+                        f"available ranks: {list(self.lower_tier_kv_event_publishers.keys())}"
+                    )
+                    return
                 logging.warning(
-                    "Dropping non-device BlockStored event under ZMQ "
-                    "consolidator path (schema does not yet carry tier). "
+                    "Publishing non-device BlockStored event through direct "
+                    "tier-aware side channel under ZMQ consolidator path. "
                     f"tier={storage_tier} hashes={block_hashes}"
                 )
-                return
-            self.zmq_kv_event_publisher.publish_stored(
-                token_ids,
-                num_block_tokens,
-                block_hashes,
-                parent_hash,
-                block_mm_infos,
-                attention_dp_rank,
-                lora_name,
-            )
+                publisher.publish_stored(
+                    token_ids,
+                    num_block_tokens,
+                    block_hashes,
+                    parent_hash,
+                    block_mm_infos,
+                    lora_name=lora_name,
+                    storage_tier=storage_tier,
+                )
         elif self.kv_event_publishers:
             publisher = self.kv_event_publishers.get(attention_dp_rank)
             if publisher is None:
@@ -1098,16 +1159,25 @@ class Publisher:
         if not block_hashes:
             return
         if self.zmq_kv_event_publisher:
-            if storage_tier != "device":
+            if storage_tier == "device":
+                self.zmq_kv_event_publisher.publish_removed(
+                    block_hashes, attention_dp_rank
+                )
+            else:
+                publisher = self.lower_tier_kv_event_publishers.get(attention_dp_rank)
+                if publisher is None:
+                    logging.warning(
+                        "No lower-tier KV event publisher for "
+                        f"attention_dp_rank={attention_dp_rank}, "
+                        f"available ranks: {list(self.lower_tier_kv_event_publishers.keys())}"
+                    )
+                    return
                 logging.warning(
-                    "Dropping non-device BlockRemoved event under ZMQ "
-                    "consolidator path (schema does not yet carry tier). "
+                    "Publishing non-device BlockRemoved event through direct "
+                    "tier-aware side channel under ZMQ consolidator path. "
                     f"tier={storage_tier} hashes={block_hashes}"
                 )
-                return
-            self.zmq_kv_event_publisher.publish_removed(
-                block_hashes, attention_dp_rank
-            )
+                publisher.publish_removed(block_hashes, storage_tier=storage_tier)
         elif self.kv_event_publishers:
             publisher = self.kv_event_publishers.get(attention_dp_rank)
             if publisher is None:
@@ -1164,6 +1234,18 @@ class Publisher:
         # Shutdown ZMQ publisher if it exists
         if self.zmq_kv_event_publisher:
             self.zmq_kv_event_publisher.shutdown()
+
+        for rank in getattr(self, "_owned_lower_tier_publisher_ranks", set()):
+            publisher = self.lower_tier_kv_event_publishers.get(rank)
+            if publisher is None:
+                continue
+            try:
+                publisher.shutdown()
+            except RuntimeError as e:
+                logging.warning(
+                    "Lower-tier KV event publisher shutdown failed for "
+                    f"rank={rank}: {e}"
+                )
 
         # Shutdown FpmDirectPublisher (stops the per-rank serialization tasks
         # and the event-plane publisher task on the Rust side). PyO3 surfaces
@@ -1223,6 +1305,7 @@ async def get_publisher(
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
+    lower_tier_kv_event_publishers: Optional[Dict[int, KvEventPublisher]] = None,
 ) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
@@ -1234,6 +1317,7 @@ async def get_publisher(
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,
+        lower_tier_kv_event_publishers=lower_tier_kv_event_publishers,
     )
     try:
         publisher.initialize()
