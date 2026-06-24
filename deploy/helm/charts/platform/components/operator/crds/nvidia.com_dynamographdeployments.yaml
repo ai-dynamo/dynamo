@@ -21213,3 +21213,14 @@ spec:
       storage: false
       subresources:
         status: {}
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        # CA will be patched in by the Dynamo operator or other means, depending on cert mode auto or manual
+        service:
+          namespace: dynamo-system
+          name: dynamo-operator-webhook-service
+          path: /convert
+      conversionReviewVersions:
+        - v1

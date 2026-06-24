@@ -22,7 +22,8 @@ use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::OfflineDisaggReplayConfig;
 use crate::replay::{
     ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTimedKvEvent, ReplayTimedOutputSignal,
-    ReplayTimedRequest, ReplayWorkerArtifacts, TraceCollector, TraceSimulationReport,
+    ReplayTimedRequest, ReplayWorkerArtifacts, SlaThresholds, TraceCollector,
+    TraceSimulationReport,
 };
 use crate::scheduler::RouterEventVisibility;
 
@@ -37,10 +38,13 @@ fn timestamp_us_from_ms(timestamp_ms: f64) -> u64 {
 fn finish_with_replay_wall_time(
     collector: TraceCollector,
     started_at: Instant,
+    sla: SlaThresholds,
 ) -> TraceSimulationReport {
     // Capture elapsed time before final report aggregation so bookkeeping such
     // as latency sorting is not counted as replay execution.
     let wall_time_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    let mut collector = collector;
+    collector.set_sla_thresholds(sla);
     collector.finish().with_wall_time_ms(wall_time_ms)
 }
 
@@ -142,6 +146,7 @@ pub(crate) fn simulate_trace(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     if use_single_runtime(num_workers, router_mode) {
         simulate_trace_single(
@@ -150,6 +155,7 @@ pub(crate) fn simulate_trace(
             arrival_speedup_ratio,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )
     } else {
         simulate_trace_multi(
@@ -162,6 +168,7 @@ pub(crate) fn simulate_trace(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )
     }
 }
@@ -177,6 +184,7 @@ pub(crate) fn simulate_concurrency(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     if use_single_runtime(num_workers, router_mode) {
         simulate_concurrency_single(
@@ -185,6 +193,7 @@ pub(crate) fn simulate_concurrency(
             max_in_flight,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )
     } else {
         simulate_concurrency_multi(
@@ -197,6 +206,7 @@ pub(crate) fn simulate_concurrency(
             router_mode,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )
     }
 }
@@ -211,6 +221,7 @@ pub(crate) fn simulate_trace_workload(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     simulate_trace_workload_with_delta_mode(
         args,
@@ -222,6 +233,7 @@ pub(crate) fn simulate_trace_workload(
         false,
         record_per_request,
         max_sim_time_ms,
+        sla,
     )
 }
 
@@ -232,9 +244,10 @@ pub(crate) fn simulate_agentic_trace_workload(
     trace: AgenticTrace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     if use_single_runtime(num_workers, router_mode) {
-        simulate_agentic_trace_workload_single(args, trace)
+        simulate_agentic_trace_workload_single(args, trace, sla)
     } else {
         simulate_agentic_trace_workload_multi(
             args,
@@ -243,6 +256,7 @@ pub(crate) fn simulate_agentic_trace_workload(
             trace,
             num_workers,
             router_mode,
+            sla,
         )
     }
 }
@@ -257,6 +271,7 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     simulate_trace_workload_with_delta_mode(
         args,
@@ -268,6 +283,7 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
         true,
         record_per_request,
         max_sim_time_ms,
+        sla,
     )
 }
 
@@ -282,6 +298,7 @@ fn simulate_trace_workload_with_delta_mode(
     accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     if use_single_runtime(num_workers, router_mode) {
         simulate_trace_workload_single(
@@ -290,6 +307,7 @@ fn simulate_trace_workload_with_delta_mode(
             accumulate_session_deltas,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )
     } else {
         simulate_trace_workload_multi(
@@ -302,6 +320,7 @@ fn simulate_trace_workload_with_delta_mode(
             accumulate_session_deltas,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )
     }
 }
@@ -317,6 +336,7 @@ pub(crate) fn simulate_concurrency_workload(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_workload_with_delta_mode(
         args,
@@ -329,6 +349,7 @@ pub(crate) fn simulate_concurrency_workload(
         false,
         record_per_request,
         max_sim_time_ms,
+        sla,
     )
 }
 
@@ -343,6 +364,7 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_workload_with_delta_mode(
         args,
@@ -355,6 +377,7 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
         true,
         record_per_request,
         max_sim_time_ms,
+        sla,
     )
 }
 
@@ -370,6 +393,7 @@ fn simulate_concurrency_workload_with_delta_mode(
     accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     if use_single_runtime(num_workers, router_mode) {
         simulate_concurrency_workload_single(
@@ -379,6 +403,7 @@ fn simulate_concurrency_workload_with_delta_mode(
             accumulate_session_deltas,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )
     } else {
         simulate_concurrency_workload_multi(
@@ -392,6 +417,7 @@ fn simulate_concurrency_workload_with_delta_mode(
             accumulate_session_deltas,
             record_per_request,
             max_sim_time_ms,
+            sla,
         )
     }
 }
@@ -406,6 +432,7 @@ pub(crate) fn simulate_trace_disagg(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
@@ -420,7 +447,7 @@ pub(crate) fn simulate_trace_disagg(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -433,6 +460,7 @@ pub(crate) fn simulate_concurrency_disagg(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let pending = VecDeque::from(requests);
@@ -447,9 +475,10 @@ pub(crate) fn simulate_concurrency_disagg(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
@@ -458,6 +487,7 @@ pub(crate) fn simulate_trace_workload_disagg(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
@@ -472,7 +502,7 @@ pub(crate) fn simulate_trace_workload_disagg(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -485,6 +515,7 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let driver =
@@ -500,7 +531,7 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 pub(crate) fn simulate_trace_single(
@@ -509,6 +540,7 @@ pub(crate) fn simulate_trace_single(
     arrival_speedup_ratio: f64,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -517,7 +549,7 @@ pub(crate) fn simulate_trace_single(
         .with_per_request_records(record_per_request)
         .with_max_sim_time_ms(max_sim_time_ms)
         .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 pub(crate) fn simulate_concurrency_single(
@@ -526,6 +558,7 @@ pub(crate) fn simulate_concurrency_single(
     max_in_flight: usize,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -538,7 +571,7 @@ pub(crate) fn simulate_concurrency_single(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 pub(crate) fn simulate_trace_workload_single(
@@ -547,6 +580,7 @@ pub(crate) fn simulate_trace_workload_single(
     accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -560,19 +594,20 @@ pub(crate) fn simulate_trace_workload_single(
         .with_per_request_records(record_per_request)
         .with_max_sim_time_ms(max_sim_time_ms)
         .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 pub(crate) fn simulate_agentic_trace_workload_single(
     args: MockEngineArgs,
     trace: AgenticTrace,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
     let driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
     let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace).run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 pub(crate) fn simulate_concurrency_workload_single(
@@ -582,6 +617,7 @@ pub(crate) fn simulate_concurrency_workload_single(
     accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -602,7 +638,7 @@ pub(crate) fn simulate_concurrency_workload_single(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -616,6 +652,7 @@ pub(crate) fn simulate_trace_multi(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -632,7 +669,7 @@ pub(crate) fn simulate_trace_multi(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -646,6 +683,7 @@ pub(crate) fn simulate_concurrency_multi(
     router_mode: ReplayRouterMode,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -662,7 +700,7 @@ pub(crate) fn simulate_concurrency_multi(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -676,6 +714,7 @@ pub(crate) fn simulate_trace_workload_multi(
     accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -696,7 +735,7 @@ pub(crate) fn simulate_trace_workload_multi(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 pub(crate) fn simulate_agentic_trace_workload_multi(
@@ -706,6 +745,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
     trace: AgenticTrace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -720,7 +760,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
         router_mode,
     )?
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -735,6 +775,7 @@ pub(crate) fn simulate_concurrency_workload_multi(
     accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -758,7 +799,7 @@ pub(crate) fn simulate_concurrency_workload_multi(
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
-    Ok(finish_with_replay_wall_time(collector, started_at))
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 #[cfg(test)]

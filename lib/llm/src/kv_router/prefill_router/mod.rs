@@ -8,9 +8,8 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    config::RouterConfigOverride,
-    protocols::{RouterBackpressureReason, RoutingConstraints},
+    PrefillLoadEstimator, config::RouterConfigOverride, protocols::RoutingConstraints,
+    scheduling::QueueRejection,
 };
 use dynamo_runtime::{
     pipeline::{
@@ -102,10 +101,8 @@ pub enum PrefillQueryOutcome {
         worker_id: u64,
         dp_rank: Option<u32>,
     },
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        max_queued_isl_tokens: Option<usize>,
+    QueueRejected {
+        rejection: QueueRejection,
     },
 }
 
@@ -201,7 +198,7 @@ impl
         if self.router_mode.is_direct_routing() && preselected_worker.is_none() {
             return Err(anyhow::anyhow!(
                 "Prefill worker ID required in Direct routing mode but none found in request. \
-                 Expected prefill_worker_id to be set via x-prefill-instance-id header by external router (e.g., EPP)."
+                 Expected prefill_worker_id to be set via x-dynamo-prefill-instance-id header by external router (e.g., EPP)."
             ));
         }
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Video Diffusion Support (Experimental)
+subtitle: Experimental text-to-video and text-to-image diffusion in TensorRT-LLM using the visual_gen module and Diffusers pipelines.
 ---
 
 For general TensorRT-LLM features and configuration, see the [Reference Guide](trtllm-reference-guide.md).
