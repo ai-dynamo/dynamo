@@ -45,7 +45,10 @@ pub fn discover_trace_files(explicit_inputs: &[String], start_dir: &Path) -> Res
                 if !is_trace_path(&input_path) || is_ignored_path(&input_path) {
                     bail!("not a Claude session trace file: {}", input_path.display());
                 }
-                discovered.push(input_path);
+                discovered.push(input_path.clone());
+                if let (Some(parent), Some(stem)) = (input_path.parent(), input_path.file_stem()) {
+                    discovered.extend(scan_trace_dir(&parent.join(stem).join("subagents"))?);
+                }
                 continue;
             }
 
@@ -113,9 +116,6 @@ fn scan_trace_dir(root: &Path) -> Result<Vec<PathBuf>> {
             let path = entry.path();
             let file_type = entry.file_type()?;
             if file_type.is_dir() {
-                if path.file_name().and_then(|value| value.to_str()) == Some("subagents") {
-                    continue;
-                }
                 queue.push_back(path);
                 continue;
             }
@@ -137,16 +137,14 @@ fn is_trace_path(path: &Path) -> bool {
 }
 
 fn is_ignored_path(path: &Path) -> bool {
-    path.components()
-        .any(|component| component.as_os_str() == "subagents")
-        || IGNORED_FILENAMES
-            .iter()
-            .any(|ignored| path.file_name().and_then(|value| value.to_str()) == Some(ignored))
+    IGNORED_FILENAMES
+        .iter()
+        .any(|ignored| path.file_name().and_then(|value| value.to_str()) == Some(ignored))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::iter_ancestor_roots;
+    use super::{iter_ancestor_roots, scan_trace_dir};
     use tempfile::TempDir;
 
     #[test]
@@ -162,6 +160,24 @@ mod tests {
             last.parent().is_none(),
             "expected filesystem root, got {}",
             last.display()
+        );
+    }
+
+    #[test]
+    fn scan_includes_subagent_traces() {
+        let temp = TempDir::new().unwrap();
+        let subagents = temp.path().join("session-1/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(temp.path().join("session-1.jsonl"), "").unwrap();
+        std::fs::write(subagents.join("agent-child.jsonl"), "").unwrap();
+
+        let traces = scan_trace_dir(temp.path()).unwrap();
+
+        assert_eq!(traces.len(), 2);
+        assert!(
+            traces
+                .iter()
+                .any(|path| path.ends_with("subagents/agent-child.jsonl"))
         );
     }
 }

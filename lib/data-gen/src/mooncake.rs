@@ -202,20 +202,25 @@ pub fn hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Ve
 /// Fallible token-block hashing helper for callers that want to surface
 /// invalid block-size or request-shape errors.
 pub fn try_hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Result<Vec<u64>> {
-    require_positive("block size", mapper.block_size)?;
-    let block_size: u32 = mapper
-        .block_size
+    let sequence_hashes = sequence_hashes_for_tokens(tokens, mapper.block_size)?;
+    Ok(ids_for_sequence_hashes(mapper, &sequence_hashes))
+}
+
+/// Derive the sequence-aware block hashes recorded by Dynamo request traces.
+pub fn sequence_hashes_for_tokens(tokens: &[u32], block_size: usize) -> Result<Vec<u64>> {
+    require_positive("block size", block_size)?;
+    let block_size_u32: u32 = block_size
         .try_into()
         .context("block_size does not fit u32")?;
     let request = Request::builder().tokens(tokens.to_vec()).build()?;
     let salt_hash = request.salt_hash()?;
-    let mut sequence_hashes = request.into_sequence_hashes(block_size)?;
+    let mut sequence_hashes = request.into_sequence_hashes(block_size_u32)?;
     if let Some(partial_hash) =
-        trailing_partial_sequence_hash(salt_hash, mapper.block_size, tokens, &sequence_hashes)
+        trailing_partial_sequence_hash(salt_hash, block_size, tokens, &sequence_hashes)
     {
         sequence_hashes.push(partial_hash);
     }
-    Ok(ids_for_sequence_hashes(mapper, &sequence_hashes))
+    Ok(sequence_hashes)
 }
 
 fn trailing_partial_sequence_hash(

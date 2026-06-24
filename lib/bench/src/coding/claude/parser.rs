@@ -52,6 +52,7 @@ struct CachedProgressMetrics {
 #[derive(Debug)]
 struct AssistantGroupSummary {
     entries: Vec<ConversationEntry>,
+    model: String,
     output_length: usize,
     assistant_text_blocks: usize,
     top_level_tool_calls: Vec<ToolCallSummary>,
@@ -64,7 +65,9 @@ struct AssistantGroupSummary {
 pub struct TurnDraft {
     pub session_id: String,
     pub export_session_id: String,
+    pub export_parent_session_id: Option<String>,
     pub turn_index: usize,
+    pub model: String,
     pub input_text: String,
     pub output_length: usize,
     pub assistant_start_ms: i64,
@@ -96,6 +99,7 @@ impl ToolIdNormalizer {
 pub struct SessionTurnBuilder {
     session_id: String,
     export_session_id: String,
+    export_parent_session_id: Option<String>,
     records: Vec<TraceRecord>,
     top_level_indices: Vec<usize>,
     progress_metrics_index: FxHashMap<String, CachedProgressMetrics>,
@@ -109,12 +113,24 @@ pub struct SessionTurnBuilder {
 }
 
 impl SessionTurnBuilder {
-    pub fn new(session_id: String, records: Vec<TraceRecord>, preserve_session_ids: bool) -> Self {
+    pub fn new(trace_id: String, records: Vec<TraceRecord>, preserve_session_ids: bool) -> Self {
+        let root_session_id = records
+            .first()
+            .map(|record| record.session_id.clone())
+            .unwrap_or_else(|| trace_id.clone());
+        let is_subagent = trace_id != root_session_id;
         let export_session_id = if preserve_session_ids {
-            session_id.clone()
+            trace_id.clone()
         } else {
-            anonymized_session_id(&session_id)
+            anonymized_session_id(&trace_id)
         };
+        let export_parent_session_id = is_subagent.then(|| {
+            if preserve_session_ids {
+                root_session_id
+            } else {
+                anonymized_session_id(&root_session_id)
+            }
+        });
 
         let progress_index = build_progress_index(&records);
         let progress_metrics_index = build_progress_metrics_index(&progress_index, &records);
@@ -124,18 +140,20 @@ impl SessionTurnBuilder {
             .filter_map(|(index, record)| {
                 let is_top_level =
                     matches!(record.row_type.as_str(), "user" | "assistant" | "system")
-                        && !record
-                            .raw
-                            .get("isSidechain")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
+                        && (is_subagent
+                            || !record
+                                .raw
+                                .get("isSidechain")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false));
                 is_top_level.then_some(index)
             })
             .collect();
 
         Self {
-            session_id,
+            session_id: trace_id,
             export_session_id,
+            export_parent_session_id,
             records,
             top_level_indices,
             progress_metrics_index,
@@ -227,6 +245,12 @@ impl SessionTurnBuilder {
                 "session_id".to_string(),
                 Value::String(self.export_session_id.clone()),
             );
+            if let Some(parent_session_id) = &self.export_parent_session_id {
+                sidecar.insert(
+                    "parent_session_id".to_string(),
+                    Value::String(parent_session_id.clone()),
+                );
+            }
             sidecar.insert("turn_index".to_string(), json!(self.turn_index));
             sidecar.insert(
                 "num_messages_in_context".to_string(),
@@ -283,7 +307,9 @@ impl SessionTurnBuilder {
             let turn = TurnDraft {
                 session_id: self.session_id.clone(),
                 export_session_id: self.export_session_id.clone(),
+                export_parent_session_id: self.export_parent_session_id.clone(),
                 turn_index: self.turn_index,
+                model: group_summary.model,
                 input_text,
                 output_length: group_summary.output_length,
                 assistant_start_ms: group_summary.start_ms,
@@ -339,6 +365,10 @@ pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<FxHashMap<String, V
                 .get("sessionId")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            let agent_id = payload
+                .get("agentId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let row_type = payload
                 .get("type")
                 .and_then(Value::as_str)
@@ -357,16 +387,14 @@ pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<FxHashMap<String, V
                 continue;
             };
 
-            sessions
-                .entry(session_id.clone())
-                .or_default()
-                .push(TraceRecord {
-                    session_id,
-                    row_type,
-                    timestamp_ms,
-                    source_order,
-                    raw: payload,
-                });
+            let trace_id = agent_id.clone().unwrap_or_else(|| session_id.clone());
+            sessions.entry(trace_id).or_default().push(TraceRecord {
+                session_id,
+                row_type,
+                timestamp_ms,
+                source_order,
+                raw: payload,
+            });
             source_order += 1;
         }
     }
@@ -598,12 +626,19 @@ fn summarize_assistant_group(
     let mut raw_task_tool_ids = Vec::new();
     let mut assistant_text_blocks = 0;
     let mut output_lengths = Vec::new();
+    let mut model = None;
 
     for index in group_indices {
         let record = &records[*index];
         let Some(message) = object_field(&record.raw, "message") else {
             continue;
         };
+        if model.is_none() {
+            model = message
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
         if let Some(output_tokens) = object_field(&Value::Object(message.clone()), "usage")
             .and_then(|usage| usage.get("output_tokens"))
             .and_then(Value::as_u64)
@@ -698,6 +733,7 @@ fn summarize_assistant_group(
 
     Ok(AssistantGroupSummary {
         entries,
+        model: model.unwrap_or_else(|| "unknown".to_string()),
         output_length,
         assistant_text_blocks,
         top_level_tool_calls: tool_calls,
@@ -974,6 +1010,7 @@ fn summarize_progress_indices(indices: &[usize], records: &[TraceRecord]) -> Cac
 #[cfg(test)]
 mod tests {
     use super::{SessionTurnBuilder, TraceRecord};
+    use crate::coding::common::anonymized_session_id;
     use crate::coding::tokenizer::TokenizerWorker;
     use anyhow::Result;
     use serde_json::{Value, json};
@@ -1118,6 +1155,33 @@ mod tests {
                 .map(|turn| turn.input_text.as_str())
                 .collect::<Vec<_>>(),
             vec!["[user] before compact", "[user] compacted summary"]
+        );
+    }
+
+    #[test]
+    fn child_identity_anonymizes_child_and_parent_consistently() {
+        let records = vec![
+            make_record(
+                "user",
+                1_000,
+                0,
+                json!({"type":"user","isSidechain":true,"message":{"role":"user","content":"task"}}),
+            ),
+            make_record(
+                "assistant",
+                2_000,
+                1,
+                json!({"type":"assistant","isSidechain":true,"message":{"id":"child-1","content":[{"type":"text","text":"done"}],"usage":{"output_tokens":1}}}),
+            ),
+        ];
+        let mut builder = SessionTurnBuilder::new("child-agent".to_string(), records, false);
+
+        let turn = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+
+        assert_eq!(turn.export_session_id, anonymized_session_id("child-agent"));
+        assert_eq!(
+            turn.export_parent_session_id.as_deref(),
+            Some(anonymized_session_id("session-1").as_str())
         );
     }
 }

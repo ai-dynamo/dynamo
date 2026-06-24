@@ -18,7 +18,7 @@ cargo run -p dynamo-bench --bin claude_trace_export -- \
 
 That command writes two files:
 
-- Mooncake JSONL: benchmark rows with optional `session_id`, `input_length`, `output_length`, `hash_ids`, and `timestamp` or `delay`
+- `dynamo.request.trace.v1` JSONL with replay hashes and Claude root/subagent identity in `agent_context`
 - Sidecar JSONL: text-free structural metadata such as context shape, top-level tool calls, and nested progress-derived timing
 
 The sidecar path is derived from the output path by inserting `.sidecar` before the extension.
@@ -32,10 +32,7 @@ If `--input-path` is omitted, the exporter:
 3. For each ancestor, checks the matching encoded Claude project directory under `~/.claude/projects/<encoded-absolute-path>`.
 4. Also scans the home-level Claude root `~/.claude/projects`.
 
-Ignored during discovery:
-
-- `history.jsonl`
-- anything under `subagents/`
+`history.jsonl` is ignored. Session-local `subagents/*.jsonl` files are included.
 
 ## Optional Input Override
 
@@ -75,6 +72,7 @@ cargo run -p dynamo-bench --bin claude_trace_export -- \
 The exporter:
 
 - uses top-level non-sidechain `user`, `assistant`, and `system` rows for the main transcript
+- reconstructs each `subagents/*.jsonl` file as a separate child session
 - groups adjacent assistant fragments by `requestId`, then `message.id`
 - excludes `thinking` and `redacted_thinking`
 - resets transcript state on `compact_boundary`
@@ -85,9 +83,10 @@ The exporter:
 
 ## Output Semantics
 
-- The first turn in each session gets `timestamp`.
-- Later turns get `delay`.
+- Root turns use Claude `sessionId` as `agent_context.session_id`.
+- Child turns use Claude `agentId` as `session_id` and root `sessionId` as `parent_session_id`, matching Dynamo's live Claude header mapping.
+- The final request in each root or child session has `session_final=true`.
 - Source Claude timestamps are parsed as UTC and normalized to millisecond replay timing.
-- Each Mooncake row represents the full prompt prefix for that assistant turn.
+- Each request-trace row contains replay hashes for the full prompt prefix of that assistant turn.
 - After compaction, future rows are built from the compact summary forward, not from pre-compact raw history.
 - Rows are written incrementally as turns are merged across sessions.

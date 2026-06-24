@@ -1,21 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Claude-specific orchestration on top of the generic Mooncake primitives.
+//! Claude-specific request-trace export orchestration.
 //!
 //! Handles session scheduling, parallel tokenization with text-overlap reuse,
-//! and global ordering across sessions. The actual row schema, hash-id
-//! mapping, and JSONL writer all live in [`dynamo_data_gen`] so that other
-//! producers can reuse them without depending on Claude parser types.
+//! and global ordering across sessions.
 
 use crate::coding::claude::parser::{SessionTurnBuilder, TraceRecord, TurnDraft};
 use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker, last_word_overlap_start};
 use anyhow::{Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use dynamo_data_gen::{MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper, write_empty_files};
+use dynamo_data_gen::{sequence_hashes_for_tokens, write_empty_files};
 use rustc_hash::FxHashMap;
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::thread::{self, JoinHandle};
 
@@ -87,7 +89,7 @@ struct TokenizeResponse {
     outcome: Result<ReadyTurn, String>,
 }
 
-pub fn write_streamed_mooncake_rows<F>(
+pub fn write_streamed_request_trace_rows<F>(
     output_path: &Path,
     sidecar_path: &Path,
     sessions: FxHashMap<String, Vec<TraceRecord>>,
@@ -109,7 +111,6 @@ where
     let mut states = FxHashMap::default();
     let mut heap = BinaryHeap::new();
     let mut unscheduled_sessions = VecDeque::new();
-    let mut global_trace_start_ms: Option<i64> = None;
     let mut stats = ExportStats::default();
 
     for (session_id, records) in sessions {
@@ -118,12 +119,6 @@ where
         let Some(first_turn) = builder.next_turn(&mut parser_tokenizer)? else {
             continue;
         };
-
-        global_trace_start_ms = Some(
-            global_trace_start_ms
-                .map(|current| current.min(first_turn.assistant_start_ms))
-                .unwrap_or(first_turn.assistant_start_ms),
-        );
 
         let head = HeadTurn {
             turn: first_turn,
@@ -150,11 +145,8 @@ where
     }
 
     stats.max_heap_len = heap.len();
-    let global_trace_start_ms =
-        global_trace_start_ms.ok_or_else(|| anyhow!("no assistant turns were reconstructed"))?;
-
-    let mut writer = MooncakeJsonlWriter::create(output_path, Some(sidecar_path))?;
-    let mut hasher = RollingHashIdMapper::new(config.block_size);
+    let mut output = create_writer(output_path)?;
+    let mut sidecar = create_writer(sidecar_path)?;
 
     let (job_tx, job_rx) = bounded::<TokenizeJob>(config.tokenizer_workers);
     let (result_tx, result_rx) = unbounded::<TokenizeResponse>();
@@ -210,38 +202,68 @@ where
             (head.turn, ready_turn)
         };
 
-        let hash_ids = hasher.hash_token_blocks(&ready_turn.tokens);
-        let row = MooncakeRow {
-            session_id: Some(turn.export_session_id.clone()),
-            input_length: Some(ready_turn.tokens.len()),
-            output_length: Some(turn.output_length),
-            hash_ids: Some(hash_ids),
-            timestamp: turn
-                .delay_ms
-                .is_none()
-                .then_some((turn.assistant_start_ms - global_trace_start_ms) as f64),
-            delay: turn.delay_ms.map(|delay| delay as f64),
-            ..Default::default()
-        };
-
-        writer.write_row(&row)?;
-        writer.write_sidecar(&turn.sidecar)?;
-
         let next_turn = {
             let state = states
                 .get_mut(&session_id)
                 .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
-            state.overlap_base = Some(OverlapBase {
-                previous_text: ready_turn.current_text,
-                previous_tokens: ready_turn.tokens,
-            });
             state.builder.next_turn(&mut parser_tokenizer)?
         };
+        let session_final = next_turn.is_none();
+        let input_sequence_hashes =
+            sequence_hashes_for_tokens(&ready_turn.tokens, config.block_size)?;
+        let mut agent_context = Map::from_iter([(
+            "session_id".to_string(),
+            Value::String(turn.export_session_id.clone()),
+        )]);
+        if let Some(parent_session_id) = &turn.export_parent_session_id {
+            agent_context.insert(
+                "parent_session_id".to_string(),
+                Value::String(parent_session_id.clone()),
+            );
+        }
+        if session_final {
+            agent_context.insert("session_final".to_string(), Value::Bool(true));
+            agent_context.insert("kv_hints".to_string(), json!({"evict_session": true}));
+        }
+        let event = json!({
+            "schema": "dynamo.request.trace.v1",
+            "event_type": "request_end",
+            "event_time_unix_ms": nonnegative_ms(turn.assistant_end_ms),
+            "event_source": "harness",
+            "agent_context": agent_context,
+            "request": {
+                "request_id": format!("claude:{}:{}", turn.export_session_id, turn.turn_index),
+                "model": turn.model,
+                "input_tokens": ready_turn.tokens.len(),
+                "output_tokens": turn.output_length,
+                "request_received_ms": nonnegative_ms(turn.assistant_start_ms),
+                "total_time_ms": (turn.assistant_end_ms - turn.assistant_start_ms).max(0) as f64,
+                "replay": {
+                    "trace_block_size": config.block_size,
+                    "input_length": ready_turn.tokens.len(),
+                    "input_sequence_hashes": input_sequence_hashes,
+                }
+            }
+        });
+        let row = json!({
+            "timestamp": nonnegative_ms(turn.assistant_end_ms),
+            "event": event,
+        });
+
+        write_json_line(&mut output, &row)?;
+        write_json_line(&mut sidecar, &turn.sidecar)?;
+        stats.row_count += 1;
+        stats.sidecar_count += 1;
+
+        let state = states
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
+        state.overlap_base = Some(OverlapBase {
+            previous_text: ready_turn.current_text,
+            previous_tokens: ready_turn.tokens,
+        });
 
         if let Some(next_turn) = next_turn {
-            let state = states
-                .get_mut(&session_id)
-                .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
             let turn_key = state.next_turn_key;
             state.next_turn_key += 1;
             state.head = Some(HeadTurn {
@@ -265,10 +287,26 @@ where
             .join()
             .map_err(|_| anyhow!("tokenizer worker panicked"))?;
     }
-    let writer_stats = writer.finish()?;
-    stats.row_count = writer_stats.row_count;
-    stats.sidecar_count = writer_stats.sidecar_count;
+    output.flush()?;
+    sidecar.flush()?;
     Ok(stats)
+}
+
+fn create_writer(path: &Path) -> Result<BufWriter<File>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(BufWriter::new(File::create(path)?))
+}
+
+fn write_json_line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
+    serde_json::to_writer(&mut *writer, value)?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn nonnegative_ms(value: i64) -> u64 {
+    value.max(0) as u64
 }
 
 fn push_heap_entry(
@@ -453,7 +491,7 @@ fn tokenize_job(tokenizer: &mut impl TokenizerWorker, job: &TokenizeJob) -> Resu
 mod tests {
     use super::{
         ExportConfig, HeadTurn, ReadyTurn, SessionState, TurnDraft, apply_tokenize_response,
-        write_streamed_mooncake_rows,
+        write_streamed_request_trace_rows,
     };
     use crate::coding::claude::parser::{SessionTurnBuilder, TraceRecord};
     use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker};
@@ -524,7 +562,9 @@ mod tests {
                     turn: TurnDraft {
                         session_id: "session-a".to_string(),
                         export_session_id: "session-a".to_string(),
+                        export_parent_session_id: None,
                         turn_index: 1,
+                        model: "test-model".to_string(),
                         input_text: String::new(),
                         output_length: 1,
                         assistant_start_ms: 1,
@@ -625,7 +665,7 @@ mod tests {
             ],
         );
 
-        let stats = write_streamed_mooncake_rows(
+        let stats = write_streamed_request_trace_rows(
             &output_path,
             &sidecar_path,
             sessions,
@@ -655,9 +695,119 @@ mod tests {
         assert!(stats.max_heap_len <= 2);
         assert_eq!(rows.len(), 3);
         assert_eq!(sidecar_rows.len(), 3);
-        assert_eq!(rows[0]["session_id"], json!("session-b"));
-        assert_eq!(rows[0]["timestamp"], json!(0.0));
-        assert_eq!(rows[1]["session_id"], json!("session-a"));
-        assert_eq!(rows[2]["delay"], json!(200.0));
+        assert_eq!(rows[0]["event"]["agent_context"]["session_id"], "session-b");
+        assert_eq!(rows[0]["event"]["agent_context"]["session_final"], true);
+        assert_eq!(rows[1]["event"]["agent_context"]["session_id"], "session-a");
+        assert!(
+            rows[1]["event"]["agent_context"]
+                .get("session_final")
+                .is_none()
+        );
+        assert_eq!(rows[2]["event"]["agent_context"]["session_final"], true);
+        assert_eq!(rows[2]["event"]["request"]["request_received_ms"], 2_200);
+    }
+
+    #[test]
+    fn request_trace_preserves_claude_child_identity_and_converts_to_agentic() {
+        use crate::request_trace::{
+            agentic::build_agentic_mooncake_rows, load::load_request_trace_records,
+        };
+
+        let temp = TempDir::new().unwrap();
+        let output_path = temp.path().join("trace.jsonl");
+        let sidecar_path = temp.path().join("trace.sidecar.jsonl");
+        let mut sessions = FxHashMap::default();
+        sessions.insert(
+            "root-session".to_string(),
+            vec![
+                make_record(
+                    "root-session",
+                    "user",
+                    1_000,
+                    0,
+                    json!({"type":"user","message":{"role":"user","content":"spawn child"}}),
+                ),
+                make_record(
+                    "root-session",
+                    "assistant",
+                    1_100,
+                    1,
+                    json!({"type":"assistant","message":{"id":"root-1","content":[{"type":"text","text":"spawning"}],"usage":{"output_tokens":2}}}),
+                ),
+                make_record(
+                    "root-session",
+                    "user",
+                    2_000,
+                    4,
+                    json!({"type":"user","message":{"role":"user","content":"child done"}}),
+                ),
+                make_record(
+                    "root-session",
+                    "assistant",
+                    2_100,
+                    5,
+                    json!({"type":"assistant","message":{"id":"root-2","content":[{"type":"text","text":"finished"}],"usage":{"output_tokens":1}}}),
+                ),
+            ],
+        );
+        sessions.insert(
+            "child-agent".to_string(),
+            vec![
+                make_record(
+                    "root-session",
+                    "user",
+                    1_200,
+                    2,
+                    json!({"type":"user","isSidechain":true,"agentId":"child-agent","message":{"role":"user","content":"investigate"}}),
+                ),
+                make_record(
+                    "root-session",
+                    "assistant",
+                    1_300,
+                    3,
+                    json!({"type":"assistant","isSidechain":true,"agentId":"child-agent","message":{"id":"child-1","content":[{"type":"text","text":"result"}],"usage":{"output_tokens":1}}}),
+                ),
+            ],
+        );
+
+        write_streamed_request_trace_rows(
+            &output_path,
+            &sidecar_path,
+            sessions,
+            true,
+            StubFactory::default(),
+            ExportConfig {
+                block_size: 2,
+                delta_overlap_words: 50,
+                tokenizer_workers: 2,
+            },
+        )
+        .unwrap();
+
+        let rows = std::fs::read_to_string(&output_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let child = rows
+            .iter()
+            .find(|row| row["event"]["agent_context"]["session_id"] == "child-agent")
+            .unwrap();
+        assert_eq!(
+            child["event"]["agent_context"]["parent_session_id"],
+            "root-session"
+        );
+        assert_eq!(child["event"]["agent_context"]["session_final"], true);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["event"]["agent_context"]["session_final"] == true)
+                .count(),
+            2
+        );
+
+        let loaded = load_request_trace_records(&[output_path]).unwrap();
+        let (_, agentic_rows) = build_agentic_mooncake_rows(loaded).unwrap();
+        assert_eq!(agentic_rows.len(), 3);
+        assert!(agentic_rows.iter().any(|row| !row.branches.is_empty()));
     }
 }
