@@ -14,7 +14,7 @@ runtime, so a bare run drives every request to completion.
 
 import pytest
 
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker import MockEngineArgs, PlannerReplayBridge
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .replay_utils import _vllm_args, _write_trace_and_args
@@ -73,3 +73,28 @@ def test_trace_closed_loop(tmp_path):
         replay_mode="offline",
     )
     assert report["completed_requests"] == 2
+
+
+def test_planner_callback_error_preserves_python_exception_type():
+    # A raising planner callback must propagate its original Python exception
+    # type (here ValueError) out of bridge.run() — not a generic Exception — so
+    # callback failures stay diagnosable (type + traceback preserved across the
+    # Rust seam).
+    class _RaisingPlanner:
+        def initial_tick_ms(self):
+            return 1.0  # finite -> seeds a PlannerTick that will fire
+
+        def on_tick(self, metrics):
+            raise ValueError("boom from on_tick")
+
+    bridge = PlannerReplayBridge.from_synthetic(
+        input_tokens=64,
+        output_tokens=16,
+        request_count=8,
+        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+        num_workers=1,
+        replay_concurrency=2,
+        arrival_interval_ms=1.0,
+    )
+    with pytest.raises(ValueError, match="boom from on_tick"):
+        bridge.run(_RaisingPlanner())

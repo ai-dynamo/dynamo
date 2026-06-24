@@ -1983,10 +1983,22 @@ impl PlannerReplayBridge {
             .take()
             .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
         let hook: Box<dyn PlannerHook> = Box::new(PyPlannerHook { callback: planner });
-        let report = handle.run(hook).map_err(to_pyerr)?;
+        let report = handle.run(hook).map_err(planner_run_err_to_pyerr)?;
         pythonize(py, &report)
             .map_err(to_pyerr)
             .map(|obj| obj.unbind())
+    }
+}
+
+/// Convert a planner-run error back into a `PyErr`, preserving the original
+/// Python exception (its type and traceback) when the failure originated in a
+/// planner callback (`initial_tick_ms` / `on_tick` stash the `PyErr` via
+/// `anyhow::Error::new`). Non-Python errors (e.g. a simulation dead-end) fall
+/// back to the generic conversion.
+fn planner_run_err_to_pyerr(err: anyhow::Error) -> PyErr {
+    match err.downcast::<PyErr>() {
+        Ok(py_err) => py_err,
+        Err(other) => to_pyerr(other),
     }
 }
 
@@ -2005,7 +2017,9 @@ impl PlannerHook for PyPlannerHook {
                 .call_method0("initial_tick_ms")?
                 .extract::<f64>()
         })
-        .map_err(|err: PyErr| anyhow::anyhow!(err.to_string()))
+        // Preserve the original `PyErr` (type + traceback) through the anyhow
+        // boundary so `PlannerReplayBridge::run` can re-raise it unchanged.
+        .map_err(anyhow::Error::new)
     }
 
     fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
@@ -2058,6 +2072,8 @@ impl PlannerHook for PyPlannerHook {
                 next_tick_ms: decision.get_item("next_tick_ms")?.extract()?,
             })
         })
-        .map_err(|err: PyErr| anyhow::anyhow!(err.to_string()))
+        // Preserve the original `PyErr` (type + traceback) through the anyhow
+        // boundary so `PlannerReplayBridge::run` can re-raise it unchanged.
+        .map_err(anyhow::Error::new)
     }
 }
