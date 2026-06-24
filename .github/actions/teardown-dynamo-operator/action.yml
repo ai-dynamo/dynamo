@@ -1,5 +1,5 @@
 name: 'Teardown Dynamo Operator'
-description: 'Delete a vCluster'
+description: 'Delete a vCluster and its dynamic host namespace'
 
 inputs:
   kubeconfig_base64:
@@ -89,6 +89,45 @@ runs:
           --wait=true \
           --timeout=300s || true
 
-        vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" || true
-        echo "::endgroup::"
+        if ! vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1; then
+          echo "::warning::vcluster delete failed; deleting vCluster resources directly"
+          kubectl delete statefulset "${VCLUSTER_NAME}" \
+            -n "${NAMESPACE}" \
+            --ignore-not-found 2>&1 || true
+          kubectl delete pvc,secret,svc,configmap \
+            -n "${NAMESPACE}" \
+            -l "release=${VCLUSTER_NAME}" \
+            --ignore-not-found 2>&1 || true
+        fi
 
+        kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
+          --for=delete --timeout=120s 2>/dev/null || true
+
+        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::vCluster ${VCLUSTER_NAME} still exists in ${NAMESPACE} after cleanup"
+          kubectl get pods,statefulsets -n "${NAMESPACE}" -l app=vcluster -o wide || true
+          exit 1
+        fi
+
+        if [ "${NAMESPACE}" = "dynamo-deploy-test" ]; then
+          echo "Preserving shared namespace ${NAMESPACE}"
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        if ! kubectl delete namespace "${NAMESPACE}" --wait=true --timeout=300s; then
+          echo "::error::Namespace ${NAMESPACE} did not delete cleanly"
+          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
+          kubectl get all -n "${NAMESPACE}" -o wide || true
+          kubectl describe namespace "${NAMESPACE}" || true
+          exit 1
+        fi
+
+        if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::Namespace ${NAMESPACE} still exists after delete completed"
+          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
+          exit 1
+        fi
+
+        echo "Namespace ${NAMESPACE} deleted"
+        echo "::endgroup::"

@@ -11,7 +11,7 @@ inputs:
     required: false
     default: ''
   vcluster_namespace:
-    description: 'Host namespace where the vCluster will be created. Defaults to the shared deploy-test namespace.'
+    description: 'Host namespace where the vCluster will be created. When empty, aws-dev-02 uses the shared deploy-test namespace and other clusters use a per-run namespace.'
     required: false
     default: ''
   registry:
@@ -80,12 +80,21 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: Setup host kubeconfig
+      if: inputs.kubeconfig_base64 != ''
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host
+        chmod 600 ${{ github.workspace }}/.kubeconfig-host
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
+
     - name: Resolve names
       id: resolve-names
       shell: bash
       env:
         INPUT_VCLUSTER_NAME: ${{ inputs.vcluster_name }}
         INPUT_NAMESPACE: ${{ inputs.vcluster_namespace }}
+        BRANCH: ${{ github.ref_name }}
       run: |
         if [ -n "${INPUT_VCLUSTER_NAME}" ]; then
           echo "vcluster_name=${INPUT_VCLUSTER_NAME}" >> "$GITHUB_OUTPUT"
@@ -95,18 +104,17 @@ runs:
 
         if [ -n "${INPUT_NAMESPACE}" ]; then
           echo "namespace=${INPUT_NAMESPACE}" >> "$GITHUB_OUTPUT"
-        else
+        elif kubectl config current-context 2>/dev/null | grep -q 'aws-dev-02'; then
           echo "namespace=dynamo-deploy-test" >> "$GITHUB_OUTPUT"
+        else
+          BRANCH_SANITIZED="${BRANCH//\//-}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+          echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
+          echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
         fi
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
-
-    - name: Setup host kubeconfig
-      if: inputs.kubeconfig_base64 != ''
-      shell: bash
-      run: |
-        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host
-        chmod 600 ${{ github.workspace }}/.kubeconfig-host
-        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
 
     - name: Install vCluster CLI
       uses: ./.github/actions/install-vcluster-cli
@@ -115,16 +123,27 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        NAMESPACE_SUFFIX: ${{ steps.resolve-names.outputs.namespace_suffix }}
       run: |
         echo "::group::Create host namespace $NAMESPACE"
         set -euo pipefail
         set -x
         kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-        kubectl label namespaces "${NAMESPACE}" \
-          dynamo.github/run-id="${{ github.run_id }}" \
-          ngc-api=enabled \
-          nvcr-imagepull=enabled \
-          --overwrite
+        LABELS=(
+          ngc-api=enabled
+          nvcr-imagepull=enabled
+        )
+        if [[ "${NAMESPACE}" != "dynamo-deploy-test" ]]; then
+          LABELS+=(
+            nscleanup/enabled=true
+            nscleanup/ttl=7200
+            dynamo.github/run-id="${{ github.run_id }}"
+          )
+          if [[ -n "${NAMESPACE_SUFFIX}" ]]; then
+            LABELS+=(dynamo.github/cleanup-key="${NAMESPACE_SUFFIX}")
+          fi
+        fi
+        kubectl label namespaces "${NAMESPACE}" "${LABELS[@]}" --overwrite
         echo "::endgroup::"
 
     - name: Delete existing vCluster for this run
