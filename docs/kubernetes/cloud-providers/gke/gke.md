@@ -166,6 +166,9 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
 
     ```bash
     kubectl get pods -n ${INFERENCE_NAMESPACE}
+    ```
+
+    ```text
     NAME                                                  READY   STATUS    RESTARTS   AGE
     vllm-agg-frontend-76898f5988-p5bw6                    1/1     Running   0          5m
     vllm-agg-vllmdecodeworker-2e88533b-6446cd9cdb-2n4sv   1/1     Running   0          5m
