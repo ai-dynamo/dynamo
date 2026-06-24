@@ -1,18 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-
 use dynamo_kv_router::{
     config::KvRouterConfig,
-    protocols::{DpRank, LocalBlockHash, SharedCacheHits, StorageTier, WorkerId, WorkerWithDpRank},
-    scheduling::TierOverlapBlocks,
+    protocols::{DpRank, LocalBlockHash, SharedCacheHits, WorkerId, WorkerWithDpRank},
+    scheduling::overlap::{
+        CacheHitEstimates, cache_hit_estimates_from_tiered_matches,
+        tier_overlap_blocks_from_tiered_matches,
+    },
 };
 use dynamo_runtime::pipeline::async_trait;
 use serde::Serialize;
 
 use super::{
-    indexer::{Indexer, TieredMatchDetails},
+    indexer::Indexer,
     scheduler::{OverlapScoresRefresh, RefreshedOverlap},
 };
 
@@ -25,12 +26,6 @@ impl WorkerCacheHitEstimate {
     pub fn rounded_overlap_blocks(self) -> u32 {
         self.effective_overlap_blocks.round() as u32
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(super) struct CacheHitEstimates {
-    pub(super) effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-    pub(super) cached_tokens: HashMap<WorkerWithDpRank, usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,61 +57,6 @@ pub struct OverlapScoresResponse {
     pub shared_cache: SharedCacheOverlapScore,
 }
 
-fn cache_hit_weight_for_tier(kv_router_config: &KvRouterConfig, storage_tier: StorageTier) -> f64 {
-    match storage_tier {
-        StorageTier::Device => 1.0,
-        StorageTier::HostPinned => kv_router_config.host_cache_hit_weight,
-        StorageTier::Disk | StorageTier::External => kv_router_config.disk_cache_hit_weight,
-    }
-}
-
-fn cached_tokens_from_effective_overlap(block_size: u32, effective_overlap_blocks: f64) -> usize {
-    (effective_overlap_blocks * block_size as f64)
-        .round()
-        .max(0.0) as usize
-}
-
-pub(super) fn cache_hit_estimates_from_tiered_matches(
-    kv_router_config: &KvRouterConfig,
-    block_size: u32,
-    tiered_matches: &TieredMatchDetails,
-) -> CacheHitEstimates {
-    let mut effective_overlap_blocks = HashMap::new();
-
-    for (worker, overlap) in &tiered_matches.device.overlap_scores.scores {
-        effective_overlap_blocks.insert(*worker, *overlap as f64);
-    }
-
-    for (storage_tier, tier_matches) in &tiered_matches.lower_tier {
-        let weight = cache_hit_weight_for_tier(kv_router_config, *storage_tier);
-        if weight == 0.0 {
-            continue;
-        }
-
-        for (worker, hits) in &tier_matches.hits {
-            if *hits == 0 {
-                continue;
-            }
-            *effective_overlap_blocks.entry(*worker).or_insert(0.0) += *hits as f64 * weight;
-        }
-    }
-
-    let cached_tokens = effective_overlap_blocks
-        .iter()
-        .map(|(worker, overlap)| {
-            (
-                *worker,
-                cached_tokens_from_effective_overlap(block_size, *overlap),
-            )
-        })
-        .collect();
-
-    CacheHitEstimates {
-        effective_overlap_blocks,
-        cached_tokens,
-    }
-}
-
 pub(super) fn cache_hit_for_worker(
     cache_hit_estimates: &CacheHitEstimates,
     worker: WorkerWithDpRank,
@@ -128,41 +68,6 @@ pub(super) fn cache_hit_for_worker(
             .copied()
             .unwrap_or(0.0),
     }
-}
-
-pub(super) fn tier_overlap_blocks_from_tiered_matches(
-    tiered_matches: &TieredMatchDetails,
-) -> TierOverlapBlocks {
-    let mut tier_overlap_blocks = TierOverlapBlocks::default();
-
-    tier_overlap_blocks.device.extend(
-        tiered_matches
-            .device
-            .overlap_scores
-            .scores
-            .iter()
-            .map(|(worker, hits)| (*worker, *hits as usize)),
-    );
-
-    if let Some(host_matches) = tiered_matches.lower_tier.get(&StorageTier::HostPinned) {
-        tier_overlap_blocks.host_pinned.extend(
-            host_matches
-                .hits
-                .iter()
-                .map(|(worker, hits)| (*worker, *hits)),
-        );
-    }
-
-    // Disk and External share the same weighting, so accumulate both into the disk bucket.
-    for tier in [StorageTier::Disk, StorageTier::External] {
-        if let Some(matches) = tiered_matches.lower_tier.get(&tier) {
-            for (worker, hits) in &matches.hits {
-                *tier_overlap_blocks.disk.entry(*worker).or_default() += *hits;
-            }
-        }
-    }
-
-    tier_overlap_blocks
 }
 
 pub(super) fn shared_cache_overlap_score(
@@ -239,8 +144,8 @@ impl OverlapScoresRefresh for KvRouterOverlapRefresher {
         );
         Some(RefreshedOverlap {
             tier_overlap_blocks,
-            effective_overlap_blocks: estimates.effective_overlap_blocks,
-            effective_cached_tokens: estimates.cached_tokens,
+            effective_overlap_blocks: estimates.effective_overlap_blocks.into_iter().collect(),
+            effective_cached_tokens: estimates.cached_tokens.into_iter().collect(),
         })
     }
 }

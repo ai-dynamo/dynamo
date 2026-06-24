@@ -106,6 +106,11 @@ pub(super) struct SplitLookupData {
     pub(super) suffix: SharedNode,
 }
 
+pub(super) struct RemoveBatchOutcome {
+    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
+    pub(super) unmatched_hashes: Vec<ExternalSequenceBlockHash>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum LookupRepairDirection {
     TowardTail,

@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn test_ectd_client() {
-        let rt = Runtime::from_settings().unwrap();
+        let rt = Runtime::single_threaded().unwrap();
         let rt_clone = rt.clone();
         let config = DistributedConfig::from_settings();
 
@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache() {
-        let rt = Runtime::from_settings().unwrap();
+        let rt = Runtime::single_threaded().unwrap();
         let rt_clone = rt.clone();
         let config = DistributedConfig::from_settings();
 
