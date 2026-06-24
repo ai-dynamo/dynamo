@@ -21,7 +21,7 @@ the [Install Dynamo Kubernetes Platform](#install-dynamo-kubernetes-platform) se
 If you already have a GKE cluster, proceed to
 the [Install Dynamo Kubernetes Platform](#install-dynamo-kubernetes-platform) section.
 
-In this section you create a GKE cluster with one general purpose node and one GPU node.
+Create a GKE cluster with one general purpose node and one GPU node.
 The GPU node will have [NVIDIA Kubernetes Device Plugin](https://github.com/NVIDIA/k8s-device-plugin) installed.
 
 ### Install gcloud CLI
@@ -89,7 +89,7 @@ is not to install NVIDIA GPU operator.
 
 ## Deploy an Inference Graph
 
-In this section you deploy vLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B`.
+Deploy vLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B`.
 
 ### Create a Namespace for your Inference Graph Deployments
 
