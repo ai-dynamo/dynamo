@@ -35,18 +35,18 @@ import (
 )
 
 // SharedSpecValidator validates DynamoComponentDeploymentSharedSpec fields.
-// This validator is used by both DynamoComponentDeploymentValidator and DynamoGraphDeploymentValidator
-// to provide consistent validation logic for shared spec fields.
+// This validator is used by DynamoComponentDeploymentValidator to provide
+// consistent validation logic for v1alpha1 shared spec fields.
 type SharedSpecValidator struct {
 	spec                *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-	fieldPath           string       // e.g., "spec" for DCD, "spec.services[foo]" for DGD
-	calculatedNamespace string       // The namespace that will be used: {k8s_namespace}-{dgd_name}
+	fieldPath           string       // e.g., "spec" for DCD
+	calculatedNamespace string       // Namespace the operator will use for this component
 	mgr                 ctrl.Manager // Optional: for API group detection via discovery client
 	grovePathway        bool         // Whether the component is backed by Grove
 }
 
 // NewSharedSpecValidator creates a new validator for DynamoComponentDeploymentSharedSpec.
-// fieldPath is used to provide context in error messages (e.g., "spec" or "spec.services[main]").
+// fieldPath is used to provide context in error messages (e.g., "spec").
 // calculatedNamespace is the namespace the operator will use:
 //   - If GlobalDynamoNamespace is true: "dynamo" (global constant)
 //   - Otherwise: {k8s_namespace}-{dgd_name}
@@ -438,7 +438,7 @@ func (v *SharedSpecValidator) validateFailover() error {
 			// must set gpuMemoryService.mode=interPod explicitly.
 			detected := string(v.spec.GPUMemoryService.Mode)
 			if detected == "" {
-				detected = "<unset>"
+				detected = unsetValue
 			}
 			errs = append(errs, fmt.Errorf(
 				"%s.failover: interPod failover requires gpuMemoryService.mode=%q (got %q)",
@@ -512,7 +512,7 @@ func (v *SharedSpecValidator) validateServiceAnnotations() error {
 	}
 	if value, exists := v.spec.Annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]; exists {
 		switch strings.ToLower(value) {
-		case "mp", "ray":
+		case vllmDistributedExecutorBackendMP, vllmDistributedExecutorBackendRay:
 			// valid
 		default:
 			return fmt.Errorf("%s.annotations[%s] has invalid value %q: must be \"mp\" or \"ray\"",

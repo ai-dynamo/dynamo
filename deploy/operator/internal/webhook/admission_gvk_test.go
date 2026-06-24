@@ -38,9 +38,9 @@ func TestValidateAdmissionGVK(t *testing.T) {
 		wantErrText string
 	}{
 		{
-			name:     "allows converted DGD",
-			expected: nvidiacomv1alpha1.DynamoGraphDeploymentGVK,
-			got:      nvidiacomv1alpha1.DynamoGraphDeploymentGVK,
+			name:     "allows supported DGD",
+			expected: nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+			got:      nvidiacomv1beta1.DynamoGraphDeploymentGVK,
 		},
 		{
 			name:     "allows converted DCD",
@@ -53,10 +53,10 @@ func TestValidateAdmissionGVK(t *testing.T) {
 			got:      nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK,
 		},
 		{
-			name:        "rejects unconverted DGD",
-			expected:    nvidiacomv1alpha1.DynamoGraphDeploymentGVK,
-			got:         nvidiacomv1beta1.DynamoGraphDeploymentGVK,
-			wantErrText: "admission requires nvidia.com/v1alpha1, Kind=DynamoGraphDeployment, got nvidia.com/v1beta1, Kind=DynamoGraphDeployment",
+			name:        "rejects unsupported DGD version",
+			expected:    nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+			got:         nvidiacomv1alpha1.DynamoGraphDeploymentGVK,
+			wantErrText: "admission requires nvidia.com/v1beta1, Kind=DynamoGraphDeployment, got nvidia.com/v1alpha1, Kind=DynamoGraphDeployment",
 		},
 		{
 			name:        "rejects unconverted DCD",
@@ -102,7 +102,7 @@ func TestValidateAdmissionGVK(t *testing.T) {
 }
 
 func TestValidateAdmissionGVKRejectsMissingAdmissionRequest(t *testing.T) {
-	err := ValidateAdmissionGVK(context.Background(), nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
+	err := ValidateAdmissionGVK(context.Background(), nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 	if err == nil {
 		t.Fatal("ValidateAdmissionGVK() expected error but got nil")
 	}

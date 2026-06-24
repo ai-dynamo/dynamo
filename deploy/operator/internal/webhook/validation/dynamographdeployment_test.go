@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,3494 +19,397 @@ package validation
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"testing"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/rest"
 	k8sptr "k8s.io/utils/ptr"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
-	var (
-		validReplicas    = int32(3)
-		negativeReplicas = int32(-1)
-		validMinAvail    = int32(2)
-		zeroMinAvail     = int32(0)
-		pvcName          = "test-pvc"
-		trueVal          = true
-		falseVal         = false
-	)
-
-	scheme := runtime.NewScheme()
-	if err := grovev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add Grove scheme: %v", err)
-	}
-	clusterTopology := &grovev1alpha1.ClusterTopology{
-		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
-		Spec: grovev1alpha1.ClusterTopologySpec{
-			Levels: []grovev1alpha1.TopologyLevel{
-				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
-				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
-			},
-		},
-	}
-
+func TestDynamoGraphDeploymentBetaValidator_Validate(t *testing.T) {
 	tests := []struct {
 		name         string
-		deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
+		deployment   *nvidiacomv1beta1.DynamoGraphDeployment
 		groveEnabled bool
-		wantErr      bool
-		errMsg       string
-		errContains  bool
+		wantErr      string
 	}{
 		{
-			name: "valid deployment with services",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas: &validReplicas,
-						},
-					},
-				},
-			},
-			wantErr: false,
+			name:       "valid deployment with components",
+			deployment: newBetaDGDForValidation(),
 		},
 		{
-			name:         "priorityClassName is valid on Grove pathway",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PriorityClassName: "high-priority",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas: &validReplicas,
-						},
-					},
-				},
+			name: "no components",
+			deployment: &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-graph", Namespace: "default"},
 			},
-			wantErr: false,
+			wantErr: "spec.components must have at least one component",
 		},
 		{
-			name: "priorityClassName requires Grove pathway when DGD opts out",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PriorityClassName: "high-priority",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas: &validReplicas,
-						},
-					},
+			name: "component name is required",
+			deployment: &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-graph", Namespace: "default"},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{}},
 				},
 			},
-			groveEnabled: true,
-			wantErr:      true,
-			errMsg:       "spec.priorityClassName requires the Grove pathway; remove or unset the \"nvidia.com/enable-grove\" annotation (currently \"false\")",
+			wantErr: "spec.components[0].name is required",
 		},
 		{
-			name: "priorityClassName requires Grove pathway when operator disables Grove",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PriorityClassName: "high-priority",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas: &validReplicas,
-						},
+			name: "component names are unique case-insensitively",
+			deployment: &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-graph", Namespace: "default"},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						{ComponentName: "worker"},
+						{ComponentName: "WORKER"},
 					},
 				},
 			},
+			wantErr: `spec.components[1].name "WORKER" duplicates component "worker" case-insensitively`,
+		},
+		{
+			name: "component replicas must be non-negative",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Replicas = k8sptr.To(int32(-1))
+			}),
+			wantErr: "spec.components[worker].replicas must be non-negative",
+		},
+		{
+			name: "component minAvailable requires Grove",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.MinAvailable = k8sptr.To(int32(1))
+			}),
+			wantErr: "spec.components[worker].minAvailable is currently supported only for Grove-backed DynamoGraphDeployment components",
+		},
+		{
+			name: "restart parallel strategy cannot specify order",
+			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+				spec.Restart = &nvidiacomv1beta1.Restart{
+					ID: "roll",
+					Strategy: &nvidiacomv1beta1.RestartStrategy{
+						Type:  nvidiacomv1beta1.RestartStrategyTypeParallel,
+						Order: []string{"frontend", "worker"},
+					},
+				}
+			}),
+			wantErr: "spec.restart.strategy.order cannot be specified when strategy is parallel",
+		},
+		{
+			name: "component topology constraint requires deployment topology",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
+			}),
+			wantErr: "spec.topologyConstraint with clusterTopologyName is required when any topology constraint is set",
+		},
+		{
+			name:         "inter-pod GMS requires Grove",
 			groveEnabled: false,
-			wantErr:      true,
-			errMsg:       "spec.priorityClassName requires the Grove pathway, but Grove is disabled in the operator configuration",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				enableBetaInterPodGMS(worker)
+			}),
+			wantErr: `spec.components[worker]: experimental.gpuMemoryService.mode="InterPod" requires the Grove pathway`,
 		},
 		{
-			name: "no services",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services must have at least one service",
-		},
-		{
-			name: "service with invalid replicas",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas: &negativeReplicas,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].replicas must be non-negative",
-		},
-		{
-			name:         "service minAvailable is valid on Grove pathway",
+			name:         "inter-pod GMS requires vLLM backend",
 			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     &validReplicas,
-							MinAvailable: &validMinAvail,
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "service minAvailable is valid when replicas is zero",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     &zeroMinAvail,
-							MinAvailable: &validMinAvail,
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "service minAvailable must be positive",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     &validReplicas,
-							MinAvailable: &zeroMinAvail,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].minAvailable must be greater than 0",
-		},
-		{
-			name:         "positive replicas must be at least minAvailable",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     k8sptr.To(int32(1)),
-							MinAvailable: &validMinAvail,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].replicas must be 0 or greater than or equal to minAvailable",
-		},
-		{
-			name: "service minAvailable requires Grove pathway when operator disables Grove",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     &validReplicas,
-							MinAvailable: &validMinAvail,
-						},
-					},
-				},
-			},
-			groveEnabled: false,
-			wantErr:      true,
-			errMsg:       "spec.services[main].minAvailable requires the Grove pathway, but Grove is disabled in the operator configuration",
-		},
-		{
-			name: "service minAvailable requires Grove pathway when DGD opts out",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     &validReplicas,
-							MinAvailable: &validMinAvail,
-						},
-					},
-				},
-			},
-			groveEnabled: true,
-			wantErr:      true,
-			errMsg:       "spec.services[main].minAvailable requires the Grove pathway; remove or unset the \"nvidia.com/enable-grove\" annotation (currently \"false\")",
-		},
-		{
-			name: "service with invalid ingress",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"gateway": {
-							Ingress: &nvidiacomv1alpha1.IngressSpec{
-								Enabled: true,
-								Host:    "",
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[gateway].ingress.host is required when ingress is enabled",
-		},
-		{
-			name: "pvc with create=true and missing storageClass",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PVCs: []nvidiacomv1alpha1.PVC{
-						{
-							Create:           &trueVal,
-							Name:             &pvcName,
-							StorageClass:     "",
-							Size:             resource.MustParse("10Gi"),
-							VolumeAccessMode: corev1.ReadWriteOnce,
-						},
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.pvcs[0].storageClass is required when create is true",
-		},
-		{
-			name: "pvc with create=true and missing size",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PVCs: []nvidiacomv1alpha1.PVC{
-						{
-							Create:           &trueVal,
-							Name:             &pvcName,
-							StorageClass:     "standard",
-							Size:             resource.Quantity{},
-							VolumeAccessMode: corev1.ReadWriteOnce,
-						},
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.pvcs[0].size is required when create is true",
-		},
-		{
-			name: "pvc with create=true and missing volumeAccessMode",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PVCs: []nvidiacomv1alpha1.PVC{
-						{
-							Create:           &trueVal,
-							Name:             &pvcName,
-							StorageClass:     "standard",
-							Size:             resource.MustParse("10Gi"),
-							VolumeAccessMode: "",
-						},
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.pvcs[0].volumeAccessMode is required when create is true",
-		},
-		{
-			name: "pvc with create=false and missing fields",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PVCs: []nvidiacomv1alpha1.PVC{
-						{
-							Create: &falseVal,
-							Name:   &pvcName,
-						},
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "pvc with missing name",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PVCs: []nvidiacomv1alpha1.PVC{
-						{
-							Create: &falseVal,
-						},
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.pvcs[0].name is required",
-		},
-		{
-			name: "pvc with multiple errors (name, storageClass, size, volumeAccessMode all missing)",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PVCs: []nvidiacomv1alpha1.PVC{
-						{
-							Create: &trueVal,
-						},
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.pvcs[0].name is required\nspec.pvcs[0].storageClass is required when create is true\nspec.pvcs[0].size is required when create is true\nspec.pvcs[0].volumeAccessMode is required when create is true",
-			errContains: true,
-		},
-		{
-			name: "valid pvc with create=true",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					PVCs: []nvidiacomv1alpha1.PVC{
-						{
-							Create:           &trueVal,
-							Name:             &pvcName,
-							StorageClass:     "standard",
-							Size:             resource.MustParse("10Gi"),
-							VolumeAccessMode: corev1.ReadWriteOnce,
-						},
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "service with invalid volume mount",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							VolumeMounts: []nvidiacomv1alpha1.VolumeMount{
-								{
-									Name:                  "data",
-									UseAsCompilationCache: false,
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].volumeMounts[0].mountPoint is required when useAsCompilationCache is false",
-		},
-		{
-			name: "service with invalid shared memory",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							SharedMemory: &nvidiacomv1alpha1.SharedMemorySpec{
-								Disabled: false,
-								Size:     resource.Quantity{},
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].sharedMemory.size is required when disabled is false",
-		},
-		// Restart validation test cases
-		{
-			name: "restart with nil at",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "",
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.restart.id is required",
-		},
-		{
-			name: "restart with valid id and no strategy",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "restart-id",
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "restart with parallel strategy and order specified",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main":    {},
-						"prefill": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "restart-id",
-						Strategy: &nvidiacomv1alpha1.RestartStrategy{
-							Type:  nvidiacomv1alpha1.RestartStrategyTypeParallel,
-							Order: []string{"main", "prefill"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.restart.strategy.order cannot be specified when strategy is parallel",
-		},
-		{
-			name: "restart with sequential strategy and duplicate services in order",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main":    {},
-						"prefill": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "restart-id",
-						Strategy: &nvidiacomv1alpha1.RestartStrategy{
-							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
-							Order: []string{"main", "main", "prefill"},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.restart.strategy.order must be unique",
-			errContains: true,
-		},
-		{
-			name: "restart with sequential strategy and unknown service in order",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main":    {},
-						"prefill": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "restart-id",
-						Strategy: &nvidiacomv1alpha1.RestartStrategy{
-							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
-							Order: []string{"main", "unknown"},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.restart.strategy.order contains unknown service: unknown",
-			errContains: true,
-		},
-		{
-			name: "restart with sequential strategy and missing service in order",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main":    {},
-						"prefill": {},
-						"decode":  {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "restart-id",
-						Strategy: &nvidiacomv1alpha1.RestartStrategy{
-							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
-							Order: []string{"main", "prefill"},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.restart.strategy.order must have the same number of unique services as the deployment",
-			errContains: true,
-		},
-		{
-			name: "restart with valid sequential strategy and order",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main":    {},
-						"prefill": {},
-						"decode":  {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "restart-id",
-						Strategy: &nvidiacomv1alpha1.RestartStrategy{
-							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
-							Order: []string{"prefill", "decode", "main"},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "restart with sequential strategy and empty order is valid",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "restart-id",
-						Strategy: &nvidiacomv1alpha1.RestartStrategy{
-							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
-							Order: []string{},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		// Service name length validation tests
-		{
-			name:         "long DGD name auto-truncated for single-node - no error",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "verylongdynamographdeploymentname",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"VeryLongServiceNameThatExceedsLimit": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "service name so long that even truncated PCS name exceeds limit",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "my-long-dgd-name",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						// 38 chars lowercase → pcsBudget = 45-38 = 7 < 8 → clamped to 8.
-						// DGD name 16 chars > 8 → truncated to 8.
-						// Combined: 8 + 38 = 46 > 45 → error even after truncation.
-						"VeryVeryExtremelyLongServiceNameXXXXXX": {},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "combined resource name length",
-		},
-		{
-			name:         "service name too long for multinode deployment",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "vllm-agg",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"VllmPrefillWorker": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "combined resource name length",
-		},
-		{
-			name:         "valid service name length for single-node",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "dgd",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Frontend": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "valid service name length for multinode",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "dgd",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "boundary case - exactly at 45 char limit for single-node",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					// DGD name (3 chars) + service name (42 chars) = 45 chars (exactly at limit)
-					Name:      "dgd",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						// 42 character service name
-						"abcdefghijklmnopqrstuvwxyz0123456789ABCDEF": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "boundary case - one char over limit for single-node",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					// DGD name (3 chars) + service name (43 chars) = 46 chars (over limit)
-					Name:      "dgd",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						// 43 character service name
-						"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG": {},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "combined resource name length 46 exceeds 45-character limit",
-		},
-		// Grove disabled tests - service name length validation should be skipped
-		{
-			name:         "long service name allowed when Grove disabled via annotation",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "verylongdynamographdeploymentname",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"VeryLongServiceNameThatExceedsLimit": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "long multinode service name allowed when Grove disabled via annotation",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "vllm-agg",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"VllmPrefillWorker": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "Grove annotation case insensitive - FALSE",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "verylongdynamographdeploymentname",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "FALSE",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"VeryLongServiceNameThatExceedsLimit": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		// GMS failover validation test cases
-		{
-			name:         "valid GMS failover single-node with GPU",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "valid standalone inter-pod GMS (no failover) single-node with GPU",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms-standalone",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "GMS failover without GPU",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			// validateGPUMemoryService fires first when the inter-pod layout
-			// is declared without any GPU resources.
-			errMsg: "requires resources.limits.gpu",
-		},
-		{
-			name:         "inter-pod GMS on frontend component rejected",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"fe": {
-							ComponentType: "frontend",
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "GPU memory service is only supported for worker components",
-		},
-		{
-			name:         "GMS failover requires Grove pathway - annotation disabled",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "remove or unset the \"nvidia.com/enable-grove\" annotation",
-		},
-		{
-			name:         "GMS failover requires Grove pathway - operator grove disabled",
-			groveEnabled: false,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "Grove is disabled in the operator configuration",
-		},
-		{
-			name:         "inter-pod GMS rejected on non-vLLM backend",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "currently supported only for vLLM",
-		},
-		{
-			name:         "inter-pod GMS rejected when backendFramework is unset",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					// BackendFramework intentionally left empty — the
-					// inter-pod gate must fail closed rather than silently
-					// accept a deployment whose engine may not speak vLLM.
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
-							},
-							Resources: &nvidiacomv1alpha1.Resources{
-								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "currently supported only for vLLM",
-		},
-		{
-			name: "GMS failover disabled is valid without GPU",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled: false,
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		// Annotation validation test cases
-		{
-			name: "valid annotation vllm-distributed-executor-backend=mp",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid annotation vllm-distributed-executor-backend=ray",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid annotation vllm-distributed-executor-backend case insensitive MP",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationVLLMDistributedExecutorBackend: "MP",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid annotation vllm-distributed-executor-backend",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  `annotation nvidia.com/vllm-distributed-executor-backend has invalid value "invalid": must be "mp" or "ray"`,
-		},
-		{
-			name: "no annotations is valid",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid annotation dynamo-operator-origin-version with semver",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid annotation dynamo-operator-origin-version with pre-release",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid annotation dynamo-operator-origin-version fallback version",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion: "0.0.0-unknown",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid annotation dynamo-operator-origin-version not semver",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion: "not-a-version",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  `annotation nvidia.com/dynamo-operator-origin-version has invalid value "not-a-version": must be valid semver`,
-		},
-		// Topology constraint validation tests
-		{
-			name: "no topology constraints is valid (backward compatible)",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid topology constraints with spec and service level",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("block"),
-							},
-						},
-						"Frontend": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("zone"),
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "spec-level with topologyProfile only (no packDomain) is rejected when service lacks constraint",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-						"Frontend": {},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "spec.services[Frontend].topologyConstraint is required because spec.topologyConstraint.packDomain is not set",
-		},
-		{
-			name: "spec-level set but service has no topology constraint is valid (inherits)",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid packDomain format at spec level",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("INVALID!"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "is not a valid topology domain",
-		},
-		{
-			name: "service domain equal to spec-level is valid (no hierarchy check without CRD)",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("rack"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "mixed: spec-level with some services having constraints and some not",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-						"Frontend": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "topologyProfile missing at spec level when service has constraint",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "spec.topologyConstraint with topologyProfile is required",
-		},
-		{
-			name: "topologyProfile empty at spec level when service has constraint",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						PackDomain: nvidiacomv1alpha1.TopologyDomain("zone"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "topologyProfile is required",
-		},
-		{
-			name: "service-level topologyConstraint without packDomain is rejected",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "packDomain is required",
-		},
-		{
-			name: "invalid packDomain format at service level",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("INVALID!"),
-							},
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "is not a valid topology domain",
-		},
-		{
-			name: "service domain narrower than spec-level is valid",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-						PackDomain:      nvidiacomv1alpha1.TopologyDomain("zone"),
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("host"),
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "no spec packDomain but all services have topology constraint is valid",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-						"Frontend": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("zone"),
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "no spec packDomain and service missing topology constraint is rejected",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: "false",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &nvidiacomv1alpha1.SpecTopologyConstraint{
-						TopologyProfile: "test-topology",
-					},
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Worker": {
-							TopologyConstraint: &nvidiacomv1alpha1.TopologyConstraint{
-								PackDomain: nvidiacomv1alpha1.TopologyDomain("rack"),
-							},
-						},
-						"Frontend": {},
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "spec.services[Frontend].topologyConstraint is required because spec.topologyConstraint.packDomain is not set",
-		},
-		{
-			name: "both annotations valid",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "both annotations invalid",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion:    "bad",
-						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "annotation nvidia.com/dynamo-operator-origin-version has invalid value \"bad\": must be valid semver\nannotation nvidia.com/vllm-distributed-executor-backend has invalid value \"invalid\": must be \"mp\" or \"ray\"",
-			errContains: true,
-		},
-		// --- KvTransferPolicy validation ---
-		{
-			name: "valid experimental kvTransferPolicy with required enforcement",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:    "topology.kubernetes.io/zone",
-							Domain:      "zone",
-							Enforcement: nvidiacomv1alpha1.KvTransferEnforcementRequired,
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid experimental kvTransferPolicy with preferred enforcement and weight",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:        "topology.kubernetes.io/zone",
-							Domain:          "zone",
-							Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
-							PreferredWeight: k8sptr.To[float32](0.85),
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid experimental kvTransferPolicy with unprefixed labelKey",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:    "rack",
-							Domain:      "rack",
-							Enforcement: nvidiacomv1alpha1.KvTransferEnforcementRequired,
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid experimental kvTransferPolicy with clusterTopologyName",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							ClusterTopologyName: "grove-topology",
-							Domain:              "rack",
-							Enforcement:         nvidiacomv1alpha1.KvTransferEnforcementRequired,
-						},
-					},
-				},
-			},
-			groveEnabled: true,
-			wantErr:      false,
-		},
-		{
-			name: "experimental kvTransferPolicy requires one topology source",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey: "",
-							Domain:   "zone",
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy: exactly one of labelKey or clusterTopologyName is required",
-		},
-		{
-			name: "experimental kvTransferPolicy rejects both topology sources",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:            "topology.kubernetes.io/zone",
-							ClusterTopologyName: "grove-topology",
-							Domain:              "zone",
-						},
-					},
-				},
-			},
-			groveEnabled: true,
-			wantErr:      true,
-			errMsg:       "spec.experimental.kvTransferPolicy: exactly one of labelKey or clusterTopologyName is required",
-		},
-		{
-			name: "experimental kvTransferPolicy clusterTopologyName requires Grove enabled",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							ClusterTopologyName: "grove-topology",
-							Domain:              "zone",
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy.clusterTopologyName requires the Grove pathway, but Grove is disabled in the operator configuration",
-		},
-		{
-			name: "experimental kvTransferPolicy clusterTopologyName rejects Grove opt-out annotation",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-					Annotations: map[string]string{
-						consts.KubeAnnotationEnableGrove: consts.KubeLabelValueFalse,
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							ClusterTopologyName: "grove-topology",
-							Domain:              "zone",
-						},
-					},
-				},
-			},
-			groveEnabled: true,
-			wantErr:      true,
-			errMsg:       "spec.experimental.kvTransferPolicy.clusterTopologyName requires the Grove pathway; remove or unset the \"nvidia.com/enable-grove\" annotation (currently \"false\")",
-		},
-		{
-			name: "experimental kvTransferPolicy rejects invalid clusterTopologyName",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							ClusterTopologyName: "Bad_Name",
-							Domain:              "zone",
-						},
-					},
-				},
-			},
-			groveEnabled: true,
-			wantErr:      true,
-			errMsg:       "spec.experimental.kvTransferPolicy.clusterTopologyName \"Bad_Name\" is not a valid Kubernetes resource name",
-			errContains:  true,
-		},
-		{
-			name: "experimental kvTransferPolicy rejects invalid labelKey characters",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey: "topology.kubernetes.io/bad key",
-							Domain:   "zone",
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.experimental.kvTransferPolicy.labelKey \"topology.kubernetes.io/bad key\" is not a valid Kubernetes label key",
-			errContains: true,
-		},
-		{
-			name: "experimental kvTransferPolicy rejects malformed labelKey prefix",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey: "BadPrefix.example.com/zone",
-							Domain:   "zone",
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.experimental.kvTransferPolicy.labelKey \"BadPrefix.example.com/zone\" is not a valid Kubernetes label key",
-			errContains: true,
-		},
-		{
-			name: "experimental kvTransferPolicy rejects overlong labelKey name",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey: "topology.kubernetes.io/" + strings.Repeat("a", 64),
-							Domain:   "zone",
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.experimental.kvTransferPolicy.labelKey",
-			errContains: true,
-		},
-		{
-			name: "experimental kvTransferPolicy rejects overlong labelKey prefix",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey: strings.Join([]string{
-								strings.Repeat("a", 63),
-								strings.Repeat("b", 63),
-								strings.Repeat("c", 63),
-								strings.Repeat("d", 63),
-							}, ".") + "/zone",
-							Domain: "zone",
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.experimental.kvTransferPolicy.labelKey",
-			errContains: true,
-		},
-		{
-			name: "experimental kvTransferPolicy missing domain",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey: "topology.kubernetes.io/zone",
-							Domain:   "",
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy.domain is required",
-		},
-		{
-			name: "experimental kvTransferPolicy invalid domain format",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey: "topology.kubernetes.io/zone",
-							Domain:   "INVALID_DOMAIN",
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.experimental.kvTransferPolicy.domain \"INVALID_DOMAIN\" is not a valid topology domain",
-			errContains: true,
-		},
-		{
-			name: "experimental kvTransferPolicy invalid enforcement",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:    "topology.kubernetes.io/zone",
-							Domain:      "zone",
-							Enforcement: "invalid-policy",
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.experimental.kvTransferPolicy.enforcement \"invalid-policy\" is invalid",
-			errContains: true,
-		},
-		{
-			name: "experimental kvTransferPolicy omitted enforcement defaults to required",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey: "topology.kubernetes.io/zone",
-							Domain:   "zone",
-							// enforcement omitted
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "experimental kvTransferPolicy rejects preferred without preferredWeight",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:    "topology.kubernetes.io/zone",
-							Domain:      "zone",
-							Enforcement: nvidiacomv1alpha1.KvTransferEnforcementPreferred,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy.preferredWeight is required when enforcement is \"preferred\"",
-		},
-		{
-			name: "experimental kvTransferPolicy rejects preferredWeight with required enforcement",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:        "topology.kubernetes.io/zone",
-							Domain:          "zone",
-							Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementRequired,
-							PreferredWeight: k8sptr.To[float32](0.85),
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy.preferredWeight must not be set when enforcement is \"required\"",
-		},
-		{
-			name: "experimental kvTransferPolicy rejects preferredWeight above one",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:        "topology.kubernetes.io/zone",
-							Domain:          "zone",
-							Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
-							PreferredWeight: k8sptr.To[float32](1.25),
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.experimental.kvTransferPolicy.preferredWeight 1.25 is invalid",
-			errContains: true,
-		},
-		{
-			name: "experimental kvTransferPolicy rejects negative preferredWeight",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-							LabelKey:        "topology.kubernetes.io/zone",
-							Domain:          "zone",
-							Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
-							PreferredWeight: k8sptr.To[float32](-0.1),
-						},
-					},
-				},
-			},
-			wantErr:     true,
-			errMsg:      "spec.experimental.kvTransferPolicy.preferredWeight -0.1 is invalid",
-			errContains: true,
-		},
-		{
-			name: "experimental without kvTransferPolicy is valid",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "no kvTransferPolicy is valid",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"frontend": {ComponentType: consts.ComponentTypeFrontend},
-					},
-				},
-			},
-			wantErr: false,
+			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+				spec.BackendFramework = "sglang"
+				enableBetaInterPodGMS(&spec.Components[1])
+			}),
+			wantErr: `spec.components[worker]: the inter-pod GMS layout (experimental.gpuMemoryService.mode="InterPod") is currently supported only for vLLM`,
+		},
+		{
+			name: "kv transfer policy requires exactly one topology selector",
+			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+				spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{
+						Domain: "rack",
+					},
+				}
+			}),
+			wantErr: "spec.experimental.kvTransferPolicy: exactly one of labelKey or clusterTopologyName is required",
+		},
+		{
+			name: "intra-pod failover requires container discovery",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				enableBetaIntraPodGMS(worker)
+				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
+					Mode: nvidiacomv1beta1.GMSModeIntraPod,
+				}
+			}),
+			wantErr: `failover requires per-container K8s discovery; set annotation "nvidia.com/dynamo-kube-discovery-mode" to "container"`,
+		},
+		{
+			name: "checkpoint job cannot be combined with checkpointRef",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: k8sptr.To("existing-checkpoint"),
+						Job:           &nvidiacomv1beta1.ComponentCheckpointJobConfig{},
+					},
+				}
+			}),
+			wantErr: "spec.components[worker].experimental.checkpoint.job cannot be set when checkpointRef is specified",
+		},
+		{
+			name: "GMS requires GPU resources on the main container",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+						Mode: nvidiacomv1beta1.GMSModeIntraPod,
+					},
+				}
+			}),
+			wantErr: "spec.components[worker].experimental.gpuMemoryService: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
+		},
+		{
+			name: "sidecars must provide an image",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.PodTemplate = &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: consts.MainContainerName},
+							{Name: "metrics"},
+						},
+					},
+				}
+			}),
+			wantErr: `spec.components[worker].podTemplate.spec.containers[1].image is required for sidecar container "metrics"`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(clusterTopology).Build()
-			validator := NewDynamoGraphDeploymentValidator(tt.deployment, &fakeManager{client: client, config: &rest.Config{}}, tt.groveEnabled)
+			validator := NewDynamoGraphDeploymentBetaValidator(tt.deployment, nil, tt.groveEnabled)
 			_, err := validator.Validate(context.Background())
+			assertBetaValidationError(t, err, tt.wantErr)
+		})
+	}
+}
 
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DynamoGraphDeploymentValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
+func TestDynamoGraphDeploymentBetaValidator_ValidateUpdate(t *testing.T) {
+	const operatorPrincipal = "system:serviceaccount:dynamo-system:dynamo-operator"
 
-			if tt.wantErr {
-				if tt.errContains {
-					// For multiple errors, check that all expected error messages are present
-					errStr := err.Error()
-					for _, expectedMsg := range strings.Split(tt.errMsg, "\n") {
-						if !strings.Contains(errStr, expectedMsg) {
-							t.Errorf("DynamoGraphDeploymentValidator.Validate() error message = %v, want to contain %v", errStr, expectedMsg)
-						}
+	tests := []struct {
+		name      string
+		oldDGD    *nvidiacomv1beta1.DynamoGraphDeployment
+		newDGD    *nvidiacomv1beta1.DynamoGraphDeployment
+		userInfo  *authenticationv1.UserInfo
+		principal string
+		wantErr   string
+		wantWarns bool
+	}{
+		{
+			name:   "component topology is immutable",
+			oldDGD: newBetaDGDForValidation(),
+			newDGD: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+				spec.Components = append(spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "extra",
+					Replicas:      k8sptr.To(int32(1)),
+				})
+			}),
+			wantErr: "component topology is immutable and cannot be modified after creation: components added: [extra]",
+		},
+		{
+			name: "scaling adapter blocks direct replica changes",
+			oldDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			newDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+			userInfo: &authenticationv1.UserInfo{
+				Username: "system:serviceaccount:default:regular-user",
+			},
+			principal: operatorPrincipal,
+			wantErr:   "spec.components[worker].replicas cannot be modified directly when scaling adapter is enabled",
+		},
+		{
+			name: "operator can change scaling-adapter-owned replicas",
+			oldDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			newDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+			userInfo: &authenticationv1.UserInfo{
+				Username: operatorPrincipal,
+			},
+			principal: operatorPrincipal,
+		},
+		{
+			name: "minAvailable is immutable once set",
+			oldDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.MinAvailable = k8sptr.To(int32(1))
+			}),
+			newDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.MinAvailable = k8sptr.To(int32(2))
+			}),
+			wantErr: "spec.components[worker].minAvailable is immutable after creation",
+		},
+		{
+			name:   "backend framework changes warn and fail",
+			oldDGD: newBetaDGDForValidation(),
+			newDGD: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+				spec.BackendFramework = "sglang"
+			}),
+			wantErr:   "spec.backendFramework is immutable and cannot be changed after creation",
+			wantWarns: true,
+		},
+		{
+			name: "restart id cannot change during active rolling update",
+			oldDGD: betaDGDWithStatus(
+				func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+					spec.Restart = &nvidiacomv1beta1.Restart{ID: "old"}
+				},
+				func(status *nvidiacomv1beta1.DynamoGraphDeploymentStatus) {
+					status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+						Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
 					}
-				} else {
-					if err.Error() != tt.errMsg {
-						t.Errorf("DynamoGraphDeploymentValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
-					}
-				}
-			}
-		})
-	}
-}
-
-type fakeManager struct {
-	ctrl.Manager // satisfies the rest of the interface; panics if unexpected methods are used
-	client       client.Client
-	config       *rest.Config
-}
-
-func (m fakeManager) GetClient() client.Client { return m.client }
-func (m fakeManager) GetConfig() *rest.Config  { return m.config }
-
-func TestDynamoGraphDeploymentValidator_KvTransferPolicyClusterTopology(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := grovev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add Grove scheme: %v", err)
-	}
-
-	clusterTopology := &grovev1alpha1.ClusterTopology{
-		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
-		Spec: grovev1alpha1.ClusterTopologySpec{
-			Levels: []grovev1alpha1.TopologyLevel{
-				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
-				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
-			},
-		},
-	}
-
-	baseDeployment := func(domain nvidiacomv1alpha1.TopologyDomain, topologyName string) *nvidiacomv1alpha1.DynamoGraphDeployment {
-		return &nvidiacomv1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:       "test-graph",
-				Namespace:  "default",
-				Generation: 1,
-			},
-			Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-				BackendFramework: "vllm",
-				Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {ComponentType: consts.ComponentTypeWorker},
 				},
-				Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-					KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
-						ClusterTopologyName: topologyName,
-						Domain:              domain,
-						Enforcement:         nvidiacomv1alpha1.KvTransferEnforcementRequired,
-					},
-				},
-			},
-		}
-	}
-
-	tests := []struct {
-		name       string
-		deployment *nvidiacomv1alpha1.DynamoGraphDeployment
-		objects    []runtime.Object
-		wantErr    string
-	}{
-		{
-			name:       "domain exists",
-			deployment: baseDeployment("rack", "grove-topology"),
-			objects:    []runtime.Object{clusterTopology},
-		},
-		{
-			name:       "domain missing",
-			deployment: baseDeployment("host", "grove-topology"),
-			objects:    []runtime.Object{clusterTopology},
-			wantErr:    "spec.experimental.kvTransferPolicy.domain \"host\" does not exist in ClusterTopology \"grove-topology\"",
-		},
-		{
-			name:       "cluster topology missing",
-			deployment: baseDeployment("rack", "missing-topology"),
-			wantErr:    "spec.experimental.kvTransferPolicy.clusterTopologyName \"missing-topology\" references a ClusterTopology resource that was not found",
+			),
+			newDGD: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+				spec.Restart = &nvidiacomv1beta1.Restart{ID: "new"}
+			}),
+			wantErr: "spec.restart.id cannot be changed while a rolling update is InProgress",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tt.objects...).Build()
-			validator := NewDynamoGraphDeploymentValidator(tt.deployment, &fakeManager{client: client, config: &rest.Config{}}, true)
-			_, err := validator.Validate(context.Background())
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("Validate() error = %v", err)
-				}
-				return
+			validator := NewDynamoGraphDeploymentBetaValidator(tt.newDGD, nil, true)
+			warnings, err := validator.ValidateUpdate(tt.oldDGD, tt.userInfo, tt.principal)
+			assertBetaValidationError(t, err, tt.wantErr)
+			if tt.wantWarns && len(warnings) == 0 {
+				t.Fatal("ValidateUpdate() expected warnings but got none")
 			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("Validate() error = %v, want to contain %q", err, tt.wantErr)
+			if !tt.wantWarns && len(warnings) != 0 {
+				t.Fatalf("ValidateUpdate() unexpected warnings: %v", warnings)
 			}
 		})
 	}
 }
 
-func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := grovev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add Grove scheme: %v", err)
-	}
-
-	kvTransferUpdateDeployment := func(kvt *nvidiacomv1alpha1.KvTransferPolicy) *nvidiacomv1alpha1.DynamoGraphDeployment {
-		dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
-			Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-				BackendFramework: "sglang",
-				Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {},
-				},
-			},
-		}
-		if kvt != nil {
-			dgd.Spec.Experimental = &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
-				KvTransferPolicy: kvt,
-			}
-		}
-		return dgd
-	}
-	clusterTopologyKvTransferPolicy := func() *nvidiacomv1alpha1.KvTransferPolicy {
-		return &nvidiacomv1alpha1.KvTransferPolicy{
-			ClusterTopologyName: "grove-topology",
-			Domain:              "zone",
-		}
-	}
-	labelKeyKvTransferPolicy := func() *nvidiacomv1alpha1.KvTransferPolicy {
-		return &nvidiacomv1alpha1.KvTransferPolicy{
-			LabelKey: "topology.kubernetes.io/zone",
-			Domain:   "zone",
-		}
-	}
-
-	tests := []struct {
-		name            string
-		oldDeployment   *nvidiacomv1alpha1.DynamoGraphDeployment
-		newDeployment   *nvidiacomv1alpha1.DynamoGraphDeployment
-		wantErr         bool
-		wantWarnings    bool
-		errMsg          string
-		expectedWarnMsg string
-	}{
-		{
-			name: "no changes",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-				},
-			},
-			wantErr: false,
+func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
+	return &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-graph",
+			Namespace: "default",
 		},
-		{
-			name: "unchanged kvTransferPolicy is allowed",
-			oldDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				ClusterTopologyName: "grove-topology",
-				Domain:              "zone",
-			}),
-			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				ClusterTopologyName: "grove-topology",
-				Domain:              "zone",
-				Enforcement:         nvidiacomv1alpha1.KvTransferEnforcementRequired,
-			}),
-			wantErr: false,
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "frontend",
+					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+					Replicas:      k8sptr.To(int32(1)),
+				},
+				{
+					ComponentName: "worker",
+					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+					Replicas:      k8sptr.To(int32(2)),
+				},
+			},
 		},
-		{
-			name:          "adding kvTransferPolicy is immutable",
-			oldDeployment: kvTransferUpdateDeployment(nil),
-			newDeployment: kvTransferUpdateDeployment(clusterTopologyKvTransferPolicy()),
-			wantErr:       true,
-			errMsg:        "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
-		},
-		{
-			name:          "removing kvTransferPolicy is immutable",
-			oldDeployment: kvTransferUpdateDeployment(clusterTopologyKvTransferPolicy()),
-			newDeployment: kvTransferUpdateDeployment(nil),
-			wantErr:       true,
-			errMsg:        "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
-		},
-		{
-			name:          "changing kvTransferPolicy clusterTopologyName is immutable",
-			oldDeployment: kvTransferUpdateDeployment(clusterTopologyKvTransferPolicy()),
-			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				ClusterTopologyName: "other-topology",
-				Domain:              "zone",
-			}),
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
-		},
-		{
-			name:          "changing kvTransferPolicy labelKey is immutable",
-			oldDeployment: kvTransferUpdateDeployment(labelKeyKvTransferPolicy()),
-			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				LabelKey: "topology.kubernetes.io/rack",
-				Domain:   "zone",
-			}),
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
-		},
-		{
-			name:          "changing kvTransferPolicy domain is immutable",
-			oldDeployment: kvTransferUpdateDeployment(clusterTopologyKvTransferPolicy()),
-			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				ClusterTopologyName: "grove-topology",
-				Domain:              "rack",
-			}),
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
-		},
-		{
-			name: "changing kvTransferPolicy enforcement is immutable",
-			oldDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				LabelKey:    "topology.kubernetes.io/zone",
-				Domain:      "zone",
-				Enforcement: nvidiacomv1alpha1.KvTransferEnforcementRequired,
-			}),
-			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				LabelKey:        "topology.kubernetes.io/zone",
-				Domain:          "zone",
-				Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
-				PreferredWeight: k8sptr.To[float32](0.85),
-			}),
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
-		},
-		{
-			name: "changing kvTransferPolicy preferredWeight is immutable",
-			oldDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				LabelKey:        "topology.kubernetes.io/zone",
-				Domain:          "zone",
-				Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
-				PreferredWeight: k8sptr.To[float32](0.5),
-			}),
-			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
-				LabelKey:        "topology.kubernetes.io/zone",
-				Domain:          "zone",
-				Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
-				PreferredWeight: k8sptr.To[float32](0.85),
-			}),
-			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
-		},
-		{
-			name: "changing minAvailable is immutable",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {Replicas: k8sptr.To(int32(5)), MinAvailable: k8sptr.To(int32(5))},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {Replicas: k8sptr.To(int32(5)), MinAvailable: k8sptr.To(int32(4))},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[backend].minAvailable is immutable after creation",
-		},
-		{
-			name: "changing backend framework",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-				},
-			},
-			wantErr:         true,
-			wantWarnings:    true,
-			errMsg:          "spec.backendFramework is immutable and cannot be changed after creation",
-			expectedWarnMsg: "Changing spec.backendFramework may cause unexpected behavior",
-		},
-		{
-			name: "adding single service is prohibited",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend":  {},
-						"frontend": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [frontend]",
-		},
-		{
-			name: "adding multiple services is prohibited",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend":  {},
-						"cache":    {},
-						"frontend": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [cache frontend]",
-		},
-		{
-			name: "removing single service is prohibited",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend":  {},
-						"frontend": {},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "service topology is immutable and cannot be modified after creation: services removed: [frontend]",
-		},
-		{
-			name: "removing multiple services is prohibited",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend":  {},
-						"cache":    {},
-						"frontend": {},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "service topology is immutable and cannot be modified after creation: services removed: [cache frontend]",
-		},
-		{
-			name: "adding and removing services simultaneously is prohibited",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {},
-						"cache":   {},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend":  {},
-						"frontend": {},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [frontend], services removed: [cache]",
-		},
-		{
-			name: "modifying service specifications is allowed",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {
-							Replicas: func() *int32 { r := int32(1); return &r }(),
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend": {
-							Replicas: func() *int32 { r := int32(3); return &r }(),
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "service topology unchanged with same services",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend":  {},
-						"frontend": {},
-						"cache":    {},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"backend":  {},
-						"frontend": {},
-						"cache":    {},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "changing service from single-node to multi-node",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							// Single-node (nil Multinode)
-							Multinode: nil,
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							// Multi-node (NodeCount > 1)
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
-		},
-		{
-			name: "changing service from multi-node to single-node",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							// Multi-node
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 3,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							// Single-node (nil Multinode)
-							Multinode: nil,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
-		},
-		{
-			name: "changing multinode NodeCount within multi-node range is allowed",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 4,
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "keeping service as single-node is allowed",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: nil,
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: nil,
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "keeping service as multi-node is allowed",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 3,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 3,
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "changing from single-node (NodeCount=1) to multi-node (NodeCount=2)",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 1,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
-		},
-		{
-			name: "changing from multi-node (NodeCount=2) to single-node (NodeCount=1)",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 1,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
-		},
-		{
-			name: "multiple services with one changing topology",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: nil,
-						},
-						"prefill": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							// Changing from single-node to multi-node
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 3,
-							},
-						},
-						"prefill": {
-							// Keeping as multi-node (OK)
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 4,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
-		},
-		{
-			name: "adding new service with multinode is not allowed", // service topology is immutable
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: nil,
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: nil,
-						},
-						"decode": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 4,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [decode]",
-		},
-		{
-			name: "adding new service without multinode is not allowed", // service topology is immutable
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
-								NodeCount: 2,
-							},
-						},
-						"gateway": {
-							// New service without multinode - should be allowed
-							Multinode: nil,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [gateway]",
-		},
-		{
-			name: "restart.id change while rolling update Pending - rejected",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "old-restart-id",
-					},
-				},
-				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
-					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
-						Phase: nvidiacomv1alpha1.RollingUpdatePhasePending,
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "new-restart-id",
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.restart.id cannot be changed while a rolling update is Pending",
-		},
-		{
-			name: "restart.id change while rolling update InProgress - rejected",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "old-restart-id",
-					},
-				},
-				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
-					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
-						Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "new-restart-id",
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.restart.id cannot be changed while a rolling update is InProgress",
-		},
-		{
-			name: "restart.id change while rolling update Completed - allowed",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "old-restart-id",
-					},
-				},
-				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
-					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
-						Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "new-restart-id",
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "restart.id change with no rolling update - allowed",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "old-restart-id",
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "new-restart-id",
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "spec change without restart.id change during rolling update - allowed",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							Replicas: func() *int32 { r := int32(1); return &r }(),
-						},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "same-restart-id",
-					},
-				},
-				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
-					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
-						Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "sglang",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							Replicas: func() *int32 { r := int32(3); return &r }(),
-						},
-					},
-					Restart: &nvidiacomv1alpha1.Restart{
-						ID: "same-restart-id",
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "toggling GMS failover is immutable",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "failover cannot be toggled after creation",
-		},
-		{
-			name: "toggling inter-pod GMS layout is immutable",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "inter-pod GMS layout cannot be toggled after creation",
-		},
-		{
-			name: "changing numShadows is immutable",
-			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
-							},
-						},
-					},
-				},
-			},
-			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
-							ComponentType: consts.ComponentTypeWorker,
-							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-								Enabled: true,
-								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
-							},
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 3,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "failover.numShadows is immutable",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
-			validator := NewDynamoGraphDeploymentValidator(tt.newDeployment, &fakeManager{client: client, config: &rest.Config{}}, true)
-			// Pass nil userInfo and empty operatorPrincipal - these tests don't modify replicas, so it's safe
-			warnings, err := validator.ValidateUpdate(tt.oldDeployment, nil, "")
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DynamoGraphDeploymentValidator.ValidateUpdate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			if tt.wantErr && !strings.Contains(err.Error(), tt.errMsg) {
-				t.Errorf("DynamoGraphDeploymentValidator.ValidateUpdate() error message = %v, want to contain %v", err.Error(), tt.errMsg)
-			}
-
-			if tt.wantWarnings && len(warnings) == 0 {
-				t.Errorf("DynamoGraphDeploymentValidator.ValidateUpdate() expected warnings but got none")
-			}
-
-			if tt.wantWarnings && len(warnings) > 0 && warnings[0] != tt.expectedWarnMsg {
-				t.Errorf("DynamoGraphDeploymentValidator.ValidateUpdate() warning = %v, want %v", warnings[0], tt.expectedWarnMsg)
-			}
-		})
 	}
 }
 
-func TestGetServiceNames(t *testing.T) {
-	tests := []struct {
-		name     string
-		services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-		want     map[string]struct{}
-	}{
-		{
-			name:     "empty services",
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{},
-			want:     map[string]struct{}{},
-		},
-		{
-			name: "single service",
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"backend": {},
-			},
-			want: map[string]struct{}{
-				"backend": {},
-			},
-		},
-		{
-			name: "multiple services",
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"backend":  {},
-				"frontend": {},
-				"cache":    {},
-			},
-			want: map[string]struct{}{
-				"backend":  {},
-				"frontend": {},
-				"cache":    {},
-			},
-		},
-	}
+func betaDGDWithSpec(
+	mutate func(*nvidiacomv1beta1.DynamoGraphDeploymentSpec),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := newBetaDGDForValidation()
+	mutate(&dgd.Spec)
+	return dgd
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := getServiceNames(tt.services)
-			if len(got) != len(tt.want) {
-				t.Errorf("getServiceNames() length = %v, want %v", len(got), len(tt.want))
+func betaDGDWithWorker(
+	mutate func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+		for i := range spec.Components {
+			if spec.Components[i].ComponentName == "worker" {
+				mutate(&spec.Components[i])
 				return
 			}
-			for name := range tt.want {
-				if _, exists := got[name]; !exists {
-					t.Errorf("getServiceNames() missing service %v", name)
-				}
-			}
-		})
+		}
+	})
+}
+
+func betaDGDWithStatus(
+	mutateSpec func(*nvidiacomv1beta1.DynamoGraphDeploymentSpec),
+	mutateStatus func(*nvidiacomv1beta1.DynamoGraphDeploymentStatus),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := betaDGDWithSpec(mutateSpec)
+	mutateStatus(&dgd.Status)
+	return dgd
+}
+
+func enableBetaInterPodGMS(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+	component.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+			Mode: nvidiacomv1beta1.GMSModeInterPod,
+		},
+	}
+	component.PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: consts.MainContainerName,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
-func TestDifference(t *testing.T) {
-	tests := []struct {
-		name string
-		a    map[string]struct{}
-		b    map[string]struct{}
-		want []string
-	}{
-		{
-			name: "empty sets",
-			a:    map[string]struct{}{},
-			b:    map[string]struct{}{},
-			want: nil,
-		},
-		{
-			name: "a is empty",
-			a:    map[string]struct{}{},
-			b: map[string]struct{}{
-				"backend": {},
-			},
-			want: nil,
-		},
-		{
-			name: "b is empty",
-			a: map[string]struct{}{
-				"backend": {},
-			},
-			b:    map[string]struct{}{},
-			want: []string{"backend"},
-		},
-		{
-			name: "no difference - identical sets",
-			a: map[string]struct{}{
-				"backend":  {},
-				"frontend": {},
-			},
-			b: map[string]struct{}{
-				"backend":  {},
-				"frontend": {},
-			},
-			want: nil,
-		},
-		{
-			name: "single element difference",
-			a: map[string]struct{}{
-				"backend":  {},
-				"frontend": {},
-			},
-			b: map[string]struct{}{
-				"backend": {},
-			},
-			want: []string{"frontend"},
-		},
-		{
-			name: "multiple element difference",
-			a: map[string]struct{}{
-				"backend":  {},
-				"frontend": {},
-				"cache":    {},
-			},
-			b: map[string]struct{}{
-				"backend": {},
-			},
-			want: []string{"cache", "frontend"},
-		},
-		{
-			name: "completely different sets",
-			a: map[string]struct{}{
-				"frontend": {},
-				"cache":    {},
-			},
-			b: map[string]struct{}{
-				"backend": {},
-			},
-			want: []string{"cache", "frontend"},
+func enableBetaIntraPodGMS(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+	component.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+			Mode: nvidiacomv1beta1.GMSModeIntraPod,
 		},
 	}
+	component.PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: consts.MainContainerName,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+						},
+					},
+				},
+			},
+		},
+	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := difference(tt.a, tt.b)
-
-			// Sort both slices for comparison (since map iteration order is undefined)
-			sort.Strings(got)
-			want := make([]string, len(tt.want))
-			copy(want, tt.want)
-			sort.Strings(want)
-
-			if len(got) != len(want) {
-				t.Errorf("difference() length = %v, want %v", len(got), len(want))
-				return
-			}
-
-			for i := range got {
-				if got[i] != want[i] {
-					t.Errorf("difference() = %v, want %v", got, want)
-					return
-				}
-			}
-		})
+func assertBetaValidationError(t *testing.T, err error, wantErr string) {
+	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("expected error containing %q but got nil", wantErr)
+	}
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("error = %q, want to contain %q", err.Error(), wantErr)
 	}
 }
