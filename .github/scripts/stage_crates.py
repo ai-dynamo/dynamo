@@ -97,20 +97,26 @@ def write_cargo_config(root: Path, alias: str, index: str) -> None:
     )
 
 
-def inject_registry(root: Path, names: list[str], alias: str) -> None:
-    # Internal deps carry path + version but no registry, so published metadata
-    # would default to crates.io. Attribute them to the artifactory registry.
-    # `workspace = true` deps inherit from the root table, which we also rewrite.
+def inject_registry(root: Path, names: list[str], alias: str, versions: dict[str, str]) -> None:
+    # Internal deps must carry a registry + a version when published, else cargo
+    # publish defaults them to crates.io / rejects them. `workspace = true` deps
+    # inherit both from the root table (which we also rewrite), so skip them.
+    # A direct path dep (e.g. `dynamo-llm = { path = "../llm", default-features = false }`
+    # in backend-common) has neither — add the registry AND the depended-on crate's
+    # publish version so `cargo publish` accepts it (cargo drops the path on publish).
     pat = re.compile(
         r"^(" + "|".join(re.escape(n) for n in names) + r")(\s*=\s*)\{([^}]*)\}",
         re.MULTILINE,
     )
 
     def repl(m: re.Match) -> str:
-        inner = m.group(3).strip()
+        name, inner = m.group(1), m.group(3).strip()
         if "registry" in inner or "workspace" in inner:
             return m.group(0)
-        return f'{m.group(1)}{m.group(2)}{{ {inner.rstrip(",")}, registry = "{alias}" }}'
+        parts = inner.rstrip(",")
+        if "version" not in inner and name in versions:
+            parts = f'{parts}, version = "{versions[name]}"'
+        return f'{m.group(1)}{m.group(2)}{{ {parts}, registry = "{alias}" }}'
 
     for manifest in [root / "Cargo.toml", *sorted((root / "lib").glob("*/Cargo.toml"))]:
         text = manifest.read_text()
@@ -301,7 +307,7 @@ def main() -> int:
             return 1
 
     write_cargo_config(root, args.registry, index)
-    inject_registry(root, order, args.registry)
+    inject_registry(root, order, args.registry, {n: pkgs[n]["version"] for n in order})
     # cargo publish rejects deps without a registry version; drop the optional,
     # private git deps (e.g. aiconfigurator-core) from the crates being published.
     strip_git_deps(root, [Path(pkgs[n]["manifest_path"]) for n in order])
