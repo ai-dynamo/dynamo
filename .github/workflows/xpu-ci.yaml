@@ -202,7 +202,7 @@ jobs:
   test-xpu-2card:
     needs: [build-xpu]
     if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
-    runs-on: xpu_2
+    runs-on: xpu-2
     env:
       FRAMEWORK: ${{ inputs.framework || 'vllm' }}
       IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
