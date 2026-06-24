@@ -1042,6 +1042,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1; 16],
             max_output_tokens: 2,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
