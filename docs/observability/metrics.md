@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Metrics
+subtitle: Reference for the Prometheus metrics Dynamo's runtime, frontend, and workers expose on the local system metrics endpoint.
 ---
 
 ## Overview

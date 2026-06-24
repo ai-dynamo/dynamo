@@ -1123,12 +1123,14 @@ def _probe_overload_503_and_assert(
     is responsible for starting the frontend (with the desired thresholds and,
     for disagg, ``enforce_disagg=True``) and for waiting until it is ready.
 
-    Sends unique (shuffled) prompts 0.1s apart to exhaust worker resources, then
+    Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
     asserts:
-    1. At least one request succeeds (routed before the busy state propagates)
-    2. At least one request is rejected with 503 (all eligible workers busy)
-    3. No other status codes appear
-    4. The frontend ``model_rejection_total`` metric matches the 503 count
+    1. At least one request is rejected with 503 (the threshold gates the pool)
+    2. No other status codes appear
+    3. The frontend ``model_rejection_total`` metric matches the 503 count
+
+    Successes are not required: a single overload-shaped request can exceed the
+    threshold before dispatch, so an all-503 burst is a valid outcome.
     """
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
     test_payload_503 = {
@@ -1230,7 +1232,6 @@ def _probe_overload_503_and_assert(
         num_other == 0
     ), f"Expected only 200 or 503 responses, but got {num_other} other"
     assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
-    assert num_succeeded > 0, f"Expected at least 1 success, but got {num_succeeded}"
 
     # Verify rejection metrics from frontend /metrics endpoint
     model_name = test_payload.get("model", "")
@@ -3327,7 +3328,8 @@ def _test_disagg_direct_mode(
     """E2E test for disaggregated Direct routing mode (simulating GAIE EPP).
 
     In Direct mode, the router does not select workers itself.
-    Worker IDs must be provided via x-worker-instance-id and x-prefill-instance-id
+    Worker IDs must be provided via x-dynamo-worker-instance-id and
+    x-dynamo-prefill-instance-id
     HTTP headers. The test verifies:
       1. Requests with explicit worker ID headers succeed and return a valid response.
       2. Requests without headers fail (Direct mode rejects unaddressed requests).
@@ -3369,10 +3371,10 @@ def _test_disagg_direct_mode(
                 decode_workers.num_workers,
             )
             headers = {
-                "x-worker-instance-id": str(decode_ids[0]),
-                "x-prefill-instance-id": str(prefill_ids[0]),
-                "x-dp-rank": "0",
-                "x-prefill-dp-rank": "0",
+                "x-dynamo-worker-instance-id": str(decode_ids[0]),
+                "x-dynamo-prefill-instance-id": str(prefill_ids[0]),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
             }
             await wait_for_frontend_ready(
                 frontend_url=frontend_url,
@@ -3401,10 +3403,10 @@ def _test_disagg_direct_mode(
                 "stream": False,
             }
             headers = {
-                "x-worker-instance-id": str(target_decode),
-                "x-prefill-instance-id": str(target_prefill),
-                "x-dp-rank": "0",
-                "x-prefill-dp-rank": "0",
+                "x-dynamo-worker-instance-id": str(target_decode),
+                "x-dynamo-prefill-instance-id": str(target_prefill),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
             }
 
             async with aiohttp.ClientSession() as session:

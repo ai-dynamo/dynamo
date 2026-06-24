@@ -234,14 +234,19 @@ pub fn parse_nvext(raw: Option<serde_json::Value>) -> anyhow::Result<Option<NvEx
         .map_err(|err| anyhow::anyhow!("invalid nvext: {err}"))
 }
 
-pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
-pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
-pub const HEADER_DP_RANK: &str = "x-dp-rank";
-/// Alias for data-parallel rank routing.
-pub const HEADER_DP_RANK_ALIAS: &str = "x-data-parallel-rank";
-pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+pub const HEADER_WORKER_INSTANCE_ID: &str = "x-dynamo-worker-instance-id";
+pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-dynamo-prefill-instance-id";
+pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
+pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+// Compatibility aliases for the original unprefixed names. Future agents may remove these after
+// the deprecation window.
+pub const HEADER_WORKER_INSTANCE_ID_ALIAS: &str = "x-worker-instance-id";
+pub const HEADER_PREFILL_INSTANCE_ID_ALIAS: &str = "x-prefill-instance-id";
+pub const HEADER_DP_RANK_ALIAS: &str = "x-dp-rank";
+pub const HEADER_DATA_PARALLEL_RANK_ALIAS: &str = "x-data-parallel-rank";
+pub const HEADER_PREFILL_DP_RANK_ALIAS: &str = "x-prefill-dp-rank";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 impl From<AgentContextHeaderValues> for AgentContext {
@@ -267,10 +272,10 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
 /// Apply HTTP routing header overrides to nvext.
 ///
 /// Header mappings:
-/// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
-/// - `x-prefill-instance-id` -> `prefill_worker_id`
-/// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
-/// - `x-prefill-dp-rank` -> `prefill_dp_rank`
+/// - `x-dynamo-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
+/// - `x-dynamo-prefill-instance-id` -> `prefill_worker_id`
+/// - `x-dynamo-dp-rank` -> `dp_rank` (decode worker's DP rank)
+/// - `x-dynamo-prefill-dp-rank` -> `prefill_dp_rank`
 /// - `x-dynamo-request-priority` -> `agent_hints.priority`
 /// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
 ///
@@ -279,22 +284,26 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
 pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
     let worker_id = headers
         .get(HEADER_WORKER_INSTANCE_ID)
+        .or_else(|| headers.get(HEADER_WORKER_INSTANCE_ID_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
     let prefill_id = headers
         .get(HEADER_PREFILL_INSTANCE_ID)
+        .or_else(|| headers.get(HEADER_PREFILL_INSTANCE_ID_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
     let dp_rank = headers
         .get(HEADER_DP_RANK)
         .or_else(|| headers.get(HEADER_DP_RANK_ALIAS))
+        .or_else(|| headers.get(HEADER_DATA_PARALLEL_RANK_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
 
     let prefill_dp_rank = headers
         .get(HEADER_PREFILL_DP_RANK)
+        .or_else(|| headers.get(HEADER_PREFILL_DP_RANK_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
@@ -727,6 +736,10 @@ mod tests {
         headers.insert(HEADER_PREFILL_INSTANCE_ID, "456".parse().unwrap());
         headers.insert(HEADER_DP_RANK, "3".parse().unwrap());
         headers.insert(HEADER_PREFILL_DP_RANK, "5".parse().unwrap());
+        headers.insert(HEADER_WORKER_INSTANCE_ID_ALIAS, "1".parse().unwrap());
+        headers.insert(HEADER_PREFILL_INSTANCE_ID_ALIAS, "2".parse().unwrap());
+        headers.insert(HEADER_DP_RANK_ALIAS, "4".parse().unwrap());
+        headers.insert(HEADER_PREFILL_DP_RANK_ALIAS, "6".parse().unwrap());
 
         let result = apply_header_routing_overrides(None, &headers).unwrap();
 
@@ -769,6 +782,32 @@ mod tests {
         assert_eq!(hints.priority, Some(-3));
         assert_eq!(hints.strict_priority, Some(2));
         assert_eq!(hints.osl, Some(99));
+    }
+
+    #[test]
+    fn apply_header_routing_overrides_supports_unprefixed_aliases() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_WORKER_INSTANCE_ID_ALIAS, "123".parse().unwrap());
+        headers.insert(HEADER_PREFILL_INSTANCE_ID_ALIAS, "456".parse().unwrap());
+        headers.insert(HEADER_DP_RANK_ALIAS, "3".parse().unwrap());
+        headers.insert(HEADER_PREFILL_DP_RANK_ALIAS, "5".parse().unwrap());
+
+        let result = apply_header_routing_overrides(None, &headers).unwrap();
+
+        assert_eq!(result.backend_instance_id, Some(123));
+        assert_eq!(result.decode_worker_id, Some(123));
+        assert_eq!(result.prefill_worker_id, Some(456));
+        assert_eq!(result.dp_rank, Some(3));
+        assert_eq!(result.prefill_dp_rank, Some(5));
+
+        headers.remove(HEADER_DP_RANK_ALIAS);
+        headers.insert(HEADER_DATA_PARALLEL_RANK_ALIAS, "4".parse().unwrap());
+        assert_eq!(
+            apply_header_routing_overrides(None, &headers)
+                .unwrap()
+                .dp_rank,
+            Some(4)
+        );
     }
 
     #[test]

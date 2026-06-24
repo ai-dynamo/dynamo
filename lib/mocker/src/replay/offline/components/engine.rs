@@ -11,12 +11,16 @@ use super::super::runtime_utils::WorkerCompletionPayload;
 use super::super::state::OfflineWorkerSnapshot;
 use super::super::state::OfflineWorkerState;
 use super::{EngineEffects, EnginePassMode, ScheduledWorkerCompletion};
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::RouterEventVisibility;
 use crate::scheduler::{SchedulerCommand, SchedulerCommandEffects};
 #[cfg(feature = "kvbm-offload")]
 use dynamo_kv_router::protocols::RouterEvent;
+
+fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
+    snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
+}
 
 pub(in crate::replay::offline) struct EngineComponent {
     stage: SimulationWorkerStage,
@@ -228,82 +232,88 @@ impl EngineComponent {
     pub(in crate::replay::offline) fn drive_ready(
         &mut self,
         now_ms: f64,
-        collector: Option<&mut TraceCollector>,
+        mut collector: Option<&mut TraceCollector>,
     ) -> anyhow::Result<EngineEffects> {
-        let Some(worker_id) = self
-            .workers
-            .iter()
-            .find_map(|(worker_id, worker)| worker.is_ready().then_some(*worker_id))
-        else {
-            return Ok(EngineEffects::default());
-        };
+        let worker_ids: Vec<usize> = self.workers.keys().copied().collect();
+        for worker_id in worker_ids {
+            let worker = self.workers.get(&worker_id).unwrap();
+            if !worker.is_ready() {
+                continue;
+            }
 
-        let executed = match self.pass_mode {
-            EnginePassMode::Visible => {
-                let Some(collector) = collector else {
-                    bail!("offline replay visible engine pass requires a collector");
-                };
-                self.workers
+            let executed = match self.pass_mode {
+                EnginePassMode::Visible => {
+                    let Some(collector) = collector.as_deref_mut() else {
+                        bail!("offline replay visible engine pass requires a collector");
+                    };
+                    self.workers
+                        .get_mut(&worker_id)
+                        .unwrap()
+                        .execute_pass(collector, now_ms)
+                }
+                EnginePassMode::Hidden => self
+                    .workers
                     .get_mut(&worker_id)
                     .unwrap()
-                    .execute_pass(collector, now_ms)
-            }
-            EnginePassMode::Hidden => self
-                .workers
-                .get_mut(&worker_id)
-                .unwrap()
-                .execute_hidden_pass(now_ms),
-        };
-
-        let made_progress = executed.end_ms > now_ms
-            || !executed.admissions.is_empty()
-            || executed.completed_requests > 0
-            || !executed.output_signals.is_empty()
-            || !executed.lifecycle_events.is_empty()
-            || !executed.kv_events.is_empty();
-        if !made_progress {
-            return Ok(EngineEffects::default());
-        }
-
-        let mut effects = EngineEffects {
-            admissions: executed.admissions,
-            ..EngineEffects::default()
-        };
-        let (completion_kv_events, completion_fpm) =
-            if executed.router_event_visibility == RouterEventVisibility::PassStart {
-                effects.pass_start_kv_events = executed.kv_events;
-                if let Some(fpm) = executed.fpm {
-                    effects.fpm_snapshots.push((worker_id, fpm));
-                }
-                (Vec::new(), None)
-            } else {
-                (executed.kv_events, executed.fpm)
+                    .execute_hidden_pass(now_ms),
             };
-        let payload = WorkerCompletionPayload {
-            stage: self.stage,
-            worker_idx: worker_id,
-            completed_requests: executed.completed_requests,
-            output_signals: executed.output_signals,
-            lifecycle_events: executed.lifecycle_events,
-            kv_events: completion_kv_events,
-            fpm: completion_fpm,
-            accept_length_output_tokens: executed.accept_length_output_tokens,
-            accept_length_decode_forwards: executed.accept_length_decode_forwards,
-        };
 
-        if executed.end_ms == now_ms {
-            effects.immediate_completions.push(payload);
+            let mut effects = EngineEffects {
+                admissions: executed.admissions,
+                ..EngineEffects::default()
+            };
+            let (completion_kv_events, completion_fpm) =
+                if executed.router_event_visibility == RouterEventVisibility::PassStart {
+                    effects.pass_start_kv_events = executed.kv_events;
+                    if let Some(fpm) = executed.fpm {
+                        effects.fpm_snapshots.push((worker_id, fpm));
+                    }
+                    (Vec::new(), None)
+                } else {
+                    (executed.kv_events, executed.fpm)
+                };
+            let payload = WorkerCompletionPayload {
+                stage: self.stage,
+                worker_idx: worker_id,
+                completed_requests: executed.completed_requests,
+                output_signals: executed.output_signals,
+                lifecycle_events: executed.lifecycle_events,
+                kv_events: completion_kv_events,
+                fpm: completion_fpm,
+                accept_length_output_tokens: executed.accept_length_output_tokens,
+                accept_length_decode_forwards: executed.accept_length_decode_forwards,
+            };
+
+            if executed.end_ms == now_ms {
+                let made_progress = !effects.admissions.is_empty()
+                    || !effects.pass_start_kv_events.is_empty()
+                    || payload.completed_requests > 0
+                    || !payload.output_signals.is_empty()
+                    || !payload.lifecycle_events.is_empty()
+                    || !payload.kv_events.is_empty()
+                    || payload.fpm.as_ref().is_some_and(fpm_has_scheduled_work)
+                    || effects
+                        .fpm_snapshots
+                        .iter()
+                        .any(|(_, snapshot)| fpm_has_scheduled_work(snapshot));
+                if !made_progress {
+                    continue;
+                }
+                effects.immediate_completions.push(payload);
+                return Ok(effects);
+            }
+
+            self.workers.get_mut(&worker_id).unwrap().mark_busy();
+            effects
+                .scheduled_completions
+                .push(ScheduledWorkerCompletion {
+                    at_ms: executed.end_ms,
+                    payload,
+                });
             return Ok(effects);
         }
 
-        self.workers.get_mut(&worker_id).unwrap().mark_busy();
-        effects
-            .scheduled_completions
-            .push(ScheduledWorkerCompletion {
-                at_ms: executed.end_ms,
-                payload,
-            });
-        Ok(effects)
+        Ok(EngineEffects::default())
     }
 
     pub(in crate::replay::offline) fn on_scheduled_completion(
@@ -546,6 +556,22 @@ mod tests {
         assert_eq!(engine.active_worker_ids().len(), 1);
         assert!(engine.mark_worker_ready(new_id));
         assert_eq!(engine.active_worker_ids().len(), 2);
+    }
+
+    #[test]
+    fn queued_only_fpm_is_not_zero_duration_progress() {
+        let queued = ForwardPassSnapshot {
+            num_queued_prefill: 1,
+            sum_queued_prefill_tokens: 128,
+            ..ForwardPassSnapshot::default()
+        };
+        assert!(!fpm_has_scheduled_work(&queued));
+
+        let scheduled = ForwardPassSnapshot {
+            num_prefill_requests: 1,
+            ..ForwardPassSnapshot::default()
+        };
+        assert!(fpm_has_scheduled_work(&scheduled));
     }
 
     #[test]
