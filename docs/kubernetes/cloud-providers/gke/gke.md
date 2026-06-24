@@ -91,7 +91,7 @@ is not to install NVIDIA GPU operator.
 
 Deploy vLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B`.
 
-### Create a Namespace for your Inference Graph Deployments
+### Create a namespace for your inference graph deployments
 
 ```bash
 export INFERENCE_NAMESPACE=my-inference-graphs
