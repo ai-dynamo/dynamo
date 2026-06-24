@@ -42,6 +42,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
 ]
 
