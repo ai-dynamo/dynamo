@@ -8,9 +8,7 @@ description: |
   /proc/{pid}/cgroup to recover pod UIDs, and calls
   nvmlDeviceSetPowerManagementLimit per physical GPU.
 
-  Supersedes the raw deploy/power_agent/{daemonset,rbac,dev-pod}.yaml
-  manifests; see docs/design-docs/power-agent-helm-chart-plan.md for the
-  design rationale.
+  Replaces the previous raw DaemonSet, RBAC, and dev-pod manifests.
 type: application
 version: 1.0.0
 appVersion: "1.0.0"

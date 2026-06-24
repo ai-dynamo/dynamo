@@ -58,6 +58,3 @@ Verify:
 Dev mode forced namespace-scoped RBAC ({{ if .Values.dev.namespaceRestrictedOverride }}overridden via dev.namespaceRestrictedOverride=true → cluster-wide{{ else }}Role + RoleBinding in {{ .Release.Namespace }}; agent runs with --namespace={{ .Release.Namespace }}{{ end }}).
 
 {{- end }}
-
-For full usage, values reference, and uninstall instructions see:
-  deploy/helm/charts/power-agent/README.md

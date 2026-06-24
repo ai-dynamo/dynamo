@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Power Agent — per-node NVML power-cap enforcement DaemonSet.
-# See deploy/helm/charts/power-agent/README.md for usage and
-# docs/design-docs/power-agent-helm-chart-plan.md for the design rationale.
 
 image:
   repository: nvcr.io/nvidia/ai-dynamo/power-agent
