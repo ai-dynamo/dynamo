@@ -131,35 +131,66 @@ def _update_fpm_cache(
 def _merge_traffic(
     acc: Optional[dict[str, Any]], window: dict[str, Any]
 ) -> dict[str, Any]:
-    """Num_req-weighted merge of two TrafficStats dicts into one window.
+    """Merge two TrafficStats dicts into one window.
 
-    Exact for ``duration_s``/``num_req`` and the sum-based averages (isl/osl/
-    kv_hit_rate, since a num_req-weighted mean of per-window means re-sums to the
-    overall mean). ``ttft``/``itl``/``accept_length`` are num_req-weighted
-    approximations (their true per-sample counts are not carried across windows);
-    they feed diagnostics, not the simulation trajectory, so the trace_report is
-    unaffected."""
+    Exact for every field the planner's scaling consumes:
+      - ``duration_s``/``num_req``: summed.
+      - ``avg_isl``/``avg_osl``: num_req-weighted — their denominator *is*
+        ``num_req``, so a num_req-weighted mean of per-window means re-sums to
+        the exact overall mean.
+      - ``avg_kv_hit_rate``: weighted by ``hit_rate_count`` (its true
+        denominator: router admissions with ``isl_blocks > 0``), so the merge
+        reconstructs the exact sample mean rather than approximating it.
+      - ``avg_accept_length``: weighted by ``accept_length_forward_count``
+        (decode request-forwards, its true denominator), exact across windows.
+
+    ``avg_ttft_ms``/``avg_itl_ms`` are num_req-weighted approximations (their
+    per-sample counts are not carried across windows); they feed diagnostics
+    only, never the scaling trajectory."""
     if acc is None:
         return dict(window)
     na = float(acc.get("num_req", 0.0))
     nw = float(window.get("num_req", 0.0))
     n = na + nw
+
+    def _weighted(key: str, wa: float, ww: float) -> float:
+        w = wa + ww
+        if w <= 0:
+            return 0.0
+        return (acc.get(key, 0.0) * wa + window.get(key, 0.0) * ww) / w
+
+    hit_a = float(acc.get("hit_rate_count", 0.0))
+    hit_w = float(window.get("hit_rate_count", 0.0))
+    fwd_a = float(acc.get("accept_length_forward_count", 0.0))
+    fwd_w = float(window.get("accept_length_forward_count", 0.0))
+
     merged: dict[str, Any] = {
         "duration_s": acc.get("duration_s", 0.0) + window.get("duration_s", 0.0),
         "num_req": n,
+        # Carry the native denominators so chained multi-window merges stay exact.
+        "hit_rate_count": hit_a + hit_w,
+        "accept_length_forward_count": fwd_a + fwd_w,
+        # num_req-weighted: exact for isl/osl, diagnostics-only for ttft/itl.
+        "avg_isl": _weighted("avg_isl", na, nw),
+        "avg_osl": _weighted("avg_osl", na, nw),
+        "avg_ttft_ms": _weighted("avg_ttft_ms", na, nw),
+        "avg_itl_ms": _weighted("avg_itl_ms", na, nw),
+        # Count-weighted by the true denominator -> exact across windows.
+        "avg_kv_hit_rate": _weighted("avg_kv_hit_rate", hit_a, hit_w),
     }
-    for key in ("avg_isl", "avg_osl", "avg_ttft_ms", "avg_itl_ms", "avg_kv_hit_rate"):
-        merged[key] = (
-            (acc.get(key, 0.0) * na + window.get(key, 0.0) * nw) / n if n > 0 else 0.0
-        )
     a_acc = acc.get("avg_accept_length")
     a_win = window.get("avg_accept_length")
-    if a_acc is None:
+    if a_acc is None and a_win is None:
+        merged["avg_accept_length"] = None
+    elif a_acc is None:
         merged["avg_accept_length"] = a_win
     elif a_win is None:
         merged["avg_accept_length"] = a_acc
     else:
-        merged["avg_accept_length"] = (a_acc * na + a_win * nw) / n if n > 0 else None
+        fwd = fwd_a + fwd_w
+        merged["avg_accept_length"] = (
+            (a_acc * fwd_a + a_win * fwd_w) / fwd if fwd > 0 else None
+        )
     return merged
 
 
@@ -343,9 +374,20 @@ class ReplayPlannerAdapter:
                 html_report_path=html_report_path,
             )
         finally:
-            if self._loop is not None:
-                self._run_sync(self._engine.shutdown())
-                self._loop.close()
+            self.close()
+
+    def close(self) -> None:
+        """Shut down the engine and the replay-scoped event loop. Idempotent so it
+        runs cleanly from both ``finalize`` (success) and the entrypoint's error
+        path (when ``bridge.run`` raises before ``finalize`` is reached)."""
+        loop = self._loop
+        if loop is None:
+            return
+        self._loop = None
+        try:
+            loop.run_until_complete(self._engine.shutdown())
+        finally:
+            loop.close()
 
     def _record_diagnostics(
         self,
@@ -401,7 +443,10 @@ class ReplayPlannerAdapter:
         event. Returns ``(None, None)`` for a no-op. The Rust loop applies the targets,
         so this no longer calls ``bridge.apply_scaling``."""
         scale = effects.scale_to
-        assert scale is not None
+        if scale is None:
+            raise ValueError(
+                "_compute_scale_decision requires effects.scale_to to be set"
+            )
         current_p = result["active_prefill_count"]
         current_d = result["active_decode_count"]
         target_p = scale.num_prefill if scale.num_prefill is not None else current_p

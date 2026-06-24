@@ -1021,6 +1021,16 @@ pub fn run_mocker_synthetic_trace_replay(
         itl_ms: sla_itl_ms,
         e2e_ms: sla_e2e_ms,
     };
+    // The online branches below don't thread `sla`, so reject SLA with a
+    // non-offline replay_mode rather than silently dropping goodput
+    // (mirrors run_mocker_trace_replay).
+    if replay_mode != "offline"
+        && (sla_ttft_ms.is_some() || sla_itl_ms.is_some() || sla_e2e_ms.is_some())
+    {
+        return Err(PyValueError::new_err(
+            "sla_ttft_ms, sla_itl_ms, and sla_e2e_ms only support replay_mode='offline'",
+        ));
+    }
     let args_selection = load_replay_args_selection(
         py,
         extra_engine_args,
@@ -1665,12 +1675,6 @@ fn fpm_snapshots_to_json(
         .collect()
 }
 
-/// Step-based bridge for driving an offline replay with a Python planner.
-///
-/// Supports both aggregated and disaggregated topologies. The Python adapter
-/// calls `advance_to()` to run the simulation forward, collects FPM/traffic
-/// metrics, feeds them to the planner state machine, then calls
-/// `apply_scaling()` to resize worker pools.
 /// Reject a goodput SLA threshold that is not a finite, non-negative value;
 /// `None` (unset) is allowed and means "do not gate on this dimension".
 fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
@@ -2035,6 +2039,11 @@ impl PlannerHook for PyPlannerHook {
                     "avg_itl_ms": traffic.avg_itl_ms,
                     "avg_accept_length": traffic.avg_accept_length,
                     "avg_kv_hit_rate": traffic.avg_kv_hit_rate,
+                    // Denominators behind the two ratio averages, so the Python
+                    // adapter can merge partial windows with exact count weights
+                    // instead of approximating with num_req.
+                    "hit_rate_count": traffic.hit_rate_count,
+                    "accept_length_forward_count": traffic.accept_length_forward_count,
                 },
             });
             let metrics_obj = pythonize(py, &metrics_json).map_err(to_pyerr)?;

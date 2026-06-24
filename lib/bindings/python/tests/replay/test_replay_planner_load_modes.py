@@ -72,4 +72,4 @@ def test_trace_closed_loop(tmp_path):
         replay_concurrency=2,
         replay_mode="offline",
     )
-    assert report["completed_requests"] > 0
+    assert report["completed_requests"] == 2

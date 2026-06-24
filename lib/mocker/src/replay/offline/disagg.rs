@@ -953,6 +953,9 @@ impl DisaggRuntime {
         if first_ms.is_finite() {
             let at_ms = first_ms.max(self.now_ms);
             push_planner_tick(&mut self.events, &mut self.next_event_seq, at_ms);
+        } else {
+            // No tick will ever fire to drain the FPM buffers; stop collecting them.
+            self.collect_fpm = false;
         }
         Ok(())
     }
@@ -999,14 +1002,20 @@ impl DisaggRuntime {
                 self.apply_scaling(target_prefill, target_decode)?;
             }
 
-            // Re-arm only into the strict future and only while work remains; the
-            // `at_ms == now_ms` pop guard plus this check prevent a same-pass re-fire
-            // or an infinite spin from a degenerate `next_tick_ms <= now_ms`.
-            if let Some(next_ms) = decision.next_tick_ms
-                && next_ms > self.now_ms
+            // Re-arm only into the strict, finite future and only while work
+            // remains; the `at_ms == now_ms` pop guard plus this check prevent a
+            // same-pass re-fire or an infinite spin from a degenerate
+            // `next_tick_ms <= now_ms`. When no future tick will fire, stop FPM
+            // collection so neither buffer grows unbounded after the cadence ends.
+            let next_tick = decision
+                .next_tick_ms
+                .filter(|next_ms| next_ms.is_finite() && *next_ms > self.now_ms);
+            if let Some(next_ms) = next_tick
                 && !self.is_workload_done()
             {
                 push_planner_tick(&mut self.events, &mut self.next_event_seq, next_ms);
+            } else {
+                self.collect_fpm = false;
             }
             changed = true;
         }

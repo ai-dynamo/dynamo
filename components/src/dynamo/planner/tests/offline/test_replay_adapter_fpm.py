@@ -28,6 +28,7 @@ from dynamo.planner.core.types import (
 from dynamo.planner.offline.replay_adapter import (
     ReplayPlannerAdapter,
     _build_fpm_from_dict,
+    _merge_traffic,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.replay.main import _engine_caps
@@ -212,3 +213,42 @@ def test_replay_engine_caps_exposes_aic_nextn():
     caps = _engine_caps(MockEngineArgs(aic_nextn=2))
 
     assert caps.speculative_nextn == 2
+
+
+def test_merge_traffic_weights_ratio_fields_by_native_counts():
+    # kv_hit_rate and accept_length must merge by their true denominators
+    # (hit_rate_count / accept_length_forward_count), not num_req, so a window
+    # whose ratio-sample count is disproportionate to its request count still
+    # contributes its exact share. Here num_req-weighting would give the wrong
+    # answer (0.9 and 1.2); count-weighting reconstructs the exact mean.
+    a = {
+        "num_req": 1,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 50.0,
+        "avg_kv_hit_rate": 0.0,
+        "hit_rate_count": 90,
+        "avg_accept_length": 3.0,
+        "accept_length_forward_count": 90,
+    }
+    b = {
+        "num_req": 9,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 50.0,
+        "avg_kv_hit_rate": 1.0,
+        "hit_rate_count": 10,
+        "avg_accept_length": 1.0,
+        "accept_length_forward_count": 10,
+    }
+    merged = _merge_traffic(a, b)
+    assert merged["avg_kv_hit_rate"] == pytest.approx(
+        (0.0 * 90 + 1.0 * 10) / 100
+    )  # 0.1
+    assert merged["avg_accept_length"] == pytest.approx(
+        (3.0 * 90 + 1.0 * 10) / 100
+    )  # 2.8
+    assert merged["num_req"] == 10
+    assert merged["hit_rate_count"] == 100
+    assert merged["accept_length_forward_count"] == 100
+    assert merged["avg_isl"] == pytest.approx(100.0)

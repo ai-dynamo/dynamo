@@ -46,6 +46,21 @@ def run_trace_replay(
     benchmark_granularity=8,
 ):
     if planner_config is not None:
+        # Planner replay is offline-only and Mooncake-only; reject controls the
+        # planner path ignores so callers fail fast instead of silently getting an
+        # offline planner run (matches the CLI's guardrails).
+        if replay_mode != "offline":
+            raise ValueError(
+                "planner_config replay only supports replay_mode='offline'"
+            )
+        if trace_format != "mooncake":
+            raise ValueError(
+                "planner_config replay only supports trace_format='mooncake'"
+            )
+        if report_jsonl_path is not None:
+            raise ValueError("report_jsonl_path is not supported with planner_config")
+        if max_sim_time_ms is not None:
+            raise ValueError("max_sim_time_ms is not supported with planner_config")
         # Planner-in-the-loop: the Rust bridge owns the sim loop and calls back into
         # the Python planner adapter once per PlannerTick (main._run_planner_replay),
         # returning a ReplayPlannerReport (its .trace_report matches the static dict).
@@ -63,6 +78,7 @@ def run_trace_replay(
             router_mode=router_mode,
             arrival_speedup_ratio=arrival_speedup_ratio,
             trace_block_size=trace_block_size,
+            model_name=model_name,
             planner_config_arg=_planner_config_arg(planner_config),
             benchmark_granularity=benchmark_granularity,
             sla_ttft_ms=sla_ttft_ms,
@@ -129,6 +145,10 @@ def run_synthetic_trace_replay(
     benchmark_granularity=8,
 ):
     if planner_config is not None:
+        if replay_mode != "offline":
+            raise ValueError(
+                "planner_config replay only supports replay_mode='offline'"
+            )
         from dynamo.replay.main import SyntheticWorkload, _run_planner_replay
 
         return _run_planner_replay(
@@ -143,6 +163,7 @@ def run_synthetic_trace_replay(
             router_mode=router_mode,
             arrival_speedup_ratio=arrival_speedup_ratio,
             trace_block_size=512,
+            model_name=model_name,
             planner_config_arg=_planner_config_arg(planner_config),
             benchmark_granularity=benchmark_granularity,
             sla_ttft_ms=sla_ttft_ms,

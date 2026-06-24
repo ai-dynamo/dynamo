@@ -630,7 +630,14 @@ def _run_planner_replay(
     # Unified drive: the Rust bridge owns the loop and calls back into the adapter
     # (initial_tick_ms / on_tick) once per PlannerTick; `finalize` wraps the returned
     # trace_report with the adapter's accumulated scaling events / diagnostics.
-    trace_report = bridge.run(adapter)
+    try:
+        trace_report = bridge.run(adapter)
+    except BaseException:
+        # `finalize` (which closes the engine + replay-scoped event loop) is only
+        # reached on success; ensure cleanup also runs when the Rust loop or a
+        # planner callback raises. `close()` is idempotent.
+        adapter.close()
+        raise
     return adapter.finalize(trace_report)
 
 

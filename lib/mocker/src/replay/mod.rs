@@ -86,6 +86,7 @@ pub use entrypoints::{
     simulate_trace_workload, simulate_trace_workload_disagg_with_router_mode,
     simulate_trace_workload_with_router_mode,
 };
+pub use offline::components::TrafficStats;
 pub use offline::planner_hook::{
     NoopPlannerHook, PlannerHook, PlannerTickDecision, PlannerTickMetrics,
 };
