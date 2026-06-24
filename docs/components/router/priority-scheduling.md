@@ -10,6 +10,10 @@ Priority scheduling lets a client mark one request as more important than anothe
 - `nvext.agent_hints.priority` is a soft priority used by router policy scoring and supported backend engines.
 - `nvext.agent_hints.strict_priority` is an unsigned router pending-queue tier. Higher tiers always precede lower tiers.
 
+For HTTP requests, send the same values in `x-dynamo-request-priority` and
+`x-dynamo-request-strict-priority`. Header values override the corresponding `nvext.agent_hints`
+fields.
+
 ```json
 {
     "model": "my-model",

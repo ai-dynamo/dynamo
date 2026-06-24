@@ -11,11 +11,15 @@ use super::super::runtime_utils::WorkerCompletionPayload;
 use super::super::state::OfflineWorkerSnapshot;
 use super::super::state::OfflineWorkerState;
 use super::{EngineEffects, EnginePassMode, ScheduledWorkerCompletion};
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::RouterEventVisibility;
 #[cfg(feature = "kvbm-offload")]
 use dynamo_kv_router::protocols::RouterEvent;
+
+fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
+    snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
+}
 
 pub(in crate::replay::offline) struct EngineComponent {
     stage: SimulationWorkerStage,
@@ -250,6 +254,18 @@ impl EngineComponent {
             };
 
             if executed.end_ms == now_ms {
+                let made_progress = !effects.admissions.is_empty()
+                    || !effects.pass_start_kv_events.is_empty()
+                    || payload.completed_requests > 0
+                    || !payload.output_signals.is_empty()
+                    || !payload.kv_events.is_empty()
+                    || effects
+                        .fpm_snapshots
+                        .iter()
+                        .any(|(_, snapshot)| fpm_has_scheduled_work(snapshot));
+                if !made_progress {
+                    continue;
+                }
                 effects.immediate_completions.push(payload);
                 return Ok(effects);
             }
@@ -428,6 +444,22 @@ mod tests {
         assert_eq!(engine.active_worker_ids().len(), 1);
         assert!(engine.mark_worker_ready(new_id));
         assert_eq!(engine.active_worker_ids().len(), 2);
+    }
+
+    #[test]
+    fn queued_only_fpm_is_not_zero_duration_progress() {
+        let queued = ForwardPassSnapshot {
+            num_queued_prefill: 1,
+            sum_queued_prefill_tokens: 128,
+            ..ForwardPassSnapshot::default()
+        };
+        assert!(!fpm_has_scheduled_work(&queued));
+
+        let scheduled = ForwardPassSnapshot {
+            num_prefill_requests: 1,
+            ..ForwardPassSnapshot::default()
+        };
+        assert!(fpm_has_scheduled_work(&scheduled));
     }
 
     #[test]
