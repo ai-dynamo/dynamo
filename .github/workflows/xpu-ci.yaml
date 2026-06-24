@@ -202,6 +202,7 @@ jobs:
   test-xpu-2card:
     needs: [build-xpu]
     if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
+<<<<<<< HEAD
     runs-on: xpu_2
     env:
       FRAMEWORK: ${{ inputs.framework || 'vllm' }}
@@ -249,7 +250,7 @@ jobs:
   test-xpu-2card:
     needs: [build-xpu]
     if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
-    runs-on: xpu_2
+    runs-on: xpu-2
     env:
       FRAMEWORK: ${{ inputs.framework || 'vllm' }}
       IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
@@ -288,6 +289,7 @@ jobs:
           CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
           docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
           echo "✓ Pytest container cleanup finished"
+
 
   # ============================================================================
   # CLEANUP (always runs)
