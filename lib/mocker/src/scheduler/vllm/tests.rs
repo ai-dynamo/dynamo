@@ -3310,4 +3310,96 @@ mod offload {
             "replayed G2-offload trace must be deterministic\nfirst:  {report_first:?}\nsecond: {report_second:?}",
         );
     }
+
+    #[test]
+    fn destination_reservation_retries_after_presence_filtered_offload() {
+        let block_size = 4;
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(2)
+            .block_size(block_size)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+
+        let cached_uuid = Uuid::from_u128(1);
+        core.receive(DirectRequest {
+            tokens: (0..block_size as u32).collect(),
+            max_output_tokens: 1,
+            uuid: Some(cached_uuid),
+            ..Default::default()
+        });
+        let cached_plhs = core
+            .state
+            .requests
+            .get(&cached_uuid)
+            .unwrap()
+            .sequence
+            .positional_lineage_hashes()
+            .to_vec();
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut now_ms = 0.0;
+        let completed = (0..4).any(|_| {
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms;
+            pass.output_signals
+                .iter()
+                .any(|signal| signal.uuid == cached_uuid && signal.completed)
+        });
+        assert!(completed, "cache seed request should complete");
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        assert_eq!(core.kv_manager.num_inactive_blocks(), 1);
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut engine = runtime
+            .block_on(MockOffloadEngine::new(KvbmOffloadConfig {
+                block_size_tokens: block_size,
+                ..Default::default()
+            }))
+            .expect("engine build");
+        engine.tick(now_ms);
+        seed_g2_blocks(engine.g2_manager(), &cached_plhs);
+        engine.attach_runtime(runtime);
+        core.kv_manager.attach_new_offload_engine(engine);
+
+        let handoff_id = HandoffId::from(Uuid::from_u128(2));
+        let request_id = Uuid::from_u128(2);
+        let effects = core
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id,
+                    request: DirectRequest {
+                        tokens: (block_size as u32..(block_size * 3) as u32).collect(),
+                        max_output_tokens: 1,
+                        uuid: Some(request_id),
+                        ..Default::default()
+                    },
+                },
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(
+            effects.result,
+            SchedulerCommandResult::DestinationAccepted { request_id }
+        );
+        assert!(core.earliest_offload_deadline().is_none());
+        assert!(effects.lifecycle_events.iter().any(|event| matches!(
+            event,
+            SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id: observed_handoff,
+                request_id: observed_request,
+            } if *observed_handoff == handoff_id && *observed_request == request_id
+        )));
+        assert!(core.destination_is_held(handoff_id));
+        assert_eq!(core.destination_block_ids(handoff_id).len(), 2);
+    }
 }

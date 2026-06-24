@@ -723,6 +723,16 @@ impl VllmCore {
         let reservation = self
             .kv_manager
             .reserve_destination_at(&request.sequence, reservation_now_ms);
+        #[cfg(feature = "kvbm-offload")]
+        let reservation =
+            if reservation.is_none() && self.kv_manager.earliest_offload_deadline().is_none() {
+                // Presence-filtered evictions can release G1 capacity without a
+                // DMA completion that would otherwise trigger another retry.
+                self.kv_manager
+                    .reserve_destination_at(&request.sequence, reservation_now_ms)
+            } else {
+                reservation
+            };
         self.pending_destinations.mark_front_attempted(generation);
         let Some(kv) = reservation else {
             return Vec::new();
