@@ -642,7 +642,7 @@ where
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
-    /// `anyhow!("no instances found")` when no routable workers exist.
+    /// `Unavailable` when no routable workers exist.
     fn empty_free_pool_error(&self, routing_instances: &RoutingInstances) -> anyhow::Error {
         if !routing_instances.routable_ids().is_empty() {
             let cause = PipelineError::ServiceOverloaded(
@@ -655,10 +655,14 @@ where
                 .build()
                 .into();
         }
-        anyhow::anyhow!(
-            "no instances found for endpoint {}",
-            self.client.endpoint.id()
-        )
+        DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message(format!(
+                "No workers available for endpoint {}",
+                self.client.endpoint.id()
+            ))
+            .build()
+            .into()
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -2041,6 +2045,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_workers_is_reported_as_unavailable() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_no_workers_unavailable".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let error = router.generate(SingleIn::new(42)).await.unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::Unavailable],
+            &[]
+        ));
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn round_robin_excludes_overloaded_workers_from_candidates() {
         // Long reconcile interval so the synthetic override below survives
         // the test. We still register a real endpoint instance up front so
@@ -2075,7 +2105,7 @@ mod tests {
         // Now override with two synthetic IDs and mark one overloaded.
         // round_robin must never select the overloaded one — that's the
         // whole point of selecting from free_ids instead of routable_ids.
-        // The post-selection overload check in route() would otherwise 503
+        // The post-selection overload check in route() would otherwise return 529
         // one of N requests on each pass, which is the bug this PR closes
         // for non-KV selectors.
         client.override_instance_avail(vec![1, 2]);

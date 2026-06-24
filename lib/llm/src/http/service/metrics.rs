@@ -36,6 +36,13 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
+/// Check whether an error chain indicates that no backend worker is available.
+pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
+    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const AVAILABLE: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
+}
+
 /// Check whether an error chain indicates the request was cancelled.
 pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
@@ -378,7 +385,7 @@ pub enum ErrorType {
     Validation,
     /// Model or resource not found (404)
     NotFound,
-    /// Service overloaded, too many requests (503)
+    /// Service overloaded or rate limited (429 or 529)
     Overload,
     /// Request cancelled by client or timeout
     Cancelled,

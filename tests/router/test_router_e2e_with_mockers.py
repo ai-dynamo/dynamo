@@ -21,12 +21,12 @@ import pytest
 from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
-    _test_disagg_router_overload_503,
+    _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
-    _test_router_overload_503,
+    _test_router_overload_529,
     _test_router_override_router_config,
     _test_router_query_instance_id,
     _test_router_threshold_none_disables_rejection,
@@ -88,7 +88,7 @@ ROUTER_AIC_CONFIG = {
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
-ROUTER_OVERLOAD_503_CASES = (
+ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
             "blocks_threshold": 0.2,
@@ -113,11 +113,11 @@ ROUTER_OVERLOAD_503_CASES = (
 # signal.
 _SLOW_SPEEDUP = 0.01
 _FAST_SPEEDUP = 100.0
-ROUTER_DISAGG_OVERLOAD_503_CASES = (
+ROUTER_DISAGG_OVERLOAD_529_CASES = (
     pytest.param(
         {
             # A single prefill worker is sufficient to verify
-            # overloaded -> no free prefill worker -> 503, and --enforce-disagg
+            # overloaded -> no free prefill worker -> 529, and --enforce-disagg
             # means the model only lists once the prefill router has activated,
             # so frontend readiness already gates on prefill registration.
             "num_prefill": 1,
@@ -473,9 +473,9 @@ def test_mocker_two_kv_router(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
-@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_503_CASES)
+@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_529_CASES)
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
-def test_mocker_kv_router_overload_503(
+def test_mocker_kv_router_overload_529(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -483,9 +483,9 @@ def test_mocker_kv_router_overload_503(
     monkeypatch,
     overload_config,
 ):
-    """Test that KV router returns 503 when mocker workers are overloaded."""
+    """Test that KV router returns 529 when mocker workers are overloaded."""
     monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
-    logger.info("Starting mocker KV router overload test for 503 status")
+    logger.info("Starting mocker KV router overload test for 529 status")
     # Create mocker args dictionary with limited resources - use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": 0.01,
@@ -502,8 +502,8 @@ def test_mocker_kv_router_overload_503(
         # Get unique port for this test
         frontend_port = allocate_frontend_ports(request, 1)[0]
 
-        # Run overload 503 test
-        _test_router_overload_503(
+        # Run overload 529 test
+        _test_router_overload_529(
             engine_workers=mockers,
             block_size=4,  # Match the mocker's block size
             request=request,
@@ -930,9 +930,9 @@ def test_router_decisions_disagg(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
-@pytest.mark.parametrize("overload_case", ROUTER_DISAGG_OVERLOAD_503_CASES)
+@pytest.mark.parametrize("overload_case", ROUTER_DISAGG_OVERLOAD_529_CASES)
 @pytest.mark.timeout(120)
-def test_mocker_disagg_router_overload_503(
+def test_mocker_disagg_router_overload_529(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -940,7 +940,7 @@ def test_mocker_disagg_router_overload_503(
     monkeypatch,
     overload_case,
 ):
-    """Disaggregated load shedding: clients get 503 when the gated pool is busy.
+    """Disaggregated load shedding: clients get 529 when the gated pool is busy.
 
     - prefill-tokens: a low ``--active-prefill-tokens-threshold`` must gate the
       PREFILL pool. This was previously a silent no-op in disagg (the
@@ -950,7 +950,7 @@ def test_mocker_disagg_router_overload_503(
       DECODE pool (the path that already worked).
     """
     monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
-    logger.info("Starting disagg mocker router overload 503 test")
+    logger.info("Starting disagg mocker router overload 529 test")
 
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
@@ -976,7 +976,7 @@ def test_mocker_disagg_router_overload_503(
         enable_disagg_bootstrap=False,
     ) as (prefill_workers, decode_workers):
         frontend_port = allocate_frontend_ports(request, 1)[0]
-        _test_disagg_router_overload_503(
+        _test_disagg_router_overload_529(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
             block_size=4,
@@ -1190,7 +1190,7 @@ def test_busy_threshold_endpoint(
     TODO: This doesn't actually test any e2e rejection for now. A proper test would:
     1. Set a very low threshold
     2. Send enough requests to exceed the threshold
-    3. Verify that subsequent requests are rejected with 503
+    3. Verify that subsequent requests are rejected with 529
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """

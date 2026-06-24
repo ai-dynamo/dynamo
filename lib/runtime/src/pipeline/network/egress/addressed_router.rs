@@ -673,7 +673,7 @@ impl AddressedPushRouter {
 
 /// Map a worker load-shed ACK (prefixed by a known overload marker, see
 /// `shared_tcp_endpoint.rs`) to `ResourceExhausted` so the HTTP layer returns
-/// 503. `None` for normal responses, including the empty "queued" ACK.
+/// 529. `None` for normal responses, including the empty "queued" ACK.
 fn detect_worker_overload_response(res_bytes: &[u8]) -> Option<DynamoError> {
     const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
     const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
@@ -711,7 +711,7 @@ mod overload_detection_tests {
 
     #[test]
     fn detected_error_satisfies_http_503_gate() {
-        // request_was_rejected (http/service/metrics.rs) → 503 keys on ResourceExhausted.
+        // request_was_rejected (http/service/metrics.rs) → 529 keys on ResourceExhausted.
         let err =
             detect_worker_overload_response(b"Server overloaded: test").expect("should detect");
         let any_err: anyhow::Error = err.into();
