@@ -325,6 +325,10 @@ impl GrpcInferenceService for KserveService {
         let model = request.model_name.clone();
         let request_id = request.id.clone();
 
+        if !model.is_empty() && self.state().manager().get_model(&model).is_none() {
+            return Err(Status::not_found(format!("Model '{}' not found", model)));
+        }
+
         // [gluo TODO] refactor to reuse code, inference logic is largely the same
         if self.state().is_tensor_model(&model) {
             let set_raw_output_contents = !request.raw_input_contents.is_empty();
@@ -380,6 +384,15 @@ impl GrpcInferenceService for KserveService {
             }
         }
 
+        let effective_model = &completion_request.inner.model;
+        if effective_model.is_empty() || self.state().manager().get_model(effective_model).is_none()
+        {
+            return Err(Status::not_found(format!(
+                "Model '{}' not found",
+                effective_model
+            )));
+        }
+
         let (stream, parsing_options) =
             completion_response_stream(self.state_clone(), completion_request, &metadata).await?;
 
@@ -431,6 +444,14 @@ impl GrpcInferenceService for KserveService {
                 };
 
                 let model = request.model_name.clone();
+
+                if !model.is_empty() && state.manager().get_model(&model).is_none() {
+                    yield ModelStreamInferResponse {
+                        error_message: format!("Model '{}' not found", model),
+                        infer_response: None,
+                    };
+                    continue;
+                }
 
                 // [gluo TODO] refactor to reuse code, inference logic is largely the same
                 if state.is_tensor_model(&model) {
@@ -500,6 +521,15 @@ impl GrpcInferenceService for KserveService {
                     if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
                         completion_request.inner.max_tokens = Some(template.max_completion_tokens);
                     }
+                }
+
+                let effective_model = &completion_request.inner.model;
+                if effective_model.is_empty() || state.manager().get_model(effective_model).is_none() {
+                    yield ModelStreamInferResponse {
+                        error_message: format!("Model '{}' not found", effective_model),
+                        infer_response: None,
+                    };
+                    continue;
                 }
 
                 let streaming = completion_request.inner.stream.unwrap_or(false);
