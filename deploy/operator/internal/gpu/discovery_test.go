@@ -618,6 +618,18 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeMI200,
 		},
 
+		// --- Intel ---
+		{
+			name:     "Intel e211 maps to B60",
+			input:    "Intel(R) Graphics [0xe211]",
+			expected: nvidiacomv1beta1.GPUSKUTypeB60,
+		},
+		{
+			name:     "Intel B60 branded model maps to B60",
+			input:    "Intel(R) Arc(TM) Pro B60 Graphics",
+			expected: nvidiacomv1beta1.GPUSKUTypeB60,
+		},
+
 		// --- Bare DCGM model names (no form factor suffix) ---
 		// DCGM often reports "NVIDIA H200" / "NVIDIA B200" with system="" because
 		// there is no SXM/HGX/DGX token in the string. GPUs that have no PCIe
@@ -927,6 +939,36 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 		}
 	})
 
+	t.Run("DCGM parser ignores stray XPUMD family", func(t *testing.T) {
+		mixedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, err := fmt.Fprintln(w, `# TYPE hw_gpu_info gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `hw_gpu_info{hw_id="0",hw_name="Intel(R) Arc(TM) Pro B60 Graphics"} 1`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_GPU_TEMP gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="NVIDIA A100",Hostname="test-node"} 50`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_FREE gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_FREE{gpu="0",Hostname="test-node"} 10000`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_USED gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_USED{gpu="0",Hostname="test-node"} 2000`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_RESERVED gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_RESERVED{gpu="0",Hostname="test-node"} 500`)
+			require.NoError(t, err)
+		}))
+		defer mixedServer.Close()
+
+		info, err := ScrapeMetricsEndpoint(ctx, mixedServer.URL)
+		require.NoError(t, err)
+		assert.Equal(t, "NVIDIA A100", info.Model)
+	})
+
 	t.Run("404 response", func(t *testing.T) {
 		badServer := httptest.NewServer(http.NotFoundHandler())
 		defer badServer.Close()
@@ -949,6 +991,62 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected parse error, got nil")
 		}
+	})
+
+	t.Run("successful XPUMD scrape", func(t *testing.T) {
+		xpumdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, err := fmt.Fprintln(w, `# TYPE hw_gpu_info gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `hw_gpu_info{hw_id="0",hw_name="Intel(R) Graphics [0xe211]",pci_bdf="0000:29:00.0",pci_device_id="e211",hw_vendor="Intel(R) Corporation"} 1`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `hw_gpu_info{hw_id="1",hw_name="Intel(R) Graphics [0xe211]",pci_bdf="0000:2a:00.0",pci_device_id="e211",hw_vendor="Intel(R) Corporation"} 1`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `# TYPE hw_memory_size_bytes gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `hw_memory_size_bytes{pci_bdf="0000:29:00.0",hw_memory_location="device"} 25669140480`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `hw_memory_size_bytes{pci_bdf="0000:2a:00.0",hw_memory_location="device"} 25669140480`)
+			require.NoError(t, err)
+		}))
+		defer xpumdServer.Close()
+
+		info, err := ScrapeIntelMetricsEndpoint(ctx, xpumdServer.URL)
+		require.NoError(t, err)
+		assert.Equal(t, 2, info.GPUsPerNode)
+		assert.Equal(t, "Intel(R) Graphics [0xe211]", info.Model)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeB60, info.System)
+	})
+
+	t.Run("unknown Intel device with large memory is not B60", func(t *testing.T) {
+		xpumdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, err := fmt.Fprintln(w, `# TYPE hw_gpu_info gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `hw_gpu_info{hw_id="0",hw_name="Intel(R) Future XPU",pci_bdf="0000:29:00.0",pci_device_id="1234"} 1`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `# TYPE hw_memory_size_bytes gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `hw_memory_size_bytes{hw_id="0",hw_memory_location="device"} 34359738368`)
+			require.NoError(t, err)
+		}))
+		defer xpumdServer.Close()
+
+		info, err := ScrapeIntelMetricsEndpoint(ctx, xpumdServer.URL)
+		require.NoError(t, err)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUType(""), info.System)
+	})
+
+	t.Run("XPUMD metrics without memory returns error", func(t *testing.T) {
+		xpumdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, err := fmt.Fprintln(w, `# TYPE hw_gpu_info gauge`)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(w, `hw_gpu_info{hw_id="0",hw_name="Intel(R) Arc(TM) Pro B60 Graphics",pci_bdf="0000:29:00.0"} 1`)
+			require.NoError(t, err)
+		}))
+		defer xpumdServer.Close()
+
+		_, err := ScrapeIntelMetricsEndpoint(ctx, xpumdServer.URL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no XPU device memory detected")
 	})
 }
 
@@ -1164,6 +1262,132 @@ func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
 		info2, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, cache, "a100_sxm")
 		require.NoError(t, err)
 		assert.NotEqual(t, info1.System, info2.System, "different SKU filters should return different results")
+	})
+}
+
+func TestDiscoverGPUHardware_MixedMetricsSourcesPreservesNVDefault(t *testing.T) {
+	ctx := context.Background()
+
+	dcgmPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcgm-h100",
+			Namespace: "gpu-operator",
+			Labels:    map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+		},
+		Spec:   corev1.PodSpec{NodeName: "node-h100"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
+	}
+	xpumdPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "xpumd-b60",
+			Namespace: "intel-xpum",
+			Labels:    map[string]string{LabelAppKubernetesName: LabelValueXPUMD},
+		},
+		Spec:   corev1.PodSpec{NodeName: "node-b60"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
+	}
+
+	k8sClient := newFakeClient(dcgmPod, xpumdPod)
+
+	t.Run("empty gpuSku uses DCGM only", func(t *testing.T) {
+		intelCalled := false
+		discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+			if strings.Contains(endpoint, "10.0.0.2") {
+				intelCalled = true
+				return &GPUInfo{
+					NodeName:    "node-b60",
+					GPUsPerNode: 2,
+					Model:       "Intel(R) Arc(TM) Pro B60 Graphics",
+					VRAMPerGPU:  24480,
+					System:      nvidiacomv1beta1.GPUSKUTypeB60,
+				}, nil
+			}
+			return &GPUInfo{
+				NodeName:    "node-h100",
+				GPUsPerNode: 8,
+				Model:       "H100-SXM5-80GB",
+				VRAMPerGPU:  81920,
+			}, nil
+		})
+
+		info, err := DiscoverGPUHardware(ctx, k8sClient, discovery, nil, "", false)
+		require.NoError(t, err)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100SXM, info.System)
+		assert.False(t, intelCalled, "unfiltered discovery should not probe Intel source")
+	})
+
+	t.Run("gpuSku=b60 uses XPUMD", func(t *testing.T) {
+		discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+			require.Contains(t, endpoint, "10.0.0.2")
+			return &GPUInfo{
+				NodeName:    "node-b60",
+				GPUsPerNode: 2,
+				Model:       "Intel(R) Arc(TM) Pro B60 Graphics",
+				VRAMPerGPU:  24480,
+				System:      nvidiacomv1beta1.GPUSKUTypeB60,
+			}, nil
+		})
+
+		info, err := DiscoverGPUHardware(ctx, k8sClient, discovery, nil, nvidiacomv1beta1.GPUSKUTypeB60, false)
+		require.NoError(t, err)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeB60, info.System)
+	})
+}
+
+// TestDiscoverGPUHardware_WarmCacheHonoredWithoutScraper is a regression guard:
+// DiscoverGPUHardware must honor a warm cache even when no scraper is configured
+// (or the discovery struct is nil), because the underlying filtered methods
+// consult the cache before requiring a scraper. A prior refactor short-circuited
+// on a nil scraper before the cache was ever checked.
+func TestDiscoverGPUHardware_WarmCacheHonoredWithoutScraper(t *testing.T) {
+	ctx := context.Background()
+	// No pods and no nodes: discovery can only succeed via the warm cache.
+	k8sClient := newFakeClient()
+
+	t.Run("DCGM cache hit with nil scraper", func(t *testing.T) {
+		cache := NewGPUDiscoveryCache()
+		cache.Set("", &GPUInfo{
+			NodeName:    "node-h100",
+			GPUsPerNode: 8,
+			Model:       "NVIDIA H100 80GB HBM3",
+			VRAMPerGPU:  81920,
+			System:      nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		}, time.Minute)
+
+		info, err := DiscoverGPUHardware(ctx, k8sClient, NewGPUDiscovery(nil), cache, "", false)
+		require.NoError(t, err)
+		require.NotNil(t, info)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100PCIe, info.System)
+	})
+
+	t.Run("Intel XPU cache hit with nil scraper for b60", func(t *testing.T) {
+		cache := NewGPUDiscoveryCache()
+		cache.SetForSource(gpuDiscoverySourceIntelXPU, nvidiacomv1beta1.GPUSKUTypeB60, &GPUInfo{
+			NodeName:    "node-b60",
+			GPUsPerNode: 2,
+			Model:       "Intel(R) Arc(TM) Pro B60 Graphics",
+			VRAMPerGPU:  24480,
+			System:      nvidiacomv1beta1.GPUSKUTypeB60,
+		}, time.Minute)
+
+		info, err := DiscoverGPUHardware(ctx, k8sClient, NewGPUDiscovery(nil), cache, nvidiacomv1beta1.GPUSKUTypeB60, false)
+		require.NoError(t, err)
+		require.NotNil(t, info)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeB60, info.System)
+	})
+
+	t.Run("nil discovery struct still honors warm cache", func(t *testing.T) {
+		cache := NewGPUDiscoveryCache()
+		cache.Set("", &GPUInfo{
+			NodeName:    "node-h100",
+			GPUsPerNode: 8,
+			System:      nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		}, time.Minute)
+
+		info, err := DiscoverGPUHardware(ctx, k8sClient, nil, cache, "", false)
+		require.NoError(t, err)
+		require.NotNil(t, info)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100PCIe, info.System)
 	})
 }
 

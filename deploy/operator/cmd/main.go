@@ -716,7 +716,7 @@ func registerControllers(
 		Config:            operatorCfg,
 		RuntimeConfig:     runtimeConfig,
 		GPUDiscoveryCache: gpu.NewGPUDiscoveryCache(),
-		GPUDiscovery:      gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+		GPUDiscovery:      gpu.NewGPUDiscoveryWithScrapers(gpu.ScrapeMetricsEndpoint, gpu.ScrapeIntelMetricsEndpoint),
 		RBACManager:       rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)

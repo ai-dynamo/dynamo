@@ -598,6 +598,7 @@ spec:
                             - t4
                             - mi200
                             - mi300
+                            - b60
                         - enum:
                             - gb200_sxm
                             - gb10
@@ -616,6 +617,7 @@ spec:
                             - t4
                             - mi200
                             - mi300
+                            - b60
                       description: |-
                         GPUSKU selects the GPU type to target.
                         When omitted, auto-detected by selecting the GPU with the highest

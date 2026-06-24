@@ -1272,7 +1272,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 }
 
 // validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling.
-// Attempt DCGM discovery first; falls back to node-label discovery.
+// Attempt metrics discovery first; falls back to node-label discovery.
 func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
@@ -1287,31 +1287,31 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		logger.Info("GPU discovery unavailable; APIReader is not configured")
 		return fmt.Errorf(
 			"GPU hardware info required but auto-discovery failed. " +
-				"Verify DCGM exporter is reachable from the operator's namespace, " +
+				"Verify DCGM or XPUMD exporter is reachable from the operator's namespace, " +
 				"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
 	}
 
-	// DCGM exporter is a cluster-level Service — reachable from any namespace.
-	if r.GPUDiscovery != nil {
-		if _, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, reader, r.GPUDiscoveryCache); err == nil {
-			return nil
-		} else {
-			logger.Info("DCGM discovery unavailable", "error", err.Error())
-		}
+	filterSKU := nvidiacomv1beta1.GPUSKUType("")
+	if hw != nil {
+		filterSKU = hw.GPUSKU
 	}
 
-	// Node-label fallback
-	if r.gpuDiscoveryEnabled() {
-		if _, err := gpu.DiscoverGPUs(ctx, reader); err == nil {
-			return nil
-		} else {
-			logger.Info("Node-label discovery unavailable", "error", err.Error())
-		}
+	if _, err := gpu.DiscoverGPUHardware(
+		ctx,
+		reader,
+		r.GPUDiscovery,
+		r.GPUDiscoveryCache,
+		filterSKU,
+		r.gpuDiscoveryEnabled(),
+	); err == nil {
+		return nil
+	} else {
+		logger.Info("GPU auto-discovery unavailable", "error", err.Error())
 	}
 
 	return fmt.Errorf(
 		"GPU hardware info required but auto-discovery failed. " +
-			"Verify DCGM exporter is reachable from the operator's namespace, " +
+			"Verify DCGM or XPUMD exporter is reachable from the operator's namespace, " +
 			"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
 }
 
@@ -1334,6 +1334,8 @@ func GetGPUDiscoveryFailureReason(err error) string {
 	switch {
 	case strings.Contains(errMsg, "list pods"):
 		return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
+	case strings.Contains(errMsg, "no intel xpumd pods found"):
+		return "Intel XPUMD exporter pods not found"
 	case strings.Contains(errMsg, "gpu operator is not installed"):
 		return "GPU Operator not installed in expected namespace"
 	case strings.Contains(errMsg, "helm init failed"):
@@ -1347,14 +1349,22 @@ func GetGPUDiscoveryFailureReason(err error) string {
 		return "DCGM pod metrics endpoint returned non-200 status"
 	case strings.Contains(errMsg, "parse prometheus metrics"):
 		return "failed to parse dcgm Prometheus metrics (invalid format)"
+	case strings.Contains(errMsg, "no xpu devices detected"):
+		return "no XPU devices detected in XPUMD metrics"
+	case strings.Contains(errMsg, "no xpu device memory detected"):
+		return "no XPU device memory detected in XPUMD metrics"
 	case strings.Contains(errMsg, "no gpus detected"):
 		return "no GPUs detected in dcgm metrics (GPU model or metrics missing)"
-	case strings.Contains(errMsg, "dcgm is not enabled in the GPU Operator"):
+	case strings.Contains(errMsg, "dcgm is not enabled in the gpu operator"):
 		return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
 	case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
 		return "failed to scrape any dcgm exporter pod (check DCGM exporter pod status and network connectivity)"
+	case strings.Contains(errMsg, "failed to scrape any intel xpumd exporter pod"):
+		return "failed to scrape any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)"
 	case strings.Contains(errMsg, "no gpu metrics could be parsed from any dcgm pod"):
 		return "no GPU metrics could be parsed from any DCGM pod (check DCGM exporter pod status and network connectivity)"
+	case strings.Contains(errMsg, "no xpu metrics could be parsed from any intel xpumd exporter pod"):
+		return "no XPU metrics could be parsed from any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)"
 	case strings.Contains(errMsg, "failed to create helm path"):
 		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
 	}
@@ -1692,10 +1702,10 @@ func marshalDGDRSpec(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (strin
 // specified hardware can still receive best-effort metadata. Discovery failures remain fatal
 // when required fields are missing, but optional metadata is best-effort.
 //
-// DCGM is tried first; node-label discovery (DiscoverGPUs) is used as a fallback to support
-// environments such as vCluster where DCGM sockets are exclusive to the host cluster. A
-// successful DCGM result is accepted as authoritative; if it lacks optional metadata, missing
-// optional fields are left unset rather than forcing a second discovery backend.
+// Metrics discovery is tried first; node-label discovery is used as a fallback to support
+// environments such as vCluster where metrics endpoints are not directly reachable. A
+// successful metrics result is accepted as authoritative; if it lacks optional metadata,
+// missing optional fields are left unset rather than forcing a second discovery backend.
 func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (bool, error) {
 	changed := false
 	if dgdr.Spec.Hardware == nil {
@@ -1797,36 +1807,28 @@ func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(c
 		return nil, nil
 	}
 
-	var dcgmErr error
-	if r.GPUDiscovery != nil {
-		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, reader, r.GPUDiscoveryCache, hw.GPUSKU)
-		if err == nil {
-			return discoveredInfo, nil
-		}
-		dcgmErr = err
-
-		reason := GetGPUDiscoveryFailureReason(err)
-		logger.Info("DCGM discovery failed, falling back to node-label discovery",
-			"reason", reason, "error", err.Error())
+	discoveredInfo, err := gpu.DiscoverGPUHardware(
+		ctx,
+		reader,
+		r.GPUDiscovery,
+		r.GPUDiscoveryCache,
+		hw.GPUSKU,
+		r.gpuDiscoveryEnabled(),
+	)
+	if err == nil {
+		return discoveredInfo, nil
 	}
 
+	reason := GetGPUDiscoveryFailureReason(err)
+	logger.Info("GPU discovery failed", "reason", reason, "error", err.Error())
 	if !r.gpuDiscoveryEnabled() {
 		if discoveryRequired {
-			if dcgmErr != nil {
-				return nil, fmt.Errorf("auto-discovery failed: %w", dcgmErr)
-			}
-			return nil, fmt.Errorf("auto-discovery failed: node-label discovery is disabled")
+			return nil, fmt.Errorf("auto-discovery failed: %w", err)
 		}
 		logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
 		return nil, nil
 	}
 
-	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, reader, hw.GPUSKU)
-	if err == nil {
-		return discoveredInfo, nil
-	}
-
-	logger.Info("Node-label discovery also failed", "error", err.Error())
 	if discoveryRequired {
 		return nil, fmt.Errorf("auto-discovery failed: %w", err)
 	}
