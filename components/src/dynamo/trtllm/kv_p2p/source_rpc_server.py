@@ -5,13 +5,15 @@
 
 The actual SourceG2DescriptorRegistry runs inside the engine subprocess
 (spawned by TRT-LLM via OpenMPI). It exposes a ZMQ REP loop over a Unix
-domain socket at ``/tmp/dynamo_remote_g2_ipc_<dynamo_pid>.sock``.
+domain socket keyed by the parent dynamo PID and, for ADP, the DP/KV
+rank context.
 
 This module bridges that local socket to dynamo's network-discoverable
-runtime endpoints. Two endpoints are registered:
+runtime endpoints. Three endpoints are registered:
 
 * ``<namespace>.<component>.remote-g2-resolve`` — forwards resolve_and_lease
 * ``<namespace>.<component>.remote-g2-release`` — forwards release_lease
+* ``<namespace>.<component>.remote-g2-metadata`` — forwards get_metadata
 
 Each endpoint handler is an async generator (dynamo's standard endpoint
 shape). It uses ``loop.run_in_executor`` to call into the blocking ZMQ
@@ -69,7 +71,42 @@ class _ZmqReqWrapper:
         return pickle.loads(raw)
 
 
-def _make_resolve_handler(req_wrapper: _ZmqReqWrapper):
+class _SourceIpcRouter:
+    """Route source RPCs to the engine subprocess for the plan's DP rank."""
+
+    def __init__(
+        self, wrappers: dict[int, _ZmqReqWrapper], default_dp_rank: int
+    ) -> None:
+        self._wrappers = wrappers
+        self._default_dp_rank = default_dp_rank
+
+    @property
+    def dp_ranks(self) -> tuple[int, ...]:
+        return tuple(sorted(self._wrappers))
+
+    def _select_dp_rank(self, method: str, payload: dict) -> int:
+        if method == "resolve_and_lease":
+            plan = payload.get("plan")
+            if isinstance(plan, dict):
+                return int(plan.get("source_dp_rank", self._default_dp_rank))
+        if method in {"release_lease", "get_metadata"}:
+            return int(payload.get("source_dp_rank", self._default_dp_rank))
+        return self._default_dp_rank
+
+    def request(self, method: str, payload: dict) -> dict:
+        dp_rank = self._select_dp_rank(method, payload)
+        wrapper = self._wrappers.get(dp_rank)
+        if wrapper is None:
+            wrapper = self._wrappers[self._default_dp_rank]
+            logging.warning(
+                "remote_g2: no source IPC wrapper for dp_rank=%s; using dp_rank=%s",
+                dp_rank,
+                self._default_dp_rank,
+            )
+        return wrapper.request(method, payload)
+
+
+def _make_resolve_handler(req_router: _SourceIpcRouter):
     """Build the async-generator handler for the remote-g2-resolve endpoint."""
 
     async def handler(request: dict, context: Any = None) -> AsyncIterator[dict]:
@@ -83,7 +120,7 @@ def _make_resolve_handler(req_wrapper: _ZmqReqWrapper):
         # because the await suspends the generator and the push_handler
         # invalidates the stream before the executor returns.
         try:
-            response = req_wrapper.request("resolve_and_lease", {"plan": plan})
+            response = req_router.request("resolve_and_lease", {"plan": plan})
         except Exception as exc:
             logging.exception("remote_g2: resolve_and_lease RPC raised")
             yield {"ok": False, "error": repr(exc)}
@@ -93,12 +130,13 @@ def _make_resolve_handler(req_wrapper: _ZmqReqWrapper):
     return handler
 
 
-def _make_release_handler(req_wrapper: _ZmqReqWrapper):
+def _make_release_handler(req_router: _SourceIpcRouter):
     """Build the async-generator handler for the remote-g2-release endpoint."""
 
     async def handler(request: dict, context: Any = None) -> AsyncIterator[dict]:
         lease_id = (request or {}).get("lease_id")
         reason = (request or {}).get("reason", "ack")
+        source_dp_rank = (request or {}).get("source_dp_rank", 0)
         if lease_id is None:
             yield {"ok": False, "error": "missing 'lease_id' in request"}
             return
@@ -106,9 +144,13 @@ def _make_release_handler(req_wrapper: _ZmqReqWrapper):
         try:
             response = await loop.run_in_executor(
                 None,
-                req_wrapper.request,
+                req_router.request,
                 "release_lease",
-                {"lease_id": lease_id, "reason": reason},
+                {
+                    "lease_id": lease_id,
+                    "reason": reason,
+                    "source_dp_rank": source_dp_rank,
+                },
             )
         except Exception as exc:
             logging.exception("remote_g2: release_lease RPC raised")
@@ -119,7 +161,7 @@ def _make_release_handler(req_wrapper: _ZmqReqWrapper):
     return handler
 
 
-def _make_metadata_handler(req_wrapper: _ZmqReqWrapper):
+def _make_metadata_handler(req_router: _SourceIpcRouter):
     """Build the async-generator handler for the remote-g2-metadata endpoint.
 
     Unary RPC. Returns the source NIXL agent's identity (remote_name,
@@ -136,7 +178,15 @@ def _make_metadata_handler(req_wrapper: _ZmqReqWrapper):
 
     async def handler(request: dict, context: Any = None) -> AsyncIterator[dict]:
         req = request or {}
-        payload: dict = {}
+        try:
+            payload: dict = {"source_dp_rank": int(req.get("source_dp_rank", 0))}
+        except (TypeError, ValueError):
+            yield {
+                "ok": False,
+                "error": f"invalid source_dp_rank: {req.get('source_dp_rank')!r}",
+            }
+            return
+
         peer_name = req.get("peer_name")
         peer_conn = req.get("peer_connection_info")
         if peer_name:
@@ -146,7 +196,7 @@ def _make_metadata_handler(req_wrapper: _ZmqReqWrapper):
         loop = asyncio.get_running_loop()
         try:
             response = await loop.run_in_executor(
-                None, req_wrapper.request, "get_metadata", payload
+                None, req_router.request, "get_metadata", payload
             )
         except Exception as exc:
             logging.exception("remote_g2: get_metadata RPC raised")
@@ -157,7 +207,7 @@ def _make_metadata_handler(req_wrapper: _ZmqReqWrapper):
     return handler
 
 
-def _ipc_socket_path() -> str:
+def _legacy_ipc_socket_path() -> str:
     """The Unix-domain-socket path the engine subprocess's REP service
     binds to. Keyed by the dynamo parent's PID so multiple workers on
     one host don't collide.
@@ -170,6 +220,10 @@ def _ipc_socket_path() -> str:
     if os.path.exists(tp0_path):
         return tp0_path
     return f"/tmp/dynamo_remote_g2_ipc_{pid}.sock"
+
+
+def _context_ipc_socket_path(dp_rank: int, kv_rank: int = 0) -> str:
+    return f"/tmp/dynamo_remote_g2_ipc_{os.getpid()}_dp{dp_rank}_kv{kv_rank}.sock"
 
 
 def _wait_for_socket(path: str, timeout_s: float = 30.0) -> bool:
@@ -186,11 +240,53 @@ def _wait_for_socket(path: str, timeout_s: float = 30.0) -> bool:
     return False
 
 
+def _discover_ipc_router(timeout_s: float = 30.0) -> Optional[_SourceIpcRouter]:
+    """Find source IPC sockets for either ADP DP ranks or legacy TP mode."""
+    deadline = time.monotonic() + timeout_s
+    wrappers: dict[int, _ZmqReqWrapper] = {}
+    expected_dp_ranks = (0, 1)
+
+    while time.monotonic() < deadline:
+        for dp_rank in expected_dp_ranks:
+            if dp_rank in wrappers:
+                continue
+            socket_path = _context_ipc_socket_path(dp_rank)
+            if os.path.exists(socket_path):
+                wrappers[dp_rank] = _ZmqReqWrapper(socket_path)
+                logging.warning(
+                    "remote_g2: discovered source IPC socket for dp_rank=%d at %s",
+                    dp_rank,
+                    socket_path,
+                )
+
+        if len(wrappers) == len(expected_dp_ranks):
+            return _SourceIpcRouter(wrappers, default_dp_rank=0)
+
+        if not wrappers:
+            legacy_path = _legacy_ipc_socket_path()
+            if os.path.exists(legacy_path):
+                return _SourceIpcRouter(
+                    {0: _ZmqReqWrapper(legacy_path)},
+                    default_dp_rank=0,
+                )
+
+        time.sleep(0.25)
+
+    if wrappers:
+        logging.warning(
+            "remote_g2: only discovered source IPC sockets for dp_ranks=%s",
+            sorted(wrappers),
+        )
+        default_dp_rank = 0 if 0 in wrappers else min(wrappers)
+        return _SourceIpcRouter(wrappers, default_dp_rank=default_dp_rank)
+    return None
+
+
 async def setup_source_rpc_endpoints(
     runtime: Any,
     namespace: str,
     component: str,
-) -> Optional[_ZmqReqWrapper]:
+) -> Optional[_SourceIpcRouter]:
     """Register the two source-side dynamo runtime endpoints and spawn
     their serving tasks. Returns the ``_ZmqReqWrapper`` so the caller
     can hold it alive (the socket closes when the wrapper is GCed).
@@ -198,15 +294,12 @@ async def setup_source_rpc_endpoints(
     Returns ``None`` if the engine subprocess's ZMQ REP socket never
     appears (e.g. remote-G2 wasn't actually bootstrapped).
     """
-    socket_path = _ipc_socket_path()
-    if not _wait_for_socket(socket_path):
+    req_router = _discover_ipc_router()
+    if req_router is None:
         logging.warning(
-            "remote_g2: ZMQ REP socket %s never appeared; source RPC endpoints not registered",
-            socket_path,
+            "remote_g2: no source ZMQ REP socket appeared; source RPC endpoints not registered",
         )
         return None
-
-    req_wrapper = _ZmqReqWrapper(socket_path)
 
     resolve_ep = runtime.endpoint(f"{namespace}.{component}.remote-g2-resolve")
     release_ep = runtime.endpoint(f"{namespace}.{component}.remote-g2-release")
@@ -216,13 +309,13 @@ async def setup_source_rpc_endpoints(
     # the dynamo runtime version. asyncio.ensure_future accepts both and
     # returns a Task/Future we can hold on to without blocking here.
     _resolve_task = asyncio.ensure_future(
-        resolve_ep.serve_endpoint(_make_resolve_handler(req_wrapper))
+        resolve_ep.serve_endpoint(_make_resolve_handler(req_router))
     )
     _release_task = asyncio.ensure_future(
-        release_ep.serve_endpoint(_make_release_handler(req_wrapper))
+        release_ep.serve_endpoint(_make_release_handler(req_router))
     )
     _metadata_task = asyncio.ensure_future(
-        metadata_ep.serve_endpoint(_make_metadata_handler(req_wrapper))
+        metadata_ep.serve_endpoint(_make_metadata_handler(req_router))
     )
 
     # Direct ZMQ TCP REP for resolve — bypasses dynamo's client.direct()
@@ -253,13 +346,17 @@ async def setup_source_rpc_endpoints(
                 if method == "identify":
                     # Lightweight probe: return our worker_id so the target
                     # can match IPs to worker identities.
-                    response = {"ok": True, "worker_id": _my_worker_id}
+                    response = {
+                        "ok": True,
+                        "worker_id": _my_worker_id,
+                        "dp_ranks": req_router.dp_ranks,
+                    }
                 elif method == "resolve_and_lease":
-                    response = req_wrapper.request("resolve_and_lease", payload)
+                    response = req_router.request("resolve_and_lease", payload)
                 elif method == "release_lease":
-                    response = req_wrapper.request("release_lease", payload)
+                    response = req_router.request("release_lease", payload)
                 elif method == "get_metadata":
-                    response = req_wrapper.request("get_metadata", payload)
+                    response = req_router.request("get_metadata", payload)
                 else:
                     response = {"ok": False, "error": f"unknown method: {method!r}"}
             except Exception as exc:
@@ -290,13 +387,13 @@ async def setup_source_rpc_endpoints(
     logging.warning(
         "remote_g2: source RPC endpoints registered "
         "(resolve=%s.%s.remote-g2-resolve release=%s.%s.remote-g2-release "
-        "metadata=%s.%s.remote-g2-metadata ipc=%s)",
+        "metadata=%s.%s.remote-g2-metadata dp_ranks=%s)",
         namespace,
         component,
         namespace,
         component,
         namespace,
         component,
-        socket_path,
+        req_router.dp_ranks,
     )
-    return req_wrapper
+    return req_router

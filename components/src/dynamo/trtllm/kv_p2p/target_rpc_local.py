@@ -17,9 +17,10 @@ connects to the same path. Wire format mirrors source side: pickle
 ``{"ok": bool, "result": dict | None, "error": str | None}`` response.
 
 Lease lifecycle: the connector's ``release_lease(lease_id, reason)``
-signature does not carry source_worker_id, so this bridge maintains a
-``lease_id → source_worker_id`` mapping populated from successful
-resolve responses. Release calls look up the mapping; if the lease is
+signature does not carry source_worker_id or source_dp_rank, so this
+bridge maintains a ``lease_id → (source_worker_id, source_dp_rank)``
+mapping populated from successful resolve responses. Release calls look
+up the mapping; if the lease is
 unknown (e.g. parent restarted between resolve and release) the call
 is silently dropped — the source-side lease will time out via its TTL
 mechanism.
@@ -39,7 +40,7 @@ from .target_rpc_client import _TargetRpcClient
 
 
 class _LeaseSourceMap:
-    """Thread-safe ``lease_id → source_worker_id`` map.
+    """Thread-safe ``lease_id → (source_worker_id, source_dp_rank)`` map.
 
     Populated on successful resolve, consulted on release. Bounded only
     by total active leases — entries should be removed by the connector
@@ -47,14 +48,14 @@ class _LeaseSourceMap:
     """
 
     def __init__(self) -> None:
-        self._map: dict[str, int] = {}
+        self._map: dict[str, tuple[int, int]] = {}
         self._lock = threading.Lock()
 
-    def put(self, lease_id: str, source_worker_id: int) -> None:
+    def put(self, lease_id: str, source_worker_id: int, source_dp_rank: int) -> None:
         with self._lock:
-            self._map[lease_id] = source_worker_id
+            self._map[lease_id] = (source_worker_id, source_dp_rank)
 
-    def pop(self, lease_id: str) -> Optional[int]:
+    def pop(self, lease_id: str) -> Optional[tuple[int, int]]:
         with self._lock:
             return self._map.pop(lease_id, None)
 
@@ -175,6 +176,10 @@ def _dispatch_resolve(
         source_worker_id = int(source_worker_id)
     except (TypeError, ValueError):
         return {"ok": False, "error": f"invalid source_worker_id: {source_worker_id!r}"}
+    try:
+        source_dp_rank = int(plan.get("source_dp_rank", 0))
+    except (AttributeError, TypeError, ValueError):
+        source_dp_rank = 0
 
     # Try direct ZMQ TCP first (bypasses dynamo response stream).
     source_ip = _discover_source_ip(source_worker_id)
@@ -187,7 +192,7 @@ def _dispatch_resolve(
                 if isinstance(inner, dict):
                     lease_id = inner.get("lease_id")
                     if lease_id:
-                        lease_map.put(str(lease_id), source_worker_id)
+                        lease_map.put(str(lease_id), source_worker_id, source_dp_rank)
             return response
         logging.warning(
             "remote_g2: direct ZMQ resolve failed, falling back to client.direct()"
@@ -213,7 +218,7 @@ def _dispatch_resolve(
     inner = response.get("result") if isinstance(response.get("result"), dict) else {}
     lease_id = inner.get("lease_id")
     if lease_id:
-        lease_map.put(str(lease_id), source_worker_id)
+        lease_map.put(str(lease_id), source_worker_id, source_dp_rank)
     return response
 
 
@@ -238,6 +243,10 @@ def _dispatch_metadata(
         source_worker_id = int(source_worker_id)
     except (TypeError, ValueError):
         return {"ok": False, "error": f"invalid source_worker_id: {source_worker_id!r}"}
+    try:
+        source_dp_rank = int(payload.get("source_dp_rank", 0))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": f"invalid source_dp_rank: {payload.get('source_dp_rank')!r}"}
 
     # Pass through peer_name + peer_connection_info to enable the
     # bidirectional NIXL handshake.
@@ -245,6 +254,7 @@ def _dispatch_metadata(
     peer_conn = payload.get("peer_connection_info", "")
     coro = client.get_source_metadata(
         source_worker_id,
+        source_dp_rank=source_dp_rank,
         peer_name=str(peer_name) if peer_name else "",
         peer_connection_info=str(peer_conn) if peer_conn else "",
     )
@@ -277,8 +287,9 @@ def _dispatch_release(
         # Lease unknown — silently treat as ok. Source-side TTL will
         # garbage-collect orphaned leases.
         return {"ok": True, "result": False}
+    source_worker_id, source_dp_rank = source
 
-    coro = client.release_lease(lease_id, source, reason)
+    coro = client.release_lease(lease_id, source_worker_id, source_dp_rank, reason)
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
         response = future.result(timeout=timeout_s)

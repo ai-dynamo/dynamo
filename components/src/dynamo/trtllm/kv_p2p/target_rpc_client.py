@@ -94,6 +94,7 @@ class _TargetRpcClient:
     async def get_source_metadata(
         self,
         source_worker_id: int,
+        source_dp_rank: int = 0,
         peer_name: str = "",
         peer_connection_info: str = "",
     ) -> Optional[dict]:
@@ -117,7 +118,7 @@ class _TargetRpcClient:
             )
             return None
 
-        payload: dict = {}
+        payload: dict = {"source_dp_rank": int(source_dp_rank)}
         if peer_name:
             payload["peer_name"] = peer_name
         if peer_connection_info:
@@ -274,7 +275,11 @@ class _TargetRpcClient:
         return None
 
     async def release_lease(
-        self, lease_id: str, source_worker_id: int, reason: str = "ack"
+        self,
+        lease_id: str,
+        source_worker_id: int,
+        source_dp_rank: int = 0,
+        reason: str = "ack",
     ) -> Optional[dict]:
         """Call the source worker's release endpoint. Same semantics as
         ``resolve_and_lease`` — ``None`` on transport failure."""
@@ -286,7 +291,11 @@ class _TargetRpcClient:
             )
             return None
 
-        payload = {"lease_id": lease_id, "reason": reason}
+        payload = {
+            "lease_id": lease_id,
+            "reason": reason,
+            "source_dp_rank": int(source_dp_rank),
+        }
         try:
             stream = await client.direct(payload, instance_id=source_worker_id)
             async for response in stream:
