@@ -14,6 +14,7 @@ import logging
 import os
 import tempfile
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
@@ -71,6 +72,7 @@ from dynamo.vllm.cache_info import (
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
+from .flashinfer_collectives import configure_flashinfer_only_collectives
 from .handlers import (
     VllmEnginePauseController,
     build_sampling_params,
@@ -79,6 +81,11 @@ from .handlers import (
 from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
+)
+from .snapshot_worker_config import (
+    configure_no_nccl_snapshot_before_engine_config,
+    validate_no_nccl_snapshot_config,
+    validate_flashinfer_snapshot_worker_config,
 )
 
 if TYPE_CHECKING:
@@ -288,9 +295,15 @@ class VllmLLMEngine(LLMEngine):
 
         self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
 
+        configure_no_nccl_snapshot_before_engine_config(
+            SimpleNamespace(engine_args=self.engine_args)
+        )
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
+        validate_flashinfer_snapshot_worker_config(self.engine_args, vllm_config)
+        validate_no_nccl_snapshot_config(self.engine_args, vllm_config)
+        configure_flashinfer_only_collectives(self.engine_args, vllm_config)
         self._vllm_config = vllm_config
         self._default_sampling_params = (
             vllm_config.model_config.get_diff_sampling_param()

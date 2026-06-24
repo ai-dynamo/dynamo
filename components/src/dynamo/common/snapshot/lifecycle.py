@@ -115,19 +115,20 @@ def configure_snapshot_capture_env() -> None:
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
 
     nccl_p2p_disable = os.environ.get("NCCL_P2P_DISABLE")
-    if nccl_p2p_disable and nccl_p2p_disable != "0":
+    if nccl_p2p_disable and nccl_p2p_disable != "1":
         logger.warning(
-            "Overriding NCCL_P2P_DISABLE=%r with '0' for snapshot mode "
-            "to keep NCCL on GPU P2P transport when topology allows it",
+            "Overriding NCCL_P2P_DISABLE=%r with '1' for snapshot mode "
+            "because cuda-checkpoint does not support CUDA IPC/P2P memory",
             nccl_p2p_disable,
         )
-    os.environ["NCCL_P2P_DISABLE"] = "0"
+    os.environ["NCCL_P2P_DISABLE"] = "1"
 
     nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
     if nccl_nvls_enable and nccl_nvls_enable != "0":
         logger.warning(
             "Overriding NCCL_NVLS_ENABLE=%r with '0' for snapshot mode "
-            "to avoid NVLS and keep NCCL on the legacy P2P path",
+            "to avoid NVLS peer mappings and resources for cuda-checkpoint "
+            "compatibility",
             nccl_nvls_enable,
         )
     os.environ["NCCL_NVLS_ENABLE"] = "0"

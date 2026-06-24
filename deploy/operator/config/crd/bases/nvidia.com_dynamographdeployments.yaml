@@ -1045,7 +1045,7 @@ spec:
                                 default: 1
                                 description: |-
                                   PipelineParallelSize is the pipeline parallel configuration.
-                                  Deprecated: checkpoint launch uses the pod template instead.
+                                  Deprecated: legacy identity only.
                                 format: int32
                                 minimum: 1
                                 type: integer
@@ -1053,7 +1053,7 @@ spec:
                                 default: 1
                                 description: |-
                                   TensorParallelSize is the tensor parallel configuration.
-                                  Deprecated: checkpoint launch uses the pod template instead.
+                                  Deprecated: legacy identity only.
                                 format: int32
                                 minimum: 1
                                 type: integer
@@ -12348,7 +12348,7 @@ spec:
                                     default: 1
                                     description: |-
                                       pipelineParallelSize is the pipeline parallel configuration.
-                                      Deprecated: checkpoint launch uses the pod template instead.
+                                      Deprecated: legacy identity only.
                                     format: int32
                                     minimum: 1
                                     type: integer
@@ -12356,7 +12356,7 @@ spec:
                                     default: 1
                                     description: |-
                                       tensorParallelSize is the tensor parallel configuration.
-                                      Deprecated: checkpoint launch uses the pod template instead.
+                                      Deprecated: legacy identity only.
                                     format: int32
                                     minimum: 1
                                     type: integer

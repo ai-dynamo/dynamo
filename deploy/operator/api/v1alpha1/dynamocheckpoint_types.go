@@ -64,14 +64,14 @@ type DynamoCheckpointIdentity struct {
 	DynamoVersion string `json:"dynamoVersion,omitempty"`
 
 	// TensorParallelSize is the tensor parallel configuration.
-	// Deprecated: checkpoint launch uses the pod template instead.
+	// Deprecated: legacy identity only.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
 
 	// PipelineParallelSize is the pipeline parallel configuration.
-	// Deprecated: checkpoint launch uses the pod template instead.
+	// Deprecated: legacy identity only.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1

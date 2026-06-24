@@ -433,7 +433,7 @@ func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyH
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", "", nil, nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", "", nil, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "checkpoint-"+testHash, ckpt.Name)
 
@@ -447,7 +447,7 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", "", nil, nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", "", nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
@@ -478,6 +478,7 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		"",
 		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 		nil,
+		nil,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
@@ -504,6 +505,7 @@ func TestCreateOrGetAutoCheckpointRetainStoresDeletionPolicy(t *testing.T) {
 		corev1.PodTemplateSpec{},
 		"",
 		nvidiacomv1alpha1.CheckpointDeletionPolicyRetain,
+		nil,
 		nil,
 		owner,
 	)
@@ -549,6 +551,7 @@ func TestCreateOrGetAutoCheckpointUpdatesExistingDeletionPolicyAndFinalizer(t *t
 		corev1.PodTemplateSpec{},
 		"",
 		nvidiacomv1alpha1.CheckpointDeletionPolicyDelete,
+		nil,
 		nil,
 		owner,
 	)

@@ -142,6 +142,7 @@ func CreateOrGetAutoCheckpoint(
 	targetContainerName string,
 	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
 	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
+	sharedMemory *nvidiacomv1alpha1.SharedMemorySpec,
 	owner client.Object,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	if err := ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gpuMemoryService); err != nil {
@@ -192,6 +193,7 @@ func CreateOrGetAutoCheckpoint(
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec:     podTemplate,
 				TargetContainerName: targetContainerName,
+				SharedMemory:        sharedMemory,
 			},
 		},
 	}

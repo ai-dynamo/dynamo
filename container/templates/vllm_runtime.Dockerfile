@@ -21,7 +21,12 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG NIXL_REF
 {% if device == "cuda" %}
+ARG CUDA_VERSION
 ARG CUDA_MAJOR
+ARG FLASHINF_REF
+ARG FLASHINFER_GIT_URL
+ARG FLASHINFER_GIT_REF
+ARG FLASHINFER_GIT_SHA
 {% endif %}
 ARG MODELEXPRESS_VERSION
 
@@ -71,6 +76,60 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+
+{% if device == "cuda" %}
+# Build On Demand can pin a FlashInfer branch/commit for Snapshot peer-resource
+# pause/resume APIs while leaving normal runtime builds on the upstream image's
+# packaged FlashInfer.
+# Source-override builds may JIT CUDA code at runtime; keep CUDA headers visible
+# without clobbering any CPATH inherited from the base image.
+ENV CPATH=${FLASHINFER_GIT_URL:+/usr/local/cuda/include${CPATH:+:}}${CPATH}
+# When overriding from source, refresh optional FlashInfer companion packages
+# from the same checkout and remove stale JIT cache wheels so version checks do
+# not compare the source package against packages left from the base image.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    if [ -n "${FLASHINFER_GIT_URL}" ]; then \
+        if [ -z "${FLASHINFER_GIT_REF}" ] && [ -z "${FLASHINFER_GIT_SHA}" ]; then \
+            echo "FLASHINFER_GIT_URL requires FLASHINFER_GIT_REF or FLASHINFER_GIT_SHA" >&2; \
+            exit 1; \
+        fi; \
+        CUDA_VERSION_REST="${CUDA_VERSION#*.}"; \
+        if [ "${CUDA_VERSION_REST}" = "${CUDA_VERSION}" ]; then \
+            echo "CUDA_VERSION must include major.minor for cuda-nvrtc-dev package selection: ${CUDA_VERSION}" >&2; \
+            exit 1; \
+        fi; \
+        CUDA_MINOR_DASH="${CUDA_VERSION%%.*}-${CUDA_VERSION_REST%%.*}"; \
+        apt-get update; \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git \
+            "cuda-nvrtc-dev-${CUDA_MINOR_DASH}"; \
+        rm -rf /var/lib/apt/lists/*; \
+        rm -rf /tmp/flashinfer-src; \
+        if [ -n "${FLASHINFER_GIT_REF}" ]; then \
+            git clone --recurse-submodules --branch "${FLASHINFER_GIT_REF}" \
+                "${FLASHINFER_GIT_URL}" /tmp/flashinfer-src; \
+        else \
+            git clone --recurse-submodules "${FLASHINFER_GIT_URL}" \
+                /tmp/flashinfer-src; \
+        fi; \
+        cd /tmp/flashinfer-src; \
+        if [ -n "${FLASHINFER_GIT_SHA}" ]; then \
+            git checkout --detach "${FLASHINFER_GIT_SHA}"; \
+            test "$(git rev-parse HEAD)" = "${FLASHINFER_GIT_SHA}"; \
+            git submodule update --init --recursive; \
+        fi; \
+        export UV_CACHE_DIR=/root/.cache/uv; \
+        uv pip install --system --force-reinstall --no-deps .; \
+        if [ -d ./flashinfer-cubin ]; then \
+            uv pip install --system --force-reinstall --no-deps ./flashinfer-cubin; \
+        fi; \
+        uv pip uninstall --system flashinfer-jit-cache || true; \
+        rm -rf /tmp/flashinfer-src; \
+    else \
+        echo "Using FlashInfer from the upstream vLLM runtime image (${FLASHINF_REF})."; \
+    fi
+{% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at

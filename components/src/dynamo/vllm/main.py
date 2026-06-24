@@ -58,10 +58,17 @@ from .capacity import (
     per_rank_kv_blocks,
 )
 from .constants import DisaggregationMode
+from .flashinfer_collectives import configure_flashinfer_only_collectives
 from .handlers import get_dp_range_for_worker
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
+from .snapshot_worker_config import (
+    configure_no_nccl_snapshot_before_engine_config,
+    configure_gms_worker_cls,
+    validate_no_nccl_snapshot_config,
+    validate_flashinfer_snapshot_worker_config,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -130,9 +137,7 @@ def run_dynamo_headless(config: Config) -> None:
     # Propagate worker_cls for custom load formats so headless workers use
     # the same model loader settings as the leader node.
     if config.engine_args.load_format == "gms":
-        config.engine_args.worker_cls = (
-            "gpu_memory_service.integrations.vllm.worker.GMSWorker"
-        )
+        configure_gms_worker_cls(config.engine_args)
 
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
@@ -146,6 +151,8 @@ def run_dynamo_headless(config: Config) -> None:
 
     # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
     # Dynamo does not set a custom worker class here.
+
+    configure_no_nccl_snapshot_before_engine_config(config)
 
     # Keep the upstream CLI import local so tests that only exercise
     # build_headless_namespace() do not pull in vLLM's full CLI import graph.
@@ -554,7 +561,7 @@ def setup_vllm_engine(
             os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
 
     if engine_args.load_format == "gms":
-        engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+        configure_gms_worker_cls(engine_args)
 
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
@@ -599,7 +606,11 @@ def setup_vllm_engine(
 
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
+    configure_no_nccl_snapshot_before_engine_config(config)
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    validate_flashinfer_snapshot_worker_config(engine_args, vllm_config)
+    validate_no_nccl_snapshot_config(engine_args, vllm_config)
+    configure_flashinfer_only_collectives(engine_args, vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled

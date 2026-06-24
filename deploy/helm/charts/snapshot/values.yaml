@@ -212,7 +212,7 @@ config:
     # Config file options (NOT available via RPC - written to criu.conf)
     # Dedicated directory for Dynamo Snapshot CRIU plugins.
     # Do not point this at CRIU's global plugin dir, which can load unrelated
-    # plugins such as the CRIU CUDA plugin.
+    # plugins.
     libDir: "/usr/local/lib/snapshot/criu-plugins"
     allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
     skipInFlight: true             # Skip in-flight TCP connections

@@ -50,6 +50,19 @@ func buildSharedMemoryVolumeAndMount(sizeSpec *resource.Quantity) (*corev1.Volum
 	return volume, volumeMount
 }
 
+func existingSharedMemorySize(podSpec *corev1.PodSpec) *resource.Quantity {
+	for _, volume := range podSpec.Volumes {
+		if volume.Name != commonconsts.KubeValueNameSharedMemory ||
+			volume.EmptyDir == nil ||
+			volume.EmptyDir.SizeLimit == nil {
+			continue
+		}
+		size := volume.EmptyDir.SizeLimit.DeepCopy()
+		return &size
+	}
+	return nil
+}
+
 // ApplySharedMemoryVolumeAndMount applies the checkpoint Job's /dev/shm
 // compatibility setting to the target container.
 func ApplySharedMemoryVolumeAndMount(
@@ -57,7 +70,11 @@ func ApplySharedMemoryVolumeAndMount(
 	mainContainer *corev1.Container,
 	sharedMemory *nvidiacomv1alpha1.SharedMemorySpec,
 ) {
-	volume, volumeMount := buildSharedMemoryVolumeAndMount(sharedMemorySize(sharedMemory))
+	size := sharedMemorySize(sharedMemory)
+	if size == nil {
+		size = existingSharedMemorySize(podSpec)
+	}
+	volume, volumeMount := buildSharedMemoryVolumeAndMount(size)
 	if volume == nil || volumeMount == nil {
 		return
 	}

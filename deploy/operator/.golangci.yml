@@ -45,7 +45,7 @@ issues:
     # fields until a future API version can remove them.
     - linters:
         - staticcheck
-      text: "SA1019:.*(CheckpointMode|omit mode|DynamoCheckpointIdentity|required by v1alpha1|omit for DGD-managed checkpoints|legacy spec.identity|checkpoint launch uses)"
+      text: "SA1019:.*(CheckpointMode|omit mode|DynamoCheckpointIdentity|required by v1alpha1|omit for DGD-managed checkpoints|legacy spec.identity)"
 linters:
   disable-all: true
   enable:

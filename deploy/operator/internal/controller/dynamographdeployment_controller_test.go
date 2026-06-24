@@ -1347,6 +1347,110 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoPreservesPodTem
 	assert.Equal(t, "worker", jobMeta.Labels[commonconsts.KubeLabelDynamoComponent])
 }
 
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoPreservesShmAndSysPtrace(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	shmSize := resource.MustParse("64Gi")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName:    "worker",
+				ComponentType:    v1beta1.ComponentTypeWorker,
+				SharedMemorySize: &shmSize,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  commonconsts.MainContainerName,
+							Image: "main:latest",
+							Command: []string{
+								"python3",
+								"-m",
+								"dynamo.vllm",
+							},
+							SecurityContext: &corev1.SecurityContext{
+								Capabilities: &corev1.Capabilities{
+									Add: []corev1.Capability{"SYS_PTRACE"},
+								},
+							},
+						}},
+					},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Mode:    v1beta1.CheckpointModeAuto,
+					},
+				},
+			}},
+		},
+	}
+
+	checkpointStatuses, _, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	require.NoError(t, err)
+	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
+
+	ckpt := &v1alpha1.DynamoCheckpoint{}
+	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{
+		Name:      checkpointStatuses["worker"].CheckpointName,
+		Namespace: "default",
+	}, ckpt))
+	require.NotNil(t, ckpt.Spec.Job.SharedMemory)
+	assert.Equal(t, shmSize, ckpt.Spec.Job.SharedMemory.Size)
+
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
+	require.NoError(t, err)
+	job, err := buildCheckpointJob(
+		ctx,
+		nil,
+		checkpointTestConfig(),
+		ckpt,
+		snapshotprotocol.GetCheckpointJobName(
+			checkpointID,
+			snapshotprotocol.DefaultCheckpointArtifactVersion,
+		),
+	)
+	require.NoError(t, err)
+
+	main := findContainer(
+		job.Spec.Template.Spec.Containers,
+		commonconsts.MainContainerName,
+	)
+	require.NotNil(t, main)
+	require.NotNil(t, main.SecurityContext)
+	require.NotNil(t, main.SecurityContext.Capabilities)
+	assert.Contains(
+		t,
+		main.SecurityContext.Capabilities.Add,
+		corev1.Capability("SYS_PTRACE"),
+	)
+
+	foundSharedMemoryVolume := false
+	for _, volume := range job.Spec.Template.Spec.Volumes {
+		if volume.Name != commonconsts.KubeValueNameSharedMemory {
+			continue
+		}
+		foundSharedMemoryVolume = true
+		require.NotNil(t, volume.EmptyDir)
+		require.NotNil(t, volume.EmptyDir.SizeLimit)
+		assert.Equal(t, shmSize, *volume.EmptyDir.SizeLimit)
+	}
+	require.True(t, foundSharedMemoryVolume)
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{
+		Name:      commonconsts.KubeValueNameSharedMemory,
+		MountPath: commonconsts.DefaultSharedMemoryMountPath,
+	})
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsSyncsExistingAutoLifecycle(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)

@@ -59,6 +59,9 @@ vllm:
     base_image_tag: 22.04
     runtime_image_tag: v0.23.0
   flashinf_ref: v0.6.8.post1
+  flashinfer_git_url: ""
+  flashinfer_git_ref: ""
+  flashinfer_git_sha: ""
   vllm_omni_ref: "v0.21.0rc1"
   nixl_ref: v1.1.0
   max_jobs: "10"

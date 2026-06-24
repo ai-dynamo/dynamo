@@ -38,6 +38,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -2066,6 +2067,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		targetContainerName,
 		deletionPolicy,
 		gmsSpec,
+		checkpointSharedMemorySpec(component.SharedMemorySize),
 		dynamoDeployment,
 	)
 	if err != nil {
@@ -2077,6 +2079,15 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		}
 	}
 	return ckpt, nil
+}
+
+func checkpointSharedMemorySpec(size *resource.Quantity) *nvidiacomv1alpha1.SharedMemorySpec {
+	if size == nil {
+		return nil
+	}
+	spec := &nvidiacomv1alpha1.SharedMemorySpec{}
+	nvidiacomv1alpha1.ConvertToSharedMemorySpec(size, spec)
+	return spec
 }
 
 func checkpointGMSResourceClaimTemplateName(checkpointID string) string {

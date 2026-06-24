@@ -11,7 +11,10 @@ from dynamo.common.snapshot.constants import (
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
 )
-from dynamo.common.snapshot.lifecycle import SnapshotConfig
+from dynamo.common.snapshot.lifecycle import (
+    SnapshotConfig,
+    configure_snapshot_capture_env,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -58,6 +61,16 @@ async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tm
             lifecycle.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await lifecycle
+
+
+def test_configure_snapshot_capture_env_disables_cuda_ipc_p2p(monkeypatch):
+    monkeypatch.setenv("NCCL_CUMEM_ENABLE", "1")
+    monkeypatch.setenv("NCCL_P2P_DISABLE", "0")
+
+    configure_snapshot_capture_env()
+
+    assert os.environ["NCCL_CUMEM_ENABLE"] == "0"
+    assert os.environ["NCCL_P2P_DISABLE"] == "1"
 
 
 async def test_snapshot_lifecycle_clears_capture_only_env_after_restore(
