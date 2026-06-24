@@ -277,7 +277,7 @@ impl<
     /// Register externally-provided workers in the slot tracker.
     ///
     /// Uses discovery DP rank/size when present; otherwise defaults to `(0, 1)`.
-    /// External GAIE/vLLM endpoints are treated as single-rank endpoints.
+    /// External endpoints are treated as single-rank endpoints.
     pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
         let discovery_workers = self.workers_with_configs.borrow();
         for &worker_id in worker_ids {
