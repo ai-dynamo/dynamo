@@ -28,10 +28,13 @@ use types::*;
 
 mod dump;
 mod matches;
+mod prompt_membership;
 mod remove;
 mod repair;
 mod store;
 mod sync_impl;
+
+pub(crate) use prompt_membership::{PromptMembershipIndex, PromptWorkerLookup, lookup_live_hashes};
 
 #[cfg(test)]
 mod tests;
