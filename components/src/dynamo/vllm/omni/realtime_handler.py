@@ -82,6 +82,15 @@ def _response_payload(response_id: str, status: str) -> dict:
     }
 
 
+def _session_updated_event(session: Any) -> dict:
+    """Echo a client ``session.update`` back as the spec ``session.updated``."""
+    return {
+        "type": "session.updated",
+        "event_id": _event_id(),
+        "session": session,
+    }
+
+
 class _Turn:
     """One request->response cycle: a committed span of input audio and the
     single OpenAI-spec ``response`` it produces. Owns the turn's processing.
@@ -112,8 +121,9 @@ class _Turn:
         default_sampling_params_list: Optional[Sequence[Any]] = None,
         emit_transcript: bool = True,
         output_modalities: list[str] | None = None,
+        response_id: str | None = None,
     ) -> None:
-        self.response_id = f"resp_{uuid.uuid4().hex}"
+        self.response_id = response_id or f"resp_{uuid.uuid4().hex}"
         self.item_id = f"item_{uuid.uuid4().hex}"
         # Unbounded on purpose: filled by non-blocking put_nowait so the inbound
         # demux never stalls control events (commit/clear/session.update) behind
@@ -142,13 +152,7 @@ class _Turn:
         their own queue meanwhile).
         """
         async with turn_lock:
-            await emit(
-                {
-                    "type": "response.created",
-                    "event_id": _event_id(),
-                    "response": _response_payload(self.response_id, "in_progress"),
-                }
-            )
+            await emit(self._response_created_event())
 
             sent_audio = False
             try:
@@ -170,28 +174,12 @@ class _Turn:
 
                 if sent_audio:
                     await emit(self._audio_done_event())
-                await emit(
-                    {
-                        "type": "response.done",
-                        "event_id": _event_id(),
-                        "response": _response_payload(self.response_id, "completed"),
-                    }
-                )
+                await emit(self._response_done_event())
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
                 logger.exception("realtime omni turn failed: %s", exc)
-                await emit(
-                    {
-                        "type": "error",
-                        "event_id": _event_id(),
-                        "error": {
-                            "type": "server_error",
-                            "code": "omni_generation_error",
-                            "message": str(exc),
-                        },
-                    }
-                )
+                await emit(self._error_event(exc))
 
     async def _drive_engine(self) -> AsyncGenerator[Any, None]:
         """Feed buffered audio into the engine and yield its stage outputs.
@@ -235,6 +223,33 @@ class _Turn:
             if token_ids:
                 input_stream.put_nowait(token_ids)
             yield output
+
+    # -- response lifecycle events --------------------------------------------
+
+    def _response_created_event(self) -> dict:
+        return {
+            "type": "response.created",
+            "event_id": _event_id(),
+            "response": _response_payload(self.response_id, "in_progress"),
+        }
+
+    def _response_done_event(self) -> dict:
+        return {
+            "type": "response.done",
+            "event_id": _event_id(),
+            "response": _response_payload(self.response_id, "completed"),
+        }
+
+    def _error_event(self, exc: Exception) -> dict:
+        return {
+            "type": "error",
+            "event_id": _event_id(),
+            "error": {
+                "type": "server_error",
+                "code": "omni_generation_error",
+                "message": str(exc),
+            },
+        }
 
     # -- output translation (ported from vllm-omni realtime_connection.py) ----
 
@@ -424,13 +439,7 @@ class RealtimeOmniHandler:
                         modalities = _parse_output_modalities(session)
                         if modalities is not None:
                             session_output_modalities = modalities
-                        await emit(
-                            {
-                                "type": "session.updated",
-                                "event_id": _event_id(),
-                                "session": session,
-                            }
-                        )
+                        await emit(_session_updated_event(session))
                     elif etype == "input_audio_buffer.append":
                         turn = ensure_turn()
                         waveform = _decode_pcm16(client_event.get("audio", ""))
