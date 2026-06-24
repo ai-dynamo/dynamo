@@ -137,12 +137,12 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         StatusCode::NOT_FOUND => ErrorType::NotFound, // 404
         StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented, // 501
         StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
-        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503 unavailable or legacy overload
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable, // 503
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
-        _ if code.as_u16() == 529 => ErrorType::Overload,       // 529
-        _ if code.as_u16() == 499 => ErrorType::Cancelled,      // 499 Client Closed Request
-        _ if code.is_client_error() => ErrorType::Validation,   // other 4xx
-        _ => ErrorType::Internal,                               // everything else
+        _ if code.as_u16() == 529 => ErrorType::Overload, // 529
+        _ if code.as_u16() == 499 => ErrorType::Cancelled, // 499 Client Closed Request
+        _ if code.is_client_error() => ErrorType::Validation, // other 4xx
+        _ => ErrorType::Internal,                     // everything else
     }
 }
 
@@ -4514,8 +4514,8 @@ mod tests {
             ErrorType::Overload
         );
         assert_eq!(
-            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Overloaded"),
-            ErrorType::Overload
+            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Unavailable"),
+            ErrorType::Unavailable
         );
         assert_eq!(
             classify_error_for_metrics(overload_status_code(), "Overloaded"),
@@ -4566,7 +4566,7 @@ mod tests {
         let response = ErrorMessage::model_unavailable();
         assert_eq!(
             extract_error_type_from_response(&response),
-            ErrorType::Overload
+            ErrorType::Unavailable
         );
     }
 

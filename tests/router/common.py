@@ -1150,25 +1150,28 @@ def _probe_overload_529_and_assert(
                 try:
                     async with session.post(url, json=payload) as response:
                         if response.status == 200:
-                            logger.info(f"Request {req_id} accepted")
+                            logger.info("Request %s accepted", req_id)
                             await stop_event.wait()
                             return response.status
 
                         if response.status == 529:
                             body = await response.text()
-                            logger.info(f"Request {req_id} got expected 529: {body}")
+                            logger.info("Request %s got expected 529: %s", req_id, body)
                             stop_event.set()
                             return response.status
 
                         body = await response.text()
                         logger.info(
-                            f"Request {req_id} got unexpected status {response.status}: {body}"
+                            "Request %s got unexpected status %s: %s",
+                            req_id,
+                            response.status,
+                            body,
                         )
                         return response.status
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.info(f"Request {req_id} failed: {e}")
+                    logger.info("Request %s failed: %s", req_id, e)
                     raise
 
             try:
@@ -1223,8 +1226,10 @@ def _probe_overload_529_and_assert(
     num_other = sum(1 for s in results if s not in (200, 529))
 
     logger.info(
-        f"Results: {num_succeeded} succeeded, {num_rejected} rejected (529), "
-        f"{num_other} other"
+        "Results: %s succeeded, %s rejected (529), %s other",
+        num_succeeded,
+        num_rejected,
+        num_other,
     )
 
     # Assert minimum thresholds
@@ -1240,8 +1245,9 @@ def _probe_overload_529_and_assert(
     )
 
     logger.info(
-        f"Successfully verified overload 529: {num_rejected} rejected, "
-        f"{num_succeeded} succeeded, metrics match"
+        "Successfully verified overload 529: %s rejected, %s succeeded, metrics match",
+        num_rejected,
+        num_succeeded,
     )
 
 
@@ -1365,7 +1371,8 @@ def _test_disagg_router_overload_529(
         min_initial_workers=decode_workers.num_workers,
     ):
         logger.info(
-            f"Starting disagg KV router frontend on port {frontend_port} for overload 529 test"
+            "Starting disagg KV router frontend on port %s for overload 529 test",
+            frontend_port,
         )
         frontend_url = f"http://localhost:{frontend_port}"
 

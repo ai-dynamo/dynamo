@@ -365,6 +365,9 @@ pub mod frontend_service {
         /// Service overloaded or rate limited (429 or 529)
         pub const OVERLOAD: &str = "overload";
 
+        /// Service unavailable because no backend worker can serve the request
+        pub const UNAVAILABLE: &str = "unavailable";
+
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
 
