@@ -360,6 +360,7 @@ def build_runtime_config(
         engine_args.enable_local_indexer and not engine_args.is_decode()
     )
     rc.data_parallel_size = engine_args.dp_size
+
     bootstrap_port = engine_args.bootstrap_port
     if engine_args.is_prefill() and bootstrap_port is not None:
         host = os.environ.get(
