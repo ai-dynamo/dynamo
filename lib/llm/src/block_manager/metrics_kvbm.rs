@@ -6,8 +6,8 @@ use dynamo_runtime::metrics::prometheus_names::{
     kvbm::{
         DISK_CACHE_HIT_RATE, HOST_CACHE_HIT_RATE, MATCHED_TOKENS, OBJECT_CACHE_HIT_RATE,
         OBJECT_READ_FAILURES, OBJECT_WRITE_FAILURES, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H,
-        OFFLOAD_BLOCKS_D2O, OFFLOAD_BLOCKS_H2D, ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D,
-        ONBOARD_BLOCKS_O2D,
+        OFFLOAD_BLOCKS_D2O, OFFLOAD_BLOCKS_H2D, OFFLOAD_BLOCKS_SKIPPED_POOL_FULL,
+        ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D, ONBOARD_BLOCKS_O2D,
     },
     sanitize_prometheus_name,
 };
@@ -27,6 +27,10 @@ pub struct KvbmMetrics {
 
     // number of blocks offloaded from device to disk (bypassing host memory)
     pub offload_blocks_d2d: IntCounter,
+
+    // number of offload attempts dropped because the target pool had no free
+    // block to allocate (the block is silently lost, not offloaded)
+    pub offload_blocks_skipped_pool_full: IntCounter,
 
     // number of blocks offloaded from device to object storage
     pub offload_blocks_d2o: IntCounter,
@@ -84,6 +88,13 @@ impl KvbmMetrics {
             .create_intcounter(
                 OFFLOAD_BLOCKS_D2D,
                 "The number of offload blocks from device to disk (bypassing host memory)",
+                &[],
+            )
+            .unwrap();
+        let offload_blocks_skipped_pool_full = mr
+            .create_intcounter(
+                OFFLOAD_BLOCKS_SKIPPED_POOL_FULL,
+                "The number of offload attempts dropped because the target pool was full",
                 &[],
             )
             .unwrap();
@@ -160,6 +171,7 @@ impl KvbmMetrics {
                 offload_blocks_d2h,
                 offload_blocks_h2d,
                 offload_blocks_d2d,
+                offload_blocks_skipped_pool_full,
                 offload_blocks_d2o,
                 onboard_blocks_h2d,
                 onboard_blocks_d2d,
@@ -222,6 +234,7 @@ impl KvbmMetrics {
             offload_blocks_d2h,
             offload_blocks_h2d,
             offload_blocks_d2d,
+            offload_blocks_skipped_pool_full,
             offload_blocks_d2o,
             onboard_blocks_h2d,
             onboard_blocks_d2d,

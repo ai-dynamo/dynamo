@@ -249,6 +249,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 .kvbm_metrics
                 .as_ref()
                 .map(|m| m.offload_blocks_d2h.clone()),
+            config
+                .kvbm_metrics
+                .as_ref()
+                .map(|m| m.offload_blocks_skipped_pool_full.clone()),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -295,6 +299,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 .kvbm_metrics
                 .as_ref()
                 .map(|m| m.offload_blocks_h2d.clone()),
+            config
+                .kvbm_metrics
+                .as_ref()
+                .map(|m| m.offload_blocks_skipped_pool_full.clone()),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -383,6 +391,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     .kvbm_metrics
                     .as_ref()
                     .map(|m| m.offload_blocks_d2d.clone()),
+                config
+                    .kvbm_metrics
+                    .as_ref()
+                    .map(|m| m.offload_blocks_skipped_pool_full.clone()),
                 config.cancellation_token.clone(),
             );
             CriticalTaskExecutionHandle::new_with_runtime(
@@ -397,6 +409,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         Ok(this)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn offload_worker<Source: Storage, Target: Storage>(
         source_pool: Option<Arc<dyn BlockPool<Source, Locality, Metadata>>>,
         target_pool: Option<Arc<dyn BlockPool<Target, Locality, Metadata>>>,
@@ -404,6 +417,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
         offload_filter: Option<Arc<dyn OffloadFilter>>,
         offload_metric: Option<prometheus::IntCounter>,
+        skipped_metric: Option<prometheus::IntCounter>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
@@ -472,6 +486,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         tracing::warn!(
                             "Target pool full. Skipping offload. This should only ever happen with very small pool sizes."
                         );
+                        // The block is dropped here instead of being offloaded.
+                        // Count it so the silent loss is observable.
+                        if let Some(ref metric) = skipped_metric {
+                            metric.inc();
+                        }
                         None
                     };
 
