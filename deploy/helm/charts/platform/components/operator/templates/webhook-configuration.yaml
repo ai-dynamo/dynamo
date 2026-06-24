@@ -254,6 +254,7 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamographdeployments
   sideEffects: None

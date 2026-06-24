@@ -321,30 +321,8 @@ func (v *DynamoGraphDeploymentBetaValidator) validateComponentNameLength(
 	pcsName := dynamo.PCSNameForDGD(v.deployment.Name, v.deployment.Spec.Components)
 	lowerComponentName := strings.ToLower(componentName)
 
-	isMultinode := component.GetNumberOfNodes() > 1
-	isInterPodGMS := component.IsInterPodGMSEnabled()
-
-	var longestPCLQName string
-	var pcsgName string
-
-	switch {
-	case isInterPodGMS:
-		pcsgName = lowerComponentName
-		gmsName := fmt.Sprintf("%s-%s-0", lowerComponentName, consts.GroveRoleSuffixGMS)
-		longestPCLQName = gmsName
-		if isMultinode {
-			maxRank := component.GetNumberOfNodes() - 1
-			workerName := fmt.Sprintf("%s-%s-%d", lowerComponentName, consts.GroveRoleSuffixWorker, maxRank)
-			if len(workerName) > len(longestPCLQName) {
-				longestPCLQName = workerName
-			}
-		}
-
-	case isMultinode:
-		pcsgName = lowerComponentName
-		longestPCLQName = lowerComponentName + "-" + consts.GroveRoleSuffixLeader
-
-	default:
+	hasPodCliqueScalingGroup := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+	if !hasPodCliqueScalingGroup {
 		combinedLength := len(pcsName) + len(lowerComponentName)
 		if combinedLength > maxCombinedResourceNameLength {
 			return fmt.Errorf("%s: combined resource name length %d exceeds %d-character limit required for pod naming. "+
@@ -359,7 +337,8 @@ func (v *DynamoGraphDeploymentBetaValidator) validateComponentNameLength(
 		return nil
 	}
 
-	combinedLength := len(pcsName) + len(pcsgName) + len(longestPCLQName)
+	longestPCLQName := dynamo.LongestPodCliqueNameForDGDComponent(componentName, component)
+	combinedLength := len(pcsName) + len(lowerComponentName) + len(longestPCLQName)
 	if combinedLength > maxCombinedResourceNameLength {
 		return fmt.Errorf("spec.components[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
 			"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or component name '%s' (length %d). "+

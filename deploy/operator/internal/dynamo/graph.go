@@ -1210,6 +1210,27 @@ func expandMultinodeGMSRoles(componentName string, numberOfNodes int32, totalEng
 	return roles
 }
 
+// LongestPodCliqueNameForDGDComponent returns the longest rendered PodClique
+// name for a DGD component using the same role expansion as Grove rendering.
+func LongestPodCliqueNameForDGDComponent(
+	componentName string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) string {
+	lowerComponentName := strings.ToLower(componentName)
+	if component == nil || (component.GetNumberOfNodes() <= 1 && !component.IsInterPodGMSEnabled()) {
+		return lowerComponentName
+	}
+
+	longestName := lowerComponentName
+	for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
+		roleName := strings.ToLower(role.Name)
+		if len(roleName) > len(longestName) {
+			longestName = roleName
+		}
+	}
+	return longestName
+}
+
 // PCSNameForDGD computes the PodCliqueSet name for a DGD, auto-truncating if
 // the DGD name is too long to fit within Grove's combined resource name limit.
 //
@@ -1224,14 +1245,8 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 		lowerName := strings.ToLower(componentName)
 		var budget int
 		if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
-			maxCliqueNameLen := 0
-			for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
-				if cliqueNameLen := len(strings.ToLower(role.Name)); cliqueNameLen > maxCliqueNameLen {
-					maxCliqueNameLen = cliqueNameLen
-				}
-			}
 			// PCSG = lowerName, PCLQ = longest rendered role name.
-			budget = len(lowerName) + maxCliqueNameLen
+			budget = len(lowerName) + len(LongestPodCliqueNameForDGDComponent(componentName, component))
 		} else {
 			// Single-node: PCLQ = lowerName (no PCSG).
 			budget = len(lowerName)
