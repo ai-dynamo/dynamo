@@ -27,16 +27,6 @@ event names the frontend's typed reader requires, which differ from
 vLLM-Omni's own ``response.audio.delta`` / ``transcription.delta`` names; the
 PCM16 and cumulative-vs-delta waveform handling below is ported from
 vLLM-Omni's ``realtime_connection.py`` and only the event tags change.
-
-Engine drive (the real-model path, see ``StreamingInput`` in
-``vllm.engine.protocol``): audio is not handed to the engine as raw chunks.
-Instead a ``streaming_input_factory`` (``OpenAIServingRealtime.transcribe_realtime``
-in production) turns the float32 ``audio_stream`` into an async generator of
-``StreamingInput`` prompts via the model's ``buffer_realtime_audio`` cumulative
-buffering; ``engine.generate(prompt=streaming_input_gen, ...)`` consumes it, and
-the thinker's per-step token ids are fed back into ``input_stream`` for the
-talker (autoregressive multi-turn). The factory and engine are injected so the
-worker passes the real serving/AsyncOmni while tests pass lightweight fakes.
 """
 
 from __future__ import annotations
@@ -57,6 +47,8 @@ logger = logging.getLogger(__name__)
 # mirrors ``OpenAIServingRealtime.transcribe_realtime``: it consumes float32
 # audio chunks and an ``asyncio.Queue`` of context token ids, yielding engine
 # ``StreamingInput`` prompts.
+# The factory and engine are injected so the worker passes the real serving/AsyncOmni
+# while tests pass lightweight fakes.
 StreamingInputFactory = Callable[
     [AsyncGenerator[np.ndarray, None], "asyncio.Queue[list[int]]"],
     AsyncGenerator[Any, None],
@@ -65,23 +57,6 @@ StreamingInputFactory = Callable[
 
 def event_id() -> str:
     return f"event_{uuid.uuid4().hex}"
-
-
-def response_payload(response_id: str, status: str) -> dict:
-    """Minimal ``RealtimeResponse`` payload accepted by the frontend's reader.
-
-    The typed reader requires ``id``, ``max_output_tokens``, ``object``,
-    ``output``, ``output_modalities``, and ``status``; they are minted verbatim
-    here, mirroring the realtime echo worker.
-    """
-    return {
-        "id": response_id,
-        "max_output_tokens": "inf",
-        "object": "realtime.response",
-        "output": [],
-        "output_modalities": ["audio"],
-        "status": status,
-    }
 
 
 def session_updated_event(session: Any) -> dict:
@@ -148,11 +123,10 @@ class Turn:
         The float32 ``audio_stream`` (ending on the ``None`` sentinel) and an
         ``input_stream`` token queue are handed to the streaming-input factory
         (``transcribe_realtime``), whose ``StreamingInput`` generator drives
-        ``AsyncOmni.generate``. The thinker's (stage 0) per-step token ids are
-        fed back into ``input_stream`` for the talker, matching vLLM-Omni's own
-        realtime connection.
+        ``AsyncOmni.generate``.
         """
 
+        # build input stream generator
         async def audio_stream() -> AsyncGenerator[np.ndarray, None]:
             while True:
                 waveform = await self.audio_queue.get()
@@ -179,6 +153,7 @@ class Turn:
         if self.output_modalities is not None:
             generate_kwargs["output_modalities"] = self.output_modalities
 
+        # drive the engine
         async for output in self._engine_client.generate(**generate_kwargs):
             token_ids = self.thinker_token_ids(output)
             if token_ids:
@@ -337,14 +312,28 @@ class RealtimeOmniHandler:
         return {
             "type": "response.created",
             "event_id": event_id(),
-            "response": response_payload(turn.response_id, "in_progress"),
+            "response": {
+                "id": turn.response_id,
+                "max_output_tokens": "inf",
+                "object": "realtime.response",
+                "output": [],
+                "output_modalities": ["audio"],
+                "status": "in_progress",
+            },
         }
 
     def response_done_event(self, turn: Turn) -> dict:
         return {
             "type": "response.done",
             "event_id": event_id(),
-            "response": response_payload(turn.response_id, "completed"),
+            "response": {
+                "id": turn.response_id,
+                "max_output_tokens": "inf",
+                "object": "realtime.response",
+                "output": [],
+                "output_modalities": ["audio"],
+                "status": "completed",
+            },
         }
 
     def error_event(self, exc: Exception) -> dict:
