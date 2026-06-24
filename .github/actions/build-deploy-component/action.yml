@@ -15,10 +15,6 @@ inputs:
     description: 'Dockerfile target to build. Defaults to agent for snapshot and the default target for operator.'
     required: false
     default: ''
-  push:
-    description: 'Push the built image. Set false to build only (e.g. a test target whose RUN executes the suite but is never shipped).'
-    required: false
-    default: 'true'
   builder_name:
     description: 'Buildx builder name'
     required: true
@@ -119,13 +115,6 @@ runs:
           TARGET_FLAG="--target ${TARGET}"
         fi
 
-        # When push is false the build still runs every RUN (so a test target's
-        # suite executes and gates the job); the image is just not exported.
-        PUSH_FLAG="--push"
-        if [[ "${{ inputs.push }}" != "true" ]]; then
-          PUSH_FLAG=""
-        fi
-
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
         while IFS= read -r build_arg; do
           if [[ -n "${build_arg}" ]]; then
@@ -141,21 +130,18 @@ runs:
           BUILD_CONTEXT_FLAG="--build-context snapshot=../snapshot"
         fi
 
-        docker buildx build ${PUSH_FLAG} \
+        docker buildx build --push \
             --platform ${{ steps.settings.outputs.build_platforms }} \
             "${BUILD_ARGS[@]}" \
             ${BUILD_CONTEXT_FLAG} \
             ${TARGET_FLAG} \
             ${TAGGING_FLAGS} -f Dockerfile .
 
-        # Only advertise image URIs that were actually pushed.
-        if [[ "${{ inputs.push }}" == "true" ]]; then
-          DISPLAY_NAME="${{ inputs.component }}"
-          echo "### 🐳 ${DISPLAY_NAME^} Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
-        fi
+        DISPLAY_NAME="${{ inputs.component }}"
+        echo "### 🐳 ${DISPLAY_NAME^} Container Images" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----|" >> $GITHUB_STEP_SUMMARY
+        for image_uri in "${IMAGE_URIS[@]}"; do
+          echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+        done
