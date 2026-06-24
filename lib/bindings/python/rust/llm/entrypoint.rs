@@ -160,7 +160,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl AicPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, aic_nextn=None, aic_nextn_accept_rates=None))]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         aic_backend: String,
@@ -171,13 +171,13 @@ impl AicPerfConfig {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        aic_nextn: Option<usize>,
+        aic_nextn_accept_rates: Option<String>,
         aic_weight_dtype: Option<String>,
         aic_moe_dtype: Option<String>,
         aic_activation_dtype: Option<String>,
         aic_kv_cache_dtype: Option<String>,
         aic_comm_dtype: Option<String>,
-        aic_nextn: Option<usize>,
-        aic_nextn_accept_rates: Option<String>,
     ) -> PyResult<Self> {
         if aic_backend.is_empty() {
             return Err(PyValueError::new_err("aic_backend must be non-empty"));

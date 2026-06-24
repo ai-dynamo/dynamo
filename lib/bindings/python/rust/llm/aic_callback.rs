@@ -126,23 +126,25 @@ fn build_rust_engine(
         ),
         _ => None,
     };
-    // Normalize the quant-mode strings through the single Python source of
-    // truth (`dynamo._internal.aic._normalize_aic_quant_mode`) so the latency
-    // engine and the KV-block estimator (`estimate_num_gpu_blocks`) agree on
-    // the dtype vocabulary (`auto`/`none`/`null` -> default, `int4` ->
-    // `int4_wo`). Done before the cache key so e.g. `int4` and `int4_wo`
-    // resolve to the same compiled engine instead of two redundant entries.
+    // Resolve each quant-mode string through the single Python source of truth
+    // (`dynamo._internal.aic._resolve_quant_mode_name`) so this latency-engine
+    // path matches the Python paths (`create_session`/`estimate_num_gpu_blocks`)
+    // exactly: it normalizes the vocabulary (`auto`/`none`/`null` -> default,
+    // `int4` -> `int4_wo`) AND validates per field, rejecting unsupported
+    // field/dtype combos (e.g. `kvcache=int4`) up front with a clear error
+    // instead of a generic failure from `build_aic_engine`. Done before the
+    // cache key so equivalent spellings share one compiled engine.
     let aic_module = py.import("dynamo._internal.aic")?;
-    let normalize_quant_mode = |value: Option<&str>| -> PyResult<Option<String>> {
+    let resolve_quant_mode = |field: &str, value: Option<&str>| -> PyResult<Option<String>> {
         aic_module
-            .call_method1("_normalize_aic_quant_mode", (value,))?
+            .call_method1("_resolve_quant_mode_name", (field, value))?
             .extract()
     };
-    let weight_dtype = normalize_quant_mode(weight_dtype)?;
-    let moe_dtype = normalize_quant_mode(moe_dtype)?;
-    let activation_dtype = normalize_quant_mode(activation_dtype)?;
-    let kv_cache_dtype = normalize_quant_mode(kv_cache_dtype)?;
-    let comm_dtype = normalize_quant_mode(comm_dtype)?;
+    let weight_dtype = resolve_quant_mode("gemm", weight_dtype)?;
+    let moe_dtype = resolve_quant_mode("moe", moe_dtype)?;
+    let activation_dtype = resolve_quant_mode("fmha", activation_dtype)?;
+    let kv_cache_dtype = resolve_quant_mode("kvcache", kv_cache_dtype)?;
+    let comm_dtype = resolve_quant_mode("comm", comm_dtype)?;
 
     // Cache the compiled engine per identity. build_aic_engine compiles the
     // model (Python) and loads the perf DB (Rust parquet) — a one-time startup

@@ -171,7 +171,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -195,14 +195,14 @@ impl MockEngineArgs {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        aic_nextn: Option<usize>,
+        aic_nextn_accept_rates: Option<String>,
+        aic_mtp_seed: u64,
         aic_weight_dtype: Option<String>,
         aic_moe_dtype: Option<String>,
         aic_activation_dtype: Option<String>,
         aic_kv_cache_dtype: Option<String>,
         aic_comm_dtype: Option<String>,
-        aic_nextn: Option<usize>,
-        aic_nextn_accept_rates: Option<String>,
-        aic_mtp_seed: u64,
         gpu_memory_utilization: Option<f64>,
         mem_fraction_static: Option<f64>,
         free_gpu_memory_fraction: Option<f64>,
@@ -690,7 +690,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -706,14 +706,14 @@ impl MockEngineArgs {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        aic_nextn: Option<usize>,
+        aic_nextn_accept_rates: Option<String>,
+        aic_mtp_seed: Option<u64>,
         aic_weight_dtype: Option<String>,
         aic_moe_dtype: Option<String>,
         aic_activation_dtype: Option<String>,
         aic_kv_cache_dtype: Option<String>,
         aic_comm_dtype: Option<String>,
-        aic_nextn: Option<usize>,
-        aic_nextn_accept_rates: Option<String>,
-        aic_mtp_seed: Option<u64>,
         gpu_memory_utilization: Option<f64>,
         mem_fraction_static: Option<f64>,
         free_gpu_memory_fraction: Option<f64>,
@@ -1473,10 +1473,23 @@ fn populate_missing_offload_kv_bytes_per_token(
         return Ok(());
     };
 
+    // Match the Python `_resolve_kv_bytes_per_token`: normalize the configured
+    // KV-cache dtype (auto/none -> "auto") and forward it so offload KV-byte
+    // sizing reflects the quantized KV precision (e.g. fp8 = 1 byte) instead of
+    // the model default.
+    let kv_cache_dtype: Option<String> = py
+        .import("dynamo._internal.aic")?
+        .call_method1(
+            "_normalize_aic_quant_mode",
+            (args.aic_kv_cache_dtype.as_deref(),),
+        )?
+        .extract()?;
+    let kv_cache_dtype = kv_cache_dtype.as_deref().unwrap_or("auto");
+
     let kv_cache_module = py.import("dynamo.mocker.utils.kv_cache")?;
     let kv_bytes_per_token = kv_cache_module
         .getattr("compute_kv_bytes_per_token")?
-        .call1((model_path,))?
+        .call1((model_path, kv_cache_dtype))?
         .extract::<Option<usize>>()?;
     if let Some(kv_bytes_per_token) = kv_bytes_per_token {
         args.kv_bytes_per_token = Some(kv_bytes_per_token);

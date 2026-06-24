@@ -236,11 +236,14 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_moe_tp_size": args.aic_moe_tp_size,
         "aic_moe_ep_size": args.aic_moe_ep_size,
         "aic_attention_dp_size": args.aic_attention_dp_size,
-        "aic_weight_dtype": args.aic_weight_dtype,
-        "aic_moe_dtype": args.aic_moe_dtype,
-        "aic_activation_dtype": args.aic_activation_dtype,
-        "aic_kv_cache_dtype": args.aic_kv_cache_dtype,
-        "aic_comm_dtype": args.aic_comm_dtype,
+        # Normalize here so `--aic-*-dtype auto` (== model default) doesn't make
+        # the "any AIC value set?" check below think an AIC config was requested
+        # and then demand --aic-backend/--aic-system/--aic-model-path.
+        "aic_weight_dtype": _normalize_aic_quant_mode(args.aic_weight_dtype),
+        "aic_moe_dtype": _normalize_aic_quant_mode(args.aic_moe_dtype),
+        "aic_activation_dtype": _normalize_aic_quant_mode(args.aic_activation_dtype),
+        "aic_kv_cache_dtype": _normalize_aic_quant_mode(args.aic_kv_cache_dtype),
+        "aic_comm_dtype": _normalize_aic_quant_mode(args.aic_comm_dtype),
         "aic_nextn": args.aic_nextn,
         "aic_nextn_accept_rates": args.aic_nextn_accept_rates,
     }
@@ -594,6 +597,7 @@ def _run_planner_replay(
                     moe_dtype=ref_args.aic_moe_dtype,
                     activation_dtype=ref_args.aic_activation_dtype,
                     kv_cache_dtype=ref_args.aic_kv_cache_dtype,
+                    comm_dtype=ref_args.aic_comm_dtype,
                     nextn=d_args.aic_nextn,
                     # Model the full verification round; real conditional rates
                     # are consumed only by the mocker's burst sampler.
