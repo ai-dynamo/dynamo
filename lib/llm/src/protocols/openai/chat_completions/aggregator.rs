@@ -381,20 +381,33 @@ impl DeltaAggregator {
                     continue;
                 }
 
-                let (tool_calls, content) =
-                    match try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None)
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(error) => {
-                            tracing::debug!(
-                                error = %error,
-                                parser,
-                                "failed to parse aggregated chat tool calls"
-                            );
-                            continue;
-                        }
-                    };
+                // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
+                // v2 parser for batch too (no jail / no aggregate-finalize):
+                // parse_complete drops a value truncated at EOF instead of guessing it.
+                // Other families, the flag off, and guided-decoded requests
+                // (tool_choice=required/named or structural-tag, gated by
+                // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
+                // keep the v1 finalize path.
+                let parse_result = if super::tool_parser_v2::enabled()
+                    && super::tool_parser_v2::supports_family(parser)
+                    && parsing_options.experimental_v2_batch_eligible
+                {
+                    super::tool_parser_v2::parse_complete(&choice.text, None, parser)
+                        .map(|(calls, normal)| (calls, Some(normal)))
+                } else {
+                    try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None).await
+                };
+                let (tool_calls, content) = match parse_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            parser,
+                            "failed to parse aggregated chat tool calls"
+                        );
+                        continue;
+                    }
+                };
 
                 if !tool_calls.is_empty() {
                     choice.tool_calls = Some(
