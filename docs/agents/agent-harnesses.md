@@ -130,17 +130,15 @@ Add a Dynamo-backed model to `~/.openclaw/openclaw.json`:
 }
 ```
 
-Run a local agent turn:
+Run OpenClaw:
 
 ```bash
-openclaw agent --local --message "Reply exactly ok."
+openclaw chat
 ```
 
 The plugin copies OpenClaw's current `sessionId` into `x-dynamo-session-id` on each
 request. Native subagents receive their own `session_id` and the immediate parent is
-recorded as `parent_session_id`. The ID is stable during ordinary turns; OpenClaw can
-rotate it after compaction when
-`agents.defaults.compaction.truncateAfterCompaction` is enabled.
+recorded as `parent_session_id`.
 
 ## Hermes Agent
 
