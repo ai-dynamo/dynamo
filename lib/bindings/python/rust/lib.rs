@@ -348,7 +348,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -372,6 +372,7 @@ fn register_model<'p>(
     tensor_model_config: Option<&Bound<'p, PyDict>>,
     ignore_weights: bool,
     max_gpu_lora_count: Option<u32>,
+    model_aliases: Option<Vec<String>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -476,6 +477,7 @@ fn register_model<'p>(
     // This preserves backward-compat: workers that don't specify router_config continue to
     // fall back to the frontend-level global router config via the watcher.
     let explicit_router_config: Option<RouterConfig> = router_config.map(|rc| rc.into());
+    let model_aliases = model_aliases.unwrap_or_default();
 
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
@@ -535,6 +537,9 @@ fn register_model<'p>(
             card.worker_type = worker_type_value;
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
+            if !model_aliases.is_empty() {
+                card.set_aliases(model_aliases);
+            }
 
             card.runtime_config = runtime_config.inner;
             card.tensor_model_config = tensor_model_config;
@@ -574,6 +579,8 @@ fn register_model<'p>(
             .source_path(source_path.clone().into())
             // --served_model_name
             .model_name(model_name.clone())
+            // --served_model_name aliases (additional names this model responds to)
+            .model_aliases(model_aliases)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
             .runtime_config({

@@ -599,6 +599,14 @@ impl ModelWatcher {
                     namespace = %worker_namespace,
                     "Removed WorkerSet (no remaining instances in namespace)"
                 );
+                // Also remove from alias models
+                for alias in &card.aliases {
+                    if alias != &model_name {
+                        self.manager.remove_worker_set(alias, &ws_key);
+                        self.manager.remove_model_if_empty(alias);
+                        self.manager.unregister_alias_if_empty(alias, &model_name);
+                    }
+                }
             }
 
             // Activator-state cleanup depends on which component just went away.
@@ -669,6 +677,13 @@ impl ModelWatcher {
 
         // No instances remain anywhere — remove the entire Model
         let _ = self.manager.remove_model(&model_name);
+        // Also remove alias models
+        for alias in &card.aliases {
+            if alias != &model_name {
+                let _ = self.manager.remove_model(alias);
+                self.manager.unregister_alias_if_empty(alias, &model_name);
+            }
+        }
 
         if let Some(tx) = &self.model_update_tx {
             for model_type in ALL_MODEL_TYPES {
@@ -1359,9 +1374,40 @@ impl ModelWatcher {
             );
         }
 
+        // Register alias→primary mappings BEFORE the engine becomes visible.
+        // Order matters: any request landing between engine-visible and
+        // alias-mapped would see correct routing but mis-labelled metrics
+        // (and an OpenAI response.model echoing the alias instead of the
+        // primary). Recording the mapping first closes that gap.
+        let mut registered_aliases = Vec::new();
+        for alias in &card.aliases {
+            if alias != card.name() {
+                if self.manager.register_alias(alias, card.name()) {
+                    registered_aliases.push(alias.clone());
+                }
+            }
+        }
+
         // Add the completed WorkerSet to the Model
         self.manager
             .add_worker_set(card.name(), &ws_key, worker_set);
+
+        // Register under aliases — share the same Arc<WorkerSet>
+        if !registered_aliases.is_empty() {
+            if let Some(model) = self.manager.get_model(card.name()) {
+                if let Some(ws_arc) = model.get_worker_set(&ws_key) {
+                    for alias in &registered_aliases {
+                        tracing::info!(
+                            model_name = card.name(),
+                            alias,
+                            "Registering model alias"
+                        );
+                        self.manager
+                            .add_worker_set_arc(alias, &ws_key, ws_arc.clone());
+                    }
+                }
+            }
+        }
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();

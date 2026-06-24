@@ -58,6 +58,7 @@ pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
     model_name: Option<String>,
+    model_aliases: Vec<String>,
     endpoint_id: Option<EndpointId>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
@@ -97,6 +98,7 @@ impl Default for LocalModelBuilder {
             model_path: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
+            model_aliases: Default::default(),
             endpoint_id: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
@@ -133,6 +135,11 @@ impl LocalModelBuilder {
 
     pub fn model_name(&mut self, model_name: Option<String>) -> &mut Self {
         self.model_name = model_name;
+        self
+    }
+
+    pub fn model_aliases(&mut self, aliases: Vec<String>) -> &mut Self {
+        self.model_aliases = aliases;
         self
     }
 
@@ -391,6 +398,9 @@ impl LocalModelBuilder {
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
         card.router_config = self.router_config.clone();
+        if !self.model_aliases.is_empty() {
+            card.set_aliases(self.model_aliases.clone());
+        }
 
         Ok(LocalModel {
             card,
