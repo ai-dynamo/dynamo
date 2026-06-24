@@ -1044,7 +1044,9 @@ def test_sglang_lora_aggregated(
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.profiled_vram_gib(4.7)
 @pytest.mark.requested_sglang_kv_tokens(2848)
-@pytest.mark.timeout(240)
+@pytest.mark.timeout(
+    600
+)  # CI under xdist parallel pressure is much slower than local (~30s)
 @pytest.mark.pre_merge
 def test_sglang_aggregated_s3_model_path(
     request,

@@ -1248,7 +1248,9 @@ def test_embedding_multi_worker_multi_model_dispatch(
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.profiled_vram_gib(3.8)
 @pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
-@pytest.mark.timeout(240)
+@pytest.mark.timeout(
+    600
+)  # CI under xdist parallel pressure is much slower than local (~30s)
 @pytest.mark.pre_merge
 def test_vllm_aggregated_s3_model(
     request,
