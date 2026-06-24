@@ -124,7 +124,9 @@ pub(super) fn pop_ready_worker_completion(
             accept_length_output_tokens,
             accept_length_decode_forwards,
         ),
-        SimulationEventKind::DecodeHandoff { .. } | SimulationEventKind::WorkerReady { .. } => {
+        SimulationEventKind::DecodeHandoff { .. }
+        | SimulationEventKind::WorkerReady { .. }
+        | SimulationEventKind::PlannerTick => {
             unreachable!("peeked worker completion event must match popped event")
         }
     };
@@ -202,6 +204,38 @@ pub(super) fn pop_ready_worker_ready(
         unreachable!("peeked worker ready event must match popped event");
     };
     Some((stage, worker_id))
+}
+
+pub(super) fn push_planner_tick(
+    events: &mut BinaryHeap<SimulationEvent>,
+    next_event_seq: &mut u64,
+    at_ms: f64,
+) {
+    events.push(SimulationEvent {
+        at_ms,
+        seq_no: *next_event_seq,
+        kind: SimulationEventKind::PlannerTick,
+    });
+    *next_event_seq += 1;
+}
+
+/// Pop a `PlannerTick` scheduled for exactly `now_ms` (peek-and-pop-at-now, like the
+/// other `pop_ready_*` helpers). Payload-free, so it returns whether one fired.
+pub(super) fn pop_ready_planner_tick(
+    events: &mut BinaryHeap<SimulationEvent>,
+    now_ms: f64,
+) -> bool {
+    let Some(event) = events.peek() else {
+        return false;
+    };
+    if event.at_ms != now_ms {
+        return false;
+    }
+    if !matches!(event.kind, SimulationEventKind::PlannerTick) {
+        return false;
+    }
+    events.pop().expect("event must exist after peek");
+    true
 }
 
 #[cfg(test)]

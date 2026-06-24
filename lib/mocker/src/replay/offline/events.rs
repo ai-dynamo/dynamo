@@ -31,6 +31,10 @@ pub(crate) enum SimulationEventKind {
         stage: SimulationWorkerStage,
         worker_id: usize,
     },
+    /// A recurring planner heartbeat. Payload-free: the planner metrics are
+    /// gathered from live runtime state when the tick fires. Re-enqueues itself
+    /// at the time the planner hook returns (see `apply_planner_ticks`).
+    PlannerTick,
 }
 
 #[derive(Debug)]

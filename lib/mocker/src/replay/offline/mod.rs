@@ -9,6 +9,7 @@ pub(crate) mod core;
 pub(crate) mod disagg;
 mod entrypoints;
 pub(crate) mod events;
+pub(crate) mod planner_hook;
 mod progress;
 pub(crate) mod runtime_utils;
 pub(crate) mod single;
