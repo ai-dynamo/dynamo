@@ -182,6 +182,10 @@ addopts = [
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
     "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
+    # power-agent is a self-contained deployable with its own pytest.ini; its
+    # `tests` package is tested inside its container, and collecting it here
+    # collides with the repo-root `tests` package.
+    "--ignore-glob=deploy/power-agent/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
