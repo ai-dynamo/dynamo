@@ -284,6 +284,28 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			},
 		},
 		{
+			name:         "UPDATE defaults positive replicas to minAvailable 1 on Grove pathway",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "defaults zero replicas to minAvailable 1 on Grove pathway",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Idle": {Replicas: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Idle": ptr.To(int32(1)),
+			},
+		},
+		{
 			name:         "preserves explicit minAvailable",
 			op:           admissionv1.Create,
 			groveEnabled: true,
@@ -292,6 +314,61 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			},
 			wantMinAvailable: map[string]*int32{
 				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "CREATE preserves explicit zero minAvailable for validation",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(1)), MinAvailable: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(0)),
+			},
+		},
+		{
+			name:         "UPDATE preserves minAvailable when replicas become positive",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(3)), MinAvailable: ptr.To(int32(2))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "UPDATE preserves minAvailable when replicas become zero",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(0)), MinAvailable: ptr.To(int32(1))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "UPDATE preserves explicit minAvailable away from zero boundary",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(4)), MinAvailable: ptr.To(int32(2))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "UPDATE preserves explicit zero minAvailable for validation",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(1)), MinAvailable: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(0)),
 			},
 		},
 		{
@@ -318,6 +395,15 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			wantMinAvailable: map[string]*int32{
 				"Worker": nil,
 			},
+		},
+		{
+			name:         "nil service pointer in map is safe",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Nil": nil,
+			},
+			wantMinAvailable: map[string]*int32{},
 		},
 	}
 

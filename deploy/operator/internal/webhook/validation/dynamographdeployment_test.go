@@ -213,12 +213,52 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"main": {
 							Replicas:     &zeroMinAvail,
-							MinAvailable: &zeroMinAvail,
+							MinAvailable: &validMinAvail,
 						},
 					},
 				},
 			},
 			wantErr: false,
+		},
+		{
+			name:         "service minAvailable must be positive",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas:     &validReplicas,
+							MinAvailable: &zeroMinAvail,
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.services[main].minAvailable must be greater than 0",
+		},
+		{
+			name:         "positive replicas must be at least minAvailable",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas:     k8sptr.To(int32(1)),
+							MinAvailable: &validMinAvail,
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.services[main].replicas must be 0 or greater than or equal to minAvailable",
 		},
 		{
 			name: "service minAvailable requires Grove pathway when operator disables Grove",
@@ -2527,6 +2567,27 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			}),
 			wantErr: true,
 			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
+		},
+		{
+			name: "changing minAvailable is immutable",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"backend": {Replicas: k8sptr.To(int32(5)), MinAvailable: k8sptr.To(int32(5))},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"backend": {Replicas: k8sptr.To(int32(5)), MinAvailable: k8sptr.To(int32(4))},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.services[backend].minAvailable is immutable after creation",
 		},
 		{
 			name: "changing backend framework",

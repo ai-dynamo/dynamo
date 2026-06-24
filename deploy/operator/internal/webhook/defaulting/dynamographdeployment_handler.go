@@ -56,9 +56,9 @@ func NewDGDDefaulter(operatorVersion string, groveEnabled bool) *DGDDefaulter {
 
 // Default implements admission.CustomDefaulter.
 // On every operation: defaults nil Replicas to 1 for all services.
-// On every Grove-pathway operation: defaults nil MinAvailable to 0 when Replicas
-// is 0 and to 1 otherwise. On UPDATE, normalizes MinAvailable across
-// replicas-only scale-to/from-zero changes.
+// On every Grove-pathway operation: defaults nil MinAvailable to 1. Scaling to
+// replicas=0 does not rewrite MinAvailable; it remains the component's
+// configured minimum viable unit.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {

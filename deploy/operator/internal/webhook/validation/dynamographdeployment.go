@@ -182,6 +182,15 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 				serviceName,
 			))
 		}
+
+		if v.isGrovePathway() && oldService.MinAvailable != nil {
+			if newService.MinAvailable == nil || *newService.MinAvailable != *oldService.MinAvailable {
+				errs = append(errs, fmt.Errorf(
+					"spec.services[%s].minAvailable is immutable after creation",
+					serviceName,
+				))
+			}
+		}
 	}
 
 	// Validate inter-pod GMS layout and failover immutability.
@@ -340,6 +349,18 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	}
 	if service.MinAvailable != nil && !v.isGrovePathway() {
 		return nil, v.grovePathwayRequiredError(fmt.Sprintf("spec.services[%s].minAvailable", serviceName))
+	}
+	if service.MinAvailable != nil && v.isGrovePathway() {
+		if *service.MinAvailable <= 0 {
+			return nil, fmt.Errorf("spec.services[%s].minAvailable must be greater than 0", serviceName)
+		}
+		replicas := int32(1)
+		if service.Replicas != nil {
+			replicas = *service.Replicas
+		}
+		if replicas > 0 && replicas < *service.MinAvailable {
+			return nil, fmt.Errorf("spec.services[%s].replicas must be 0 or greater than or equal to minAvailable", serviceName)
+		}
 	}
 
 	// The inter-pod GMS layout is currently implemented only for vLLM (the

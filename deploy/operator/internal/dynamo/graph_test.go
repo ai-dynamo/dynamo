@@ -8207,14 +8207,14 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 	require.NotNil(t, pcsg.Replicas)
 	assert.EqualValues(t, 0, *pcsg.Replicas)
 	require.NotNil(t, pcsg.MinAvailable)
-	assert.EqualValues(t, 0, *pcsg.MinAvailable)
+	assert.EqualValues(t, 1, *pcsg.MinAvailable)
 	for _, clique := range got.Spec.Template.Cliques {
 		if strings.Contains(clique.Name, "gms") {
 			continue
 		}
 		assert.EqualValues(t, 0, clique.Spec.Replicas, "clique %q should be gated", clique.Name)
 		require.NotNil(t, clique.Spec.MinAvailable)
-		assert.EqualValues(t, 0, *clique.Spec.MinAvailable, "clique %q should be gated", clique.Name)
+		assert.EqualValues(t, 1, *clique.Spec.MinAvailable, "clique %q should keep its configured minAvailable", clique.Name)
 	}
 }
 

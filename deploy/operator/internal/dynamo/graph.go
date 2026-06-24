@@ -2110,7 +2110,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		minAvailable = p.r.Replicas
 	}
 	replicas := p.r.Replicas
-	// if checkpoint is enabled and not ready, set replicas and minAvailable to 0
+	// if checkpoint is enabled and not ready, set replicas to 0
 	// to prevent the engine clique from being scheduled
 	if p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
@@ -2118,7 +2118,6 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!p.checkpointInfo.Ready {
 		replicas = 0
-		minAvailable = 0
 	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
@@ -2390,7 +2389,6 @@ func GenerateGrovePodCliqueSet(
 				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 				!checkpointInfo.Ready {
 				replicas = ptr.To(int32(0))
-				minAvailable = ptr.To(int32(0))
 			}
 			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:               strings.ToLower(componentName),

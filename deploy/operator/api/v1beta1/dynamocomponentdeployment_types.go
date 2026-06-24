@@ -69,8 +69,8 @@ type DynamoComponentDeploymentSpec struct {
 // semantics. Users can add sidecars, init containers, and pod-level configuration
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
-// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas"
-// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable != 0 || (has(self.replicas) && self.replicas == 0)",message="minAvailable may be 0 only when replicas is 0"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSharedSpec struct {
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
@@ -132,13 +132,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// termination.
 	//
 	// For Grove-backed DynamoGraphDeployment components, admission defaults this
-	// field when omitted: 0 if replicas is 0, otherwise 1. On update, admission also
-	// normalizes the replicas zero-boundary: when scaling replicas from 0 to a
-	// positive value and minAvailable is still 0, it becomes 1; when scaling replicas
-	// to 0, it becomes 0. Other explicit values are preserved and validated.
+	// field to 1 when omitted. The field is immutable after creation. Scaling to
+	// replicas=0 is represented only by the replicas field; minAvailable remains
+	// the configured minimum viable unit and is restored when scaling back up.
+	// Positive replicas must be greater than or equal to minAvailable.
 	//
 	// For non-Grove deployments, setting this field will result in a validation error.
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
