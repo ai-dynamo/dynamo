@@ -171,7 +171,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -195,6 +195,11 @@ impl MockEngineArgs {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        aic_weight_dtype: Option<String>,
+        aic_moe_dtype: Option<String>,
+        aic_activation_dtype: Option<String>,
+        aic_kv_cache_dtype: Option<String>,
+        aic_comm_dtype: Option<String>,
         aic_nextn: Option<usize>,
         aic_nextn_accept_rates: Option<String>,
         aic_mtp_seed: u64,
@@ -255,6 +260,11 @@ impl MockEngineArgs {
             .aic_moe_tp_size(aic_moe_tp_size)
             .aic_moe_ep_size(aic_moe_ep_size)
             .aic_attention_dp_size(aic_attention_dp_size)
+            .aic_weight_dtype(aic_weight_dtype)
+            .aic_moe_dtype(aic_moe_dtype)
+            .aic_activation_dtype(aic_activation_dtype)
+            .aic_kv_cache_dtype(aic_kv_cache_dtype)
+            .aic_comm_dtype(aic_comm_dtype)
             .aic_nextn(aic_nextn)
             .aic_nextn_accept_rates(aic_nextn_accept_rates)
             .aic_mtp_seed(aic_mtp_seed)
@@ -517,6 +527,56 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn aic_weight_dtype(&self) -> Option<String> {
+        self.inner.aic_weight_dtype.clone()
+    }
+
+    #[setter]
+    fn set_aic_weight_dtype(&mut self, value: Option<String>) {
+        self.inner.aic_weight_dtype = value;
+    }
+
+    #[getter]
+    fn aic_moe_dtype(&self) -> Option<String> {
+        self.inner.aic_moe_dtype.clone()
+    }
+
+    #[setter]
+    fn set_aic_moe_dtype(&mut self, value: Option<String>) {
+        self.inner.aic_moe_dtype = value;
+    }
+
+    #[getter]
+    fn aic_activation_dtype(&self) -> Option<String> {
+        self.inner.aic_activation_dtype.clone()
+    }
+
+    #[setter]
+    fn set_aic_activation_dtype(&mut self, value: Option<String>) {
+        self.inner.aic_activation_dtype = value;
+    }
+
+    #[getter]
+    fn aic_kv_cache_dtype(&self) -> Option<String> {
+        self.inner.aic_kv_cache_dtype.clone()
+    }
+
+    #[setter]
+    fn set_aic_kv_cache_dtype(&mut self, value: Option<String>) {
+        self.inner.aic_kv_cache_dtype = value;
+    }
+
+    #[getter]
+    fn aic_comm_dtype(&self) -> Option<String> {
+        self.inner.aic_comm_dtype.clone()
+    }
+
+    #[setter]
+    fn set_aic_comm_dtype(&mut self, value: Option<String>) {
+        self.inner.aic_comm_dtype = value;
+    }
+
+    #[getter]
     fn aic_nextn(&self) -> Option<usize> {
         self.inner.aic_nextn
     }
@@ -630,7 +690,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -646,6 +706,11 @@ impl MockEngineArgs {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        aic_weight_dtype: Option<String>,
+        aic_moe_dtype: Option<String>,
+        aic_activation_dtype: Option<String>,
+        aic_kv_cache_dtype: Option<String>,
+        aic_comm_dtype: Option<String>,
         aic_nextn: Option<usize>,
         aic_nextn_accept_rates: Option<String>,
         aic_mtp_seed: Option<u64>,
@@ -696,6 +761,21 @@ impl MockEngineArgs {
         }
         if let Some(attention_dp_size) = aic_attention_dp_size {
             inner.aic_attention_dp_size = Some(attention_dp_size);
+        }
+        if let Some(dtype) = aic_weight_dtype {
+            inner.aic_weight_dtype = Some(dtype);
+        }
+        if let Some(dtype) = aic_moe_dtype {
+            inner.aic_moe_dtype = Some(dtype);
+        }
+        if let Some(dtype) = aic_activation_dtype {
+            inner.aic_activation_dtype = Some(dtype);
+        }
+        if let Some(dtype) = aic_kv_cache_dtype {
+            inner.aic_kv_cache_dtype = Some(dtype);
+        }
+        if let Some(dtype) = aic_comm_dtype {
+            inner.aic_comm_dtype = Some(dtype);
         }
         if let Some(nextn) = aic_nextn {
             inner.aic_nextn = Some(nextn);
@@ -1299,6 +1379,11 @@ fn materialize_replay_mocker_args(
         let moe_tp_size = args.aic_moe_tp_size;
         let moe_ep_size = args.aic_moe_ep_size;
         let attention_dp_size = args.aic_attention_dp_size;
+        let weight_dtype = args.aic_weight_dtype.clone();
+        let moe_dtype = args.aic_moe_dtype.clone();
+        let activation_dtype = args.aic_activation_dtype.clone();
+        let kv_cache_dtype = args.aic_kv_cache_dtype.clone();
+        let comm_dtype = args.aic_comm_dtype.clone();
         let nextn = args.aic_nextn;
         let undiscounted_accept_rates = args.undiscounted_aic_accept_rates();
         // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
@@ -1321,6 +1406,11 @@ fn materialize_replay_mocker_args(
                 moe_tp_size,
                 moe_ep_size,
                 attention_dp_size,
+                weight_dtype.as_deref(),
+                moe_dtype.as_deref(),
+                activation_dtype.as_deref(),
+                kv_cache_dtype.as_deref(),
+                comm_dtype.as_deref(),
             )
             .map_err(|e| {
                 PyException::new_err(format!(
@@ -1339,6 +1429,11 @@ fn materialize_replay_mocker_args(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
+            weight_dtype.as_deref(),
+            moe_dtype.as_deref(),
+            activation_dtype.as_deref(),
+            kv_cache_dtype.as_deref(),
+            comm_dtype.as_deref(),
             nextn,
             undiscounted_accept_rates.as_deref(),
         )
@@ -1450,6 +1545,11 @@ fn load_replay_prefill_load_estimator(
         aic_perf_config.moe_tp_size(),
         aic_perf_config.moe_ep_size(),
         aic_perf_config.attention_dp_size(),
+        aic_perf_config.weight_dtype(),
+        aic_perf_config.moe_dtype(),
+        aic_perf_config.activation_dtype(),
+        aic_perf_config.kv_cache_dtype(),
+        aic_perf_config.comm_dtype(),
         aic_perf_config.nextn(),
         aic_perf_config.nextn_accept_rates(),
     )

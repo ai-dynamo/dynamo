@@ -86,6 +86,11 @@ pub struct AicPerfConfig {
     aic_moe_tp_size: Option<usize>,
     aic_moe_ep_size: Option<usize>,
     aic_attention_dp_size: Option<usize>,
+    aic_weight_dtype: Option<String>,
+    aic_moe_dtype: Option<String>,
+    aic_activation_dtype: Option<String>,
+    aic_kv_cache_dtype: Option<String>,
+    aic_comm_dtype: Option<String>,
     aic_nextn: Option<usize>,
     aic_nextn_accept_rates: Option<String>,
 }
@@ -123,6 +128,26 @@ impl AicPerfConfig {
         self.aic_attention_dp_size
     }
 
+    pub(crate) fn weight_dtype(&self) -> Option<&str> {
+        self.aic_weight_dtype.as_deref()
+    }
+
+    pub(crate) fn moe_dtype(&self) -> Option<&str> {
+        self.aic_moe_dtype.as_deref()
+    }
+
+    pub(crate) fn activation_dtype(&self) -> Option<&str> {
+        self.aic_activation_dtype.as_deref()
+    }
+
+    pub(crate) fn kv_cache_dtype(&self) -> Option<&str> {
+        self.aic_kv_cache_dtype.as_deref()
+    }
+
+    pub(crate) fn comm_dtype(&self) -> Option<&str> {
+        self.aic_comm_dtype.as_deref()
+    }
+
     pub(crate) fn nextn(&self) -> Option<usize> {
         self.aic_nextn
     }
@@ -135,7 +160,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl AicPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None))]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_weight_dtype=None, aic_moe_dtype=None, aic_activation_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, aic_nextn=None, aic_nextn_accept_rates=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         aic_backend: String,
@@ -146,6 +171,11 @@ impl AicPerfConfig {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        aic_weight_dtype: Option<String>,
+        aic_moe_dtype: Option<String>,
+        aic_activation_dtype: Option<String>,
+        aic_kv_cache_dtype: Option<String>,
+        aic_comm_dtype: Option<String>,
         aic_nextn: Option<usize>,
         aic_nextn_accept_rates: Option<String>,
     ) -> PyResult<Self> {
@@ -188,6 +218,11 @@ impl AicPerfConfig {
             aic_moe_tp_size,
             aic_moe_ep_size,
             aic_attention_dp_size,
+            aic_weight_dtype,
+            aic_moe_dtype,
+            aic_activation_dtype,
+            aic_kv_cache_dtype,
+            aic_comm_dtype,
             aic_nextn,
             aic_nextn_accept_rates,
         })
@@ -719,6 +754,11 @@ async fn select_engine(
                             config.moe_tp_size(),
                             config.moe_ep_size(),
                             config.attention_dp_size(),
+                            config.weight_dtype(),
+                            config.moe_dtype(),
+                            config.activation_dtype(),
+                            config.kv_cache_dtype(),
+                            config.comm_dtype(),
                             config.nextn(),
                             config.nextn_accept_rates(),
                         )
@@ -762,6 +802,11 @@ async fn select_engine(
                 let moe_tp_size = mocker_args.aic_moe_tp_size;
                 let moe_ep_size = mocker_args.aic_moe_ep_size;
                 let attention_dp_size = mocker_args.aic_attention_dp_size;
+                let weight_dtype = mocker_args.aic_weight_dtype.as_deref();
+                let moe_dtype = mocker_args.aic_moe_dtype.as_deref();
+                let activation_dtype = mocker_args.aic_activation_dtype.as_deref();
+                let kv_cache_dtype = mocker_args.aic_kv_cache_dtype.as_deref();
+                let comm_dtype = mocker_args.aic_comm_dtype.as_deref();
                 let nextn = mocker_args.aic_nextn;
                 let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
                 match Python::with_gil(|py| {
@@ -775,6 +820,11 @@ async fn select_engine(
                         moe_tp_size,
                         moe_ep_size,
                         attention_dp_size,
+                        weight_dtype,
+                        moe_dtype,
+                        activation_dtype,
+                        kv_cache_dtype,
+                        comm_dtype,
                         nextn,
                         undiscounted_accept_rates.as_deref(),
                     )

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
+    _normalize_aic_quant_mode,
     estimate_num_gpu_blocks,
 )
 from dynamo.common.forward_pass_metrics import (
@@ -96,6 +97,16 @@ def _resolve_block_size_for_capacity(raw: dict) -> int:
     return _DEFAULT_VLLM_BLOCK_SIZE
 
 
+def _aic_quant_mode(raw: dict, name: str) -> str | None:
+    # Extract + type-check the raw JSON value here; defer the dtype-vocabulary
+    # normalization (`auto` -> default, `int4` -> `int4_wo`, ...) to the single
+    # source of truth shared with the latency engine and the KV-block estimator.
+    value = raw.get(name)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{name} must be a string when set")
+    return _normalize_aic_quant_mode(value)
+
+
 def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     if raw.get("num_gpu_blocks") is not None:
         return
@@ -146,6 +157,11 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         moe_tp_size=raw.get("aic_moe_tp_size"),
         moe_ep_size=raw.get("aic_moe_ep_size"),
         attention_dp_size=raw.get("aic_attention_dp_size"),
+        weight_dtype=_aic_quant_mode(raw, "aic_weight_dtype"),
+        moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
+        activation_dtype=_aic_quant_mode(raw, "aic_activation_dtype"),
+        kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
+        comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
     )
 
 
@@ -167,7 +183,8 @@ def _resolve_kv_bytes_per_token(raw: dict) -> None:
     if not model_path:
         return
 
-    kv_bytes_per_token = compute_kv_bytes_per_token(model_path, "auto")
+    kv_cache_dtype = _aic_quant_mode(raw, "aic_kv_cache_dtype") or "auto"
+    kv_bytes_per_token = compute_kv_bytes_per_token(model_path, kv_cache_dtype)
     if kv_bytes_per_token is not None:
         raw["kv_bytes_per_token"] = kv_bytes_per_token
 
@@ -219,6 +236,11 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_moe_tp_size": args.aic_moe_tp_size,
         "aic_moe_ep_size": args.aic_moe_ep_size,
         "aic_attention_dp_size": args.aic_attention_dp_size,
+        "aic_weight_dtype": args.aic_weight_dtype,
+        "aic_moe_dtype": args.aic_moe_dtype,
+        "aic_activation_dtype": args.aic_activation_dtype,
+        "aic_kv_cache_dtype": args.aic_kv_cache_dtype,
+        "aic_comm_dtype": args.aic_comm_dtype,
         "aic_nextn": args.aic_nextn,
         "aic_nextn_accept_rates": args.aic_nextn_accept_rates,
     }
@@ -243,6 +265,11 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_moe_tp_size=values["aic_moe_tp_size"],
         aic_moe_ep_size=values["aic_moe_ep_size"],
         aic_attention_dp_size=values["aic_attention_dp_size"],
+        aic_weight_dtype=values["aic_weight_dtype"],
+        aic_moe_dtype=values["aic_moe_dtype"],
+        aic_activation_dtype=values["aic_activation_dtype"],
+        aic_kv_cache_dtype=values["aic_kv_cache_dtype"],
+        aic_comm_dtype=values["aic_comm_dtype"],
         aic_nextn=values["aic_nextn"],
         aic_nextn_accept_rates=values["aic_nextn_accept_rates"],
     )
@@ -558,6 +585,15 @@ def _run_planner_replay(
                     moe_tp_size=ref_args.aic_moe_tp_size,
                     moe_ep_size=ref_args.aic_moe_ep_size,
                     attention_dp_size=ref_args.aic_attention_dp_size,
+                    # Same quant overrides the mocker's latency engine and the
+                    # KV-block estimator use, so the planner's throughput
+                    # regression is bootstrapped at the quantized precision
+                    # instead of the model's default dtype. (AicSession
+                    # normalizes the strings via _resolve_quant_mode.)
+                    weight_dtype=ref_args.aic_weight_dtype,
+                    moe_dtype=ref_args.aic_moe_dtype,
+                    activation_dtype=ref_args.aic_activation_dtype,
+                    kv_cache_dtype=ref_args.aic_kv_cache_dtype,
                     nextn=d_args.aic_nextn,
                     # Model the full verification round; real conditional rates
                     # are consumed only by the mocker's burst sampler.
@@ -656,6 +692,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-moe-tp-size", type=int)
     parser.add_argument("--aic-moe-ep-size", type=int)
     parser.add_argument("--aic-attention-dp-size", type=int)
+    parser.add_argument(
+        "--aic-weight-dtype",
+        help="dense-GEMM (weight) quant mode for the AIC KV-router prefill-load "
+        "estimator, e.g. fp8, fp8_block, int4, nvfp4; 'auto'/omitted = model "
+        "default. Worker-engine quant is set via --extra-engine-args.",
+    )
+    parser.add_argument(
+        "--aic-moe-dtype",
+        help="MoE quant mode for the AIC prefill-load estimator, e.g. fp8, "
+        "nvfp4, w4a16_mxfp4; 'auto'/omitted = model default",
+    )
+    parser.add_argument(
+        "--aic-activation-dtype",
+        help="attention (FMHA) quant mode for the AIC prefill-load estimator, "
+        "e.g. fp8; 'auto'/omitted = model default",
+    )
+    parser.add_argument(
+        "--aic-kv-cache-dtype",
+        help="KV-cache quant mode for the AIC prefill-load estimator, e.g. fp8, "
+        "int8; 'auto'/omitted = model default",
+    )
+    parser.add_argument(
+        "--aic-comm-dtype",
+        help="communication (collective) quant mode for the AIC prefill-load "
+        "estimator, e.g. fp8, int8; 'auto'/omitted = model default",
+    )
     parser.add_argument("--aic-nextn", type=int)
     parser.add_argument("--aic-nextn-accept-rates")
     parser.add_argument("--input-tokens", type=int)

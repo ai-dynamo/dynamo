@@ -1649,6 +1649,11 @@ class AicPerfConfig:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_weight_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_activation_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
     ) -> None:
@@ -1987,6 +1992,11 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_weight_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_activation_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: int = 42,
@@ -2132,6 +2142,36 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_weight_dtype(self) -> Optional[str]: ...
+
+    @aic_weight_dtype.setter
+    def aic_weight_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_moe_dtype(self) -> Optional[str]: ...
+
+    @aic_moe_dtype.setter
+    def aic_moe_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_activation_dtype(self) -> Optional[str]: ...
+
+    @aic_activation_dtype.setter
+    def aic_activation_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_kv_cache_dtype(self) -> Optional[str]: ...
+
+    @aic_kv_cache_dtype.setter
+    def aic_kv_cache_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_comm_dtype(self) -> Optional[str]: ...
+
+    @aic_comm_dtype.setter
+    def aic_comm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
     def aic_nextn(self) -> Optional[int]: ...
 
     @aic_nextn.setter
@@ -2192,6 +2232,11 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_weight_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_activation_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: Optional[int] = None,

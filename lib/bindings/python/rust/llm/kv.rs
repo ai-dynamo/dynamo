@@ -1493,6 +1493,11 @@ impl KvRouter {
                         config.moe_tp_size(),
                         config.moe_ep_size(),
                         config.attention_dp_size(),
+                        config.weight_dtype(),
+                        config.moe_dtype(),
+                        config.activation_dtype(),
+                        config.kv_cache_dtype(),
+                        config.comm_dtype(),
                         config.nextn(),
                         config.nextn_accept_rates(),
                     )

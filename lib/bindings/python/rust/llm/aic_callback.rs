@@ -101,6 +101,11 @@ fn build_rust_engine(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
+    weight_dtype: Option<&str>,
+    moe_dtype: Option<&str>,
+    activation_dtype: Option<&str>,
+    kv_cache_dtype: Option<&str>,
+    comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<AicEngine>> {
@@ -121,6 +126,24 @@ fn build_rust_engine(
         ),
         _ => None,
     };
+    // Normalize the quant-mode strings through the single Python source of
+    // truth (`dynamo._internal.aic._normalize_aic_quant_mode`) so the latency
+    // engine and the KV-block estimator (`estimate_num_gpu_blocks`) agree on
+    // the dtype vocabulary (`auto`/`none`/`null` -> default, `int4` ->
+    // `int4_wo`). Done before the cache key so e.g. `int4` and `int4_wo`
+    // resolve to the same compiled engine instead of two redundant entries.
+    let aic_module = py.import("dynamo._internal.aic")?;
+    let normalize_quant_mode = |value: Option<&str>| -> PyResult<Option<String>> {
+        aic_module
+            .call_method1("_normalize_aic_quant_mode", (value,))?
+            .extract()
+    };
+    let weight_dtype = normalize_quant_mode(weight_dtype)?;
+    let moe_dtype = normalize_quant_mode(moe_dtype)?;
+    let activation_dtype = normalize_quant_mode(activation_dtype)?;
+    let kv_cache_dtype = normalize_quant_mode(kv_cache_dtype)?;
+    let comm_dtype = normalize_quant_mode(comm_dtype)?;
+
     // Cache the compiled engine per identity. build_aic_engine compiles the
     // model (Python) and loads the perf DB (Rust parquet) — a one-time startup
     // cost, but callers may construct several callbacks (per-worker,
@@ -128,7 +151,7 @@ fn build_rust_engine(
     // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{nextn}|{nextn_accept_rates:?}"
+        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{weight_dtype:?}|{moe_dtype:?}|{activation_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
@@ -153,15 +176,15 @@ fn build_rust_engine(
         attention_dp_size.unwrap_or(1) as u32,
         moe_tp_size.map(|x| x as u32),
         moe_ep_size.map(|x| x as u32),
-        None,               // gemm_quant_mode (inferred by compile_engine)
-        None,               // moe_quant_mode
-        None,               // kvcache_quant_mode
-        None,               // fmha_quant_mode
-        None,               // comm_quant_mode
-        nextn,              // speculative (MTP) tokens; 0 for dense
-        nextn_accept_rates, // per-position accept rates
-        None,               // kv_block_size
-        None,               // systems_path (resolved via env above / build-time default)
+        weight_dtype.as_deref(),     // gemm_quant_mode
+        moe_dtype.as_deref(),        // moe_quant_mode
+        kv_cache_dtype.as_deref(),   // kvcache_quant_mode
+        activation_dtype.as_deref(), // fmha_quant_mode
+        comm_dtype.as_deref(),       // comm_quant_mode
+        nextn,                       // speculative (MTP) tokens; 0 for dense
+        nextn_accept_rates,          // per-position accept rates
+        None,                        // kv_block_size
+        None,                        // systems_path (resolved via env above / build-time default)
     )
     .map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -188,6 +211,11 @@ pub(super) fn create_aic_callback(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
+    weight_dtype: Option<&str>,
+    moe_dtype: Option<&str>,
+    activation_dtype: Option<&str>,
+    kv_cache_dtype: Option<&str>,
+    comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<dyn AicCallback>> {
@@ -203,6 +231,11 @@ pub(super) fn create_aic_callback(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
+            weight_dtype,
+            moe_dtype,
+            activation_dtype,
+            kv_cache_dtype,
+            comm_dtype,
             nextn,
             nextn_accept_rates,
         )?;
@@ -228,6 +261,11 @@ pub(super) fn create_aic_prefill_load_estimator(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
+    weight_dtype: Option<&str>,
+    moe_dtype: Option<&str>,
+    activation_dtype: Option<&str>,
+    kv_cache_dtype: Option<&str>,
+    comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<dyn PrefillLoadEstimator>> {
@@ -243,6 +281,11 @@ pub(super) fn create_aic_prefill_load_estimator(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
+            weight_dtype,
+            moe_dtype,
+            activation_dtype,
+            kv_cache_dtype,
+            comm_dtype,
             nextn,
             nextn_accept_rates,
         )?;
@@ -271,6 +314,11 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
+    weight_dtype: Option<&str>,
+    moe_dtype: Option<&str>,
+    activation_dtype: Option<&str>,
+    kv_cache_dtype: Option<&str>,
+    comm_dtype: Option<&str>,
 ) -> PyResult<usize> {
     let module = py.import("dynamo._internal.aic")?;
     let kwargs = PyDict::new(py);
@@ -287,6 +335,11 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     kwargs.set_item("moe_tp_size", moe_tp_size)?;
     kwargs.set_item("moe_ep_size", moe_ep_size)?;
     kwargs.set_item("attention_dp_size", attention_dp_size)?;
+    kwargs.set_item("weight_dtype", weight_dtype)?;
+    kwargs.set_item("moe_dtype", moe_dtype)?;
+    kwargs.set_item("activation_dtype", activation_dtype)?;
+    kwargs.set_item("kv_cache_dtype", kv_cache_dtype)?;
+    kwargs.set_item("comm_dtype", comm_dtype)?;
     let blocks = module.call_method("estimate_num_gpu_blocks", (), Some(&kwargs))?;
     blocks.extract()
 }
