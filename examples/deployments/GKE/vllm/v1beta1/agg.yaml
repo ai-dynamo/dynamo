@@ -38,4 +38,4 @@ spec:
               nvidia.com/gpu: "1"
           workingDir: /workspace/examples/backends/vllm
     replicas: 1
-    type: decode
+    type: worker
