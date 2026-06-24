@@ -1123,12 +1123,14 @@ def _probe_overload_503_and_assert(
     is responsible for starting the frontend (with the desired thresholds and,
     for disagg, ``enforce_disagg=True``) and for waiting until it is ready.
 
-    Sends unique (shuffled) prompts 0.1s apart to exhaust worker resources, then
+    Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
     asserts:
-    1. At least one request succeeds (routed before the busy state propagates)
-    2. At least one request is rejected with 503 (all eligible workers busy)
-    3. No other status codes appear
-    4. The frontend ``model_rejection_total`` metric matches the 503 count
+    1. At least one request is rejected with 503 (the threshold gates the pool)
+    2. No other status codes appear
+    3. The frontend ``model_rejection_total`` metric matches the 503 count
+
+    Successes are not required: a single overload-shaped request can exceed the
+    threshold before dispatch, so an all-503 burst is a valid outcome.
     """
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
     test_payload_503 = {
@@ -1230,7 +1232,6 @@ def _probe_overload_503_and_assert(
         num_other == 0
     ), f"Expected only 200 or 503 responses, but got {num_other} other"
     assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
-    assert num_succeeded > 0, f"Expected at least 1 success, but got {num_succeeded}"
 
     # Verify rejection metrics from frontend /metrics endpoint
     model_name = test_payload.get("model", "")

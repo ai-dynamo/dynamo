@@ -38,6 +38,7 @@ prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
+serde_yaml = "0.9.34"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

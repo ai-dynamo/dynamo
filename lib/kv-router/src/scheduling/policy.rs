@@ -216,6 +216,7 @@ mod tests {
             lora_name: None,
             priority_jump,
             strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
@@ -87,13 +87,18 @@ async fn list_workers(
 
 async fn select(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     payload: Result<Json<SelectRequest>, JsonRejection>,
 ) -> Response {
     let Json(req) = match payload {
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    match state.core.select(req).await {
+    match state
+        .core
+        .select_with_policy_class(req, policy_class_from_headers(&headers))
+        .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
     }
@@ -101,13 +106,18 @@ async fn select(
 
 async fn select_and_reserve(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     payload: Result<Json<SelectAndReserveRequest>, JsonRejection>,
 ) -> Response {
     let Json(req) = match payload {
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    match state.core.select_and_reserve(req).await {
+    match state
+        .core
+        .select_and_reserve_with_policy_class(req, policy_class_from_headers(&headers))
+        .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
     }
@@ -241,6 +251,15 @@ fn json_error(status: StatusCode, error: impl fmt::Display) -> Response {
 
 fn json_rejection(error: JsonRejection) -> Response {
     json_error(error.status(), error.body_text())
+}
+
+fn policy_class_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-dynamo-meta-policy-class")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) fn create_router(state: Arc<AppState>, peer_manager: Option<PeerManager>) -> Router {

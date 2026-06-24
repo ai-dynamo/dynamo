@@ -47,6 +47,7 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. >1 enables the concurrent radix tree, including with `--no-router-kv-events` |
 | `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `16.0` | Queue threshold fraction of prefill capacity. Priority hints only affect requests waiting in this queue |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
+| `--router-policy-config` | `DYN_ROUTER_POLICY_CONFIG` | — | Startup-only [policy-family and cache-bucket YAML](../router/router-configuration.md#policy-class-queues). Falls back to the single queue configured above when omitted |
 | `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers unavailable |
 
 ## AIC Prefill Load Model
