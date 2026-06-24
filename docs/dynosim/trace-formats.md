@@ -49,10 +49,10 @@ Agentic Mooncake adds request identity and dependency fields to Mooncake rows:
 | Field | Meaning |
 |---|---|
 | `request_id` | Stable identity for one LLM request |
-| `session_id` | Trajectory identity |
+| `session_id` | Session identity |
 | `wait_for` | Request IDs that must complete before this request starts |
 | `branches` | Child-request metadata; does not control replay scheduling |
-| `prefix_reset` | Trajectory-boundary metadata; does not control replay scheduling |
+| `prefix_reset` | Session-boundary metadata; does not control replay scheduling |
 | `delay` | Non-tool delay after dependencies complete |
 | `tool_wait_ms` | Tool execution time after dependencies complete |
 | `tool_events` | Per-tool analysis metadata; replay scheduling uses `tool_wait_ms` |
@@ -109,9 +109,9 @@ DynoSim consumes the Mooncake file, not the sidecar. See the
 [coding trace exporter reference](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/coding/README.md)
 for discovery and tokenizer options.
 
-Local Codex and OpenCode exporters do not exist. Their live requests still gain trajectory context
+Local Codex and OpenCode exporters do not exist. Their live requests still gain session context
 when sent through Dynamo with the headers listed in
-[Trajectory IDs](../agents/trajectory-ids.md#trajectory-id-inputs).
+[Session IDs](../agents/session-ids.md#session-id-inputs).
 
 No generic text-to-Mooncake command exists. New adapters can reuse `MooncakeRow`,
 `MooncakeJsonlWriter`, and the rolling-hash helpers in

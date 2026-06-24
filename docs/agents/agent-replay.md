@@ -131,7 +131,7 @@ Change one router or engine setting at a time and compare the report JSON files.
 currently supports offline aggregated replay with trace timestamps. It does not support online
 DynoSim mode, disaggregated replay, or `--replay-concurrency`.
 
-## Agentic Row Semantics
+## DynoSim Row Semantics
 
 - `request_id`: the LLM request row identity.
 - Mooncake `session_id`: derived from the Dynamo `session_id`.
@@ -170,43 +170,101 @@ aiperf synthesize dynamo-trace /tmp/dynamo-agent-trace.jsonl \
   --output /tmp/dynamo-agent-weka
 ```
 
-Replay the converted workload against a Dynamo endpoint:
+The converter writes one file per root session lineage. It preserves Dynamo's hashes in the global
+hash namespace, so the same hash and block size synthesize the same tokens across files. Read
+`block_size` from any generated file and pass that value to AIPerf:
 
 ```bash
+TRACE_BLOCK_SIZE=$(jq -r .block_size /tmp/dynamo-agent-weka/trace_000000.json)
+
 AIPERF_DATASET_WEKA_SPLIT_FLATTENED_AGENTS=false \
+AIPERF_DYNAMO_SESSION_TRANSPORT=headers \
 aiperf profile \
-  --url localhost:8000 \
+  --url http://localhost:8000 \
   --model my-model \
+  --tokenizer my-model \
   --endpoint-type chat \
   --input-file /tmp/dynamo-agent-weka \
   --custom-dataset-type weka_trace \
+  --isl-block-size "${TRACE_BLOCK_SIZE}" \
   --fixed-schedule \
   --fixed-schedule-auto-offset \
-  --use-dynamo-conv-aware-routing
+  --use-dynamo-conv-aware-routing \
+  --use-server-token-count \
+  --output-artifact-dir /tmp/dynamo-agent-replay
 ```
 
 Set `AIPERF_DATASET_WEKA_SPLIT_FLATTENED_AGENTS=false` to preserve session boundaries.
-`--use-dynamo-conv-aware-routing` sends session and parent markers as headers without
-changing request bodies. Point `--url` at a Mocker-backed frontend or a real model deployment.
+`AIPERF_DYNAMO_SESSION_TRANSPORT=headers` and `--use-dynamo-conv-aware-routing` send session and
+parent markers as headers without changing request bodies. Point `--url` at a Mocker-backed
+frontend or a real model deployment. If `--model` does not identify a tokenizer that AIPerf can
+load, set `--tokenizer` to its local path.
+
+The recorded output length becomes `max_tokens`, not a required output length. Add
+`--extra-inputs ignore_eos:true` only when the deployed backend supports it and exact output-load
+shape matters more than natural stopping behavior. Do not add output caps or timing caps for a
+faithful replay.
 
 The converter infers the final turn from the last request in each session. It supports one level
 of child sessions and rejects deeper trees.
 
 ## How the Request DAG Is Built
 
-Each node is one LLM request:
+The Dynamo converter groups `request_end` rows by `session_id`, validates each session's single
+parent, and emits one Weka file for each root and its direct children. The Weka loader then creates
+one AIPerf `Conversation` per session:
 
 - Requests in one session run in recorded order.
-- A child session starts after the last parent request that finished before the child arrived.
-- The next parent request waits when it arrived after the child completed.
-- The edge to the next request carries tool-execution and agent-overhead delays.
+- A child session becomes a `SPAWN` branch of the preceding parent request in receive-time order.
+- The first later parent request at or after the child's recorded end gets a `SPAWN_JOIN` gate.
+- A child with no later parent request is a background branch with no join.
 
 DynoSim schedules requests from `wait_for`, `delay`, and `tool_wait_ms`. `branches`, `prefix_reset`,
 and `tool_events` preserve structure for analysis but do not control scheduling. `hash_ids`,
 `input_length`, and `output_length` preserve prompt shape without storing prompt text.
 
-The converter infers spawn and join edges from request timing. It does not recreate application
-logic that the trace never observed.
+For AIPerf fixed-schedule replay, each root targets its recorded offset. Later turns wait for the
+prior turn to return; children also wait for their spawn point, and joined parent turns wait for
+their children. The effective dispatch time is therefore:
+
+```text
+max(recorded timestamp, previous turn completion, required child completion)
+```
+
+This preserves the schedule when the replay endpoint keeps up and records positive drift when it
+does not. Concurrency emerges from overlapping roots and branches. `--concurrency`, when set, is a
+ceiling on that overlap; it does not increase or time-compress the recorded concurrency.
+
+The converters infer spawn, join, and tool-delay edges from observed identity and timing. They do
+not recreate application logic that the trace never observed.
+
+## What Replay Preserves
+
+| Property | Replay behavior |
+|---|---|
+| Session order and direct parent-child topology | Preserved |
+| Root arrival offsets and inter-turn gaps | Preserved as scheduling targets; a slower endpoint causes positive drift |
+| Prompt cache topology | Dynamo hashes and their global scope are preserved |
+| Prompt text and tool arguments | Not captured; AIPerf synthesizes deterministic text from hashes |
+| Input token count | Targeted from the trace; the live model's chat template can change the server-observed count |
+| Output token count | Sent as `max_tokens`; natural model stopping can produce fewer tokens |
+| Model responses and tool execution | Not replayed; the configured model generates new responses and tools are represented by elapsed gaps |
+
+Explicit tool events improve DynoSim attribution. The AIPerf path does not execute tool calls or
+emit separate tool requests; it preserves their observed wall-clock effect between LLM requests.
+Audit payloads are for inspection and are not replay inputs.
+
+## Validate the Replay
+
+Retain the AIPerf artifact directory and the replay endpoint's request trace. Check:
+
+- source, converted, completed, and error request counts
+- session IDs, parent IDs, and per-session request order
+- target versus actual request start offsets and accumulated drift
+- traced input/output token counts and prefix-cache reuse, not only AIPerf output lengths
+
+Before sharing a trace, consistently remap request and session IDs and shift all timestamps by one
+constant. Preserve the hash values and block size if cache topology must remain comparable.
 
 For Claude Code, Codex, OpenCode, and text inputs, see
 [Trace Format Reference](../dynosim/trace-formats.md#coding-agent-and-text-inputs).
