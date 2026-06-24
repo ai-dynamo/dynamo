@@ -676,8 +676,7 @@ mod tests {
         .expect("seed request should complete");
         sink.events.lock().unwrap().clear();
 
-        let source_handoff_id =
-            crate::common::handoff::HandoffId::from(uuid::Uuid::from_u128(10));
+        let source_handoff_id = crate::common::handoff::HandoffId::from(uuid::Uuid::from_u128(10));
         let source_request_id = uuid::Uuid::from_u128(11);
         let (source_reply, source_reply_rx) = tokio::sync::oneshot::channel();
         scheduler
