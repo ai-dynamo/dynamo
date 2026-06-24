@@ -25,6 +25,9 @@ spec:
       containers:
         - name: model-download
           image: python:3.10-slim
+          # Runs as the image default (root) so it can populate the root-owned
+          # shared-model-cache PVC (FSx Lustre). Caps are dropped and privilege
+          # escalation disabled below to keep the blast radius minimal.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

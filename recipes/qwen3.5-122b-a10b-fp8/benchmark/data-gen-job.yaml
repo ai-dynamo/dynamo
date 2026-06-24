@@ -9,7 +9,8 @@
 # The 8-turn sliding window exercises cache hit rates: from turn 2 onward
 # each turn reuses 4 of 5 images from the prior window.
 #
-# Idempotent — re-run safely; the script skips generation if the file exists.
+# Idempotent — re-run safely; skips generation only if a complete dataset
+# (correct row count) already exists, and writes atomically otherwise.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -29,6 +30,8 @@ spec:
         app.kubernetes.io/component: data-gen
     spec:
       restartPolicy: Never
+      # runAsUser:0 is required so the job can write into the shared-model-cache
+      # PVC (FSx Lustre mounts root-owned); matches the rest of the recipe suite.
       securityContext:
         runAsUser: 0
         runAsGroup: 0
@@ -37,6 +40,8 @@ spec:
         - name: generate-datasets
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           imagePullPolicy: IfNotPresent
+          # No privilege escalation, drop all Linux caps, default seccomp.
+          # Complements the pod-level root requirement above without removing it.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -54,7 +59,10 @@ spec:
               set -euo pipefail
               OUTPUT_DIR="/perf-cache/datasets"
               OUTPUT_FILE="${OUTPUT_DIR}/30u_8t_5w_8000word_base64.jsonl"
-              if [[ -f "$OUTPUT_FILE" ]]; then
+              EXPECTED_ROWS=240   # 30 users × 8 turns
+              # Skip only if a complete dataset (correct row count) already exists.
+              # A truncated file from an interrupted prior run is regenerated.
+              if [[ -s "$OUTPUT_FILE" ]] && [[ "$(wc -l < "$OUTPUT_FILE")" -eq "$EXPECTED_ROWS" ]]; then
                 echo "Dataset already exists: $(ls -lh $OUTPUT_FILE)"
                 exit 0
               fi
@@ -68,6 +76,10 @@ spec:
               echo "[gen] dynamo @ $(git -C $GEN_SRC rev-parse --short HEAD)"
               IMAGE_DIR="/perf-cache/images/2400x1080"
               mkdir -p "${OUTPUT_DIR}" "${IMAGE_DIR}"
+              # Generate to a temp file, validate row count, then atomically
+              # rename so a failed run never leaves a partial dataset behind.
+              TMP_OUTPUT_FILE="${OUTPUT_DIR}/.$(basename "${OUTPUT_FILE}").tmp"
+              rm -f "${TMP_OUTPUT_FILE}"
               python3 main.py sliding-window \
                 --num-users 30 \
                 --turns-per-user 8 \
@@ -76,7 +88,14 @@ spec:
                 --image-mode base64 \
                 --image-dir "${IMAGE_DIR}" \
                 --user-text-tokens 8000 \
-                -o "${OUTPUT_FILE}"
+                -o "${TMP_OUTPUT_FILE}"
+              ROWS="$(wc -l < "${TMP_OUTPUT_FILE}")"
+              if [[ "${ROWS}" -ne "${EXPECTED_ROWS}" ]]; then
+                echo "ERROR: expected ${EXPECTED_ROWS} rows, got ${ROWS}" >&2
+                rm -f "${TMP_OUTPUT_FILE}"
+                exit 1
+              fi
+              mv -f "${TMP_OUTPUT_FILE}" "${OUTPUT_FILE}"
               ls -lh "${OUTPUT_FILE}"
               echo "Dataset generation complete"
           volumeMounts:

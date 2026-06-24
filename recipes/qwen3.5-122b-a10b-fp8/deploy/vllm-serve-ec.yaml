@@ -57,6 +57,8 @@ spec:
       restartPolicy: Always
       nodeSelector: ${HW_NODE_SELECTOR}
       tolerations: ${HW_TOLERATIONS}
+      # runAsUser:0 is required to read the root-owned shared-model-cache PVC
+      # (FSx Lustre) and to mlock the model weights (IPC_LOCK + ulimit -l).
       securityContext:
         runAsUser: 0
       containers:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Shared aiperf benchmark pod — works against any of the four deploy configs.
+# aiperf benchmark pod for the vllm-serve-ec deploy config.
 # run-benchmark.sh exports ${BENCH_POD}, ${BENCH_FRONTEND}, ${BENCH_RUN_LABEL}
 # and pipes this file through envsubst before kubectl apply.
 #
@@ -32,12 +32,17 @@ spec:
 
           apt update && apt install -y --no-install-recommends curl jq
 
-          pip install --no-cache-dir aiperf
+          pip install --no-cache-dir "aiperf==${AIPERF_VERSION}"
           python -c "import aiperf; print('aiperf', aiperf.__version__ if hasattr(aiperf,'__version__') else 'installed')"
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000 ..."
+          DEADLINE=$(( $(date +%s) + READINESS_TIMEOUT ))
           until curl -s "http://${FRONTEND}:8000/v1/models" \
               | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            if [[ "$(date +%s)" -ge "${DEADLINE}" ]]; then
+              echo "ERROR: model '${MODEL_NAME}' not ready after ${READINESS_TIMEOUT}s" >&2
+              exit 1
+            fi
             echo "[$(date '+%H:%M:%S')] not ready, sleeping 10s"
             sleep 10
           done
@@ -75,6 +80,10 @@ spec:
       env:
         - name: MODEL_NAME
           value: "Qwen/Qwen3.5-122B-A10B"
+        - name: AIPERF_VERSION
+          value: "0.10.0"
+        - name: READINESS_TIMEOUT  # seconds to wait for /v1/models before failing
+          value: "1800"
         - name: FRONTEND
           value: ${BENCH_FRONTEND}
         - name: RUN_LABEL

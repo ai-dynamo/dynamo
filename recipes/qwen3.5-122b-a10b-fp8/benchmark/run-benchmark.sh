@@ -6,14 +6,11 @@
 # Idempotent — re-running steps that already completed is a no-op.
 #
 # Available configs:
-#   vllm-serve     : plain vllm serve, no Dynamo features
 #   vllm-serve-ec  : vllm serve + Dynamo embedding cache (no frontend-decoding)
-#   dynamo-fd      : Dynamo + frontend-decoding, no EC
-#   dynamo-fd-ec   : Dynamo + frontend-decoding + EC
 #
 # Usage:
-#   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve
-#   ./run-benchmark.sh -n <namespace> --hw h100 --config dynamo-fd-ec --step deploy
+#   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve-ec
+#   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve-ec --step deploy
 #   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve-ec --step bench
 #
 # Steps: dataset | download | deploy | bench | retrieve | clean | all
@@ -24,12 +21,13 @@ STEP="all"
 HW="h100"
 CONFIG=""
 
+need_val() { [[ -n "${2:-}" ]] || { echo "ERROR: $1 requires a value" >&2; exit 2; }; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n|--namespace) NAMESPACE="$2"; shift 2 ;;
-    --step)         STEP="$2";      shift 2 ;;
-    --hw)           HW="$2";        shift 2 ;;
-    --config)       CONFIG="$2";    shift 2 ;;
+    -n|--namespace) need_val "$1" "${2:-}"; NAMESPACE="$2"; shift 2 ;;
+    --step)         need_val "$1" "${2:-}"; STEP="$2";      shift 2 ;;
+    --hw)           need_val "$1" "${2:-}"; HW="$2";        shift 2 ;;
+    --config)       need_val "$1" "${2:-}"; CONFIG="$2";    shift 2 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -40,28 +38,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RECIPE="$(dirname "$HERE")"
 
 case "$CONFIG" in
-  vllm-serve)
-    DEPLOY_KIND="deployment"; DEPLOY_NAME="qwen35-122b-vllm-serve"
-    BENCH_POD="qwen35-122b-bench";      BENCH_FRONTEND="qwen35-122b-vllm-serve"
-    BENCH_RUN_LABEL="vllm-serve" ;;
   vllm-serve-ec)
     DEPLOY_KIND="deployment"; DEPLOY_NAME="qwen35-122b-vllm-serve-ec"
     BENCH_POD="qwen35-122b-vs-ec-bench"; BENCH_FRONTEND="qwen35-122b-vllm-serve-ec"
     BENCH_RUN_LABEL="vllm-serve-ec" ;;
-  dynamo-fd)
-    DEPLOY_KIND="dgd"; DEPLOY_NAME="qwen35-122b-dynamo-fd"
-    BENCH_POD="qwen35-122b-fd-bench";   BENCH_FRONTEND="qwen35-122b-dynamo-fd-frontend"
-    BENCH_RUN_LABEL="dynamo-fd" ;;
-  dynamo-fd-ec)
-    DEPLOY_KIND="dgd"; DEPLOY_NAME="qwen35-122b-dynamo-fd-ec"
-    BENCH_POD="qwen35-122b-fd-ec-bench"; BENCH_FRONTEND="qwen35-122b-dynamo-fd-ec-frontend"
-    BENCH_RUN_LABEL="dynamo-fd-ec" ;;
   "")
     echo "ERROR: --config required" >&2
-    echo "Available: vllm-serve  vllm-serve-ec  dynamo-fd  dynamo-fd-ec" >&2; exit 2 ;;
+    echo "Available: vllm-serve-ec" >&2; exit 2 ;;
   *)
     echo "ERROR: unknown config '$CONFIG'" >&2
-    echo "Available: vllm-serve  vllm-serve-ec  dynamo-fd  dynamo-fd-ec" >&2; exit 2 ;;
+    echo "Available: vllm-serve-ec" >&2; exit 2 ;;
 esac
 export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
 
@@ -104,25 +90,19 @@ dataset() {
 
 deploy() {
   APPLY "$RECIPE/deploy/${CONFIG}.yaml"
-  case "$DEPLOY_KIND" in
-    deployment)
-      $K rollout status "deploy/$DEPLOY_NAME" --timeout=1800s ;;
-    dgd)
-      local sel_fe="nvidia.com/dynamo-graph-deployment-name=$DEPLOY_NAME,nvidia.com/dynamo-component-type=frontend"
-      local sel_wk="nvidia.com/dynamo-graph-deployment-name=$DEPLOY_NAME,nvidia.com/dynamo-component-type=worker"
-      echo "[deploy] waiting for Frontend..."
-      $K wait --for=condition=Ready pod -l "$sel_fe" --timeout=900s
-      echo "[deploy] waiting for VllmWorker..."
-      $K wait --for=condition=Ready pod -l "$sel_wk" --timeout=1800s ;;
-  esac
+  $K rollout status "deploy/$DEPLOY_NAME" --timeout=1800s
 }
 
 bench() {
   $K delete pod "$BENCH_POD" --ignore-not-found
   APPLY "$HERE/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
-  echo "[bench] streaming logs — Ctrl-C to detach (run continues in pod)"
-  $K logs -f "$BENCH_POD" || true
+  echo "[bench] streaming logs until run completes (pod stays alive for retrieve)"
+  # Stop following at the completion marker so all() proceeds to retrieve while
+  # the pod is still alive. `sed .../q` prints the marker then quits, which
+  # SIGPIPEs `kubectl logs -f`. If the run fails first, the pod exits (restart
+  # Never) and `logs -f` reaches EOF, so this never hangs.
+  $K logs -f "$BENCH_POD" 2>/dev/null | sed '/Run complete\. Artifacts in/q' || true
 }
 
 retrieve() {
@@ -137,13 +117,8 @@ retrieve() {
 
 clean() {
   $K delete pod "$BENCH_POD" --ignore-not-found
-  case "$DEPLOY_KIND" in
-    deployment)
-      $K delete deploy "$DEPLOY_NAME" --ignore-not-found
-      $K delete service "$DEPLOY_NAME" --ignore-not-found ;;
-    dgd)
-      $K delete dynamographdeployment "$DEPLOY_NAME" --ignore-not-found ;;
-  esac
+  $K delete deploy "$DEPLOY_NAME" --ignore-not-found
+  $K delete service "$DEPLOY_NAME" --ignore-not-found
 }
 
 all() { download; dataset; deploy; bench; retrieve; }
