@@ -59,7 +59,6 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
-from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -219,7 +218,7 @@ class SglangLLMEngine(LLMEngine):
                     _DYN_SGLANG_SKIP_WARMUP_ENV,
                 )
 
-        scheduler_info = get_scheduler_info(self.engine)
+        scheduler_info = self.engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(self.server_args, scheduler_info)
         page_size = self.server_args.page_size
 

@@ -43,6 +43,11 @@ When queueing is enabled, the router checks active prefill tokens for the reques
 
 Queueing does not permanently remove a worker from the candidate set. It delays the routing decision; busy-threshold overload filtering removes overloaded workers from candidate selection.
 
+When policy classes are configured, the router uses weighted DRR to choose
+which dispatchable class runs next. For credit accumulation, blocked-class
+behavior, and oversized-request bulk credit, see
+[Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
+
 ## Scoring Signals
 
 These signals affect candidate scoring, not hard filtering:

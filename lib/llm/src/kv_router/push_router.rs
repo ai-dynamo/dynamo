@@ -72,6 +72,7 @@ impl KvPushRouter {
         affinity_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
+        let policy_class = request.metadata().get("policy-class").cloned();
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let mut selection_future = Box::pin(async {
@@ -82,6 +83,7 @@ impl KvPushRouter {
                 phase,
                 is_query_only,
                 affinity_worker,
+                policy_class,
             )
             .instrument(tracing::info_span!("kv_router.select_worker"))
             .await

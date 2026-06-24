@@ -484,16 +484,13 @@ impl RouterHandles {
         match outcome {
             // Advisory only: the external caller owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            PrefillQueryOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => {
+            PrefillQueryOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
-                    reason = ?reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens = ?max_queued_isl_tokens,
-                    "Prefill query rejected due to router backpressure"
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill query rejected by policy-class queue limit"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
@@ -568,16 +565,13 @@ impl RouterHandles {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => {
+            dynamo_llm::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
-                    reason = ?reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens = ?max_queued_isl_tokens,
-                    "Decode query rejected due to router backpressure"
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Decode query rejected by policy-class queue limit"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }

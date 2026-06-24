@@ -57,7 +57,7 @@ fn router_metric(suffix: &str) -> String {
     format!("{}{}", router_request::METRIC_PREFIX, suffix)
 }
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGaugeVec, Opts};
+use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
 
@@ -319,7 +319,18 @@ pub fn register_worker_load_metrics(
 pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
     pub pending_isl_tokens: IntGaugeVec,
+    pub pending_cached_tokens: IntGaugeVec,
     pub backpressure_total: IntCounterVec,
+}
+
+#[derive(Clone)]
+pub struct RouterQueueMetricHandles {
+    pub pending_requests: IntGauge,
+    pub pending_isl_tokens: IntGauge,
+    pub pending_cached_tokens: IntGauge,
+    pub request_limit_rejections: IntCounter,
+    pub raw_isl_limit_rejections: IntCounter,
+    pub cached_token_limit_rejections: IntCounter,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
@@ -333,7 +344,7 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
                 ),
                 "Number of requests pending in the router scheduler queue",
             ),
-            &[labels::WORKER_TYPE],
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         )
         .expect("Failed to create router_queue_pending_requests gauge"),
         pending_isl_tokens: IntGaugeVec::new(
@@ -341,36 +352,50 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
                 format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
                 "Sum of isl_tokens for requests pending in the router scheduler queue",
             ),
-            &[labels::WORKER_TYPE],
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         )
         .expect("Failed to create router_queue_pending_isl_tokens gauge"),
+        pending_cached_tokens: IntGaugeVec::new(
+            Opts::new(
+                format!(
+                    "{}_router_queue_pending_cached_tokens",
+                    name_prefix::FRONTEND
+                ),
+                "Estimated cached tokens for requests pending in the router scheduler queue",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+        )
+        .expect("Failed to create router_queue_pending_cached_tokens gauge"),
         backpressure_total: IntCounterVec::new(
             Opts::new(
                 format!("{}_router_queue_backpressure_total", name_prefix::FRONTEND),
                 "Total number of router scheduler queue backpressure rejections",
             ),
-            &[labels::WORKER_TYPE, "reason"],
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
         )
         .expect("Failed to create router_queue_backpressure_total counter"),
     });
 
 impl RouterQueueMetrics {
-    pub fn set_pending(&self, worker_type: &str, count: usize) {
-        self.pending_requests
-            .with_label_values(&[worker_type])
-            .set(count as i64);
-    }
-
-    pub fn set_pending_isl_tokens(&self, worker_type: &str, tokens: usize) {
-        self.pending_isl_tokens
-            .with_label_values(&[worker_type])
-            .set(tokens as i64);
-    }
-
-    pub fn inc_backpressure(&self, worker_type: &str, reason: &str) {
-        self.backpressure_total
-            .with_label_values(&[worker_type, reason])
-            .inc();
+    pub fn handles(
+        &self,
+        model: &str,
+        worker_type: &str,
+        policy_class: &str,
+    ) -> RouterQueueMetricHandles {
+        let queue_labels = [model, worker_type, policy_class];
+        let rejection = |reason| {
+            self.backpressure_total
+                .with_label_values(&[model, worker_type, policy_class, reason])
+        };
+        RouterQueueMetricHandles {
+            pending_requests: self.pending_requests.with_label_values(&queue_labels),
+            pending_isl_tokens: self.pending_isl_tokens.with_label_values(&queue_labels),
+            pending_cached_tokens: self.pending_cached_tokens.with_label_values(&queue_labels),
+            request_limit_rejections: rejection("request_limit"),
+            raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
+            cached_token_limit_rejections: rejection("cached_token_limit"),
+        }
     }
 }
 
@@ -382,6 +407,7 @@ pub fn register_router_queue_metrics(
     let m = &*ROUTER_QUEUE_METRICS;
     registry.register(Box::new(m.pending_requests.clone()))?;
     registry.register(Box::new(m.pending_isl_tokens.clone()))?;
+    registry.register(Box::new(m.pending_cached_tokens.clone()))?;
     registry.register(Box::new(m.backpressure_total.clone()))?;
     Ok(())
 }
@@ -856,7 +882,7 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                     ),
                     "Number of requests pending in the router scheduler queue",
                 ),
-                &[labels::WORKER_TYPE],
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
             )
             .unwrap(),
             pending_isl_tokens: IntGaugeVec::new(
@@ -864,7 +890,18 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                     format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
                     "Sum of isl_tokens for requests pending in the router scheduler queue",
                 ),
-                &[labels::WORKER_TYPE],
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+            )
+            .unwrap(),
+            pending_cached_tokens: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_router_queue_pending_cached_tokens",
+                        name_prefix::FRONTEND
+                    ),
+                    "Estimated cached tokens for requests pending in the router scheduler queue",
+                ),
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
             )
             .unwrap(),
             backpressure_total: IntCounterVec::new(
@@ -872,7 +909,7 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                     format!("{}_router_queue_backpressure_total", name_prefix::FRONTEND),
                     "Total number of router scheduler queue backpressure rejections",
                 ),
-                &[labels::WORKER_TYPE, "reason"],
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
             )
             .unwrap(),
         };
@@ -883,24 +920,33 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
             .register(Box::new(metrics.pending_isl_tokens.clone()))
             .unwrap();
         registry
+            .register(Box::new(metrics.pending_cached_tokens.clone()))
+            .unwrap();
+        registry
             .register(Box::new(metrics.backpressure_total.clone()))
             .unwrap();
 
-        metrics.set_pending("decode", 5);
-        metrics.set_pending_isl_tokens("decode", 1024);
-        metrics.inc_backpressure("decode", "max_queued_isl_tokens_exceeded");
+        let handles = metrics.handles("model", "decode", "default");
+        handles.pending_requests.set(5);
+        handles.pending_isl_tokens.set(1024);
+        handles.pending_cached_tokens.set(512);
 
         let output = gather_pef(&registry);
         let expected = "\
 # HELP dynamo_frontend_router_queue_backpressure_total Total number of router scheduler queue backpressure rejections
 # TYPE dynamo_frontend_router_queue_backpressure_total counter
-dynamo_frontend_router_queue_backpressure_total{reason=\"max_queued_isl_tokens_exceeded\",worker_type=\"decode\"} 1
+dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"cached_token_limit\",worker_type=\"decode\"} 0
+dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"raw_isl_token_limit\",worker_type=\"decode\"} 0
+dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"request_limit\",worker_type=\"decode\"} 0
+# HELP dynamo_frontend_router_queue_pending_cached_tokens Estimated cached tokens for requests pending in the router scheduler queue
+# TYPE dynamo_frontend_router_queue_pending_cached_tokens gauge
+dynamo_frontend_router_queue_pending_cached_tokens{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 512
 # HELP dynamo_frontend_router_queue_pending_isl_tokens Sum of isl_tokens for requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_isl_tokens gauge
-dynamo_frontend_router_queue_pending_isl_tokens{worker_type=\"decode\"} 1024
+dynamo_frontend_router_queue_pending_isl_tokens{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 1024
 # HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_requests gauge
-dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
+dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 5
 ";
         assert_eq!(
             output, expected,

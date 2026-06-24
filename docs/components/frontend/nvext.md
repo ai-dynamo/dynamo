@@ -60,10 +60,15 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 
 | Header | Overrides |
 |--------|-----------|
-| `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
-| `x-prefill-instance-id` | `prefill_worker_id` |
-| `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
-| `x-prefill-dp-rank` | `prefill_dp_rank` |
+| `x-dynamo-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
+| `x-dynamo-prefill-instance-id` | `prefill_worker_id` |
+| `x-dynamo-dp-rank` | `dp_rank` |
+| `x-dynamo-prefill-dp-rank` | `prefill_dp_rank` |
+
+> [!WARNING]
+> The unprefixed forms (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
+> `x-data-parallel-rank`, and `x-prefill-dp-rank`) are compatibility aliases planned for future
+> deprecation. Use the `x-dynamo-*` headers for new integrations.
 
 Session identity is header-only. Use the coding-agent headers or Dynamo
 session headers described in [Session IDs](../../agents/session-ids.md);
