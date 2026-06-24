@@ -193,18 +193,20 @@ class BaseEngine(ABC):
         ``context.metadata`` during :meth:`generate` are not visible here.
         """
 
-    async def drain(self) -> None:
-        """Drain in-flight engine work before cleanup (optional, default no-op).
+    async def is_quiescent(self) -> Optional[bool]:
+        """Whether in-flight KV transfers are done, so :meth:`cleanup` may
+        release GPU memory. The Rust ``Worker`` polls this on prefill workers
+        between the grace period and :meth:`cleanup`:
 
-        Called once during graceful shutdown after the discovery unregister
-        + grace-period sleep, but before :meth:`cleanup`.  Use it for
-        backend-side draining that must complete while the distributed
-        runtime (NATS / etcd) is still alive — e.g. waiting for in-flight
-        NIXL KV transfers on prefill workers (issue #7319), so downstream
-        decode workers don't observe a use-after-free on freed GPU memory.
+        - ``True``  — quiescent; exit the drain loop now.
+        - ``False`` — busy; poll again next tick.
+        - ``None``  — no introspection (default); poll until the drain budget
+          (``DYN_PREFILL_DRAIN_TIMEOUT_S``) expires. Never frees KV early.
 
-        Failures are logged and swallowed; shutdown proceeds regardless.
+        Aggregated/decode workers are never polled. Override only if the engine
+        can observe transfer completion.
         """
+        return None
 
     @abstractmethod
     async def cleanup(self) -> None:

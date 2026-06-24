@@ -17,6 +17,23 @@ use pyo3::types::PyModule;
 
 // Base exception for all Dynamo errors.
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
+pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException);
+
+pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRejection) -> PyErr {
+    let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
+    let attributes = Python::with_gil(|py| -> PyResult<()> {
+        let value = error.value(py);
+        value.setattr("policy_class", &rejection.policy_class)?;
+        value.setattr("limit_kind", rejection.limit_kind.to_string())?;
+        value.setattr("current", rejection.current)?;
+        value.setattr("limit", rejection.limit)?;
+        Ok(())
+    });
+    if let Err(error) = attributes {
+        return error;
+    }
+    error
+}
 
 // Raised by the in-process `SelectionService` bindings for selector failures
 // that are not malformed input. Instances carry `kind` (a stable,
@@ -79,6 +96,10 @@ macro_rules! define_dynamo_exceptions {
         /// Register all Dynamo exception classes on the `_core` module.
         pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("DynamoException", m.py().get_type::<DynamoException>())?;
+            m.add(
+                "RouterQueueLimitExceeded",
+                m.py().get_type::<RouterQueueLimitExceeded>(),
+            )?;
             m.add(
                 "SelectionServiceError",
                 m.py().get_type::<SelectionServiceError>(),
