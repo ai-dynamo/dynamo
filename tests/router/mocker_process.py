@@ -385,9 +385,9 @@ class MockerProcess:
                         ),
                     }
                     if replay_base is not None:
-                        payload["replay_endpoint"] = (
-                            f"tcp://127.0.0.1:{replay_base + dp_rank}"
-                        )
+                        payload[
+                            "replay_endpoint"
+                        ] = f"tcp://127.0.0.1:{replay_base + dp_rank}"
                     async with session.post(register_url, json=payload) as response:
                         if response.status != 201:
                             body = await response.text()
