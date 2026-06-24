@@ -498,32 +498,54 @@ class MxRefitWorkerExtension:
         weights: list[tuple[str, torch.Tensor]] = []
 
         if is_matched_tp:
-            buffers: dict[str, torch.Tensor] = {}
-            for spec in receive_specs.values():
-                dt = dt_map.get(spec.target_dtype, torch.bfloat16)
-                # Receiver's per-rank window — for matched-TP that's the
-                # source's natural shard along the role's shard axis.
-                full_shape = list(spec.target_shape)
-                if spec.role != "replicated" and target_tp > 1:
-                    axis_extent = full_shape[spec.shard_axis]
-                    per_rank = axis_extent // target_tp
-                    full_shape[spec.shard_axis] = (
-                        axis_extent if layout.tp_rank == target_tp - 1
-                        else per_rank
+            # Pre-allocate + NIXL-register the per-rank buffers ONCE per
+            # worker lifetime, not once per refit cycle. The receive_specs
+            # are deterministic given the source's TP layout, so cycle-N's
+            # allocations are identical to cycle-1's. Cache the buffers
+            # dict and reuse across refits.
+            #
+            # Surfaced by a 16-receiver Llama 3.1 8B benchmark (2026-06-22)
+            # where MX refit was ~6 s vs NCCL's 0.05 s. Cluster validation
+            # on GB200 / Qwen3-4B-Thinking: register_tensors costs ~0.15 s
+            # per cycle (paid by every refit). Caching drops warm-cycle
+            # wall from 0.39 s to 0.21 s (-45%). Scales with buffer count
+            # and total bytes.
+            buffers = getattr(self, "_mx_megatron_buffers", None)
+            if buffers is None:
+                buffers = {}
+                for spec in receive_specs.values():
+                    dt = dt_map.get(spec.target_dtype, torch.bfloat16)
+                    # Receiver's per-rank window — for matched-TP that's the
+                    # source's natural shard along the role's shard axis.
+                    full_shape = list(spec.target_shape)
+                    if spec.role != "replicated" and target_tp > 1:
+                        axis_extent = full_shape[spec.shard_axis]
+                        per_rank = axis_extent // target_tp
+                        full_shape[spec.shard_axis] = (
+                            axis_extent if layout.tp_rank == target_tp - 1
+                            else per_rank
+                        )
+                    if spec.role.startswith("expert_"):
+                        # Grouped-MoE per-expert tensors are passthrough — the
+                        # source-side per-expert shape IS the target.
+                        pass
+                    buffers[spec.megatron_name] = torch.empty(
+                        full_shape, dtype=dt, device=device,
                     )
-                if spec.role.startswith("expert_"):
-                    # Grouped-MoE per-expert tensors are passthrough — the
-                    # source-side per-expert shape IS the target.
-                    pass
-                buffers[spec.megatron_name] = torch.empty(
-                    full_shape, dtype=dt, device=device,
+                self._mx_receiver._receiver._nixl.register_tensors(buffers)
+                self._mx_megatron_buffers = buffers
+                logger.info(
+                    "[mx-megatron] matched-TP: ALLOCATED + registered %d buffers (%.2f GB) "
+                    "[first cycle; cached for subsequent refits]",
+                    len(buffers),
+                    sum(b.numel() * b.element_size() for b in buffers.values()) / 1e9,
                 )
-            self._mx_receiver._receiver._nixl.register_tensors(buffers)
-            logger.info(
-                "[mx-megatron] matched-TP: registered %d buffers (%.2f GB)",
-                len(buffers),
-                sum(b.numel() * b.element_size() for b in buffers.values()) / 1e9,
-            )
+            else:
+                logger.info(
+                    "[mx-megatron] matched-TP: reusing %d cached buffers (%.2f GB)",
+                    len(buffers),
+                    sum(b.numel() * b.element_size() for b in buffers.values()) / 1e9,
+                )
             t0 = _time.perf_counter()
             for _name, _t in self._mx_receiver.receive_from(
                 matched, timeout_seconds=mx_config.timeout_seconds,
@@ -568,9 +590,19 @@ class MxRefitWorkerExtension:
                 target_tensor_specs=target_specs,
             )
 
-            plan_dests: dict[str, torch.Tensor] = {}
+            # Cache plan_dests across refit cycles. Plan shapes are
+            # deterministic for a fixed source TP layout + target TP
+            # layout; re-allocating + re-registering NIXL buffers every
+            # cycle is the bug surfaced by the 16-receiver Llama 3.1
+            # benchmark (2026-06-22). v1 sliced-pull writes directly into
+            # these dest views, so cached buffers stay live across pulls.
+            cached_plan_dests: dict[str, torch.Tensor] | None = getattr(
+                self, "_mx_megatron_plan_dests", None,
+            )
+            plan_dests: dict[str, torch.Tensor] = cached_plan_dests or {}
             v1_batches: dict[str, list] = {c.ref.mx_source_id: [] for c in megatron_cands}
             v0_plans: list = []
+            newly_allocated_this_cycle = 0
 
             for plan in plans:
                 if not plan.sources:
@@ -580,8 +612,12 @@ class MxRefitWorkerExtension:
                     v0_plans.append(plan)
                     continue
                 dt = dt_map.get(rs.target_dtype, torch.bfloat16)
-                dest = torch.empty(plan.target_shape, dtype=dt, device=device)
-                plan_dests[plan.tensor_name] = dest
+                if plan.tensor_name in plan_dests:
+                    dest = plan_dests[plan.tensor_name]
+                else:
+                    dest = torch.empty(plan.target_shape, dtype=dt, device=device)
+                    plan_dests[plan.tensor_name] = dest
+                    newly_allocated_this_cycle += 1
                 axis = 1 if plan.assembly == "concat_dim1" else 0
                 routed_v1 = True
                 for src in plan.sources:
@@ -594,15 +630,26 @@ class MxRefitWorkerExtension:
                         (plan.tensor_name, src.source_subslice, dest_view)
                     )
                 if not routed_v1:
-                    plan_dests.pop(plan.tensor_name, None)
+                    # Don't drop cached entries — they may be valid for
+                    # other plans; just route this plan to v0.
+                    if cached_plan_dests is None:
+                        plan_dests.pop(plan.tensor_name, None)
                     for sid in v1_batches:
                         v1_batches[sid] = [
                             r for r in v1_batches[sid] if r[0] != plan.tensor_name
                         ]
                     v0_plans.append(plan)
 
-            if plan_dests:
+            # Only register NIXL if we have NEW allocations. If everything
+            # is cached, skip the register call entirely.
+            if newly_allocated_this_cycle > 0 and plan_dests:
                 self._mx_receiver._receiver._nixl.register_tensors(plan_dests)
+                self._mx_megatron_plan_dests = plan_dests
+                logger.info(
+                    "[mx-megatron] mixed-TP: registered %d plan_dests "
+                    "(%d newly allocated this cycle)",
+                    len(plan_dests), newly_allocated_this_cycle,
+                )
             n_v1_slices = sum(len(b) for b in v1_batches.values())
             logger.info(
                 "[mx-megatron] mixed-TP: %d v1 slices across %d sources "
