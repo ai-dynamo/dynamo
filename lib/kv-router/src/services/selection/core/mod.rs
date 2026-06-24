@@ -17,7 +17,6 @@ use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::{
     cache_hit_estimates_from_tiered_matches, tier_overlap_blocks_from_tiered_matches,
 };
-use crate::scheduling::policy::RouterSchedulingPolicy;
 use crate::scheduling::selector::DefaultWorkerSelector;
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, PotentialLoad, effective_prefill_tokens,
@@ -45,8 +44,7 @@ use super::types::{
     WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };
 
-type SelectionScheduler =
-    LocalScheduler<ScopedSequencePublisher, SelectionWorkerConfig, RouterSchedulingPolicy>;
+type SelectionScheduler = LocalScheduler<ScopedSequencePublisher, SelectionWorkerConfig>;
 
 struct SelectionEntry {
     key: SelectionKey,
@@ -73,6 +71,7 @@ struct SelectionOperation {
     expected_output_tokens: Option<u32>,
     priority_jump: f64,
     strict_priority: u32,
+    policy_class: Option<String>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
@@ -304,7 +303,8 @@ impl SelectionCore {
         }
 
         let reasons = record.missing_schedulable_metadata(
-            self.kv_router_config.router_queue_threshold.is_some(),
+            self.kv_router_config.router_queue_threshold.is_some()
+                || self.kv_router_config.router_policy_config.is_some(),
             self.kv_router_config.use_kv_events,
         );
         if !reasons.is_empty() {
@@ -418,16 +418,17 @@ impl SelectionCore {
         slots.start_periodic_force_expiry_across_all_workers(self.cancel_token.child_token());
 
         let selector = DefaultWorkerSelector::new(Some(self.kv_router_config.clone()), WORKER_TYPE);
-        let scheduler = LocalScheduler::new_without_overlap_refresh(
+        let profile = self
+            .kv_router_config
+            .policy_profile(Some(&key.model_name))
+            .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+        let scheduler = LocalScheduler::new_without_overlap_refresh_with_policy_profile(
             slots,
             workers_rx,
-            self.kv_router_config.router_queue_threshold,
-            self.kv_router_config
-                .router_queue_by_incoming_missing_isl
-                .clone(),
+            profile,
             block_size,
             selector,
-            RouterSchedulingPolicy::new(self.kv_router_config.router_queue_policy),
+            None,
             None,
             self.kv_router_config.router_queue_recheck_interval(),
             self.kv_router_config.router_track_prefill_tokens,
@@ -551,6 +552,14 @@ impl SelectionCore {
     }
 
     pub async fn select(&self, req: SelectRequest) -> Result<SelectResponse, SelectionError> {
+        self.select_with_policy_class(req, None).await
+    }
+
+    pub async fn select_with_policy_class(
+        &self,
+        req: SelectRequest,
+        policy_class: Option<String>,
+    ) -> Result<SelectResponse, SelectionError> {
         self.schedule_selection(
             SelectionOperation {
                 key: SelectionKey::new(req.model_name, req.tenant_id),
@@ -561,6 +570,7 @@ impl SelectionCore {
                 expected_output_tokens: req.expected_output_tokens,
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
+                policy_class,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -573,6 +583,14 @@ impl SelectionCore {
     pub async fn select_and_reserve(
         &self,
         req: SelectAndReserveRequest,
+    ) -> Result<SelectResponse, SelectionError> {
+        self.select_and_reserve_with_policy_class(req, None).await
+    }
+
+    pub async fn select_and_reserve_with_policy_class(
+        &self,
+        req: SelectAndReserveRequest,
+        policy_class: Option<String>,
     ) -> Result<SelectResponse, SelectionError> {
         let reservation_id = req
             .reservation_id
@@ -587,6 +605,7 @@ impl SelectionCore {
                 expected_output_tokens: req.expected_output_tokens,
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
+                policy_class,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -610,6 +629,7 @@ impl SelectionCore {
             expected_output_tokens,
             priority_jump,
             strict_priority,
+            policy_class,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -642,7 +662,7 @@ impl SelectionCore {
             _ = self.cancel_token.cancelled() => {
                 return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
             }
-            result = entry.scheduler.schedule_with_block_hashes(
+            result = entry.scheduler.schedule_with_policy_class_and_block_hashes(
                 scheduler_request_id,
                 isl_tokens,
                 Some(sequence_hashes),
@@ -655,6 +675,7 @@ impl SelectionCore {
                 prompt.lora_name,
                 priority_jump,
                 strict_priority,
+                policy_class,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,

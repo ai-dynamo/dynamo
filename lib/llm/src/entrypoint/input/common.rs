@@ -12,6 +12,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
+    kv_router::indexer::try_build_cache_indexer,
     kv_router::{
         DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
     },
@@ -19,7 +20,10 @@ use crate::{
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
-    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+    protocols::common::{
+        llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+        preprocessor::MultimodalData,
+    },
     request_template::RequestTemplate,
     types::{
         Annotated,
@@ -36,11 +40,37 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
-        ServiceEngine, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
+        SegmentSource, ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
 use std::sync::Arc;
+
+fn multimodal_cache_key_from_url(url: &str) -> String {
+    blake3::hash(url.as_bytes()).to_hex().to_string()
+}
+
+fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<String> {
+    let Some(items) = request
+        .multi_modal_data
+        .as_ref()
+        .and_then(|media| media.get("image_url"))
+    else {
+        return Vec::new();
+    };
+
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
+            MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
+            MultimodalData::Decoded(_) => {}
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
 
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
@@ -144,6 +174,7 @@ pub async fn build_preprocessed_routing(
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    enable_multimodal_cache_indexer: bool,
     enforce_disagg: bool,
 ) -> anyhow::Result<PreprocessedRouting> {
     let min_initial_workers = min_initial_workers_from_env()?;
@@ -151,11 +182,29 @@ pub async fn build_preprocessed_routing(
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
+    let embedding_cache_indexer = if enable_multimodal_cache_indexer
+        && matches!(router_mode, RouterMode::DeviceAwareWeighted)
+    {
+        try_build_cache_indexer(&router_client.endpoint).await
+    } else {
+        None
+    };
+    let cache_key_extractor = embedding_cache_indexer.as_ref().map(|_| {
+        Arc::new(preprocessed_multimodal_cache_keys)
+            as MultimodalCacheKeyExtractor<PreprocessedRequest>
+    });
+
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
-    let router =
-        LlmPushRouter::from_client_with_monitor(router_client, router_mode, monitor_arc).await?;
+    let router = LlmPushRouter::from_client_with_state(
+        router_client,
+        router_mode,
+        monitor_arc,
+        embedding_cache_indexer,
+        cache_key_extractor,
+    )
+    .await?;
 
     // Eagerly register router request metrics so they appear as zeros even in
     // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.

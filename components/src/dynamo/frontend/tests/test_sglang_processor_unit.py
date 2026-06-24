@@ -1888,8 +1888,9 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         items = asyncio.run(collect())
 
         assert len(items) == 1
-        assert items[0]["nvext"]["stop_reason"] == "END"
-        assert "stop_reason" not in items[0]["choices"][0]
+        chunk = items[0]["data"]
+        assert chunk["nvext"]["stop_reason"] == "END"
+        assert "stop_reason" not in chunk["choices"][0]
 
     def _run_stream(self, tokenizer, items):
         processor = SglangProcessor(
@@ -1904,11 +1905,17 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         )
 
         async def collect():
-            return [
+            raw_items = [
                 item
                 async for item in processor._generate_and_stream(
                     "req-err", {"model": "test-model"}, {}, [], post
                 )
+            ]
+            return [
+                item["data"]
+                if item.get("_dynamo_annotated") and "data" in item
+                else item
+                for item in raw_items
             ]
 
         return asyncio.run(collect())

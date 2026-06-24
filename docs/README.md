@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: How to Build and Publish Dynamo Docs
-sidebar-title: Dynamo Docs Guide
+sidebar-title: Building and Publishing
 ---
 
 This document describes the architecture, workflows, and maintenance procedures for the
-NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com).
+NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com). It covers how the
+docs **system** works: the branch model, sync workflow, and publishing pipeline. For how to **write**
+docs content (page types, structure, prose, terminology, and links), see the
+[Documentation Style Guide](documentation-style-guide.md).
 
 <Note>
 The documentation website is published at [https://docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo). CI handles publishing, including hosting, CDN, and versioned URL routing.
@@ -272,6 +275,10 @@ Runs two independent link-checking jobs:
 
 ## Content Authoring
 
+This section covers the mechanics of authoring on `main`. For the writing standard (page types,
+headings, prose, terminology, links, and the pre-merge checklist), follow the
+[Documentation Style Guide](documentation-style-guide.md).
+
 ### Writing docs on `main`
 
 1. Edit or add markdown files in `docs/`.
@@ -425,6 +432,35 @@ git push origin v0.9.0
 
 The `release-version` job in `fern-docs.yml` handles everything else
 automatically.
+
+### Redirects
+
+When a page's URL changes — moved to a different section, or its nav label
+renamed — add a redirect to the `redirects:` list in `fern/docs.yml` so existing
+links keep working. The key rule is **scope the redirect to the version whose
+nav actually changed**, and for everyday authoring that is always `dev`:
+
+- **A `main` edit to `docs/index.yml` only regenerates the `dev` nav.** So a page
+  you move or rename on `main` changes only its `/dynamo/dev/<old>` URL. Add a
+  single dev-scoped rule:
+
+  ```yaml
+  - source: "/dynamo/dev/<old-path>"
+    destination: "/dynamo/dev/<new-path>"
+  ```
+
+- **Do not** add unversioned (`/dynamo/<old>`) or `/dynamo/latest/<old>`
+  redirects for that same move. The unversioned root and `/latest/` both resolve
+  to **Latest** (slug `/`) — a frozen snapshot of the newest release that `main`
+  edits never touch — so the old path keeps serving there. A `latest`/unversioned
+  redirect would hijack a still-working URL and send it to a `<new-path>` that
+  does not exist in Latest until the next release re-snapshots it.
+- **Pinned versions (`/dynamo/vX.Y.Z/...`) are immutable** and never need new
+  redirects after the fact.
+
+A page reachable in Latest therefore keeps its old URL at the unversioned and
+`/latest/` prefixes after a `main`-only move — only the `dev` prefix moves, and
+only the `dev` redirect is needed.
 
 ---
 

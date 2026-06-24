@@ -128,6 +128,10 @@ pub(super) fn allows_preemption(policy: SchedulingPolicy) -> bool {
     policy == SchedulingPolicy::Vllm
 }
 
+pub(super) fn supports_destination_reservation(policy: SchedulingPolicy) -> bool {
+    policy == SchedulingPolicy::Vllm
+}
+
 /// TRT-LLM enqueue normalization: a no-evict request's `prompt + output` can
 /// reserve at most the whole KV pool. Returns `max_output_tokens` clamped to the
 /// room left after the prompt, or `None` if the prompt alone leaves no decode

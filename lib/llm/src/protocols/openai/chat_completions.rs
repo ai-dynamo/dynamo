@@ -17,7 +17,7 @@ use super::{
     validate,
 };
 use crate::protocols::common::extensions::{
-    NvExt, NvExtProvider, validate_completion_token_ids_single_choice, validate_nvext_semantics,
+    NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
 };
 
 pub mod aggregator;
@@ -470,7 +470,6 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
             self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
-        validate_nvext_semantics(self.nvext.as_ref())?;
         // none for modalities
         // none for prediction
         // none for audio
