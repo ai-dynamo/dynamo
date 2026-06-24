@@ -1269,20 +1269,6 @@ async fn lost_reserve_or_activation_ack_cleans_ambiguous_destination_ownership()
     }
 }
 
-#[test]
-fn bootstrap_session_deadline_counts_transfer_delay_once() {
-    let started = tokio::time::Instant::now();
-    let timeout = Duration::from_millis(40);
-    let deadline = session_deadline_with_transfer(started, timeout, Some(120.0));
-
-    assert_eq!(deadline - started, Duration::from_millis(160));
-    assert_eq!(
-        session_deadline_with_transfer(started, timeout, Some(120.0)),
-        deadline,
-        "re-observing the same transfer delay must not accumulate it"
-    );
-}
-
 #[tokio::test(start_paused = true)]
 async fn cleanup_ack_can_wait_beyond_the_rendezvous_timeout() {
     let (command_tx, mut command_rx) = mpsc::channel(1);

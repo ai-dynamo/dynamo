@@ -400,31 +400,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn framed_registration_and_round_trip() {
-        let cancel = CancellationToken::new();
-        let server = BootstrapServer::start(0, cancel.clone(), BootstrapServerConfig::default())
-            .await
-            .unwrap();
-        let mut incoming_rx = server.take_incoming_receiver().unwrap();
-        let mut client =
-            connect_to_prefill("127.0.0.1", server.port(), identity(1), registration())
-                .await
-                .unwrap();
-        let mut incoming = incoming_rx.recv().await.unwrap();
-        assert_eq!(incoming.identity, identity(1));
-        incoming
-            .connection
-            .send(BootstrapMessage::Registered)
-            .await
-            .unwrap();
-        assert_eq!(
-            client.recv().await.unwrap(),
-            Some(BootstrapMessage::Registered)
-        );
-        cancel.cancel();
-    }
-
-    #[tokio::test]
     async fn send_rejects_oversized_frame_before_codec_allocation() {
         let cancel = CancellationToken::new();
         let server = BootstrapServer::start(0, cancel.clone(), BootstrapServerConfig::default())

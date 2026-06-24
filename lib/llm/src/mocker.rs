@@ -25,7 +25,6 @@ use dynamo_mocker::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
     RawKvEventSink,
 };
-use dynamo_mocker::common::utils::sleep_precise;
 use dynamo_mocker::engine::create_engine;
 use dynamo_mocker::scheduler::{SchedulerCommandEnvelope, SchedulerHandle};
 use dynamo_mocker::services::bootstrap::{
@@ -90,7 +89,7 @@ async fn wait_for_no_bootstrap_handoff_delay(
     delay_ms: Option<f64>,
 ) {
     if let Some(delay) = no_bootstrap_handoff_delay(is_prefill, has_handoff_session, delay_ms) {
-        sleep_precise(delay).await;
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -1061,18 +1060,71 @@ pub async fn make_mocker_engine(
 #[cfg(test)]
 mod tests {
     use super::MockEngine;
-    use super::no_bootstrap_handoff_delay;
-    use dynamo_mocker::common::protocols::{MockEngineArgs, WorkerType};
+    use crate::protocols::common::llm_backend::PreprocessedRequest;
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_mocker::common::protocols::{MockEngineArgs, OutputSignal, WorkerType};
+    use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
+    use futures::StreamExt;
     use std::time::Duration;
 
-    #[test]
-    fn response_loop_delay_is_owned_only_by_no_bootstrap_prefill() {
-        assert_eq!(
-            no_bootstrap_handoff_delay(true, false, Some(25.0)),
-            Some(Duration::from_millis(25))
+    fn prefill_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("mock".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions {
+                max_tokens: Some(1),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .eos_token_ids(vec![])
+            .annotations(vec![])
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_bootstrap_prefill_delays_terminal_finish_once() {
+        let args = MockEngineArgs::builder()
+            .worker_type(WorkerType::Prefill)
+            .build()
+            .unwrap();
+        let engine = MockEngine::new(args);
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        engine.request_senders.set(vec![request_tx]).unwrap();
+
+        let mut stream = engine
+            .generate(SingleIn::new(prefill_request()))
+            .await
+            .unwrap();
+        let request = request_rx.recv().await.unwrap();
+        let request_id = request.uuid.unwrap();
+        engine
+            .active_requests
+            .get(&request_id)
+            .unwrap()
+            .send(OutputSignal {
+                uuid: request_id,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: Some(100.0),
+            })
+            .unwrap();
+
+        let token = stream.next().await.unwrap();
+        assert_eq!(token.token_ids.len(), 1);
+        assert!(token.finish_reason.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(99), stream.next())
+                .await
+                .is_err()
         );
-        assert_eq!(no_bootstrap_handoff_delay(true, true, Some(25.0)), None);
-        assert_eq!(no_bootstrap_handoff_delay(false, false, Some(25.0)), None);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let finish = stream.next().await.unwrap();
+        assert!(finish.token_ids.is_empty());
+        assert!(finish.finish_reason.is_some());
+        assert!(stream.next().await.is_none());
     }
 
     #[test]

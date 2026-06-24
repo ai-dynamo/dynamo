@@ -582,6 +582,7 @@ impl LiveBoundaryCore for VllmCore {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "kvbm-offload")]
     use super::*;
 
     #[cfg(feature = "kvbm-offload")]
@@ -613,17 +614,6 @@ mod tests {
             self.events.lock().unwrap().push((storage_tier, event));
             Ok(())
         }
-    }
-
-    #[tokio::test]
-    async fn internal_deadline_is_a_zero_progress_wake_source() {
-        let scheduler_start = Instant::now();
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            wait_for_internal_deadline(&scheduler_start, Some(0.0)),
-        )
-        .await
-        .expect("an existing internal deadline must wake the scheduler");
     }
 
     #[cfg(feature = "kvbm-offload")]

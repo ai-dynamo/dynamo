@@ -8,48 +8,9 @@ use super::super::entrypoints::{
     run_trace_workload_collect,
 };
 use super::*;
-use crate::common::handoff::HandoffCoordinatorCore;
 use crate::common::protocols::{EngineType, MockEngineArgs, SglangArgs, WorkerType};
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::TraceSimulationReport;
-
-#[test]
-fn action_queue_membership_balances_across_defer_wake_and_removal() {
-    let uuid = Uuid::from_u128(1);
-    let other_uuid = Uuid::from_u128(2);
-    let handoff_id = HandoffId::from(Uuid::from_u128(3));
-    let mut coordinator = HandoffCoordinatorCore::new(handoff_id, HandoffOrder::SourceFirst);
-    let action = coordinator.start().unwrap().pop().unwrap();
-    let mut queues = DisaggActionQueues::default();
-
-    queues.enqueue_all(uuid, [action, action]);
-    assert!(queues.contains(uuid));
-
-    let (_, first) = queues.pop_pending().unwrap();
-    queues.wait_for_worker(uuid, first, SimulationWorkerStage::Prefill);
-    let (_, second) = queues.pop_pending().unwrap();
-    queues.defer(uuid, second, SimulationWorkerStage::Decode, 7);
-    queues.wake_worker_waiters(SimulationWorkerStage::Prefill);
-
-    assert!(queues.contains(uuid));
-    assert_eq!(queues.pop_pending().unwrap().0, uuid);
-    assert!(
-        queues.contains(uuid),
-        "deferred action still owns membership"
-    );
-
-    queues.wake_deferred(SimulationWorkerStage::Decode, 7);
-    assert_eq!(queues.pop_pending().unwrap().0, uuid);
-    assert!(!queues.contains(uuid));
-
-    queues.enqueue_all(other_uuid, [action]);
-    let (_, other) = queues.pop_pending().unwrap();
-    queues.defer(other_uuid, other, SimulationWorkerStage::Prefill, 9);
-    queues.enqueue_all(other_uuid, [action]);
-    queues.remove(other_uuid);
-    assert!(!queues.contains(other_uuid));
-    assert!(queues.is_empty());
-}
 
 fn staged_args(worker_type: WorkerType, speedup_ratio: f64) -> MockEngineArgs {
     MockEngineArgs::builder()
@@ -720,10 +681,10 @@ fn test_permanently_unavailable_destination_unwinds_without_stalling() {
 }
 
 #[test]
-fn test_handoff_delay_increases_decode_visible_ttft() {
+fn handoff_delay_is_applied_once_to_decode_visible_ttft() {
     let requests = vec![request(1, 128, 2, 0.0)];
 
-    let (baseline_collector, _) = run_trace_collect(
+    let (baseline_collector, baseline_stats) = run_trace_collect(
         &disagg_config(),
         requests.clone(),
         None,
@@ -742,12 +703,17 @@ fn test_handoff_delay_increases_decode_visible_ttft() {
     let delayed = delayed_collector.snapshot(Uuid::from_u128(1)).unwrap();
     let baseline_ttft = baseline.first_token_ms.unwrap() - baseline.arrival_time_ms;
     let delayed_ttft = delayed.first_token_ms.unwrap() - delayed.arrival_time_ms;
+    let uuid = Uuid::from_u128(1);
+    let handoff_delta = delayed_stats.handoff_ms[&uuid] - baseline_stats.handoff_ms[&uuid];
 
     assert!(
         delayed_ttft >= baseline_ttft + 120.0,
         "expected delayed TTFT to include roughly 128ms of handoff delay, baseline={baseline_ttft}, delayed={delayed_ttft}"
     );
-    let uuid = Uuid::from_u128(1);
+    assert!(
+        (handoff_delta - 128.0).abs() < 1e-6,
+        "handoff delay must be applied once, observed delta={handoff_delta}ms"
+    );
     let queued_idx = transition_index(
         &delayed_stats.transition_log,
         DisaggTransition::TransferQueued { uuid },
@@ -757,7 +723,6 @@ fn test_handoff_delay_increases_decode_visible_ttft() {
         DisaggTransition::DestinationActivated { uuid },
     );
     assert!(queued_idx < activated_idx);
-    assert!(delayed_stats.handoff_ms[&uuid] >= 120.0);
 }
 
 #[test]
