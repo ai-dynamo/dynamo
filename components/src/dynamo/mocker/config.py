@@ -308,7 +308,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         bandwidth_g2_to_g4_gbps=getattr(args, "bandwidth_g2_to_g4_gbps", None),
         bandwidth_g4_to_g2_gbps=getattr(args, "bandwidth_g4_to_g2_gbps", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
-        response_replay_trace_path=getattr(args, "response_replay_trace_path", None),
+        response_replay_trace_path=args.response_replay_trace_path,
         sglang=_build_sglang_args(args),
         trtllm=_build_trtllm_args(args),
         preemption_mode=getattr(args, "preemption_mode", "lifo"),

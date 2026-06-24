@@ -1024,6 +1024,17 @@ impl Trace {
             }
 
             for (turn_idx, turn) in session.turns.iter().enumerate() {
+                if let Some(output_token_ids) = turn.output_token_ids.as_ref()
+                    && output_token_ids.len() != turn.max_output_tokens
+                {
+                    bail!(
+                        "session {} turn {} max_output_tokens {} does not match output_token_ids length {}",
+                        session.session_id,
+                        turn_idx,
+                        turn.max_output_tokens,
+                        output_token_ids.len()
+                    );
+                }
                 if turn.input_length == 0 {
                     bail!(
                         "session {} turn {} must have a positive input_length",

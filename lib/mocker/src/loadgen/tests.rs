@@ -212,6 +212,32 @@ fn test_from_mooncake_rejects_output_token_length_mismatch() {
 }
 
 #[test]
+fn test_trace_validate_rejects_programmatic_output_token_length_mismatch() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "s".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 4,
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![10]),
+                hash_ids: vec![1],
+                delay_after_previous_ms: 0.0,
+                ..Default::default()
+            }],
+        }],
+    };
+
+    let err = trace.validate_for_trace_mode().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("max_output_tokens 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
+}
+
+#[test]
 fn test_from_mooncake_multi_turn_uses_session_id_and_delay() {
     let file = write_trace(&[
         serde_json::json!({
