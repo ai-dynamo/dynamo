@@ -13,7 +13,7 @@ For the feature itself — what the embedding cache is, support across backends 
 
 ## Recipe
 
-The numbers below come from the [`qwen3.6-35b` recipe](../../recipes/qwen3.6-35b/README.md), which runs three configurations on the same single-GPU node so the only thing that varies is the Dynamo feature set:
+The numbers below come from the [`qwen3.6-35b-a3b-fp8` recipe](../../recipes/qwen3.6-35b-a3b-fp8/README.md), which runs three configurations on the same single-GPU node so the only thing that varies is the Dynamo feature set:
 
 | Config         | Stack          | Frontend-decoding | Embedding cache |
 |----------------|----------------|-------------------|-----------------|
@@ -23,7 +23,7 @@ The numbers below come from the [`qwen3.6-35b` recipe](../../recipes/qwen3.6-35b
 
 **Workload:** `Qwen/Qwen3.6-35B-A3B-FP8`, sliding-window dataset (30 users × 8 turns, window = 5, 2400×1080 base64 images, 8000 input text tokens, `max_tokens=1024`, concurrency = 30). Each turn shares 4-of-5 images with the previous turn of the same user, so repeated images dominate — the exact shape the embedding cache is designed for.
 
-See the [recipe README](../../recipes/qwen3.6-35b/README.md) for standalone deploy instructions, and the [benchmark README](../../recipes/qwen3.6-35b/benchmark/README.md) for dataset generation and the `aiperf` invocation.
+See the [recipe README](../../recipes/qwen3.6-35b-a3b-fp8/README.md) for standalone deploy instructions, and the [benchmark README](../../recipes/qwen3.6-35b-a3b-fp8/benchmark/README.md) for dataset generation and the `aiperf` invocation.
 
 ## Results — H100
 
@@ -44,7 +44,7 @@ Change vs the `vllm-serve` baseline (negative TTFT/ITL = lower latency, better):
 ## Reproduce
 
 ```bash
-cd recipes/qwen3.6-35b/benchmark
+cd recipes/qwen3.6-35b-a3b-fp8/benchmark
 HW=h100   # or gb200
 ./run-all-benchmarks.sh -n <namespace> --hw "${HW}"
 ```
@@ -53,4 +53,4 @@ Each config's `profile_export_aiperf.json` lands under
 `~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/`
 and holds the headline metrics.
 
-Full instructions and prerequisites live in [`recipes/qwen3.6-35b/README.md`](../../recipes/qwen3.6-35b/README.md).
+Full instructions and prerequisites live in [`recipes/qwen3.6-35b-a3b-fp8/README.md`](../../recipes/qwen3.6-35b-a3b-fp8/README.md).

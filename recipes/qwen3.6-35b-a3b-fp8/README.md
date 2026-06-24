@@ -97,7 +97,7 @@ wipe everything: `kubectl -n $NAMESPACE delete pvc shared-model-cache`.
 ## Directory layout
 
 ```text
-qwen3.6-35b/
+qwen3.6-35b-a3b-fp8/
 ├── README.md                   # this file — standalone deploy guide
 ├── hw/                         # per-cluster user state — edit hostname here
 │   ├── h100.env
