@@ -28,6 +28,10 @@ def run_trace_replay(
     trace_num_prefix_groups=0,
     report_jsonl_path=None,
     max_sim_time_ms=None,
+    model_name=None,
+    sla_ttft_ms=None,
+    sla_itl_ms=None,
+    sla_e2e_ms=None,
 ):
     return _run_mocker_trace_replay(
         trace_file,
@@ -49,6 +53,12 @@ def run_trace_replay(
         trace_num_prefix_groups=trace_num_prefix_groups,
         report_jsonl_path=report_jsonl_path,
         max_sim_time_ms=max_sim_time_ms,
+        model_name=model_name,
+        # Goodput SLA (offline replay only): when set, the report carries
+        # goodput_* keys classifying SLA-satisfying requests.
+        sla_ttft_ms=sla_ttft_ms,
+        sla_itl_ms=sla_itl_ms,
+        sla_e2e_ms=sla_e2e_ms,
     )
 
 
@@ -74,6 +84,7 @@ def run_synthetic_trace_replay(
     shared_prefix_ratio=0.0,
     num_prefix_groups=0,
     inter_turn_delay_ms=0.0,
+    model_name=None,
 ):
     return _run_mocker_synthetic_trace_replay(
         input_tokens,
@@ -96,4 +107,5 @@ def run_synthetic_trace_replay(
         shared_prefix_ratio=shared_prefix_ratio,
         num_prefix_groups=num_prefix_groups,
         inter_turn_delay_ms=inter_turn_delay_ms,
+        model_name=model_name,
     )

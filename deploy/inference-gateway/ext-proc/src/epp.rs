@@ -328,18 +328,12 @@ impl Router {
         match outcome {
             // Advisory only: the gateway owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            // Surface backpressure as an error so the caller's
-            // enforce_disagg / aggregated-fallback logic in `pick()` can
-            // decide whether to fail the request or fall back to decode-only.
-            PrefillQueryOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => Err(anyhow::anyhow!(
-                "Prefill router backpressure: {:?} (queued_isl_tokens={}, max={:?})",
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens
+            PrefillQueryOutcome::QueueRejected { rejection } => Err(anyhow::anyhow!(
+                "Prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
+                rejection.policy_class,
+                rejection.limit_kind,
+                rejection.current,
+                rejection.limit
             )),
         }
     }

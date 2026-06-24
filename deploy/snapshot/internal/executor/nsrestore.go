@@ -20,6 +20,7 @@ type RestoreOptions struct {
 	CheckpointPath string
 	CUDADeviceMap  string
 	CgroupRoot     string
+	TargetPodIP    string
 }
 
 type RestoreInNamespaceResult struct {
@@ -36,6 +37,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_path", opts.CheckpointPath,
 		"has_cuda_map", opts.CUDADeviceMap != "",
 		"cgroup_root", opts.CgroupRoot,
+		"target_pod_ip_present", opts.TargetPodIP != "",
 	)
 
 	manifestReadStart := time.Now()
@@ -53,6 +55,9 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 
 	// Phase 1: Configure — build CRIU opts from manifest
 	configureStart := time.Now()
+	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
+		return nil, err
+	}
 	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, log)
 	if err != nil {
 		return nil, err

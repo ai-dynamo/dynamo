@@ -252,7 +252,7 @@ the runtime wheel from a clone:
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo.git
-pip install maturin
+pip install 'maturin[patchelf]'
 cd dynamo/lib/bindings/python && maturin build --release --out /tmp/wheels
 pip install /tmp/wheels/*.whl       # ai-dynamo-runtime
 pip install /path/to/dynamo         # ai-dynamo (components/ tree)

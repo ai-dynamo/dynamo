@@ -242,6 +242,7 @@ fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
         delay_after_previous_ms: 0.0,
         priority: -2,
         strict_priority: 8,
+        policy_class: None,
     };
 
     let request = turn
