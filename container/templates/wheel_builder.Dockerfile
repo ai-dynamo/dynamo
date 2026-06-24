@@ -566,6 +566,13 @@ RUN set -u; injected=0; \
     done; \
     echo "wheel NOTICES bundled into $injected wheel(s)"
 
+# cargo vendor below resolves the FULL root workspace, which lists
+# deploy/inference-gateway/ext-proc as a member; the lib/ + components/ copies
+# above omit deploy/, so its manifest must be present or the resolve fails.
+# Copied here (not in the source block above) to keep the wheel-build layers
+# cached — only the vendor path needs it.
+COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
+
 # Compliance source archival: vendor the workspace lockfile for the OSRB
 # bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB
 # vendor pull. The vendor tree is consumed downstream by each runtime
