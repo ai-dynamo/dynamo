@@ -501,6 +501,18 @@ func GetDGDComponentResourceLabels(dgd *v1beta1.DynamoGraphDeployment, component
 	return labels
 }
 
+// GetDGDComponentResourceAnnotations returns annotations that should be applied to resources
+// created directly for a DGD component.
+func GetDGDComponentResourceAnnotations(dgd *v1beta1.DynamoGraphDeployment, componentName string, component *v1beta1.DynamoComponentDeploymentSharedSpec) map[string]string {
+	annotations := map[string]string{}
+	if dgd != nil {
+		maps.Copy(annotations, dgd.Spec.Annotations)
+		maps.Copy(annotations, getDGDComponentAlphaAnnotations(dgd, componentName))
+	}
+	maps.Copy(annotations, GetPodTemplateAnnotations(component))
+	return annotations
+}
+
 // GetDGDComponentPreservedIngressSpec returns an alpha component ingress spec that
 // was preserved during conversion to v1beta1.
 func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, componentName string) (IngressSpec, bool) {
@@ -1404,6 +1416,26 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
 
+func applyCheckpointProbeCadence(
+	container *corev1.Container,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) {
+	if operatorConfig.Checkpoint.Enabled &&
+		checkpointInfo != nil &&
+		checkpointInfo.Enabled &&
+		checkpointInfo.Ready &&
+		IsWorkerComponent(string(component.ComponentType)) {
+		if container.ReadinessProbe != nil {
+			container.ReadinessProbe.PeriodSeconds = 1
+		}
+		if container.StartupProbe != nil {
+			container.StartupProbe.PeriodSeconds = 1
+		}
+	}
+}
+
 // applyDefaultSecurityContext sets secure defaults for pod security context.
 // Currently only sets fsGroup to solve volume permission issues.
 // Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
@@ -1485,6 +1517,7 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	applyCheckpointProbeCadence(&container, component, operatorConfig, checkpointInfo)
 
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)

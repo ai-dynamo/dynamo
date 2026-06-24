@@ -123,7 +123,14 @@ python3 -m dynamo.frontend &
 # run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" --skip-tokenizer-init $ENCODE_EXTRA_ARGS &
+env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
+  --enable-multimodal \
+  --disaggregation-mode encode \
+  --model-path "$MODEL_NAME" \
+  $SERVED_MODEL_ARG \
+  --chat-template "$CHAT_TEMPLATE" \
+  --skip-tokenizer-init \
+  $ENCODE_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Wait for encode worker to initialize before starting PD worker.
@@ -141,7 +148,8 @@ fi
 echo "Starting PD worker on GPU $DYN_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
-  --multimodal-worker \
+  --enable-multimodal \
+  --disaggregation-mode pd \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
   --page-size 16 \

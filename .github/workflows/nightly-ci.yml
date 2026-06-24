@@ -252,7 +252,11 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      # Nightly serves as the continuous-compliance source-archival cadence
+      # (post-merge-ci skips main and only archives on release/*.*.* cuts).
+      archive_sources: true
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -267,7 +271,9 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      archive_sources: true
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -282,10 +288,22 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      archive_sources: true
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
+
+  # ============================================================================
+  # COMPLIANCE
+  # ============================================================================
+  # Compliance extract + verify now runs as an inline step INSIDE each build job
+  # (inline_compliance: true above), on the same warm builder — a cache hit + small
+  # scratch export instead of a cold full-image rebuild on the fresh builder. The
+  # build jobs already set archive_sources: true (the continuous-compliance
+  # source-archival cadence), so /sources.zip is still emitted; /legal + /sboms
+  # upload at the default 30-day retention. A compliance failure fails the build.
 
   # ============================================================================
   # TEST JOBS

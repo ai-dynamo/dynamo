@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Rejection
+subtitle: Sheds load with HTTP 503 when all workers exceed admission-control thresholds, preventing cascading failures and OOMs.
 ---
 
 This document describes how Dynamo implements request rejection to prevent system overload and maintain service stability under high load conditions.
