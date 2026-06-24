@@ -146,6 +146,55 @@ runs:
           echo "No existing vCluster named ${VCLUSTER_NAME} found."
         fi
 
+    - name: Delete stale checkpoint vClusters in shared namespace
+      if: steps.resolve-names.outputs.namespace == 'dynamo-deploy-test'
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+      run: |
+        echo "::group::Delete stale checkpoint vClusters in ${NAMESPACE}"
+        set -euo pipefail
+
+        mapfile -t EXISTING_VCLUSTERS < <(
+          kubectl get statefulsets -n "${NAMESPACE}" -l app=vcluster \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+            | sort -u
+        )
+
+        for existing in "${EXISTING_VCLUSTERS[@]}"; do
+          if [ -z "${existing}" ]; then
+            continue
+          fi
+
+          case "${existing}" in
+            ci-*-checkpoint-vllm|ci-*-checkpoint-sglang)
+              ;;
+            *)
+              continue
+              ;;
+          esac
+
+          if [ "${existing}" = "${VCLUSTER_NAME}" ]; then
+            continue
+          fi
+
+          echo "Deleting stale checkpoint vCluster: ${existing}"
+          if ! vcluster delete "${existing}" --namespace "${NAMESPACE}" 2>&1; then
+            kubectl delete statefulset "${existing}" \
+              -n "${NAMESPACE}" \
+              --ignore-not-found 2>&1 || true
+            kubectl delete pvc,secret,svc,configmap \
+              -n "${NAMESPACE}" \
+              -l "release=${existing}" \
+              --ignore-not-found 2>&1 || true
+          fi
+          kubectl wait "statefulset/${existing}" -n "${NAMESPACE}" \
+            --for=delete --timeout=120s 2>/dev/null || true
+        done
+
+        echo "::endgroup::"
+
     - name: Resolve vCluster host priority class
       id: resolve-vcluster-priority
       shell: bash
