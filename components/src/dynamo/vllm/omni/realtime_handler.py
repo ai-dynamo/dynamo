@@ -93,24 +93,18 @@ def _session_updated_event(session: Any) -> dict:
 
 class _Turn:
     """One request->response cycle: a committed span of input audio and the
-    single OpenAI-spec ``response`` it produces. Owns the turn's processing.
+    single OpenAI-spec ``response`` it produces.
 
-    Processing workflow (driven by ``RealtimeOmniHandler.generate``):
-
-      1. ``ensure_turn`` opens a turn on the first ``input_audio_buffer.append``
-         / ``.commit`` and spawns ``run`` as ``task``.
-      2. ``append`` pushes decoded float32 audio onto ``audio_queue``; the final
-         ``commit`` (or end of the client stream) pushes ``None`` to close input.
-      3. ``run`` -- serialized via the connection lock so only one turn is in
-         flight -- drives the engine over this turn's audio and emits
-         ``response.created`` -> ``response.output_audio.delta``* ->
-         ``response.output_audio.done`` -> ``response.done``.
+    Owns its engine drive (``_drive_engine``: it feeds its buffered audio into
+    the engine and yields stage outputs); ``RealtimeOmniHandler`` orchestrates
+    turns and translates those outputs into OpenAI-spec server events (see
+    ``RealtimeOmniHandler._run_turn``).
 
     Fields: ``response_id`` / ``item_id`` tag every event of this turn;
     ``audio_queue`` carries the float32 input (``None`` = end of input);
     ``audio_ref`` tracks the last emitted waveform so cumulative engine outputs
     are de-duplicated into true deltas; ``output_modalities`` is snapshotted from
-    the latest ``session.update``.
+    the latest ``session.update``; ``task`` runs the turn's processing.
     """
 
     def __init__(
@@ -119,11 +113,9 @@ class _Turn:
         engine_client: Any,
         streaming_input_factory: StreamingInputFactory,
         default_sampling_params_list: Optional[Sequence[Any]] = None,
-        emit_transcript: bool = True,
         output_modalities: list[str] | None = None,
-        response_id: str | None = None,
     ) -> None:
-        self.response_id = response_id or f"resp_{uuid.uuid4().hex}"
+        self.response_id = f"resp_{uuid.uuid4().hex}"
         self.item_id = f"item_{uuid.uuid4().hex}"
         # Unbounded on purpose: filled by non-blocking put_nowait so the inbound
         # demux never stalls control events (commit/clear/session.update) behind
@@ -136,53 +128,9 @@ class _Turn:
         self._engine_client = engine_client
         self._streaming_input_factory = streaming_input_factory
         self._default_sampling_params_list = default_sampling_params_list
-        self._emit_transcript = emit_transcript
-
-    async def run(
-        self,
-        context: Context,
-        emit: Callable[[dict], Awaitable[None]],
-        turn_lock: "asyncio.Lock",
-    ) -> None:
-        """Drive this turn's engine generation and translate its outputs.
-
-        Holds ``turn_lock`` for the whole ``response.created`` -> ``response.done``
-        lifecycle so only one turn's response is on the wire at a time; later
-        turns block here until this one finishes (their audio keeps buffering in
-        their own queue meanwhile).
-        """
-        async with turn_lock:
-            await emit(self._response_created_event())
-
-            sent_audio = False
-            try:
-                async for output in self._drive_engine():
-                    if context.is_stopped():
-                        break
-
-                    transcript = self._extract_transcript(output)
-                    if transcript and self._emit_transcript:
-                        await emit(self._transcript_delta_event(transcript))
-
-                    for chunk in self._extract_audio_chunks(output):
-                        sent_audio = True
-                        await emit(self._audio_delta_event(chunk))
-
-                if context.is_stopped():
-                    # Connection torn down mid-turn; don't claim a completed response.
-                    return
-
-                if sent_audio:
-                    await emit(self._audio_done_event())
-                await emit(self._response_done_event())
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
-                logger.exception("realtime omni turn failed: %s", exc)
-                await emit(self._error_event(exc))
 
     async def _drive_engine(self) -> AsyncGenerator[Any, None]:
-        """Feed buffered audio into the engine and yield its stage outputs.
+        """Feed this turn's buffered audio into the engine and yield stage outputs.
 
         The float32 ``audio_stream`` (ending on the ``None`` sentinel) and an
         ``input_stream`` token queue are handed to the streaming-input factory
@@ -224,20 +172,108 @@ class _Turn:
                 input_stream.put_nowait(token_ids)
             yield output
 
+    @staticmethod
+    def _thinker_token_ids(output: Any) -> list[int]:
+        """Stage-0 (thinker) per-step token ids to feed back to the talker."""
+        if getattr(output, "stage_id", None) != 0:
+            return []
+        outputs = getattr(output, "outputs", None)
+        if not outputs:
+            return []
+        token_ids = getattr(outputs[0], "token_ids", None)
+        return list(token_ids) if token_ids else []
+
+
+class RealtimeOmniHandler:
+    """Bridge OpenAI Realtime client events to vLLM-Omni streaming generation.
+
+    Owns the per-connection orchestration (event demux, turn serialization,
+    output queue) and the conversion between the realtime API and model output:
+    it drives each ``_Turn``'s engine generation and translates the engine's
+    stage outputs into OpenAI-spec server events.
+    """
+
+    def __init__(
+        self,
+        *,
+        engine_client: Any,
+        model_name: str,
+        streaming_input_factory: StreamingInputFactory,
+        default_sampling_params_list: Optional[Sequence[Any]] = None,
+        emit_transcript: bool = True,
+    ) -> None:
+        self.engine_client = engine_client
+        self.model_name = model_name
+        self._streaming_input_factory = streaming_input_factory
+        self._default_sampling_params_list = default_sampling_params_list
+        self._emit_transcript = emit_transcript
+
+    def _new_turn(self, output_modalities: list[str] | None) -> _Turn:
+        return _Turn(
+            engine_client=self.engine_client,
+            streaming_input_factory=self._streaming_input_factory,
+            default_sampling_params_list=self._default_sampling_params_list,
+            output_modalities=output_modalities,
+        )
+
+    async def _run_turn(
+        self,
+        turn: _Turn,
+        context: Context,
+        emit: Callable[[dict], Awaitable[None]],
+        turn_lock: "asyncio.Lock",
+    ) -> None:
+        """Drive one turn's engine generation and translate its outputs.
+
+        Holds ``turn_lock`` for the whole ``response.created`` -> ``response.done``
+        lifecycle so only one turn's response is on the wire at a time; later
+        turns block here until this one finishes (their audio keeps buffering in
+        their own queue meanwhile).
+        """
+        async with turn_lock:
+            await emit(self._response_created_event(turn))
+
+            sent_audio = False
+            try:
+                async for output in turn._drive_engine():
+                    if context.is_stopped():
+                        break
+
+                    transcript = self._extract_transcript(output)
+                    if transcript and self._emit_transcript:
+                        await emit(self._transcript_delta_event(turn, transcript))
+
+                    for chunk in self._extract_audio_chunks(turn, output):
+                        sent_audio = True
+                        await emit(self._audio_delta_event(turn, chunk))
+
+                if context.is_stopped():
+                    # Connection torn down mid-turn; don't claim a completed response.
+                    return
+
+                if sent_audio:
+                    await emit(self._audio_done_event(turn))
+                await emit(self._response_done_event(turn))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
+                logger.exception("realtime omni turn failed: %s", exc)
+                await emit(self._error_event(exc))
+
     # -- response lifecycle events --------------------------------------------
 
-    def _response_created_event(self) -> dict:
+    def _response_created_event(self, turn: _Turn) -> dict:
         return {
             "type": "response.created",
             "event_id": _event_id(),
-            "response": _response_payload(self.response_id, "in_progress"),
+            "response": _response_payload(turn.response_id, "in_progress"),
         }
 
-    def _response_done_event(self) -> dict:
+    def _response_done_event(self, turn: _Turn) -> dict:
         return {
             "type": "response.done",
             "event_id": _event_id(),
-            "response": _response_payload(self.response_id, "completed"),
+            "response": _response_payload(turn.response_id, "completed"),
         }
 
     def _error_event(self, exc: Exception) -> dict:
@@ -253,48 +289,37 @@ class _Turn:
 
     # -- output translation (ported from vllm-omni realtime_connection.py) ----
 
-    def _audio_delta_event(self, chunk: np.ndarray) -> dict:
+    def _audio_delta_event(self, turn: _Turn, chunk: np.ndarray) -> dict:
         return {
             "type": "response.output_audio.delta",
             "event_id": _event_id(),
-            "response_id": self.response_id,
-            "item_id": self.item_id,
+            "response_id": turn.response_id,
+            "item_id": turn.item_id,
             "output_index": 0,
             "content_index": 0,
             "delta": _pcm16_b64(chunk),
         }
 
-    def _audio_done_event(self) -> dict:
+    def _audio_done_event(self, turn: _Turn) -> dict:
         return {
             "type": "response.output_audio.done",
             "event_id": _event_id(),
-            "response_id": self.response_id,
-            "item_id": self.item_id,
+            "response_id": turn.response_id,
+            "item_id": turn.item_id,
             "output_index": 0,
             "content_index": 0,
         }
 
-    def _transcript_delta_event(self, delta: str) -> dict:
+    def _transcript_delta_event(self, turn: _Turn, delta: str) -> dict:
         return {
             "type": "response.output_audio_transcript.delta",
             "event_id": _event_id(),
-            "response_id": self.response_id,
-            "item_id": self.item_id,
+            "response_id": turn.response_id,
+            "item_id": turn.item_id,
             "output_index": 0,
             "content_index": 0,
             "delta": delta,
         }
-
-    @staticmethod
-    def _thinker_token_ids(output: Any) -> list[int]:
-        """Stage-0 (thinker) per-step token ids to feed back to the talker."""
-        if getattr(output, "stage_id", None) != 0:
-            return []
-        outputs = getattr(output, "outputs", None)
-        if not outputs:
-            return []
-        token_ids = getattr(outputs[0], "token_ids", None)
-        return list(token_ids) if token_ids else []
 
     @staticmethod
     def _extract_transcript(output: Any) -> str:
@@ -306,13 +331,13 @@ class _Turn:
             return ""
         return getattr(outputs[0], "text", "") or ""
 
-    def _extract_audio_chunks(self, output: Any) -> list[np.ndarray]:
+    def _extract_audio_chunks(self, turn: _Turn, output: Any) -> list[np.ndarray]:
         """Extract per-step audio deltas from an engine output.
 
         Audio lives in ``output.multimodal_output['audio'|'model_outputs']`` as a
         float32 waveform (or list of them). Some engine paths emit a growing
         cumulative waveform; ``_waveform_to_deltas`` reconciles both shapes
-        against ``audio_ref`` so the client never hears duplicates.
+        against ``turn.audio_ref`` so the client never hears duplicates.
         """
         mm = getattr(output, "multimodal_output", None)
         if not isinstance(mm, dict):
@@ -336,57 +361,25 @@ class _Turn:
 
         if arr is None or arr.size == 0:
             return []
-        return self._waveform_to_deltas(arr)
+        return self._waveform_to_deltas(turn, arr)
 
-    def _waveform_to_deltas(self, arr: np.ndarray) -> list[np.ndarray]:
+    def _waveform_to_deltas(self, turn: _Turn, arr: np.ndarray) -> list[np.ndarray]:
         """Convert one streaming PCM f32 chunk into incremental piece(s)."""
         if arr.size == 0:
             return []
-        ref = self.audio_ref
+        ref = turn.audio_ref
         if ref is None:
-            self.audio_ref = arr.copy()
+            turn.audio_ref = arr.copy()
             return [arr]
         if _numpy_audio_prefix_match(ref, arr):
             delta = arr[ref.shape[0] :]
-            self.audio_ref = arr.copy()
+            turn.audio_ref = arr.copy()
             return [delta] if delta.size > 0 else []
         # True per-step delta (not a prefix extension of what we have seen). The
         # growing concat makes this O(n^2) over a response, but per-response audio
         # is bounded (seconds); kept to mirror vLLM-Omni's realtime_connection.
-        self.audio_ref = np.concatenate([ref, arr])
+        turn.audio_ref = np.concatenate([ref, arr])
         return [arr]
-
-
-class RealtimeOmniHandler:
-    """Bridge OpenAI Realtime client events to vLLM-Omni streaming generation.
-
-    Owns the per-connection orchestration (event demux, turn serialization,
-    output queue); each turn's processing lives on ``_Turn``.
-    """
-
-    def __init__(
-        self,
-        *,
-        engine_client: Any,
-        model_name: str,
-        streaming_input_factory: StreamingInputFactory,
-        default_sampling_params_list: Optional[Sequence[Any]] = None,
-        emit_transcript: bool = True,
-    ) -> None:
-        self.engine_client = engine_client
-        self.model_name = model_name
-        self._streaming_input_factory = streaming_input_factory
-        self._default_sampling_params_list = default_sampling_params_list
-        self._emit_transcript = emit_transcript
-
-    def _new_turn(self, output_modalities: list[str] | None) -> _Turn:
-        return _Turn(
-            engine_client=self.engine_client,
-            streaming_input_factory=self._streaming_input_factory,
-            default_sampling_params_list=self._default_sampling_params_list,
-            emit_transcript=self._emit_transcript,
-            output_modalities=output_modalities,
-        )
 
     async def generate(
         self, request_stream: AsyncGenerator[Any, None], context: Context
@@ -406,7 +399,7 @@ class RealtimeOmniHandler:
         # snapshotted into each turn so the engine emits text/audio accordingly.
         session_output_modalities: list[str] | None = None
         # Serialize turns: at most one response in flight at a time, matching
-        # vLLM-Omni's single-active-generation model (see _Turn.run).
+        # vLLM-Omni's single-active-generation model (see _run_turn).
         turn_lock = asyncio.Lock()
 
         async def emit(event: dict) -> None:
@@ -418,7 +411,7 @@ class RealtimeOmniHandler:
                 active_turn = self._new_turn(session_output_modalities)
                 turns.append(active_turn)
                 active_turn.task = asyncio.create_task(
-                    active_turn.run(context, emit, turn_lock)
+                    self._run_turn(active_turn, context, emit, turn_lock)
                 )
             return active_turn
 
