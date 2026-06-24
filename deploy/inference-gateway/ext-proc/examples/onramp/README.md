@@ -26,7 +26,7 @@ The EPP can be served in 2 modes. The two modes are selected at startup by **`DY
 
 ## Limitations
 
-| This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
+| Concern | Router-only mode (gap vs full Dynamo) |
 |---|---|
 Duplicate store/remove (vLLM "retries") | parity
 In-stream ordering |  parity
@@ -38,15 +38,68 @@ Data Parallelism | Not supported
 
 ## Examples
 
+If you are starting from scratch install the [Prerequisites](#1-prerequisites) and apply the provided example file:
+
 - `agg.yaml` — aggregated: one vLLM pool, KV-aware load balancing.
 - `disagg.yaml` — disaggregated: prefill + decode pools, KV-aware P/D selection. Note that for the disaggregated serving you need to also build the sidecar to orchestrate the pull of the kv cache from the prefill worker.
 
-## Installation Steps
+```bash
+kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml
+```
+
+Otherwise follow the steps below.
+
+## Example Progression from vLLM to vLLM + Dynamo + GAIE
+
+### Initial Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen
+  labels:
+    app: vllm-qwen
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - "--model"
+            - "Qwen/Qwen3-0.6B"
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen
+spec:
+  selector:
+    app: vllm-qwen
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+```
 
 ### 1. Prerequisites
 
 Set up a Gateway-API gateway + Inference Extension (GAIE) if you don't have one
-yet. Follow the instructions for your gateway (i.e. [AgentGateway](https://agentgateway.dev/docs/kubernetes/main/quickstart/install/)) and [Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
+yet. Follow the instructions for your gateway (e.g. [AgentGateway](https://agentgateway.dev/docs/kubernetes/main/quickstart/install/)) and [Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
 
 We provide a convenience script if you are installing from scratch for experimentation.
 ```bash
@@ -62,9 +115,14 @@ tokenizer.
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-token>
 ```
 
-### 2. Wire the InferencePool and HTTPRoute
+### 2. Create / Wire the InferencePool and HTTPRoute
 
-Point the `InferencePool` at your vLLM workers:
+Now that Gateway and GAIE is installed, we can create an InferencePool and an accompanying Dynamo EPP.
+
+Point the `InferencePool` at your vLLM workers (see the
+[`qwen-pool` InferencePool in `agg.yaml`](./agg.yaml) for a complete example):
+
+Specifically, these fields depend on the model you deploy, so make sure the settings below are adjusted to match your workers.
 
 - `spec.selector` — labels matching your vLLM pods.
 ```yaml
@@ -88,7 +146,8 @@ Point the `InferencePool` at your vLLM workers:
       number: 9002
 ```
 
-Attach the `HTTPRoute` to the gateway and target the pool:
+Attach the `HTTPRoute` to the gateway and target the pool (see the
+[`qwen-route` HTTPRoute in `agg.yaml`](./agg.yaml) for a complete example):
 
 - `spec.rules[].backendRefs[]` — targets the `InferencePool`.
 ```yaml
@@ -109,7 +168,7 @@ Attach the `HTTPRoute` to the gateway and target the pool:
       name: inference-gateway
 ```
 
-### 3. Label the workers
+### 3. Update vLLM deployment
 
 Add labels to your vLLM pods that match `InferencePool.spec.selector` (and the
 EPP's `DYN_EPP_POD_SELECTOR`):
@@ -121,6 +180,7 @@ metadata:
     app: vllm-qwen
 ```
 
+or
 ```bash
 kubectl -n <ns> label deployment <vllm-deployment> app=vllm-qwen --overwrite
 ```
@@ -189,6 +249,60 @@ metadata:
    See the full list in the
    [environment contract](#router-only-mode-environment-contract) below.
 
+In the end your Final vLLM deployment will look like below:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen
+  labels:
+    app: vllm-qwen
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - "--model"
+            - "Qwen/Qwen3-0.6B"
+            - "--served-model-name"     # NEW: pin the OpenAI model id
+            - "Qwen/Qwen3-0.6B"
+            - "--port"                  # NEW: explicit (8000 is vLLM's default)
+            - "8000"
+            - "--enable-prefix-caching" # NEW: required so vLLM emits prefix KV events
+            - "--block-size"            # NEW: MUST equal the EPP's DYN_KV_CACHE_BLOCK_SIZE
+            - "16"
+            - "--kv-events-config"      # NEW: publish KV events on a ZMQ PUB socket for the EPP
+            - '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: kv-events           # NEW: KV-event PUB port the EPP subscribes to
+              containerPort: 5557
+          env:                          # NEW: HF token lets the worker pull the model (required for gated models)
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+```
+
 ### 5. (Disaggregated only) Build the P/D routing sidecar image
 
 The sidecar is a standalone Rust crate at `deploy/inference-gateway/pd-sidecar/`.
@@ -212,11 +326,9 @@ you built. The sidecar reads the `x-prefiller-host-port` header the EPP emits an
 runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
 
 
-## Run
+## Test
 
 ```bash
-kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml
-
 # terminal 1
 kubectl -n agentgateway-system port-forward svc/inference-gateway 8000:80
 

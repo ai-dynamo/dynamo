@@ -65,10 +65,6 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
-      tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
 
 ---
 # -----------------------------------------------------------------------------
