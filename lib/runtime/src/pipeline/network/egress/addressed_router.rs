@@ -29,6 +29,7 @@ use crate::pipeline::network::StreamOptions;
 use crate::pipeline::network::StreamProvider;
 use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
+use crate::pipeline::network::StreamTerminal;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
 use crate::pipeline::network::tcp;
@@ -48,8 +49,21 @@ use tracing::Instrument;
 /// - emits TTFT and transport-roundtrip metrics on first response
 /// - hands off the `InflightGuard` to a stream-lifetime `InflightDecStream` so
 ///   the inflight gauge stays accurate for the whole response lifetime.
+fn response_stream_terminal(
+    terminal_rx: &mut Option<tokio::sync::oneshot::Receiver<StreamTerminal>>,
+) -> StreamTerminal {
+    match terminal_rx {
+        Some(rx) => match rx.try_recv() {
+            Ok(terminal) => terminal,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => StreamTerminal::Truncated,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => StreamTerminal::Truncated,
+        },
+        None => StreamTerminal::Truncated,
+    }
+}
+
 fn decode_response_stream<U>(
-    response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    response_stream: StreamReceiver,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
     queue_start: Instant,
     tx_start: Instant,
@@ -58,6 +72,10 @@ fn decode_response_stream<U>(
 where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    let StreamReceiver {
+        rx: response_rx,
+        mut terminal,
+    } = response_stream;
     let engine_ctx_for_stream = engine_ctx.clone();
     let mut is_complete_final = false;
     let mut first_response = true;
@@ -95,7 +113,9 @@ where
                     Some(U::from_err(DynamoError::msg(err.to_string())))
                 }
             }
-        } else if is_complete_final {
+        } else if response_stream_terminal(&mut terminal) == StreamTerminal::Clean
+            && is_complete_final
+        {
             None
         } else if engine_ctx_for_stream.is_stopped() {
             tracing::debug!("Request cancelled and then trying to read a response");
@@ -587,7 +607,7 @@ impl AddressedPushRouter {
         drop(_nvtx_wait);
 
         Ok(decode_response_stream(
-            response_stream.rx,
+            response_stream,
             engine_ctx,
             queue_start,
             tx_start,
@@ -747,10 +767,42 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestType,
-        ResponseType, serialize_control_message,
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, InflightGuard, RequestControlMessage,
+        RequestType, ResponseType, decode_response_stream, serialize_control_message,
     };
+    use crate::engine::AsyncEngineContextProvider;
+    use crate::error::DynamoError;
+    use crate::metrics::request_plane::REQUEST_PLANE_INFLIGHT;
+    use crate::pipeline::Context;
+    use crate::pipeline::network::{NetworkStreamWrapper, StreamReceiver, StreamTerminal};
+    use crate::protocols::maybe_error::MaybeError;
+    use bytes::Bytes;
+    use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
+    use std::time::Instant;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_stream::StreamExt;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestResponse {
+        value: Option<String>,
+        error: Option<String>,
+    }
+
+    impl MaybeError for TestResponse {
+        fn from_err(err: impl std::error::Error + 'static) -> Self {
+            Self {
+                value: None,
+                error: Some(err.to_string()),
+            }
+        }
+
+        fn err(&self) -> Option<DynamoError> {
+            self.error
+                .as_ref()
+                .map(|message| DynamoError::msg(message.clone()))
+        }
+    }
 
     fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
         RequestControlMessage {
@@ -790,5 +842,47 @@ mod tests {
             .to_string();
         assert!(err.contains("request control message too large"));
         assert!(err.contains(&CONTROL_MESSAGE_MAX_BYTES.to_string()));
+    }
+
+    #[tokio::test]
+    async fn decode_response_stream_rejects_complete_final_on_truncated_wire_close() {
+        let (tx, rx) = mpsc::channel(4);
+        let (terminal_tx, terminal_rx) = oneshot::channel();
+        let complete_final = NetworkStreamWrapper::<TestResponse> {
+            data: None,
+            complete_final: true,
+        };
+
+        tx.send(Bytes::from(serde_json::to_vec(&complete_final).unwrap()))
+            .await
+            .unwrap();
+        terminal_tx.send(StreamTerminal::Truncated).unwrap();
+        drop(tx);
+
+        REQUEST_PLANE_INFLIGHT.inc();
+        let stream_receiver = StreamReceiver {
+            rx,
+            terminal: Some(terminal_rx),
+        };
+        let engine_ctx = Context::new(()).context();
+        let mut decoded = decode_response_stream::<TestResponse>(
+            stream_receiver,
+            engine_ctx,
+            Instant::now(),
+            Instant::now(),
+            InflightGuard::new(),
+        );
+
+        let item = decoded
+            .next()
+            .await
+            .expect("truncated close after complete_final should emit an error item");
+        let err = item.err().expect("decoded item should carry an error");
+        assert!(
+            err.to_string()
+                .contains("Stream ended before generation completed"),
+            "unexpected error: {err}"
+        );
+        assert!(decoded.next().await.is_none());
     }
 }
