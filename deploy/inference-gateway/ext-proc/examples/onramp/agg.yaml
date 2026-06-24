@@ -106,7 +106,7 @@ subjects:
 
 ---
 # -----------------------------------------------------------------------------
-# The Dynamo Rust EPP, in router-only (on-ramp) mode.
+# The Dynamo EPP, in router-only (on-ramp) mode.
 #    This is the ONLY Dynamo component in the whole topology.
 # -----------------------------------------------------------------------------
 apiVersion: apps/v1

@@ -46,13 +46,18 @@ Data Parallelism | Not supported
 ### 1. Prerequisites
 
 Set up a Gateway-API gateway + Inference Extension (GAIE) if you don't have one
-yet, and create the HuggingFace token secret the EPP uses to download the
-tokenizer:
+yet. Follow the instructions for your gateway (i.e. [AgentGateway](https://agentgateway.dev/docs/kubernetes/main/quickstart/install/)) and [Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
 
+We provide a convenience script if you are installing from scratch for experimentation.
 ```bash
 # Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`
 deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+```
 
+Create the HuggingFace token secret the EPP uses to download the
+tokenizer.
+
+```bash
 # HF token secret (the EPP downloads the tokenizer to tokenize for routing)
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-token>
 ```
@@ -62,19 +67,59 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-toke
 Point the `InferencePool` at your vLLM workers:
 
 - `spec.selector` — labels matching your vLLM pods.
+```yaml
+  selector:
+    matchLabels:
+      app: vllm-qwen
+```
+
 - `spec.targetPorts[].number` — the vLLM serving port (usually `8000`).
+```yaml
+  targetPorts:
+    - number: 8000
+```
+
 - `spec.endpointPickerRef` (a.k.a. `spec.extensionRef`) — the EPP service + port.
+```yaml
+  endpointPickerRef:
+    kind: Service
+    name: qwen-epp
+    port:
+      number: 9002
+```
 
 Attach the `HTTPRoute` to the gateway and target the pool:
 
 - `spec.rules[].backendRefs[]` — targets the `InferencePool`.
+```yaml
+    - backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: qwen-pool
+          port: 8000
+          weight: 1
+```
+
 - `spec.parentRefs[]` — your gateway (set `namespace` + `sectionName` when the
   gateway lives in another namespace, e.g. `agentgateway-system`).
+```yaml
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+```
 
 ### 3. Label the workers
 
 Add labels to your vLLM pods that match `InferencePool.spec.selector` (and the
 EPP's `DYN_EPP_POD_SELECTOR`):
+
+```yaml
+metadata:
+  name: vllm-qwen
+  labels:
+    app: vllm-qwen
+```
 
 ```bash
 kubectl -n <ns> label deployment <vllm-deployment> app=vllm-qwen --overwrite
@@ -82,7 +127,7 @@ kubectl -n <ns> label deployment <vllm-deployment> app=vllm-qwen --overwrite
 
 ### 4. Add the EPP to your deployment
 
-Remove the vLLM router and replace it with the EPP (Dynamo Router).
+Remove the vLLM router (if you have it already installed) and replace it with the EPP (Dynamo Router).
 Add the EPP as a `Deployment` + `Service` (see the
 [`qwen-epp` Deployment in `agg.yaml`](./agg.yaml) for a complete example) and set:
 
