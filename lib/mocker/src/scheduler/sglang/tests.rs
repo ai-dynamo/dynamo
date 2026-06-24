@@ -381,7 +381,7 @@ mod destination_lifecycle {
             .unwrap()
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn kv_blocked_live_scheduler_waits_and_cancel_wakes_it() {
         let args = MockEngineArgs::builder()
             .engine_type(EngineType::Sglang)
@@ -435,24 +435,24 @@ mod destination_lifecycle {
 
         let blocked_uuid = Uuid::from_u128(30_003);
         scheduler.receive(request(blocked_uuid, vec![2; 4], 1));
-        let mut observed_blocked_pass = false;
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-            if fpm
-                .take()
-                .iter()
-                .any(|snapshot| snapshot.num_queued_prefill > 0)
-            {
-                observed_blocked_pass = true;
-                break;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if fpm
+                    .take()
+                    .iter()
+                    .any(|snapshot| snapshot.num_queued_prefill > 0)
+                {
+                    break;
+                }
+                fpm.wait_for_snapshot().await;
             }
-        }
-        assert!(observed_blocked_pass);
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-        }
+        })
+        .await
+        .expect("blocked scheduler FPM snapshot timed out");
         assert!(
-            fpm.take().is_empty(),
+            tokio::time::timeout(Duration::from_millis(10), fpm.wait_for_snapshot())
+                .await
+                .is_err(),
             "a blocked scheduler must not publish repeated zero-work passes"
         );
 

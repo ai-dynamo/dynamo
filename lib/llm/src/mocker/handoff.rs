@@ -11,6 +11,7 @@ use dashmap::mapref::entry::Entry;
 use dynamo_mocker::common::handoff::{
     HandoffAction, HandoffActionId, HandoffActionOutcome, HandoffCoordinatorCore, HandoffFact,
     HandoffId, HandoffOrder, IssuedHandoffAction, NormalizedHandoffEvent,
+    validate_transfer_delay_ms,
 };
 use dynamo_mocker::common::protocols::{DirectRequest, EngineType};
 use dynamo_mocker::scheduler::{
@@ -31,10 +32,11 @@ fn session_deadline_with_transfer(
     session_started: tokio::time::Instant,
     session_timeout: Duration,
     transfer_delay_ms: Option<f64>,
-) -> tokio::time::Instant {
-    session_started
+) -> Result<tokio::time::Instant> {
+    validate_transfer_delay_ms(transfer_delay_ms)?;
+    Ok(session_started
         + session_timeout
-        + Duration::from_secs_f64(transfer_delay_ms.unwrap_or_default().max(0.0) / 1000.0)
+        + Duration::from_secs_f64(transfer_delay_ms.unwrap_or_default() / 1000.0))
 }
 
 pub(crate) fn order_for_engine(engine_type: EngineType) -> Result<HandoffOrder> {
@@ -1021,7 +1023,7 @@ async fn run_source_session(
                             session_started,
                             session_timeout,
                             transfer_delay_ms,
-                        );
+                        )?;
                         deadline.as_mut().reset(session_deadline);
                     }
                     if pending_submit_action.is_some() {
@@ -1293,7 +1295,7 @@ pub(crate) async fn run_destination_session(
                                 })?,
                                 session_timeout,
                                 observed_delay,
-                            );
+                            )?;
                             deadline.as_mut().reset(session_deadline);
                         }
                     }
@@ -1359,6 +1361,13 @@ pub(crate) async fn run_destination_session(
                         });
                     }
                     BootstrapMessage::Complete => {
+                        let activation_applied = outcomes.values().any(|(action, outcome)| {
+                            matches!(action, HandoffAction::ActivateDestination { .. })
+                                && matches!(outcome, HandoffActionOutcome::Applied)
+                        });
+                        if pending_action.is_some() || !activation_applied {
+                            bail!("source completed before destination activation finished");
+                        }
                         complete = true;
                         break;
                     }

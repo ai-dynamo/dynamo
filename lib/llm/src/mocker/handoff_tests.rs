@@ -359,6 +359,150 @@ async fn destination_reservation_ack_precedes_an_early_lifecycle_fact() {
 }
 
 #[tokio::test]
+async fn premature_complete_keeps_destination_cleanup_active() {
+    let shutdown = CancellationToken::new();
+    let server = BootstrapServer::start(0, shutdown.clone(), BootstrapServerConfig::default())
+        .await
+        .unwrap();
+    let mut incoming = server.take_incoming_receiver().unwrap();
+    let request_id = Uuid::from_u128(70_100);
+    let handoff_id = HandoffId::from(Uuid::from_u128(70_101));
+    let identity = BootstrapIdentity {
+        handoff_id,
+        bootstrap_room: 19,
+        request_id,
+    };
+    let destination = connect_to_prefill(
+        "127.0.0.1",
+        server.port(),
+        identity,
+        ParticipantRegistration {
+            role: BootstrapParticipantRole::Destination,
+            dp_rank: 0,
+            order: HandoffOrder::DestinationFirst,
+            engine_type: EngineType::Sglang,
+        },
+    )
+    .await
+    .unwrap();
+    let mut source = incoming.recv().await.unwrap().connection;
+    let registry = HandoffEventRegistry::default();
+    let (command_tx, mut command_rx) = mpsc::channel(1);
+    let session = tokio::spawn(run_destination_session(
+        destination,
+        request(request_id, 2),
+        command_tx,
+        registry.register(handoff_id).unwrap(),
+        CancellationToken::new(),
+        Duration::from_secs(2),
+        shutdown.clone(),
+    ));
+
+    source.send(BootstrapMessage::Registered).await.unwrap();
+    let mut coordinator = HandoffCoordinatorCore::new(handoff_id, HandoffOrder::DestinationFirst);
+    let reserve = coordinator.start().unwrap().pop().unwrap();
+    source
+        .send(BootstrapMessage::Action(reserve))
+        .await
+        .unwrap();
+    let reserve_command = command_rx.recv().await.unwrap();
+    reserve_command
+        .reply
+        .send(Ok(SchedulerCommandEffects {
+            result: SchedulerCommandResult::DestinationAccepted { request_id },
+            lifecycle_events: Vec::new(),
+            kv_events: Vec::new(),
+        }))
+        .unwrap();
+    registry
+        .deliver_and_wait(SchedulerLifecycleEvent::DestinationReserved {
+            handoff_id,
+            request_id,
+        })
+        .await;
+    assert!(matches!(
+        source.recv().await.unwrap(),
+        Some(BootstrapMessage::ActionAck {
+            action_id,
+            outcome: HandoffActionOutcome::Accepted,
+        }) if action_id == reserve.id
+    ));
+    assert!(matches!(
+        source.recv().await.unwrap(),
+        Some(BootstrapMessage::Fact(
+            HandoffFact::DestinationReserved { .. }
+        ))
+    ));
+
+    coordinator
+        .on_action_outcome(reserve.id, HandoffActionOutcome::Accepted)
+        .unwrap();
+    let submit = coordinator
+        .on_fact(HandoffFact::DestinationReserved { handoff_id })
+        .unwrap()
+        .pop()
+        .unwrap();
+    coordinator
+        .on_action_outcome(submit.id, HandoffActionOutcome::Submitted)
+        .unwrap();
+    let transfer = coordinator
+        .on_fact(HandoffFact::SourceHeld {
+            handoff_id,
+            transfer_delay_ms: None,
+        })
+        .unwrap()
+        .pop()
+        .unwrap();
+    coordinator
+        .on_action_outcome(transfer.id, HandoffActionOutcome::Scheduled)
+        .unwrap();
+    let activate = coordinator
+        .on_fact(HandoffFact::TransferCompleted { handoff_id })
+        .unwrap()
+        .pop()
+        .unwrap();
+    source
+        .send(BootstrapMessage::Action(activate))
+        .await
+        .unwrap();
+    let pending_activation = command_rx.recv().await.unwrap();
+    assert!(matches!(
+        pending_activation.command,
+        SchedulerCommand::ActivateDestination { handoff_id: observed }
+            if observed == handoff_id
+    ));
+
+    source.send(BootstrapMessage::Complete).await.unwrap();
+    let cleanup = tokio::time::timeout(Duration::from_secs(1), command_rx.recv())
+        .await
+        .expect("premature completion must trigger destination cleanup")
+        .unwrap();
+    assert!(matches!(
+        cleanup.command,
+        SchedulerCommand::CancelDestination { handoff_id: observed }
+            if observed == handoff_id
+    ));
+    cleanup
+        .reply
+        .send(Ok(SchedulerCommandEffects {
+            result: SchedulerCommandResult::Applied,
+            lifecycle_events: Vec::new(),
+            kv_events: Vec::new(),
+        }))
+        .unwrap();
+    drop(pending_activation);
+
+    let error = session.await.unwrap().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source completed before destination activation finished")
+    );
+    shutdown.cancel();
+    server.wait_closed().await;
+}
+
+#[tokio::test]
 async fn source_held_waits_for_submit_outcome_before_progressing() {
     let shutdown = CancellationToken::new();
     let server = BootstrapServer::start(0, shutdown.clone(), BootstrapServerConfig::default())

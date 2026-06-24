@@ -443,7 +443,8 @@ mod destination_lifecycle {
         assert!(stored_hashes(&destination.drain_kv_events()).is_empty());
 
         let mut now_ms = blocker_first.end_ms;
-        loop {
+        let mut blocker_completed = false;
+        for _ in 0..16 {
             let pass = execute(&mut destination, now_ms);
             now_ms = pass.end_ms;
             if pass
@@ -451,9 +452,11 @@ mod destination_lifecycle {
                 .iter()
                 .any(|signal| signal.uuid == blocker_uuid && signal.completed)
             {
+                blocker_completed = true;
                 break;
             }
         }
+        assert!(blocker_completed, "blocker request should complete");
         let usage_before_physical_reservation = destination.kv_manager.num_active_blocks();
         let reserved = destination.retry_pending_destinations();
         assert!(matches!(

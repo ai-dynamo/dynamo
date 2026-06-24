@@ -366,6 +366,7 @@ impl HandoffCoordinatorCore {
                 if !self.source.submitted {
                     bail!("source held before prefill submission was acknowledged");
                 }
+                validate_transfer_delay_ms(transfer_delay_ms)?;
                 self.source.held = true;
                 self.source.delay_ms = transfer_delay_ms;
                 self.advance_active()
@@ -600,6 +601,16 @@ impl HandoffCoordinatorCore {
         }
         Ok(())
     }
+}
+
+pub fn validate_transfer_delay_ms(transfer_delay_ms: Option<f64>) -> Result<()> {
+    let Some(delay_ms) = transfer_delay_ms else {
+        return Ok(());
+    };
+    if !delay_ms.is_finite() || delay_ms < 0.0 {
+        bail!("invalid handoff transfer delay {delay_ms}");
+    }
+    Ok(())
 }
 
 fn require_outcome(outcome: &HandoffActionOutcome, allowed: &[HandoffActionOutcome]) -> Result<()> {

@@ -557,6 +557,9 @@ impl AggRuntime {
         while let Some(payload) = pop_ready_worker_completion(&mut self.events, self.now_ms) {
             debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
             let payload = self.engine.on_scheduled_completion(payload)?;
+            if let Some(fpm) = payload.fpm {
+                self.fpm_buffer.push((payload.worker_idx, fpm));
+            }
             self.process_completed_pass(
                 payload.worker_idx,
                 payload.completed_requests,
@@ -616,6 +619,9 @@ impl AggRuntime {
         self.apply_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
             let payload = self.engine.on_scheduled_completion(payload)?;
+            if let Some(fpm) = payload.fpm {
+                self.fpm_buffer.push((payload.worker_idx, fpm));
+            }
             self.process_completed_pass(
                 payload.worker_idx,
                 payload.completed_requests,
@@ -1183,6 +1189,40 @@ mod tests {
             }))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn sglang_completion_visible_fpm_reaches_aggregated_buffer() {
+        let pending = normalize_trace_requests(
+            vec![DirectRequest {
+                tokens: vec![1; 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(9_001)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            }],
+            1.0,
+        )
+        .unwrap();
+        let mut runtime = AggRuntime::new(
+            &sglang_replay_args(),
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert!(runtime.advance_one_timestamp().unwrap());
+        assert!(runtime.drain_fpm().is_empty());
+        assert!(runtime.advance_one_timestamp().unwrap());
+        assert!(
+            !runtime.drain_fpm().is_empty(),
+            "SGLang pass-end FPM must become planner-visible at completion"
+        );
     }
 
     fn trtllm_reject_args() -> MockEngineArgs {

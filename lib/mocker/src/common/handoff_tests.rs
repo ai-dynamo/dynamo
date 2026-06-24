@@ -259,6 +259,24 @@ fn invalid_same_handoff_ordering_is_rejected() {
 }
 
 #[test]
+fn invalid_transfer_delays_are_rejected_before_scheduling() {
+    for delay_ms in [-1.0, f64::NAN, f64::INFINITY] {
+        let id = handoff_id();
+        let mut coordinator = HandoffCoordinatorCore::new(id, HandoffOrder::SourceFirst);
+        let submit = one(coordinator.start().unwrap());
+        acknowledge(&mut coordinator, submit, HandoffActionOutcome::Submitted);
+
+        let error = coordinator
+            .on_fact(HandoffFact::SourceHeld {
+                handoff_id: id,
+                transfer_delay_ms: Some(delay_ms),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid handoff transfer delay"));
+    }
+}
+
+#[test]
 fn timeout_before_initial_ack_cleans_only_the_issued_owner() {
     for order in [HandoffOrder::SourceFirst, HandoffOrder::DestinationFirst] {
         let id = handoff_id();

@@ -298,8 +298,7 @@ pub async fn connect_to_prefill(
     identity: BootstrapIdentity,
     registration: ParticipantRegistration,
 ) -> Result<BootstrapConnection> {
-    let host = host.trim_matches(|c| c == '[' || c == ']');
-    let addr = format!("{host}:{port}");
+    let addr = bootstrap_addr(host, port);
     let mut stream = tokio::time::timeout(RENDEZVOUS_TIMEOUT, TcpStream::connect(&addr))
         .await
         .map_err(|_| anyhow!("bootstrap connect timeout to {addr}"))??;
@@ -314,6 +313,18 @@ pub async fn connect_to_prefill(
         .send(BootstrapMessage::Register(registration))
         .await?;
     Ok(connection)
+}
+
+fn bootstrap_addr(host: &str, port: u16) -> String {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 async fn accept_connection(mut stream: TcpStream) -> Result<IncomingBootstrapConnection> {
@@ -397,6 +408,13 @@ mod tests {
             order: HandoffOrder::SourceFirst,
             engine_type: EngineType::Vllm,
         }
+    }
+
+    #[test]
+    fn bootstrap_address_preserves_ipv6_literals() {
+        assert_eq!(bootstrap_addr("[::1]", 1234), "[::1]:1234");
+        assert_eq!(bootstrap_addr("::1", 1234), "[::1]:1234");
+        assert_eq!(bootstrap_addr("127.0.0.1", 1234), "127.0.0.1:1234");
     }
 
     #[tokio::test]

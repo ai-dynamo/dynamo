@@ -158,11 +158,14 @@ impl LiveEffectsPublisher {
             self.publish_admissions(&pending.pass.admissions);
         }
 
-        // Mid-pass commands allowed by the scheduler contract must not produce
-        // publishable effects. If that contract grows, any such effects remain
-        // part of this pass transaction rather than becoming visible early.
-        pending.kv_events.extend(self.captured_kv_events.drain());
-        if !pending.router_effects_published {
+        // Mid-pass command effects remain part of this pass transaction and
+        // become visible at pass end, even when pass-start effects are already
+        // published.
+        let midpass_kv_events = self.captured_kv_events.drain();
+        if pending.router_effects_published {
+            self.publish_router_effects(midpass_kv_events, None);
+        } else {
+            pending.kv_events.extend(midpass_kv_events);
             self.publish_router_effects(pending.kv_events, pending.pass.fpm.take());
         }
 
@@ -350,6 +353,7 @@ mod tests {
     struct FakeCore {
         publishers: KvEventPublishers,
         command_effects: bool,
+        midpass_kv_effects: bool,
     }
 
     impl FakeCore {
@@ -375,8 +379,10 @@ mod tests {
             _now_ms: f64,
         ) -> anyhow::Result<SchedulerCommandEffects> {
             let mut effects = SchedulerCommandEffects::new(SchedulerCommandResult::Applied);
-            if self.command_effects {
+            if self.command_effects || self.midpass_kv_effects {
                 self.publish_kv(2);
+            }
+            if self.command_effects {
                 effects
                     .lifecycle_events
                     .push(SchedulerLifecycleEvent::DestinationReserved {
@@ -458,6 +464,7 @@ mod tests {
         let mut core = FakeCore {
             publishers: buffering_publishers,
             command_effects: false,
+            midpass_kv_effects: false,
         };
         core.publish_kv(1);
         let (output_tx, output_rx) = mpsc::unbounded_channel();
@@ -513,6 +520,7 @@ mod tests {
         let mut core = FakeCore {
             publishers: buffering_publishers,
             command_effects: false,
+            midpass_kv_effects: true,
         };
         core.publish_kv(1);
         let (output_tx, _output_rx) = mpsc::unbounded_channel();
@@ -559,6 +567,7 @@ mod tests {
                 PublishedEffect::Kv,
                 PublishedEffect::Fpm,
                 PublishedEffect::Ack,
+                PublishedEffect::Kv,
                 PublishedEffect::Outputs,
                 PublishedEffect::Accounting,
                 PublishedEffect::Lifecycle,
@@ -573,6 +582,7 @@ mod tests {
         let mut core = FakeCore {
             publishers: buffering_publishers,
             command_effects: true,
+            midpass_kv_effects: false,
         };
         let (output_tx, _output_rx) = mpsc::unbounded_channel();
         let log = Arc::new(Mutex::new(Vec::new()));
