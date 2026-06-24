@@ -120,7 +120,7 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-toke
 Now that Gateway and GAIE is installed, we can create an InferencePool and an accompanying Dynamo EPP.
 
 Point the `InferencePool` at your vLLM workers (see the
-[`qwen-pool` InferencePool in `agg.yaml`](./agg.yaml) for a complete example):
+[`qwen-pool` InferencePool in `agg.yaml`](./agg.yaml#L233) for a complete example):
 
 Specifically, these fields depend on the model you deploy, so make sure the settings below are adjusted to match your workers.
 
@@ -147,7 +147,7 @@ Specifically, these fields depend on the model you deploy, so make sure the sett
 ```
 
 Attach the `HTTPRoute` to the gateway and target the pool (see the
-[`qwen-route` HTTPRoute in `agg.yaml`](./agg.yaml) for a complete example):
+[`qwen-route` HTTPRoute in `agg.yaml`](./agg.yaml#L253) for a complete example):
 
 - `spec.rules[].backendRefs[]` — targets the `InferencePool`.
 ```yaml
@@ -189,7 +189,7 @@ kubectl -n <ns> label deployment <vllm-deployment> app=vllm-qwen --overwrite
 
 Remove the vLLM router (if you have it already installed) and replace it with the EPP (Dynamo Router).
 Add the EPP as a `Deployment` + `Service` (see the
-[`qwen-epp` Deployment in `agg.yaml`](./agg.yaml) for a complete example) and set:
+[`qwen-epp` Deployment in `agg.yaml`](./agg.yaml#L109) for a complete example) and set:
 
 ```yaml
 kind: Deployment
