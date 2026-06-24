@@ -30,7 +30,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-EXCLUDE_PATH_SUBSTRINGS = ("/bindings/", "/examples/")
+# Manifest-path substrings whose crates are never published: python/C bindings,
+# example binaries, and deploy/ components — deployable binaries/services (e.g. the
+# inference-gateway ext-proc) that are not library crates consumers pull from the
+# registry, and whose build scripts (envoy/protoc codegen) aren't wired up here.
+EXCLUDE_PATH_SUBSTRINGS = ("/bindings/", "/examples/", "/deploy/")
 # Workspace members never published from the on-demand flow: internal crates that
 # carry an independent version (not the workspace version) and that no published
 # crate depends on. kvbm-consolidator pins its own 1.2.0, so the version gate would
