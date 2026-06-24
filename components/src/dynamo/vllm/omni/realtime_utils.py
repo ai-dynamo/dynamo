@@ -45,8 +45,8 @@ async def init_omni_realtime(
         shutdown_event=shutdown_event,
     )
 
-    sampling_params_list = _streaming_sampling_params(base.engine_client)
-    streaming_input_factory = _build_streaming_input_factory(config, base.engine_client)
+    sampling_params_list = streaming_sampling_params(base.engine_client)
+    streaming_input_factory = build_streaming_input_factory(config, base.engine_client)
 
     handler = RealtimeOmniHandler(
         engine_client=base.engine_client,
@@ -103,40 +103,11 @@ async def init_omni_realtime(
         base.cleanup()
 
 
-def _build_streaming_input_factory(config: OmniConfig, engine_client):
-    """Build the audio -> StreamingInput factory (``transcribe_realtime``).
-
-    vLLM's ``OpenAIServingRealtime.transcribe_realtime`` turns the float32
-    audio stream into ``StreamingInput`` prompts via the model's
-    ``buffer_realtime_audio`` cumulative buffering (see ``StreamingInput`` in
-    ``vllm.engine.protocol``). We build the serving object around the AsyncOmni
-    engine and hand its bound method to the handler.
-
-    Import locations differ across vLLM versions, so several are tried in
-    order. Upstream relocated the realtime API out of ``entrypoints/openai/``
-    into a dedicated ``entrypoints/speech_to_text/`` subtree in a newer release:
-      - vLLM 0.21.x (the pinned base today): ``vllm.entrypoints.openai.realtime``
-        / ``...openai.models`` (verified present).
-      - newer vLLM (what current vLLM-Omni targets):
-        ``vllm.entrypoints.speech_to_text.realtime`` (fallback, not yet verified
-        here — revisit when the vLLM base is bumped).
-
-    This serving wiring is exercised by the gpu-gated real-model e2e
-    (``DYN_TEST_OMNI_REALTIME_MODEL``); the hermetic mock e2e injects a fake
-    factory instead.
-    """
-    OpenAIServingRealtime = _import_first(
-        ("vllm.entrypoints.openai.realtime.serving", "OpenAIServingRealtime"),
-        ("vllm.entrypoints.speech_to_text.realtime.serving", "OpenAIServingRealtime"),
-    )
-    OpenAIServingModels = _import_first(
-        ("vllm.entrypoints.openai.models.serving", "OpenAIServingModels"),
-        ("vllm.entrypoints.openai.serving_models", "OpenAIServingModels"),
-    )
-    BaseModelPath = _import_first(
-        ("vllm.entrypoints.openai.models.protocol", "BaseModelPath"),
-        ("vllm.entrypoints.openai.serving_models", "BaseModelPath"),
-    )
+def build_streaming_input_factory(config: OmniConfig, engine_client):
+    """Build the audio -> StreamingInput factory from vLLM utils."""
+    from vllm.entrypoints.openai.models.protocol import BaseModelPath
+    from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+    from vllm.entrypoints.speech_to_text.realtime.serving import OpenAIServingRealtime
 
     model_name = config.served_model_name or config.model
     base_model_paths = [BaseModelPath(name=model_name, model_path=config.model)]
@@ -153,23 +124,7 @@ def _build_streaming_input_factory(config: OmniConfig, engine_client):
     return serving_realtime.transcribe_realtime
 
 
-def _import_first(*candidates: tuple[str, str]):
-    """Import ``attr`` from the first importable module among ``candidates``."""
-    import importlib
-
-    errors = []
-    for module_name, attr in candidates:
-        try:
-            return getattr(importlib.import_module(module_name), attr)
-        except Exception as e:  # noqa: BLE001 - try the next candidate location
-            errors.append(f"{module_name}.{attr}: {e}")
-    raise ImportError(
-        "could not import realtime serving class from any known vLLM location: "
-        + "; ".join(errors)
-    )
-
-
-def _streaming_sampling_params(engine_client) -> list | None:
+def streaming_sampling_params(engine_client) -> list | None:
     """Default per-stage sampling params coerced for streaming generation.
 
     vLLM-Omni requires streaming requests to emit incremental (delta) outputs;
