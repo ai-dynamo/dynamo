@@ -84,7 +84,7 @@ Set `RELEASE_VERSION` to `1.2.1` in [step 2](../../installation-guide.md#step-2-
 Optionally, perform
 [step 3](../../installation-guide.md#step-3-install-optional-components).
 You skip [step 1](../../installation-guide.md#step-1-install-the-gpu-operator) since on GKE
-[the recommended way](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/gpu-operator#why)
+[the recommended way](https://cloud.google.com/kubernetes-engine/docs/how-to/gpu-operator#why)
 is not to install NVIDIA GPU operator.
 
 ## Deploy an inference graph
