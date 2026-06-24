@@ -10,6 +10,10 @@ inputs:
     description: 'Name for the vCluster instance (auto-generated from github.run_id if empty)'
     required: false
     default: ''
+  vcluster_namespace:
+    description: 'Host namespace where the vCluster will be created. Defaults to the shared deploy-test namespace.'
+    required: false
+    default: ''
   registry:
     description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
     required: false
@@ -81,6 +85,7 @@ runs:
       shell: bash
       env:
         INPUT_VCLUSTER_NAME: ${{ inputs.vcluster_name }}
+        INPUT_NAMESPACE: ${{ inputs.vcluster_namespace }}
       run: |
         if [ -n "${INPUT_VCLUSTER_NAME}" ]; then
           echo "vcluster_name=${INPUT_VCLUSTER_NAME}" >> "$GITHUB_OUTPUT"
@@ -88,7 +93,11 @@ runs:
           echo "vcluster_name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
         fi
 
-        echo "namespace=dynamo-deploy-test" >> "$GITHUB_OUTPUT"
+        if [ -n "${INPUT_NAMESPACE}" ]; then
+          echo "namespace=${INPUT_NAMESPACE}" >> "$GITHUB_OUTPUT"
+        else
+          echo "namespace=dynamo-deploy-test" >> "$GITHUB_OUTPUT"
+        fi
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
 
     - name: Setup host kubeconfig
