@@ -27,7 +27,7 @@ The GPU node will have [NVIDIA Kubernetes Device Plugin](https://github.com/NVID
 ### Install gcloud CLI
 https://cloud.google.com/sdk/docs/install
 
-### Create a GKE Cluster
+### Create a GKE cluster
 
 1.  Set environment variables to store your cluster parameters:
 
@@ -53,7 +53,7 @@ https://cloud.google.com/sdk/docs/install
     --num-nodes=${NUM_GENERAL_PURPOSE_NODES}
     ```
 
-#### Create a GPU Node Pool
+#### Create a GPU node pool
 
 1.  Set environment variables to store your node pool parameters:
 
@@ -87,7 +87,7 @@ You skip [step 1](../../installation-guide.md#step-1-install-the-gpu-operator) s
 [the recommended way](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/gpu-operator#why)
 is not to install NVIDIA GPU operator.
 
-## Deploy an Inference Graph
+## Deploy an inference graph
 
 Deploy vLLM in the aggregated mode, serving `Qwen/Qwen3-0.6B`.
 
@@ -98,7 +98,7 @@ export INFERENCE_NAMESPACE=my-inference-graphs
 kubectl create namespace ${INFERENCE_NAMESPACE}
 ```
 
-### Create a Secret to store your Hugging Face Token
+### Create a secret to store your Hugging Face token
 
 ```bash
 export HF_TOKEN=<your Hugging Face token>
@@ -209,7 +209,7 @@ For more manifests, check https://github.com/ai-dynamo/dynamo/tree/main/examples
 
 Follow the steps in the subsections below to delete the components added in this guide.
 
-#### Undeploy the Inference Graph
+#### Undeploy the inference graph
 
 1.  Kill the port-forwarding command you ran in a separate terminal.
 
@@ -253,7 +253,7 @@ Follow the steps in the subsections below to delete the components added in this
     kubectl delete namespace ${NAMESPACE}
     ```
 
-#### Delete the GKE Cluster
+#### Delete the GKE cluster
 
 If you want to delete the GKE cluster you created in [Create a GKE Cluster](#create-a-gke-cluster), perform the following steps.
 
