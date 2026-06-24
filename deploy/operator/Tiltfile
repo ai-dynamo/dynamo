@@ -169,8 +169,9 @@ local(helm_cmd + ' repo add --force-update bitnami https://charts.bitnami.com/bi
 local(helm_cmd + ' repo update', quiet=True)
 
 # Initial sync at load time so render_helm() can succeed on a fresh checkout.
-# Keep this lock-file based; the Tilt resource below performs full updates.
-local(helm_cmd + ' dependency build ' + HELM_CHART, quiet=True)
+# Chart.lock and packaged charts are ignored local artifacts, so refresh them
+# here before rendering instead of trusting stale workspace state.
+local(helm_cmd + ' dependency update ' + HELM_CHART, quiet=True)
 
 # Re-run when the local operator subchart or dependency list changes.
 local_resource(
