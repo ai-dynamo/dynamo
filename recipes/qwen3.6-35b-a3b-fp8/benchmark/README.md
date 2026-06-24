@@ -62,7 +62,7 @@ and `model-cache/` from the recipe root (`../`) and `perf.yaml` /
 frontend service, run-label) are exported as `${BENCH_POD}` /
 `${BENCH_FRONTEND}` / `${BENCH_RUN_LABEL}` by `run-benchmark.sh` and resolved
 via `envsubst` at apply time. The bench Pod runs the same
-`vllm-runtime:1.2.0` image as the deployment, which bakes `aiperf` — no
+`vllm-runtime:1.2.1` image as the deployment, which bakes `aiperf` — no
 install step needed.
 
 ## Dataset
@@ -76,14 +76,15 @@ install step needed.
 - Each jsonl row carries `session_id=user_<N>`. aiperf's `single_turn`
   dataset type honors session ordering (via
   [PR 824](https://github.com/ai-dynamo/aiperf/pull/824), now baked into
-  the `1.2.0` image), so the 8 turns of any one user are sent in causal
+  the `1.2.1` image), so the 8 turns of any one user are sent in causal
   order — letting prefix-cache hits land.
 - From turn 2 onwards each turn reuses 4-of-5 images from the previous turn's
   window, so repeated images dominate — the shape the embedding cache is
   designed for.
 
-The `1.2.0` image bakes the sliding-window generator (dynamo PR 8201), so the
-Job runs it straight from the baked tree — no git clone.
+The `1.2.1` image predates dynamo PR 8201 (sliding-window generator), so the
+Job clones the generator from a pinned SHA (`DYNAMO_REF`) at runtime rather
+than using the baked tree.
 
 ## Results
 

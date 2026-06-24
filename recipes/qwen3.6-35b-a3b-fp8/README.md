@@ -212,5 +212,5 @@ kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
 - `dynamo-fd` and `dynamo-fd-ec` share the same processor cache size (30 GiB)
   so the only flag that differs between them is the embedding-cache capacity
   — keeping the comparison fair.
-- All YAML uses `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0`, pinned in
+- All YAML uses `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1`, pinned in
   `hw/*.env` (`VLLM_IMAGE`) and `benchmark/data-gen-job.yaml`.

@@ -8,7 +8,7 @@
 # ${HW_TOLERATIONS}) and pipes this file through `envsubst` before
 # `kubectl apply`.
 #
-# The bench pod runs the same ${VLLM_IMAGE} (vllm-runtime:1.2.0) as the
+# The bench pod runs the same ${VLLM_IMAGE} (vllm-runtime:1.2.1) as the
 # deployment, which bakes aiperf including session_id single-turn
 # (https://github.com/ai-dynamo/aiperf/pull/824). Our sliding-window
 # jsonl writes session_id=user_<N> per row; PR 824 is what makes
@@ -46,7 +46,7 @@ spec:
           ulimit -u 65536
 
           # aiperf, curl, and jq are all baked into the vllm-runtime image
-          # (verified on :1.2.0), so no install step is needed.
+          # (verified on :1.2.1), so no install step is needed.
           aiperf --version
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
