@@ -1052,7 +1052,6 @@ where
                     biased;
 
                     _ = request_context.stopped() => None,
-                    _ = request_context.killed() => None,
                     outcome = &mut schedule => Some(outcome),
                 };
                 drop(schedule);
