@@ -136,6 +136,42 @@ def rewrite_versions(root: Path, old: str, new: str) -> int:
     return changed
 
 
+def strip_git_deps(root: Path, manifests: list[Path]) -> None:
+    """Remove git-sourced dependencies (and feature refs to them) from the given
+    manifests before publish. cargo publish rejects any dependency without a registry
+    version, and a private git dep can never resolve from a cargo registry. In the
+    publishable crates these git deps are all OPTIONAL (behind a feature), so dropping
+    one only removes a feature that could not work for a registry consumer anyway. The
+    feature KEY is kept (emptied) so dependents that reference `<crate>/<feature>` still
+    resolve."""
+    git_names = set(re.findall(
+        r'(?m)^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}\n]*\bgit\s*=',
+        (root / "Cargo.toml").read_text()))
+    if not git_names:
+        return
+    for mp in manifests:
+        orig = mp.read_text()
+        kept, removed = [], set()
+        for line in orig.splitlines(keepends=True):
+            m = re.match(r'^[ \t]*([A-Za-z0-9_-]+)[ \t]*=[ \t]*\{(.*)\}[ \t]*$', line)
+            if m and (re.search(r'\bgit\s*=', m.group(2))
+                      or (m.group(1) in git_names and re.search(r'\bworkspace\s*=\s*true', m.group(2)))):
+                removed.add(m.group(1))
+                continue
+            kept.append(line)
+        if not removed:
+            continue
+        text = "".join(kept)
+        for nm in removed:
+            # scrub feature-array tokens: "dep:nm", "nm", "nm/feat", "nm?/feat"
+            text = re.sub(rf'"(?:dep:)?{re.escape(nm)}(?:\?)?(?:/[^"]*)?"', "", text)
+        text = re.sub(r'\[\s*,', "[", text)          # [ , ...   -> [ ...
+        text = re.sub(r',\s*,', ",", text)            # , ,       -> ,
+        text = re.sub(r',(\s*[\]\n])', r'\1', text)   # , ]  / ,\n -> ] / \n
+        mp.write_text(text)
+        print(f"strip-git-deps: removed {sorted(removed)} from {mp}")
+
+
 def crate_exists(raw_base: str, name: str, version: str, token: str) -> bool:
     url = f"{raw_base}/{name}/{name}-{version}.crate"
     req = urllib.request.Request(url, method="HEAD", headers={"Authorization": f"Bearer {token}"})
@@ -266,6 +302,9 @@ def main() -> int:
 
     write_cargo_config(root, args.registry, index)
     inject_registry(root, order, args.registry)
+    # cargo publish rejects deps without a registry version; drop the optional,
+    # private git deps (e.g. aiconfigurator-core) from the crates being published.
+    strip_git_deps(root, [Path(pkgs[n]["manifest_path"]) for n in order])
 
     env = dict(os.environ)
     env[f"CARGO_REGISTRIES_{args.registry.upper()}_TOKEN"] = f"Bearer {token}"
