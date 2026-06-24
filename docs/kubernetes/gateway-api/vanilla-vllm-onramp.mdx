@@ -160,7 +160,9 @@ Keeping the `Gateway` and `HTTPRoute` in the same namespace avoids a cross-names
 ## Create Model Credentials
 
 Create the model credentials required by your vLLM pods and by the EPP tokenizer download. This is a
-Dynamo and model-serving prerequisite, not a GAIE-specific resource.
+Dynamo and model-serving prerequisite, not a GAIE-specific resource. The general Kubernetes
+quickstart explains the expected
+[Hugging Face token secret](../README.md#huggingface-token-secret) pattern.
 
 ```bash
 export HF_TOKEN=<your-hf-token>

@@ -36,7 +36,8 @@ flowchart LR
 - `kubectl`, Helm, and `jq`.
 - Dynamo platform installed. See the [Kubernetes Quickstart](../README.md) or
   [Installation Guide](../installation-guide.md).
-- Model credentials required by the deployment.
+- Model credentials required by the deployment. The general Kubernetes quickstart explains the
+  expected [Hugging Face token secret](../README.md#huggingface-token-secret) pattern.
 
 Set the namespace once:
 
@@ -47,7 +48,8 @@ export ISTIO_NAMESPACE=istio-system
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Create model credentials if the model requires them:
+Create model credentials if the model requires them. This is a Dynamo and model-serving prerequisite,
+not a GAIE-specific resource:
 
 ```bash
 export HF_TOKEN=<your-hf-token>
