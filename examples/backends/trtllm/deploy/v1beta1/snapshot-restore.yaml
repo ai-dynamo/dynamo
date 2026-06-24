@@ -17,7 +17,8 @@
 # - Restrict UCX away from RDMA/IB transports. The snapshot stack can migrate
 #   established TCP sockets, but it cannot dump UCX/OpenMPI mappings backed by
 #   /dev/infiniband/uverbs*. For one GPU, tcp,self is sufficient.
-# - /dev/net/tun is not required for this single-GPU recipe.
+# - Mount /dev/net/tun. CRIU may need it while restoring network devices created
+#   by the TRT-LLM/PyTorch/OpenMPI stack even in this single-GPU recipe.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -61,6 +62,10 @@ spec:
                 claimName: model-cache
             - name: criu-work
               emptyDir: {}
+            - name: dev-net-tun
+              hostPath:
+                path: /dev/net/tun
+                type: CharDevice
           containers:
             - name: main
               image: my-registry/tensorrtllm-placeholder:my-tag
@@ -97,3 +102,5 @@ spec:
                   mountPath: /home/dynamo/.cache/huggingface
                 - name: criu-work
                   mountPath: /var/criu-work
+                - name: dev-net-tun
+                  mountPath: /dev/net/tun

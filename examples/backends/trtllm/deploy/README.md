@@ -65,7 +65,8 @@ TensorRT-LLM worker. This example uses the conservative engine configuration in
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server
 - `TRTLLMWorker`: Single GPU TensorRT-LLM worker restored with
-  `experimental.checkpoint.mode: Auto`
+  `experimental.checkpoint.enabled: true` and
+  `startupPolicy: WaitForCheckpoint`
 
 ## CRD Structure
 
