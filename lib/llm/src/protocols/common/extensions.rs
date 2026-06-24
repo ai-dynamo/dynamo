@@ -63,25 +63,25 @@ where
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KvHints {
-    pub evict_trajectory: bool,
+    pub evict_session: bool,
 }
 
 /// Identity metadata for agentic workloads.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentContext {
-    /// Schedulable reasoning/tool trajectory identifier.
-    pub trajectory_id: String,
+    /// Stable reasoning/tool session identifier.
+    pub session_id: String,
 
-    /// Optional parent trajectory for subagents.
+    /// Optional parent session for subagents.
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_trajectory_id: Option<String>,
+    pub parent_session_id: Option<String>,
 
     /// Optional terminal marker for lifecycle-aware internal consumers.
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub trajectory_final: Option<bool>,
+    pub session_final: Option<bool>,
 
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -246,13 +246,13 @@ const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
-        let kv_hints = (values.trajectory_final == Some(true)).then_some(KvHints {
-            evict_trajectory: true,
+        let kv_hints = (values.session_final == Some(true)).then_some(KvHints {
+            evict_session: true,
         });
         Self {
-            trajectory_id: values.trajectory_id,
-            parent_trajectory_id: values.parent_trajectory_id,
-            trajectory_final: values.trajectory_final,
+            session_id: values.session_id,
+            parent_session_id: values.parent_session_id,
+            session_final: values.session_final,
             kv_hints,
         }
     }
@@ -592,8 +592,8 @@ mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID,
-        HEADER_DYNAMO_PARENT_TRAJECTORY_ID, HEADER_DYNAMO_TRAJECTORY_FINAL,
-        HEADER_DYNAMO_TRAJECTORY_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[test]
@@ -673,9 +673,9 @@ mod tests {
     #[test]
     fn nvext_agent_context_is_rejected() {
         for json in [
-            r#"{"agent_context":{"trajectory_id":"run-123"}}"#,
-            r#"{"agent_context":{"trajectory_id":"run-123","parent_trajectory_id":"root-1"}}"#,
-            r#"{"agent_context":{"trajectory_id":"run-123","trajectory_final":true}}"#,
+            r#"{"agent_context":{"session_id":"run-123"}}"#,
+            r#"{"agent_context":{"session_id":"run-123","parent_session_id":"root-1"}}"#,
+            r#"{"agent_context":{"session_id":"run-123","session_final":true}}"#,
         ] {
             let err = serde_json::from_str::<NvExt>(json).unwrap_err();
             assert!(err.to_string().contains("unknown field `agent_context`"));
@@ -790,11 +790,10 @@ mod tests {
                 Some("parent-run-1"),
                 Some("parent-run-1"),
             ),
-            (HEADER_DYNAMO_TRAJECTORY_ID, "generic-run-1", None, None),
+            (HEADER_DYNAMO_SESSION_ID, "generic-run-1", None, None),
         ];
 
-        for (header_name, header_value, parent_header_value, expected_parent_trajectory_id) in cases
-        {
+        for (header_name, header_value, parent_header_value, expected_parent_session_id) in cases {
             let mut headers = HeaderMap::new();
             headers.insert(
                 header_name.parse::<HeaderName>().unwrap(),
@@ -805,18 +804,18 @@ mod tests {
             }
 
             let agent_context = agent_context_from_headers(&headers).unwrap();
-            assert_eq!(agent_context.trajectory_id.as_str(), header_value);
+            assert_eq!(agent_context.session_id.as_str(), header_value);
             assert_eq!(
-                agent_context.parent_trajectory_id.as_deref(),
-                expected_parent_trajectory_id
+                agent_context.parent_session_id.as_deref(),
+                expected_parent_session_id
             );
-            assert_eq!(agent_context.trajectory_final, None);
+            assert_eq!(agent_context.session_final, None);
             assert_eq!(agent_context.kv_hints, None);
         }
     }
 
     #[test]
-    fn agent_context_from_headers_uses_claude_agent_id_as_child_trajectory() {
+    fn agent_context_from_headers_uses_claude_agent_id_as_child_session() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -826,9 +825,9 @@ mod tests {
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
 
-        assert_eq!(agent_context.trajectory_id, "claude-agent");
+        assert_eq!(agent_context.session_id, "claude-agent");
         assert_eq!(
-            agent_context.parent_trajectory_id.as_deref(),
+            agent_context.parent_session_id.as_deref(),
             Some("claude-session")
         );
     }
@@ -836,37 +835,64 @@ mod tests {
     #[test]
     fn agent_context_from_headers_reads_dynamo_parent_and_final() {
         let mut headers = HeaderMap::new();
-        headers.insert(HEADER_DYNAMO_TRAJECTORY_ID, "generic-run".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "generic-run".parse().unwrap());
         headers.insert(
-            HEADER_DYNAMO_PARENT_TRAJECTORY_ID,
+            HEADER_DYNAMO_PARENT_SESSION_ID,
             "generic-parent".parse().unwrap(),
         );
-        headers.insert(HEADER_DYNAMO_TRAJECTORY_FINAL, "true".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SESSION_FINAL, "true".parse().unwrap());
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
 
-        assert_eq!(agent_context.trajectory_id, "generic-run");
+        assert_eq!(agent_context.session_id, "generic-run");
         assert_eq!(
-            agent_context.parent_trajectory_id.as_deref(),
+            agent_context.parent_session_id.as_deref(),
             Some("generic-parent")
         );
-        assert_eq!(agent_context.trajectory_final, Some(true));
+        assert_eq!(agent_context.session_final, Some(true));
         assert_eq!(
             agent_context.kv_hints,
             Some(KvHints {
-                evict_trajectory: true
+                evict_session: true
             })
         );
 
-        headers.insert(HEADER_DYNAMO_TRAJECTORY_FINAL, "false".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SESSION_FINAL, "false".parse().unwrap());
         assert_eq!(agent_context_from_headers(&headers).unwrap().kv_hints, None);
     }
 
     #[test]
-    fn apply_header_routing_overrides_ignores_non_identity_session_headers() {
+    fn dynamo_session_headers_override_agent_native_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "dynamo-session".parse().unwrap());
+        headers.insert(
+            HEADER_DYNAMO_PARENT_SESSION_ID,
+            "dynamo-parent".parse().unwrap(),
+        );
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+
+        assert_eq!(agent_context.session_id, "dynamo-session");
+        assert_eq!(
+            agent_context.parent_session_id.as_deref(),
+            Some("dynamo-parent")
+        );
+    }
+
+    #[test]
+    fn apply_header_routing_overrides_ignores_session_identity_headers() {
         use axum::http::{HeaderMap, HeaderName};
 
-        for header_name in ["x-session-affinity", "session_id"] {
+        for header_name in [
+            HEADER_DYNAMO_SESSION_ID,
+            HEADER_DYNAMO_PARENT_SESSION_ID,
+            HEADER_DYNAMO_SESSION_FINAL,
+        ] {
             let mut headers = HeaderMap::new();
             headers.insert(
                 header_name.parse::<HeaderName>().unwrap(),

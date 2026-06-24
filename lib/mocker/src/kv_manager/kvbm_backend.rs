@@ -40,6 +40,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash};
+use kvbm_logical::blocks::BlockDuplicationPolicy;
 use kvbm_logical::registry::BlockRegistry;
 use kvbm_logical::tinylfu::TinyLFUTracker;
 use kvbm_logical::{BlockManager, ImmutableBlock, MutableBlock};
@@ -131,6 +132,23 @@ pub struct DecodeBlockReservation {
     blocks: Vec<MutableBlock<G1>>,
 }
 
+pub struct VllmDestinationReservation {
+    cached_prefix: Vec<(SequenceHash, ImmutableBlock<G1>)>,
+    unpublished_blocks: Vec<MutableBlock<G1>>,
+    layout: Option<MoveBlock>,
+}
+
+#[cfg(test)]
+impl VllmDestinationReservation {
+    pub(crate) fn block_ids(&self) -> Vec<usize> {
+        self.cached_prefix
+            .iter()
+            .map(|(_, block)| block.block_id())
+            .chain(self.unpublished_blocks.iter().map(MutableBlock::block_id))
+            .collect()
+    }
+}
+
 impl DecodeBlockReservation {
     fn take(&mut self) -> Option<MutableBlock<G1>> {
         self.blocks.pop()
@@ -152,6 +170,20 @@ struct RegisteredBlockInfo {
     local_hash: Option<BlockHash>,
     #[cfg_attr(not(feature = "kvbm-offload"), allow(dead_code))]
     token_ids: Option<Vec<u32>>,
+}
+
+struct FullBlockMetadata {
+    seq_hash: SequenceHash,
+    plh: PositionalLineageHash,
+    parent_hash: Option<SequenceHash>,
+    local_hash: Option<BlockHash>,
+    token_ids: Option<Vec<u32>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FullBlockCommit {
+    Reused,
+    Stored,
 }
 
 /// Synchronous G1 KV block manager backed by `kvbm-logical::BlockManager<G1>`.
@@ -231,7 +263,17 @@ impl KvManager {
         let mut mgr_builder = BlockManager::builder()
             .block_count(max_capacity)
             .block_size(block_size)
-            .registry(registry);
+            .registry(registry)
+            .duplication_policy(BlockDuplicationPolicy::Reject);
+
+        // Intentional vLLM drift: upstream permits duplicate physical blocks
+        // for append-only request block tables. The mocker has one canonical
+        // registered_blocks entry per PLH and no request-owned physical block
+        // tables or duplicate-reset events, so Allow would make offload metadata
+        // and KV-event cleanup unsafe. Reject may discard a reserved block,
+        // adopt an existing block ID, reduce occupancy, and omit duplicate Stored.
+        // Revisit Allow only with per-request physical ownership, duplicate-aware
+        // offload metadata, and balanced duplicate Stored/Removed lifecycle events.
         mgr_builder = match eviction_backend {
             MockerEvictionBackend::Lineage => mgr_builder.with_lineage_backend(),
             MockerEvictionBackend::Lru => mgr_builder.with_lru_backend(),
@@ -711,6 +753,14 @@ impl KvManager {
     }
 
     pub fn reserve_decode_blocks(&mut self, count: usize) -> Option<DecodeBlockReservation> {
+        let blocks = self.allocate_unpublished_blocks(count)?;
+        Some(DecodeBlockReservation { blocks })
+    }
+
+    fn allocate_unpublished_blocks(&mut self, count: usize) -> Option<Vec<MutableBlock<G1>>> {
+        if count == 0 {
+            return Some(Vec::new());
+        }
         let (blocks, evicted_plhs) = self.block_manager.allocate_blocks_with_evictions(count)?;
         if self.should_block_on_g1_offload(&evicted_plhs) {
             self.handle_evictions_with_source_slots(evicted_plhs, blocks);
@@ -718,7 +768,253 @@ impl KvManager {
         }
 
         self.handle_evictions(evicted_plhs);
-        Some(DecodeBlockReservation { blocks })
+        Some(blocks)
+    }
+
+    fn acquire_existing_full(
+        &mut self,
+        seq_hash: SequenceHash,
+        plh: PositionalLineageHash,
+    ) -> Option<ImmutableBlock<G1>> {
+        if let Some(active) = self.active_full.get(&seq_hash) {
+            return Some(active[0].clone());
+        }
+        self.block_manager.match_blocks(&[plh]).into_iter().next()
+    }
+
+    fn commit_active_full(
+        &mut self,
+        candidate: MutableBlock<G1>,
+        metadata: FullBlockMetadata,
+    ) -> FullBlockCommit {
+        let FullBlockMetadata {
+            seq_hash,
+            plh,
+            parent_hash,
+            local_hash,
+            token_ids,
+        } = metadata;
+
+        if let Some(canonical) = self.acquire_existing_full(seq_hash, plh) {
+            drop(candidate);
+            self.active_full
+                .entry(seq_hash)
+                .or_default()
+                .push(canonical);
+            return FullBlockCommit::Reused;
+        }
+
+        let candidate_block_id = candidate.block_id();
+        let complete = candidate
+            .stage(plh, self.block_size)
+            .expect("full block stage failed");
+        let canonical = self.block_manager.register_block(complete);
+        let canonical_block_id = canonical.block_id();
+        self.active_full
+            .entry(seq_hash)
+            .or_default()
+            .push(canonical);
+
+        if canonical_block_id != candidate_block_id {
+            return FullBlockCommit::Reused;
+        }
+
+        let previous = self.registered_blocks.insert(
+            plh,
+            RegisteredBlockInfo {
+                seq_hash,
+                block_id: canonical_block_id,
+                parent_hash,
+                local_hash,
+                token_ids,
+            },
+        );
+        debug_assert!(previous.is_none());
+        FullBlockCommit::Stored
+    }
+
+    pub(crate) fn reserve_destination(
+        &mut self,
+        sequence: &ActiveSequence,
+    ) -> Option<VllmDestinationReservation> {
+        let layout = sequence.prepare_allocation(sequence.num_input_tokens());
+        let Some(MoveBlock::Use(blocks, _, plhs, _, _)) = layout.as_ref() else {
+            return Some(VllmDestinationReservation {
+                cached_prefix: Vec::new(),
+                unpublished_blocks: Vec::new(),
+                layout,
+            });
+        };
+
+        let mut cached_prefix = Vec::new();
+        for (plh_idx, block) in blocks.iter().enumerate() {
+            let UniqueBlock::FullBlock(seq_hash) = block else {
+                break;
+            };
+            let plh = plhs[plh_idx];
+            let Some(handle) = self.acquire_existing_full(*seq_hash, plh) else {
+                break;
+            };
+            cached_prefix.push((*seq_hash, handle));
+        }
+
+        let unpublished_blocks =
+            self.allocate_unpublished_blocks(blocks.len() - cached_prefix.len())?;
+        Some(VllmDestinationReservation {
+            cached_prefix,
+            unpublished_blocks,
+            layout,
+        })
+    }
+
+    /// Publish transferred destination blocks while reconciling any cache entry
+    /// that appeared after reservation. Unlike upstream vLLM, a collision may
+    /// replace the reserved block ID and reduce occupancy during activation;
+    /// the mocker acquires the canonical handle instead of strictly moving the
+    /// originally reserved handle.
+    pub(crate) fn activate_destination(&mut self, reservation: VllmDestinationReservation) {
+        let VllmDestinationReservation {
+            cached_prefix,
+            unpublished_blocks,
+            layout,
+        } = reservation;
+        let Some(MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent)) = layout else {
+            debug_assert!(cached_prefix.is_empty());
+            debug_assert!(unpublished_blocks.is_empty());
+            return;
+        };
+
+        let prefix_len = cached_prefix.len();
+        let full_blocks = blocks
+            .iter()
+            .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
+            .count();
+        assert_eq!(
+            plhs.len(),
+            full_blocks,
+            "destination PLH count must match full block count"
+        );
+        assert!(
+            local_hashes.is_empty() || local_hashes.len() == full_blocks,
+            "destination local hash count must be empty or match full block count"
+        );
+        assert!(
+            token_ids
+                .as_ref()
+                .is_none_or(|all_ids| all_ids.len() == full_blocks),
+            "destination token metadata count must match full block count"
+        );
+        assert!(
+            prefix_len <= blocks.len(),
+            "destination cached prefix exceeds block layout"
+        );
+        assert_eq!(
+            unpublished_blocks.len(),
+            blocks.len() - prefix_len,
+            "destination unpublished block count must cover the uncached layout"
+        );
+        for (block, (reserved_hash, _)) in blocks.iter().zip(&cached_prefix) {
+            let UniqueBlock::FullBlock(layout_hash) = block else {
+                panic!("destination cached prefix cannot contain a partial block");
+            };
+            assert_eq!(
+                layout_hash, reserved_hash,
+                "destination cached prefix hash must match block layout"
+            );
+        }
+
+        let mut cached_prefix = cached_prefix.into_iter();
+        let mut unpublished_blocks = unpublished_blocks.into_iter();
+        let mut stored_seq_hashes = Vec::new();
+        let mut stored_local_hashes = Vec::new();
+        let mut stored_token_ids = token_ids.as_ref().map(|_| Vec::new());
+        let mut first_store_parent = None;
+        let mut metadata_parent_hash = match parent {
+            Some(UniqueBlock::FullBlock(hash)) => Some(hash),
+            Some(UniqueBlock::PartialBlock(_)) => panic!("parent block cannot be partial"),
+            None => None,
+        };
+        let mut plh_idx = 0usize;
+
+        for (block_idx, block) in blocks.into_iter().enumerate() {
+            match block {
+                UniqueBlock::FullBlock(seq_hash) => {
+                    let full_idx = plh_idx;
+                    let plh = plhs[plh_idx];
+                    plh_idx += 1;
+                    if block_idx < prefix_len {
+                        let (_, handle) = cached_prefix
+                            .next()
+                            .expect("reserved prefix handle must exist");
+                        self.active_full.entry(seq_hash).or_default().push(handle);
+                        metadata_parent_hash = Some(seq_hash);
+                        continue;
+                    }
+
+                    let mutable = unpublished_blocks
+                        .next()
+                        .expect("reserved destination block must exist");
+                    let local_hash = local_hashes.get(full_idx).copied();
+                    let block_token_ids = token_ids
+                        .as_ref()
+                        .and_then(|all_ids| all_ids.get(full_idx).cloned());
+                    let commit = self.commit_active_full(
+                        mutable,
+                        FullBlockMetadata {
+                            seq_hash,
+                            plh,
+                            parent_hash: metadata_parent_hash,
+                            local_hash,
+                            token_ids: block_token_ids.clone(),
+                        },
+                    );
+                    if commit == FullBlockCommit::Reused {
+                        if !stored_seq_hashes.is_empty() {
+                            let local_hashes = std::mem::take(&mut stored_local_hashes);
+                            self.publish_kv_event(
+                                std::mem::take(&mut stored_seq_hashes),
+                                &local_hashes,
+                                first_store_parent,
+                                true,
+                                stored_token_ids.take(),
+                            );
+                            first_store_parent = None;
+                            stored_token_ids = token_ids.as_ref().map(|_| Vec::new());
+                        }
+                        metadata_parent_hash = Some(seq_hash);
+                        continue;
+                    }
+                    if stored_seq_hashes.is_empty() {
+                        first_store_parent = metadata_parent_hash;
+                    }
+                    stored_seq_hashes.push(seq_hash);
+                    if let Some(local_hash) = local_hash {
+                        stored_local_hashes.push(local_hash);
+                    }
+                    if let (Some(stored), Some(block_token_ids)) =
+                        (stored_token_ids.as_mut(), block_token_ids)
+                    {
+                        stored.push(block_token_ids);
+                    }
+                    metadata_parent_hash = Some(seq_hash);
+                }
+                UniqueBlock::PartialBlock(uuid) => {
+                    let mutable = unpublished_blocks
+                        .next()
+                        .expect("reserved destination partial block must exist");
+                    let previous = self.active_partial.insert(uuid, mutable);
+                    debug_assert!(previous.is_none());
+                }
+            }
+        }
+
+        self.publish_kv_event(
+            stored_seq_hashes,
+            &stored_local_hashes,
+            first_store_parent,
+            true,
+            stored_token_ids,
+        );
     }
 
     pub fn process_decode_signal(
@@ -1231,40 +1527,18 @@ impl KvManager {
             .remove(&uuid)
             .expect("Promote: partial block not found");
 
-        // Detect collision: seq_hash already has registered handles (active or inactive).
-        let is_new = if let Some(vec) = self.active_full.get_mut(&seq_hash) {
-            // Collision on active pool — drop MutableBlock, clone existing handle.
-            drop(mutable);
-            let existing = vec[0].clone();
-            vec.push(existing);
-            false
-        } else if let Some(immutable) = self.block_manager.match_blocks(&[plh]).into_iter().next() {
-            // Collision on inactive pool — reactivate existing handle.
-            drop(mutable);
-            self.active_full.insert(seq_hash, vec![immutable]);
-            false
-        } else {
-            // Fresh registration.
-            let complete = mutable
-                .stage(plh, self.block_size)
-                .expect("stage failed during promote");
-            let immutable = self.block_manager.register_block(complete);
-            let block_id = immutable.block_id();
-            self.active_full.insert(seq_hash, vec![immutable]);
-            self.registered_blocks.insert(
+        let commit = self.commit_active_full(
+            mutable,
+            FullBlockMetadata {
+                seq_hash,
                 plh,
-                RegisteredBlockInfo {
-                    seq_hash,
-                    block_id,
-                    parent_hash,
-                    local_hash,
-                    token_ids: token_ids.clone(),
-                },
-            );
-            true
-        };
+                parent_hash,
+                local_hash,
+                token_ids: token_ids.clone(),
+            },
+        );
 
-        if is_new {
+        if commit == FullBlockCommit::Stored {
             let local_hashes = local_hash.into_iter().collect::<Vec<_>>();
             self.publish_kv_event(
                 vec![seq_hash],
@@ -1292,6 +1566,24 @@ impl KvManager {
     /// Shared-prefix reuse inflates this above the distinct-block count.
     pub fn num_active_block_refs(&self) -> usize {
         self.active_partial.len() + self.active_full.values().map(|v| v.len()).sum::<usize>()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_block_ids(&self, sequence: &ActiveSequence) -> Vec<usize> {
+        sequence
+            .unique_blocks()
+            .iter()
+            .filter_map(|block| match block {
+                UniqueBlock::FullBlock(hash) => self
+                    .active_full
+                    .get(hash)
+                    .and_then(|handles| handles.last())
+                    .map(ImmutableBlock::block_id),
+                UniqueBlock::PartialBlock(uuid) => {
+                    self.active_partial.get(uuid).map(MutableBlock::block_id)
+                }
+            })
+            .collect()
     }
 
     pub fn get_active_perc(&self) -> f64 {
@@ -1981,6 +2273,139 @@ mod tests {
             .count();
         assert_eq!(stored_count, 1, "reactivation must not re-emit Stored");
         assert_eq!(removed_count, 0, "Deref must not emit Removed");
+    }
+
+    #[test]
+    fn destination_activation_collision_reuses_canonical_block_and_offload_metadata() {
+        let (mut mgr, sink) = make_mgr_capturing(2, 4);
+        assert_eq!(
+            mgr.block_manager.duplication_policy(),
+            &BlockDuplicationPolicy::Reject
+        );
+        let sequence = ActiveSequence::new(vec![1, 2, 3, 4], 1, Some(4), true, true);
+        let reservation = mgr
+            .reserve_destination(&sequence)
+            .expect("destination reservation should fit");
+        let reserved_block_id = reservation.block_ids()[0];
+        assert_eq!(mgr.num_active_blocks(), 1);
+
+        let signal = sequence
+            .prepare_allocation(sequence.num_input_tokens())
+            .expect("full prompt should require allocation");
+        let MoveBlock::Use(blocks, local_hashes, plhs, token_ids, _) = &signal else {
+            panic!("expected full prompt allocation");
+        };
+        let UniqueBlock::FullBlock(seq_hash) = blocks[0] else {
+            panic!("expected a full prompt block");
+        };
+        let plh = plhs[0];
+        let local_hash = local_hashes[0];
+        let token_ids = token_ids.as_ref().expect("token metadata enabled")[0].clone();
+
+        assert_eq!(mgr.process(&signal), 1);
+        let canonical_block_id = mgr.active_block_ids(&sequence)[0];
+        assert_ne!(reserved_block_id, canonical_block_id);
+        assert_eq!(mgr.num_active_blocks(), 2);
+        sink.events.lock().unwrap().clear();
+
+        mgr.activate_destination(reservation);
+
+        assert_eq!(mgr.num_active_blocks(), 1);
+        assert_eq!(mgr.active_block_ids(&sequence), vec![canonical_block_id]);
+        assert!(
+            sink.events.lock().unwrap().is_empty(),
+            "collision must not emit another Stored"
+        );
+
+        // handle_evictions consumes this entry when it later creates offload metadata.
+        let metadata = mgr
+            .registered_blocks
+            .get(&plh)
+            .expect("canonical registry metadata must remain available for offload");
+        assert_eq!(metadata.seq_hash, seq_hash);
+        assert_eq!(metadata.block_id, canonical_block_id);
+        assert_eq!(metadata.parent_hash, None);
+        assert_eq!(metadata.local_hash, Some(local_hash));
+        assert_eq!(metadata.token_ids.as_deref(), Some(token_ids.as_slice()));
+    }
+
+    #[test]
+    fn destination_activation_splits_stores_across_reused_middle_block() {
+        let (mut mgr, sink) = make_mgr_capturing(8, 4);
+        let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, true);
+        let reservation = mgr
+            .reserve_destination(&sequence)
+            .expect("destination reservation should fit");
+        let signal = sequence
+            .prepare_allocation(sequence.num_input_tokens())
+            .expect("full prompt should require allocation");
+        let MoveBlock::Use(blocks, _, plhs, _, _) = &signal else {
+            panic!("expected full prompt allocation");
+        };
+        let [
+            UniqueBlock::FullBlock(first),
+            UniqueBlock::FullBlock(middle),
+            UniqueBlock::FullBlock(last),
+        ] = blocks.as_slice()
+        else {
+            panic!("expected three full prompt blocks");
+        };
+
+        use_full(&mut mgr, *middle, plhs[1]);
+        sink.events.lock().unwrap().clear();
+
+        mgr.activate_destination(reservation);
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        let KvCacheEventData::Stored(first_store) = &events[0].data else {
+            panic!("expected first Stored event");
+        };
+        assert_eq!(first_store.blocks.len(), 1);
+        assert_eq!(
+            first_store.blocks[0].block_hash,
+            ExternalSequenceBlockHash(*first)
+        );
+        let KvCacheEventData::Stored(last_store) = &events[1].data else {
+            panic!("expected second Stored event");
+        };
+        assert_eq!(last_store.blocks.len(), 1);
+        assert_eq!(
+            last_store.blocks[0].block_hash,
+            ExternalSequenceBlockHash(*last)
+        );
+        assert_eq!(
+            last_store.parent_hash,
+            Some(ExternalSequenceBlockHash(*middle))
+        );
+    }
+
+    #[test]
+    fn destination_activation_validates_layout_before_committing_blocks() {
+        let mut mgr = make_mgr(4, 4);
+        let unpublished_blocks = mgr
+            .allocate_unpublished_blocks(2)
+            .expect("destination capacity should be available");
+        let reservation = VllmDestinationReservation {
+            cached_prefix: Vec::new(),
+            unpublished_blocks,
+            layout: Some(MoveBlock::Use(
+                vec![UniqueBlock::FullBlock(1), UniqueBlock::FullBlock(2)],
+                Vec::new(),
+                vec![plh(1)],
+                None,
+                None,
+            )),
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mgr.activate_destination(reservation);
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(mgr.num_active_blocks(), 0);
+        assert!(mgr.active_full.is_empty());
+        assert!(mgr.registered_blocks.is_empty());
     }
 
     /// After reusing a prefix [A, B] and storing a new suffix [C], the

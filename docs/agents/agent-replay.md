@@ -17,7 +17,7 @@ export DYN_REQUEST_TRACE_SINKS=jsonl_gz
 export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-trace
 ```
 
-For tool timing fidelity, publish explicit tool events over the optional ZMQ ingress described in [Agent Tracing](agent-tracing.md#tool-call-observability). Without tool events, Dynamo can still infer tool-wait time from the gap between adjacent LLM requests in the same trajectory.
+For tool timing fidelity, publish explicit tool events over the optional ZMQ ingress described in [Agent Tracing](agent-tracing.md#tool-call-observability). Without tool events, Dynamo can still infer tool-wait time from the gap between adjacent LLM requests in the same session.
 
 ## Convert to Agentic Mooncake
 
@@ -55,10 +55,10 @@ uv run --no-sync python -m dynamo.replay /tmp/dynamo-request-trace.agentic-moonc
 Agentic Mooncake rows preserve:
 
 - `request_id`: the LLM request row identity.
-- Mooncake `session_id`: derived from the Dynamo `trajectory_id`.
+- Mooncake `session_id`: derived from the Dynamo `session_id`.
 - `wait_for`: request IDs that must complete before this row becomes eligible.
 - `branches`: child request IDs spawned from this row.
-- `prefix_reset`: first request in a trajectory.
+- `prefix_reset`: first request in a session.
 - `delay`: non-tool delay after dependencies finish.
 - `tool_wait_ms`: tool time after dependencies finish, parallel-aware as the union of overlapping spans rather than their sum.
 - `tool_events`: per-tool spans attributed to this LLM request, each carrying `tool_call_id`, `tool_class`, `status`, `started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`, and optional `output_bytes`, `output_tokens`, or `error_type`.

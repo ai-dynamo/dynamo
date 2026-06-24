@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner
+subtitle: Autoscaler that adjusts prefill and decode replicas using engine performance models and traffic prediction to meet TTFT and ITL SLAs.
 ---
 
 ## Why LLM Inference Needs a Different Autoscaler
