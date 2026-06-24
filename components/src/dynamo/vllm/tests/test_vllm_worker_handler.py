@@ -662,6 +662,9 @@ def _make_decode_handler(
     handler.input_param_manager = MagicMock()
     handler.input_param_manager.get_extra_params.return_value = {}
     handler._deferred_aborts = {}
+    # Real BaseWorkerHandler.__init__ (patched out above) sets this; the
+    # aggregated branch in _generate_token_mode reads it, so mirror the default.
+    handler._custom_encoder = None
     return handler
 
 

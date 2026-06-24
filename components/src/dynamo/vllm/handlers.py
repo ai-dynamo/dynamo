@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import importlib
 import inspect
 import logging
 import math
@@ -97,6 +98,8 @@ from dynamo.vllm.kv_connector_protocols import (
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
+from .multimodal_utils.custom_encoder import CustomEncoder
+from .multimodal_utils.embed_assembler import build_mixed_embeds
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import (
     ModelFamily,
@@ -1040,6 +1043,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             enable_frontend_decoding=enable_frontend_decoding
         )
         self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
+
+        # Aggregated partial encoder: loaded in-process if --custom-encoder-class is set.
+        self._custom_encoder: Optional[CustomEncoder] = None
+        custom_encoder_class = getattr(config, "custom_encoder_class", None)
+        if custom_encoder_class:
+            # The CustomEncoder path only ever submits a mixed EmbedsPrompt, so
+            # fail fast here if prompt-embeds are disabled rather than loading
+            # the encoder and then rejecting every image request at runtime.
+            if not config.engine_args.enable_prompt_embeds:
+                raise ValueError(
+                    "--custom-encoder-class requires --enable-prompt-embeds: the "
+                    "custom encoder submits a mixed EmbedsPrompt, which the engine "
+                    "cannot accept without prompt-embeds enabled."
+                )
+            _module_path, _, _class_name = custom_encoder_class.rpartition(".")
+            _module = importlib.import_module(_module_path)
+            self._custom_encoder = getattr(_module, _class_name)()
+            _device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._custom_encoder.load(config.model, _device)
+            logger.info(
+                "Loaded CustomEncoder %s from %s on %s",
+                custom_encoder_class,
+                config.model,
+                _device,
+            )
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -2720,6 +2748,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
         mm_processor_kwargs: Dict[str, Any] | None = None,
+        mixed_embeds: tuple[torch.Tensor, list[int], list[bool]] | None = None,
     ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
@@ -2731,6 +2760,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
             mm_processor_kwargs: Optional multimodal processor kwargs (e.g.
                 use_audio_in_video) forwarded to the vLLM engine.
+            mixed_embeds: Optional ``(prompt_embeds, prompt_token_ids,
+                prompt_is_token_ids)`` assembled by the aggregated CustomEncoder
+                path. When present, takes the EmbedsPrompt fast path below.
 
         Returns:
             Tuple of (prompt, embedding_sequence_length, error_dict) where:
@@ -2738,6 +2770,39 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             - On failure: (None, None, error_dict to yield)
         """
         embedding_sequence_length = None
+
+        # Fast path: mixed token-ids/embeds prompt from the aggregated
+        # CustomEncoder path, assembled in _generate_token_mode and passed in
+        # explicitly. The image embeds ride on the EmbedsPrompt itself and the
+        # request carries no multi_modal_data, so there is nothing to bind
+        # mm_uuids to here — the normal token path's MM-routing logic below is
+        # intentionally skipped for this path.
+        if mixed_embeds is not None:
+            prompt_embeds, prompt_token_ids, prompt_is_token_ids = mixed_embeds
+            if not self.config.engine_args.enable_prompt_embeds:
+                msg = (
+                    "CustomEncoder requires `--enable-prompt-embeds`; the "
+                    "assembled EmbedsPrompt cannot be submitted without it."
+                )
+                logger.error("Request %s: %s", request_id, msg)
+                return (
+                    None,
+                    None,
+                    {
+                        "finish_reason": f"error: {msg}",
+                        "token_ids": [],
+                    },
+                )
+            seq_len = prompt_embeds.shape[0]
+            return (
+                EmbedsPrompt(
+                    prompt_embeds=prompt_embeds,
+                    prompt_token_ids=prompt_token_ids,
+                    prompt_is_token_ids=prompt_is_token_ids,
+                ),
+                seq_len,
+                None,
+            )
 
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
@@ -2781,6 +2846,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "token_ids": [],
                     },
                 )
+        # Text-only PD + encoder-worker path.
         # Normal path: use token IDs.
         # Prefer frontend-forwarded mm_hashes for hash consistency with the
         # routing layer. Fall back to computing from loaded image data when
@@ -3135,6 +3201,99 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     first_token = False
                 yield chunk
 
+    async def _assemble_custom_encoder_prompt(
+        self,
+        request: Dict[str, Any],
+        request_id: str,
+        context,
+        mm_processor_kwargs: Dict[str, Any] | None = None,
+    ) -> tuple[
+        tuple[torch.Tensor, list[int], list[bool]] | None,
+        Dict[str, Any] | None,
+        Dict[str, Any] | None,
+    ]:
+        """Run the in-process CustomEncoder and assemble a mixed EmbedsPrompt.
+
+        The CustomEncoder consumes image URLs directly and emits embeds. Returns
+        ``(mixed_embeds, multi_modal_data, error)``:
+        - images present: ``(mixed_embeds, None, None)``,
+        - no image content: ``(None, multi_modal_data, None)`` — text-only request
+          loaded via the normal aggregated path,
+        - failure: ``(None, None, error_dict)`` for the caller to yield.
+        """
+        # Internal invariant: callers guard on `self._custom_encoder is not None`
+        # before reaching here. Use an explicit raise (not assert, which is
+        # stripped under `python -O`) so a future mis-wire fails loudly.
+        if self._custom_encoder is None:
+            raise RuntimeError(
+                "_assemble_custom_encoder_prompt called without a CustomEncoder"
+            )
+        mm_map = request.get("multi_modal_data") or {}
+        # CustomEncoder handles images only. Reject any non-image modality
+        # (video/audio/...) explicitly instead of silently dropping it.
+        unsupported = sorted(k for k in mm_map if k != IMAGE_URL_KEY and mm_map.get(k))
+        if unsupported:
+            msg = (
+                "CustomEncoder supports image inputs only; got "
+                f"unsupported multimodal data: {unsupported}"
+            )
+            logger.error("Request %s: %s", request_id, msg)
+            return None, None, {"finish_reason": f"error: {msg}", "token_ids": []}
+
+        image_items = mm_map.get(IMAGE_URL_KEY) or []
+        image_urls = [
+            item["Url"]
+            for item in image_items
+            if isinstance(item, dict) and "Url" in item
+        ]
+        if image_items and not image_urls:
+            # Image data is present but no usable URL could be extracted.
+            msg = (
+                "CustomEncoder received image multimodal data but could not "
+                f"extract any URLs from {len(image_items)} item(s); each item "
+                "must be a dict with a 'Url' key"
+            )
+            logger.error("Request %s: %s", request_id, msg)
+            return None, None, {"finish_reason": f"error: {msg}", "token_ids": []}
+
+        if not image_urls:
+            # No image content at all → normal aggregated load (text-only).
+            multi_modal_data = await self._extract_multimodal_data(
+                request, request_id, context, mm_processor_kwargs=mm_processor_kwargs
+            )
+            return None, multi_modal_data, None
+
+        token_ids: list[int] = request.get("token_ids") or []
+        # encode() is user-supplied code (any exception) and
+        # get_image_placeholder_token_id() can raise (unknown model family), so
+        # keep encode -> placeholder lookup -> assembly inside one guard: a
+        # failure becomes a structured request error instead of escaping the
+        # request coroutine and tearing down the stream.
+        try:
+            # encode() is async; the encoder owns its execution model (serial via
+            # SerializedCustomEncoder, or its own batching scheduler). The worker
+            # holds no lock — serialization, if any, is the encoder's concern.
+            img_tensors: list[torch.Tensor] = await self._custom_encoder.encode(
+                image_urls
+            )
+            placeholder_id = self._custom_encoder.get_image_placeholder_token_id()
+            prompt_embeds, mixed_token_ids, is_token_ids = build_mixed_embeds(
+                token_ids, img_tensors, placeholder_id
+            )
+        except Exception as exc:
+            msg = f"CustomEncoder failed: {exc}"
+            logger.exception("Request %s: %s", request_id, msg)
+            return None, None, {"finish_reason": f"error: {msg}", "token_ids": []}
+
+        logger.debug(
+            "Request %s: CustomEncoder assembled %d image(s) → seq_len=%d dtype=%s",
+            request_id,
+            len(img_tensors),
+            prompt_embeds.shape[0],
+            prompt_embeds.dtype,
+        )
+        return (prompt_embeds, mixed_token_ids, is_token_ids), None, None
+
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
         # Firstly extract disaggregated params from prefill result if available
@@ -3163,6 +3322,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         multi_modal_data: Dict[str, Any] | None = None
         pre_rendered: Dict[str, Any] | None = None
+        # Assembled by the aggregated CustomEncoder path (if active) and passed
+        # explicitly to _build_prompt_from_request below.
+        mixed_embeds: tuple[torch.Tensor, list[int], list[bool]] | None = None
         if is_decode_only:
             # Decode mode: branch on model, not data.
             if resolve_model_family(self.config.model) is ModelFamily.QWEN_VL:
@@ -3218,6 +3380,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL/SHM",
                     request_id,
                 )
+            elif self._custom_encoder is not None and has_mm_data:
+                # Aggregated CustomEncoder path: encoder runs in-process (no NIXL
+                # transfer) and assembles a mixed EmbedsPrompt, or yields an error.
+                # No vLLM multi_modal_data is produced here — images become embeds
+                # and a request with no images is treated as text-only.
+                (
+                    mixed_embeds,
+                    multi_modal_data,
+                    assemble_error,
+                ) = await self._assemble_custom_encoder_prompt(
+                    request, request_id, context, mm_processor_kwargs
+                )
+                if assemble_error is not None:
+                    yield assemble_error
+                    return
             else:
                 # Aggregated mode: load images normally
                 multi_modal_data = await self._extract_multimodal_data(
@@ -3254,6 +3431,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     multi_modal_data,
                     mm_processor_kwargs=mm_processor_kwargs,
+                    mixed_embeds=mixed_embeds,
                 )
         if error is not None:
             yield error
