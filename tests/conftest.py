@@ -1145,7 +1145,7 @@ def runtime_services(request, discovery_backend, request_plane):
 
 @pytest.fixture()
 def runtime_services_dynamic_ports(
-    request, discovery_backend, request_plane, durable_kv_events
+    request, discovery_backend, request_plane, durable_kv_events, monkeypatch
 ):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
@@ -1174,8 +1174,6 @@ def runtime_services_dynamic_ports(
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
-    import os
-
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Start NATS when etcd is used so the NATS opt-in paths stay available.
     # When durable_kv_events=False (default), disable JetStream for faster startup.
@@ -1184,34 +1182,21 @@ def runtime_services_dynamic_ports(
             request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
-                # Save original env vars (may be set by session-scoped fixture)
-                orig_nats = os.environ.get("NATS_SERVER")
-                orig_etcd = os.environ.get("ETCD_ENDPOINTS")
-                orig_event_plane = os.environ.get("DYN_EVENT_PLANE")
-
-                # Set environment variables for this test's dynamic ports
-                os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
-                os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
+                # Set environment variables for this test's dynamic ports.
+                # monkeypatch.setenv auto-restores them (including any values set by
+                # the session-scoped fixture) at test teardown.
+                monkeypatch.setenv(
+                    "NATS_SERVER", f"nats://localhost:{nats_process.port}"
+                )
+                monkeypatch.setenv(
+                    "ETCD_ENDPOINTS", f"http://localhost:{etcd_process.port}"
+                )
                 # Pin the NATS event plane for etcd-backed tests: the in-process e2e
                 # harness cannot reliably deliver KV events over the (now-default) ZMQ
                 # plane without a broker (slow-joiner loss). See the fixture docstring.
-                os.environ["DYN_EVENT_PLANE"] = "nats"
+                monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
 
                 yield nats_process, etcd_process
-
-                # Restore original env vars (or remove if they weren't set)
-                if orig_nats is not None:
-                    os.environ["NATS_SERVER"] = orig_nats
-                else:
-                    os.environ.pop("NATS_SERVER", None)
-                if orig_etcd is not None:
-                    os.environ["ETCD_ENDPOINTS"] = orig_etcd
-                else:
-                    os.environ.pop("ETCD_ENDPOINTS", None)
-                if orig_event_plane is not None:
-                    os.environ["DYN_EVENT_PLANE"] = orig_event_plane
-                else:
-                    os.environ.pop("DYN_EVENT_PLANE", None)
     elif request_plane == "nats":
         with NatsServer(
             request, port=0, disable_jetstream=not durable_kv_events
