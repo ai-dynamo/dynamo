@@ -19,7 +19,6 @@ package defaulting
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -86,41 +85,15 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// expandRolesForService(). Apply on every operation so that services
 	// added via UPDATE also get the default.
 	grovePathway := d.isGrovePathway(dgd)
-	var oldDGD *nvidiacomv1alpha1.DynamoGraphDeployment
-	if grovePathway && req.Operation == admissionv1.Update && len(req.OldObject.Raw) > 0 {
-		oldDGD = &nvidiacomv1alpha1.DynamoGraphDeployment{}
-		if err := json.Unmarshal(req.OldObject.Raw, oldDGD); err != nil {
-			return fmt.Errorf("failed to decode old DGD object: %w", err)
-		}
-	}
-	for name, svc := range dgd.Spec.Services {
+	for _, svc := range dgd.Spec.Services {
 		if svc == nil {
 			continue
-		}
-		var oldSvc *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-		if oldDGD != nil {
-			oldSvc = oldDGD.Spec.Services[name]
 		}
 		if svc.Replicas == nil {
 			svc.Replicas = ptr.To(int32(1))
 		}
 		if grovePathway && svc.MinAvailable == nil {
-			minAvailable := int32(1)
-			if svc.Replicas != nil && *svc.Replicas == 0 {
-				minAvailable = 0
-			}
-			svc.MinAvailable = ptr.To(minAvailable)
-		}
-		if grovePathway && req.Operation == admissionv1.Update && oldSvc != nil && oldSvc.MinAvailable != nil {
-			oldReplicas := int32(1)
-			if oldSvc.Replicas != nil {
-				oldReplicas = *oldSvc.Replicas
-			}
-			if oldReplicas > 0 && *svc.Replicas == 0 && *svc.MinAvailable == *oldSvc.MinAvailable {
-				svc.MinAvailable = ptr.To(int32(0))
-			} else if oldReplicas == 0 && *svc.Replicas > 0 && *svc.MinAvailable == 0 && *oldSvc.MinAvailable == 0 {
-				svc.MinAvailable = ptr.To(int32(1))
-			}
+			svc.MinAvailable = ptr.To(int32(1))
 		}
 	}
 

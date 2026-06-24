@@ -2098,9 +2098,6 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	// 2. It defines the minimum requirement of available pods in a PodClique. Violation of this threshold will result
 	// in termination of the PodGang that it belongs to.
 	minAvailable := int32(1)
-	if p.r.Replicas == 0 {
-		minAvailable = 0
-	}
 	// single-node standalone pclq set to component.MinAvailable if defined
 	if !p.usesPCSG && p.component.MinAvailable != nil {
 		minAvailable = *p.component.MinAvailable
@@ -2385,9 +2382,6 @@ func GenerateGrovePodCliqueSet(
 		if usesPCSG {
 			replicas := component.Replicas
 			minAvailable := ptr.To(int32(1))
-			if component.Replicas != nil && *component.Replicas == 0 {
-				minAvailable = ptr.To(int32(0))
-			}
 			if component.MinAvailable != nil {
 				minAvailable = ptr.To(*component.MinAvailable)
 			}

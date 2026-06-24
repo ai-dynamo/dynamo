@@ -44,18 +44,9 @@ func NewDynamoComponentDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoC
 func (v *DynamoComponentDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	// Validate shared spec fields using SharedSpecValidator
 	calculatedNamespace := v.deployment.GetDynamoNamespace()
-	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace)
+	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace, false)
 
-	warnings, err := sharedValidator.Validate(ctx)
-	if err != nil {
-		return warnings, err
-	}
-
-	if v.deployment.Spec.MinAvailable != nil {
-		return warnings, fmt.Errorf("spec.minAvailable is currently supported only for Grove-backed DynamoGraphDeployment components")
-	}
-
-	return warnings, nil
+	return sharedValidator.Validate(ctx)
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoComponentDeployment.

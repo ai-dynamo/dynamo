@@ -375,9 +375,9 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 
 	var sharedValidator *SharedSpecValidator
 	if v.mgr != nil {
-		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr)
+		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr, v.isGrovePathway())
 	} else {
-		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
+		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace, v.isGrovePathway())
 	}
 
 	return sharedValidator.Validate(ctx)
