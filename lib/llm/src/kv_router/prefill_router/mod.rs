@@ -5,7 +5,6 @@ use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
