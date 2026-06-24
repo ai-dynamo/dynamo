@@ -97,10 +97,10 @@ class _Turn:
     """One request->response cycle: a committed span of input audio and the
     single OpenAI-spec ``response`` it produces.
 
-    Owns its engine drive (``_drive_engine``: it feeds its buffered audio into
-    the engine and yields stage outputs); ``RealtimeOmniHandler`` orchestrates
-    turns and translates those outputs into OpenAI-spec server events (see
-    ``RealtimeOmniHandler._run_turn``).
+    Owns its engine drive and output extraction (``_drive_engine``: it feeds its
+    buffered audio into the engine and yields ``(transcript, audio_chunks)`` per
+    step); ``RealtimeOmniHandler`` orchestrates turns and translates those into
+    OpenAI-spec server events (see ``RealtimeOmniHandler._run_turn``).
 
     Fields: ``response_id`` / ``item_id`` tag every event of this turn;
     ``audio_queue`` carries the float32 input (``None`` = end of input);
@@ -138,8 +138,12 @@ class _Turn:
         self._streaming_input_factory = streaming_input_factory
         self._default_sampling_params_list = default_sampling_params_list
 
-    async def _drive_engine(self) -> AsyncGenerator[Any, None]:
-        """Feed this turn's buffered audio into the engine and yield stage outputs.
+    async def _drive_engine(
+        self,
+    ) -> AsyncGenerator[tuple[str | None, list[np.ndarray] | None], None]:
+        """Feed this turn's buffered audio into the engine and yield, per engine
+        step, the extracted ``(transcript, audio_chunks)`` -- either element is
+        ``None`` when that step produced none.
 
         The float32 ``audio_stream`` (ending on the ``None`` sentinel) and an
         ``input_stream`` token queue are handed to the streaming-input factory
@@ -179,7 +183,9 @@ class _Turn:
             token_ids = self._thinker_token_ids(output)
             if token_ids:
                 input_stream.put_nowait(token_ids)
-            yield output
+            transcript = self._extract_transcript(output) or None
+            audio_chunks = self._extract_audio_chunks(output) or None
+            yield transcript, audio_chunks
 
     @staticmethod
     def _thinker_token_ids(output: Any) -> list[int]:
@@ -191,6 +197,66 @@ class _Turn:
             return []
         token_ids = getattr(outputs[0], "token_ids", None)
         return list(token_ids) if token_ids else []
+
+    @staticmethod
+    def _extract_transcript(output: Any) -> str:
+        """Pull incremental thinker text from a stage-0 LLM output, if any."""
+        if getattr(output, "stage_id", None) != 0:
+            return ""
+        outputs = getattr(output, "outputs", None)
+        if not outputs:
+            return ""
+        return getattr(outputs[0], "text", "") or ""
+
+    def _extract_audio_chunks(self, output: Any) -> list[np.ndarray]:
+        """Extract per-step audio deltas from an engine output.
+
+        Audio lives in ``output.multimodal_output['audio'|'model_outputs']`` as a
+        float32 waveform (or list of them). Some engine paths emit a growing
+        cumulative waveform; ``_waveform_to_deltas`` reconciles both shapes
+        against ``self.audio_ref`` so the client never hears duplicates.
+        """
+        mm = getattr(output, "multimodal_output", None)
+        if not isinstance(mm, dict):
+            return []
+
+        key = (
+            "audio"
+            if "audio" in mm
+            else ("model_outputs" if "model_outputs" in mm else None)
+        )
+        if key is None:
+            return []
+
+        raw_audio = mm.get(key)
+        if isinstance(raw_audio, (list, tuple)):
+            if not raw_audio:
+                return []
+            arr = _tensor_to_numpy(raw_audio[-1])
+        else:
+            arr = _tensor_to_numpy(raw_audio)
+
+        if arr is None or arr.size == 0:
+            return []
+        return self._waveform_to_deltas(arr)
+
+    def _waveform_to_deltas(self, arr: np.ndarray) -> list[np.ndarray]:
+        """Convert one streaming PCM f32 chunk into incremental piece(s)."""
+        if arr.size == 0:
+            return []
+        ref = self.audio_ref
+        if ref is None:
+            self.audio_ref = arr.copy()
+            return [arr]
+        if _numpy_audio_prefix_match(ref, arr):
+            delta = arr[ref.shape[0] :]
+            self.audio_ref = arr.copy()
+            return [delta] if delta.size > 0 else []
+        # True per-step delta (not a prefix extension of what we have seen). The
+        # growing concat makes this O(n^2) over a response, but per-response audio
+        # is bounded (seconds); kept to mirror vLLM-Omni's realtime_connection.
+        self.audio_ref = np.concatenate([ref, arr])
+        return [arr]
 
 
 class RealtimeOmniHandler:
@@ -239,15 +305,14 @@ class RealtimeOmniHandler:
             await events.put(self._response_created_event(turn))
 
             sent_audio = False
-            async for output in turn._drive_engine():
+            async for transcript, audio_chunks in turn._drive_engine():
                 if context.is_stopped():
                     break
 
-                transcript = self._extract_transcript(output)
                 if transcript and self._emit_transcript:
                     await events.put(self._transcript_delta_event(turn, transcript))
 
-                for chunk in self._extract_audio_chunks(turn, output):
+                for chunk in audio_chunks or ():
                     sent_audio = True
                     await events.put(self._audio_delta_event(turn, chunk))
 
@@ -326,66 +391,6 @@ class RealtimeOmniHandler:
             "content_index": 0,
             "delta": delta,
         }
-
-    @staticmethod
-    def _extract_transcript(output: Any) -> str:
-        """Pull incremental thinker text from a stage-0 LLM output, if any."""
-        if getattr(output, "stage_id", None) != 0:
-            return ""
-        outputs = getattr(output, "outputs", None)
-        if not outputs:
-            return ""
-        return getattr(outputs[0], "text", "") or ""
-
-    def _extract_audio_chunks(self, turn: _Turn, output: Any) -> list[np.ndarray]:
-        """Extract per-step audio deltas from an engine output.
-
-        Audio lives in ``output.multimodal_output['audio'|'model_outputs']`` as a
-        float32 waveform (or list of them). Some engine paths emit a growing
-        cumulative waveform; ``_waveform_to_deltas`` reconciles both shapes
-        against ``turn.audio_ref`` so the client never hears duplicates.
-        """
-        mm = getattr(output, "multimodal_output", None)
-        if not isinstance(mm, dict):
-            return []
-
-        key = (
-            "audio"
-            if "audio" in mm
-            else ("model_outputs" if "model_outputs" in mm else None)
-        )
-        if key is None:
-            return []
-
-        raw_audio = mm.get(key)
-        if isinstance(raw_audio, (list, tuple)):
-            if not raw_audio:
-                return []
-            arr = _tensor_to_numpy(raw_audio[-1])
-        else:
-            arr = _tensor_to_numpy(raw_audio)
-
-        if arr is None or arr.size == 0:
-            return []
-        return self._waveform_to_deltas(turn, arr)
-
-    def _waveform_to_deltas(self, turn: _Turn, arr: np.ndarray) -> list[np.ndarray]:
-        """Convert one streaming PCM f32 chunk into incremental piece(s)."""
-        if arr.size == 0:
-            return []
-        ref = turn.audio_ref
-        if ref is None:
-            turn.audio_ref = arr.copy()
-            return [arr]
-        if _numpy_audio_prefix_match(ref, arr):
-            delta = arr[ref.shape[0] :]
-            turn.audio_ref = arr.copy()
-            return [delta] if delta.size > 0 else []
-        # True per-step delta (not a prefix extension of what we have seen). The
-        # growing concat makes this O(n^2) over a response, but per-response audio
-        # is bounded (seconds); kept to mirror vLLM-Omni's realtime_connection.
-        turn.audio_ref = np.concatenate([ref, arr])
-        return [arr]
 
     async def generate(
         self, request_stream: AsyncGenerator[Any, None], context: Context
