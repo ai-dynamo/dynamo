@@ -437,6 +437,23 @@ mod tests {
         effects.scheduled_completions.pop().unwrap().payload
     }
 
+    fn decode_engine_with_chunking(enable_chunked_prefill: bool) -> EngineComponent {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(4))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(enable_chunked_prefill)
+            .worker_type(WorkerType::Decode)
+            .build()
+            .unwrap();
+        EngineComponent::new(
+            SimulationWorkerStage::Decode,
+            EnginePassMode::Visible,
+            vec![OfflineWorkerState::new(0, args, false)],
+        )
+    }
+
     #[test]
     fn pass_router_effect_visibility_follows_backend_contract() {
         let make_engine = |engine_type| {
@@ -559,19 +576,85 @@ mod tests {
     }
 
     #[test]
-    fn queued_only_fpm_is_not_zero_duration_progress() {
-        let queued = ForwardPassSnapshot {
-            num_queued_prefill: 1,
-            sum_queued_prefill_tokens: 128,
-            ..ForwardPassSnapshot::default()
-        };
-        assert!(!fpm_has_scheduled_work(&queued));
+    fn productive_zero_duration_pass_reaches_terminal_completion() {
+        let mut engine = decode_engine_with_chunking(true);
+        let uuid = Uuid::from_u128(20);
+        engine
+            .dispatch(
+                0,
+                DirectRequest {
+                    tokens: vec![1; 12],
+                    max_output_tokens: 1,
+                    uuid: Some(uuid),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut collector = TraceCollector::default();
 
-        let scheduled = ForwardPassSnapshot {
-            num_prefill_requests: 1,
-            ..ForwardPassSnapshot::default()
-        };
-        assert!(fpm_has_scheduled_work(&scheduled));
+        let first = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        assert_eq!(first.admissions.len(), 1);
+        let first = take_only_completion(first);
+        assert_eq!(first.completed_requests, 0);
+        engine.on_scheduled_completion(first).unwrap();
+
+        let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        assert!(second.admissions.is_empty());
+        assert!(second.pass_start_kv_events.is_empty());
+        assert_eq!(second.fpm_snapshots.len(), 1);
+        assert_eq!(second.fpm_snapshots[0].1.num_prefill_requests, 1);
+        assert_eq!(second.immediate_completions.len(), 1);
+        assert!(second.scheduled_completions.is_empty());
+        let second = take_only_completion(second);
+        assert_eq!(second.completed_requests, 0);
+        assert!(second.output_signals.is_empty());
+        assert!(second.lifecycle_events.is_empty());
+        assert!(second.kv_events.is_empty());
+        engine.on_scheduled_completion(second).unwrap();
+
+        let final_pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let final_pass = take_only_completion(final_pass);
+        assert_eq!(final_pass.completed_requests, 1);
+        assert!(
+            final_pass
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == uuid && signal.completed)
+        );
+        engine.on_scheduled_completion(final_pass).unwrap();
+        assert!(engine.is_drained());
+    }
+
+    #[test]
+    fn queued_only_zero_duration_pass_does_not_report_progress() {
+        let mut engine = decode_engine_with_chunking(false);
+        engine
+            .dispatch(
+                0,
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(21)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut collector = TraceCollector::default();
+
+        let first = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        assert!(first.is_empty());
+        assert_eq!(
+            engine.debug_snapshots(),
+            vec![OfflineWorkerSnapshot {
+                busy: false,
+                in_flight: 1,
+                ready: true,
+                drained: false,
+            }]
+        );
+
+        let retry = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        assert!(retry.is_empty());
     }
 
     #[test]
