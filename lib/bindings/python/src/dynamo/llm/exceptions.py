@@ -12,6 +12,7 @@ from dynamo._core import Disconnected as Disconnected
 from dynamo._core import DynamoException as DynamoException
 from dynamo._core import EngineShutdown as EngineShutdown
 from dynamo._core import InvalidArgument as InvalidArgument
+from dynamo._core import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 from dynamo._core import SelectionServiceError as SelectionServiceError
 from dynamo._core import StreamIncomplete as StreamIncomplete
 from dynamo._core import Unknown as Unknown

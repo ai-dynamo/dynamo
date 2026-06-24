@@ -226,24 +226,6 @@ const (
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
 
-	// Pod identity (Downward API) ---
-	// After CRIU restore, env vars contain stale values from the checkpoint pod.
-	// The Downward API files at /etc/podinfo always reflect the current pod.
-	PodInfoVolumeName = "podinfo"
-	PodInfoMountPath  = "/etc/podinfo"
-
-	// Downward API field paths
-	PodInfoFieldPodName      = "metadata.name"
-	PodInfoFieldPodUID       = "metadata.uid"
-	PodInfoFieldPodNamespace = "metadata.namespace"
-
-	// Downward API file names for restore identity
-	PodInfoFileDynNamespace             = "dyn_namespace"
-	PodInfoFileDynNamespaceWorkerSuffix = "dyn_namespace_worker_suffix"
-	PodInfoFileDynComponent             = "dyn_component"
-	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
-	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
-
 	// Worker hash rolling-update annotations are controller-owned annotations on
 	// DynamoGraphDeployment. They record the active worker generation and must not
 	// be treated as user-configurable inputs. During a managed rolling update,

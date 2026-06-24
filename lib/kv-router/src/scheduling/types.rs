@@ -13,9 +13,9 @@ use super::filter::RoutingEligibility;
 use super::prefill_load::effective_prefill_tokens;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
+    RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
+use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -36,14 +36,8 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
-    #[error(
-        "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
-    )]
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        max_queued_isl_tokens: Option<usize>,
-    },
+    #[error(transparent)]
+    QueueRejected(#[from] QueueRejection),
 
     #[error("all eligible workers are overloaded")]
     AllEligibleWorkersOverloaded,
@@ -68,9 +62,7 @@ impl KvSchedulerError {
     pub fn is_overload(&self) -> bool {
         matches!(
             self,
-            Self::Backpressure { .. }
-                | Self::AllEligibleWorkersOverloaded
-                | Self::PinnedWorkerOverloaded { .. }
+            Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. }
         )
     }
 }
@@ -98,6 +90,7 @@ pub struct SchedulingRequest {
     pub track_prefill_tokens: bool,
     pub priority_jump: f64,
     pub strict_priority: u32,
+    pub policy_class: Option<String>,
 
     // Overlap and cache signals.
     pub tier_overlap_blocks: TierOverlapBlocks,
@@ -134,7 +127,11 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     }
 
     pub fn best_effective_prefill_tokens(&self) -> usize {
-        let cached_tokens = match self.eligibility.pinned_worker() {
+        effective_prefill_tokens(self.request.isl_tokens, self.best_cached_tokens())
+    }
+
+    pub fn best_cached_tokens(&self) -> usize {
+        match self.eligibility.pinned_worker() {
             Some(worker) => self.request.effective_cached_tokens_for(worker),
             None => self
                 .request
@@ -148,9 +145,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
                 .map(|(_, cached_tokens)| *cached_tokens)
                 .max()
                 .unwrap_or(0),
-        };
-
-        effective_prefill_tokens(self.request.isl_tokens, cached_tokens)
+        }
     }
 }
 

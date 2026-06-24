@@ -25,15 +25,21 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// admissionCtx builds a context carrying an admission request for the given operation.
-func admissionCtx(op admissionv1.Operation) context.Context {
+// admissionCtx builds a context carrying an admission request for the given operation and kind.
+func admissionCtx(op admissionv1.Operation, kind schema.GroupVersionKind) context.Context {
 	return admission.NewContextWithRequest(context.Background(), admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: op,
+			Kind: metav1.GroupVersionKind{
+				Group:   kind.Group,
+				Version: kind.Version,
+				Kind:    kind.Kind,
+			},
 		},
 	})
 }
@@ -52,7 +58,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "CREATE stamps operator version on new DGD without annotations",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -64,7 +70,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "CREATE stamps operator version on DGD with existing annotations",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -79,7 +85,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "CREATE does not overwrite pre-existing origin version",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -94,7 +100,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE does not stamp annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update),
+			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -106,7 +112,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE preserves existing annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update),
+			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -121,7 +127,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "DELETE does not stamp annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Delete),
+			ctx:             admissionCtx(admissionv1.Delete, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -131,7 +137,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 			wantAnnotation: "",
 		},
 		{
-			name:            "no admission request in context skips defaulting gracefully",
+			name:            "no admission request in context fails closed",
 			operatorVersion: testVersion,
 			ctx:             context.Background(),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
@@ -141,6 +147,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 				},
 			},
 			wantAnnotation: "",
+			wantErr:        true,
 		},
 	}
 
@@ -238,7 +245,7 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				},
 			}
 
-			if err := defaulter.Default(admissionCtx(tt.op), dgd); err != nil {
+			if err := defaulter.Default(admissionCtx(tt.op, nvidiacomv1alpha1.DynamoGraphDeploymentGVK), dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
 			}
 

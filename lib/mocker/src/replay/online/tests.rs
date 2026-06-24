@@ -217,13 +217,8 @@ async fn test_trace_arrivals_are_not_blocked_by_queued_router_selection() {
         .build()
         .unwrap();
     let start = Instant::now();
-    let router = Arc::new(ReplayRouter::new(
-        ReplayRouterMode::KvRouter,
-        &args,
-        None,
-        None,
-        1,
-    ));
+    let router =
+        Arc::new(ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 1).unwrap());
     let senders: Arc<[mpsc::UnboundedSender<DirectRequest>]> =
         Arc::from(vec![mpsc::unbounded_channel::<DirectRequest>().0]);
     let requests = Arc::new(DashMap::new());
@@ -290,7 +285,8 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
             duration: Duration::from_secs(10),
         })),
         1,
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         router

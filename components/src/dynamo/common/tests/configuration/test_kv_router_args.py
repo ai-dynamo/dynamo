@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -145,21 +146,6 @@ def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:
     assert config.kv_router_kwargs()["overlap_score_weight"] == 2.5
 
 
-def test_deprecated_overlap_score_weight_zero_cli_flows_to_binding_kwargs() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="overlap score weight is deprecated"):
-        args = parser.parse_args(["--router-kv-overlap-score-weight", "0"])
-
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 1.0
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
 def test_deprecated_overlap_score_weight_env_flows_to_binding_kwargs(
     monkeypatch,
 ) -> None:
@@ -179,130 +165,39 @@ def test_deprecated_overlap_score_weight_env_flows_to_binding_kwargs(
     assert config.kv_router_kwargs()["overlap_score_weight"] == 2.5
 
 
-def test_deprecated_overlap_score_weight_zero_env_flows_to_binding_kwargs(
+@pytest.mark.parametrize(
+    ("canonical_env", "cli_args", "expected_credit", "expected_scale"),
+    [
+        (("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"), [], 1.0, 2.5),
+        (("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.5"), [], 0.5, 1.0),
+        (None, ["--router-prefill-load-scale", "3"], 1.0, 3.0),
+        (None, ["--router-kv-overlap-score-credit", "0.5"], 0.5, 1.0),
+    ],
+    ids=["scale-env", "credit-env", "scale-cli", "credit-cli"],
+)
+def test_deprecated_overlap_score_weight_env_coexists_with_canonical_settings(
     monkeypatch,
+    canonical_env,
+    cli_args,
+    expected_credit,
+    expected_scale,
 ) -> None:
     monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
+    if canonical_env is not None:
+        monkeypatch.setenv(*canonical_env)
 
     with pytest.warns(FutureWarning, match="deprecated"):
         parser = argparse.ArgumentParser()
         KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args([])
+    args = parser.parse_args(cli_args)
 
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 1.0
+    assert args.overlap_score_credit == expected_credit
+    assert args.prefill_load_scale == expected_scale
     assert args.overlap_score_weight == 0.0
 
     config = KvRouterConfigBase.from_cli_args(args)
     assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_env_overrides_new_scale_env(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-    monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 2.5
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_env_overrides_new_credit_env(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.5")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    assert args.overlap_score_credit == 0.5
-    assert args.prefill_load_scale == 1.0
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_env_overrides_new_scale_cli(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-prefill-load-scale", "3"])
-
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 3.0
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_env_overrides_new_credit_cli(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-kv-overlap-score-credit", "0.5"])
-
-    assert args.overlap_score_credit == 0.5
-    assert args.prefill_load_scale == 1.0
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_cli_order_does_not_change_presence() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="overlap score weight is deprecated"):
-        old_then_new = parser.parse_args(
-            [
-                "--router-kv-overlap-score-weight",
-                "0",
-                "--router-prefill-load-scale",
-                "3",
-            ]
-        )
-    with pytest.warns(FutureWarning, match="overlap score weight is deprecated"):
-        new_then_old = parser.parse_args(
-            [
-                "--router-prefill-load-scale",
-                "3",
-                "--router-kv-overlap-score-weight",
-                "0",
-            ]
-        )
-
-    assert old_then_new.overlap_score_weight == 0.0
-    assert old_then_new.prefill_load_scale == 3.0
-    assert new_then_old.overlap_score_weight == 0.0
-    assert new_then_old.prefill_load_scale == 3.0
 
 
 def test_prefill_load_scale_cli_uses_kv_router_config_field() -> None:
@@ -402,27 +297,19 @@ def test_load_aware_preserves_cache_hit_weights() -> None:
     assert kwargs["disk_cache_hit_weight"] == 0.1
 
 
-def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
+def test_policy_config_cli_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_policy_path = str(tmp_path / "env-policy.yaml")
+    explicit_policy_path = str(tmp_path / "explicit-policy.yaml")
+    monkeypatch.setenv("DYN_ROUTER_POLICY_CONFIG", env_policy_path)
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
-    config.router_queue_by_incoming_missing_isl = [(0, 2048), (2048, 512)]
+    args = parser.parse_args(["--router-policy-config", explicit_policy_path])
+    config = KvRouterConfigBase.from_cli_args(args)
 
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["router_queue_by_incoming_missing_isl"] == [(0, 2048), (2048, 512)]
-
-
-def test_kv_router_kwargs_uses_unbounded_queue_cap_by_default() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
-
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["router_queue_by_incoming_missing_isl"] is None
+    assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
 
 
 def test_load_aware_clears_predicted_ttl() -> None:
@@ -644,29 +531,6 @@ def test_admission_control_default_none_with_explicit_threshold_auto_switches(
     # _frac was not passed → filled in with production default 64.0
     # (auto-switch matches --admission-control token-capacity).
     assert config.active_prefill_tokens_threshold_frac == 64.0
-
-
-def test_admission_control_default_none_with_no_thresholds_stays_none(
-    monkeypatch,
-) -> None:
-    """When no threshold flag is explicitly set, the default 'none' is
-    preserved (no auto-switch). Already covered by
-    test_frontend_admission_control_defaults_to_none — this is the
-    explicit symmetry check next to the auto-switch tests above."""
-    _clear_admission_control_env(monkeypatch)
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-queue-threshold", "32.0"])
-
-    config = FrontendConfig.from_cli_args(args)
-    config.validate()
-
-    assert config.admission_control == "none"
-    assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
-    assert config.active_prefill_tokens_threshold_frac is None
-    assert config.router_queue_threshold == 32.0
 
 
 def test_admission_control_apply_is_idempotent(monkeypatch) -> None:
