@@ -390,7 +390,7 @@ jobs:
               "vllm-efa|${COMMIT_SHA}-vllm-runtime-efa"
               "sglang-efa|${COMMIT_SHA}-sglang-runtime-efa"
               "trtllm-efa|${COMMIT_SHA}-trtllm-runtime-efa"
-              "frontend|${COMMIT_SHA}-frontend"
+              "frontend|${COMMIT_SHA}-dynamo-frontend"
               "operator|${COMMIT_SHA}-operator"
               "planner|${COMMIT_SHA}-dynamo-planner"
               "snapshot|${COMMIT_SHA}-snapshot-agent"
@@ -573,7 +573,7 @@ jobs:
             if want frontend; then
               echo ""
               echo "=== Frontend Image ==="
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-frontend"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
               copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
             fi

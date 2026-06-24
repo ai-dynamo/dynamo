@@ -384,7 +384,7 @@ jobs:
             [vllm-runtime]=vllm-runtime     [vllm-efa]=vllm-runtime-efa
             [sglang-runtime]=sglang-runtime [sglang-efa]=sglang-runtime-efa
             [trtllm-runtime]=trtllm-runtime [trtllm-efa]=trtllm-runtime-efa
-            [frontend]=frontend [operator]=operator [planner]=dynamo-planner [snapshot]=snapshot-agent
+            [frontend]=dynamo-frontend [operator]=operator [planner]=dynamo-planner [snapshot]=snapshot-agent
           )
           declare -a TAGS=()
           for tok in "${!CTR[@]}"; do
