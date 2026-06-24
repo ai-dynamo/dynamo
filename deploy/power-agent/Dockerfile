@@ -27,7 +27,13 @@ ARG DOCKER_PROXY=
 # Slim base — the NVIDIA Container Toolkit injects libnvidia-ml.so at runtime
 # via runtimeClassName: nvidia (set by the Helm chart), so the image does NOT
 # bake pynvml's native dependency. nvmlInit() resolves the host driver lib.
-FROM ${DOCKER_PROXY}python:3.12-slim-bookworm AS runtime
+#
+# Keep the explicit `library/` namespace: ECR's Docker Hub pull-through cache
+# does not auto-expand bare official-image names (`python` -> `library/python`)
+# the way a direct Docker Hub pull does, so the proxied tag fails to pull
+# without it. `library/python` is also a valid fully-qualified reference when
+# DOCKER_PROXY is empty, so local/dev builds are unaffected.
+FROM ${DOCKER_PROXY}library/python:3.12-slim-bookworm AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
