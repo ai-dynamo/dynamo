@@ -91,10 +91,10 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
     lifecycle_calls = []
 
     class FakeSnapshotController:
-        def __init__(self, engine, pause_controller, checkpoint_config):
+        def __init__(self, engine, pause_controller, snapshot_config):
             self.engine = engine
             self.pause_controller = pause_controller
-            self.checkpoint_config = checkpoint_config
+            self.snapshot_config = snapshot_config
 
         async def wait_for_restore(self):
             lifecycle_calls.append("pause")
@@ -104,25 +104,35 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
             self.pause_controller.mark_resumed()
             return True
 
-        def reload_restore_identity(self, namespace, discovery_backend):
-            assert namespace == "checkpoint-ns"
-            assert discovery_backend == "kubernetes"
-            return "restored-ns", "kubernetes"
-
     def fake_create_runtime(discovery_backend, request_plane, event_plane):
         assert discovery_backend == "kubernetes"
         assert request_plane == "nats"
         assert event_plane is None
         return created_runtime, object()
 
+    async def fake_refresh_restore_runtime_config(config, argv):
+        assert config.namespace == "checkpoint-ns"
+        assert config.discovery_backend == "kubernetes"
+        assert argv == ["--endpoint", "dyn://checkpoint-ns.backend.generate"]
+        config.namespace = "restored-ns"
+        return config
+
     monkeypatch.setattr(
         snapshot_mod,
         "_create_engine_snapshot_controller",
         FakeSnapshotController,
     )
+    monkeypatch.setattr(
+        snapshot_mod,
+        "_refresh_snapshot_restore_runtime_config",
+        fake_refresh_restore_runtime_config,
+    )
     monkeypatch.setattr(snapshot_mod, "_create_runtime", fake_create_runtime)
 
-    proxy = _SnapshotRuntimeProxy(checkpoint_config=object())
+    proxy = _SnapshotRuntimeProxy(
+        snapshot_config=object(),
+        argv=["--endpoint", "dyn://checkpoint-ns.backend.generate"],
+    )
     config = _runtime_config()
 
     with pytest.raises(RuntimeError, match="not available until"):
@@ -147,7 +157,7 @@ async def test_snapshot_runtime_proxy_exits_without_runtime_after_capture(monkey
         pass
 
     class FakeSnapshotController:
-        def __init__(self, engine, pause_controller, checkpoint_config):
+        def __init__(self, engine, pause_controller, snapshot_config):
             pass
 
         async def wait_for_restore(self):
@@ -168,7 +178,7 @@ async def test_snapshot_runtime_proxy_exits_without_runtime_after_capture(monkey
     monkeypatch.setattr(snapshot_mod, "_create_runtime", unexpected_create_runtime)
     monkeypatch.setattr(snapshot_mod.os, "_exit", fake_exit)
 
-    proxy = _SnapshotRuntimeProxy(checkpoint_config=object())
+    proxy = _SnapshotRuntimeProxy(snapshot_config=object())
 
     with pytest.raises(SnapshotCaptured):
         await proxy.snapshot_before_endpoint(engine=object(), config=_runtime_config())

@@ -962,17 +962,15 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
 
-    def _trajectory_id(self, request: Dict[str, Any]) -> Optional[str]:
+    def _session_id(self, request: Dict[str, Any]) -> Optional[str]:
         if not self.enable_session_radix_cache:
             return None
-        trajectory_id = (request.get("agent_context") or {}).get("trajectory_id")
-        return (
-            trajectory_id if isinstance(trajectory_id, str) and trajectory_id else None
-        )
+        session_id = (request.get("agent_context") or {}).get("session_id")
+        return session_id if isinstance(session_id, str) and session_id else None
 
     def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        trajectory_id = self._trajectory_id(request)
-        return {"session_params": {"id": trajectory_id}} if trajectory_id else {}
+        session_id = self._session_id(request)
+        return {"session_params": {"id": session_id}} if session_id else {}
 
     @staticmethod
     def _get_guided_decoding_params(

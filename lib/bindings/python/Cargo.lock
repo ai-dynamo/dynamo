@@ -2153,6 +2153,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2331,7 +2332,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.3.0"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81297abfd63194518877deca17a6d001ec84d4f157e8e401006f416d5c6bbc09"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2383,7 +2386,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "1.3.0"
+version = "1.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc6658e06cd0dda37d493ac84d70cb33ea89fbe91056b152174351f7502fb46a"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2480,7 +2485,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.3.0"
+version = "1.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "801685a07cfbc87d5e3f3ed55b920707b67f31dd660c62d1b3532a651fc9d013"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2770,9 +2777,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "796a262ed47d1458a4b40d0ed831c927e6f54d5b9c1de2683bb4ac9b04f4c7cc"
+checksum = "8728655e193e0d08d7a95d63cf1fdb9b768d282cab0a112ecb006615bae9f067"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",

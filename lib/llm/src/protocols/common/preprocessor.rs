@@ -125,6 +125,11 @@ pub struct MmRoutingInfo {
     /// Block-level multimodal metadata aligned with routing_token_ids blocks.
     /// Use `None` entries for blocks without multimodal objects.
     pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
+
+    /// Unpadded expanded prompt length. Use instead of `routing_token_ids.len()`
+    /// (which includes block-padding) when a real token count is needed.
+    #[serde(default)]
+    pub expanded_prompt_len: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

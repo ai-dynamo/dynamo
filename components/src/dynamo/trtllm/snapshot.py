@@ -28,14 +28,29 @@ def _create_runtime(
 def _create_engine_snapshot_controller(
     engine: Any,
     pause_controller: Any,
-    checkpoint_config: Any,
+    snapshot_config: Any,
 ) -> Any:
-    from dynamo.common.utils.snapshot import EngineSnapshotController
+    from dynamo.common.snapshot.lifecycle import EngineSnapshotController
 
     return EngineSnapshotController(
         engine=engine,
         pause_controller=pause_controller,
-        checkpoint_config=checkpoint_config,
+        snapshot_config=snapshot_config,
+    )
+
+
+async def _refresh_snapshot_restore_runtime_config(
+    config: Any,
+    argv: list[str] | None,
+) -> Any:
+    from dynamo.common.snapshot.restore_context import (
+        parse_snapshot_restore_runtime_config,
+        refresh_snapshot_restore_config,
+    )
+
+    return await refresh_snapshot_restore_config(
+        config,
+        lambda: parse_snapshot_restore_runtime_config(argv),
     )
 
 
@@ -69,8 +84,13 @@ class _SnapshotRuntimeProxy:
     real runtime only after restore.
     """
 
-    def __init__(self, checkpoint_config: Any) -> None:
-        self._checkpoint_config = checkpoint_config
+    def __init__(
+        self,
+        snapshot_config: Any,
+        argv: list[str] | None = None,
+    ) -> None:
+        self._snapshot_config = snapshot_config
+        self._argv = list(argv) if argv is not None else None
         self._runtime: Any | None = None
 
     async def snapshot_before_endpoint(self, engine: Any, config: Any) -> None:
@@ -85,7 +105,7 @@ class _SnapshotRuntimeProxy:
         snapshot_controller = _create_engine_snapshot_controller(
             engine=engine,
             pause_controller=pause_controller,
-            checkpoint_config=self._checkpoint_config,
+            snapshot_config=self._snapshot_config,
         )
 
         # This is the checkpoint/restore synchronization point. It writes the
@@ -102,12 +122,9 @@ class _SnapshotRuntimeProxy:
             )
             os._exit(0)
 
-        (
-            config.namespace,
-            config.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity(
-            config.namespace,
-            config.discovery_backend,
+        config = await _refresh_snapshot_restore_runtime_config(
+            config,
+            self._argv,
         )
         self._runtime, _ = _create_runtime(
             discovery_backend=config.discovery_backend,
