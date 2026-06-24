@@ -30,16 +30,25 @@ use parking_lot::RwLock;
 /// `_base` would collide with this sentinel and is not supported.
 pub const BASE_SUFFIX: &str = "_base";
 
-/// `(slug, suffix, filename)`.
-type Key = (String, String, String);
-
 /// `(instance_id, lora_slug)`. `None` lora_slug = base model.
 pub type Owner = (u64, Option<String>);
 
 /// Cloning shares the underlying map.
 #[derive(Clone, Debug, Default)]
 pub struct MetadataArtifactRegistry {
-    entries: Arc<RwLock<HashMap<Key, (PathBuf, Owner)>>>,
+    // Key is a single concatenated `{slug}\0{suffix}\0{filename}` string —
+    // one allocation per lookup instead of a 3-`String` tuple.
+    entries: Arc<RwLock<HashMap<String, (PathBuf, Owner)>>>,
+}
+
+fn make_key(slug: &str, suffix: &str, filename: &str) -> String {
+    let mut s = String::with_capacity(slug.len() + suffix.len() + filename.len() + 2);
+    s.push_str(slug);
+    s.push('\0');
+    s.push_str(suffix);
+    s.push('\0');
+    s.push_str(filename);
+    s
 }
 
 impl MetadataArtifactRegistry {
@@ -47,21 +56,17 @@ impl MetadataArtifactRegistry {
         Self::default()
     }
 
-    /// Panics if `(slug, suffix, filename)` is already registered by a
-    /// different owner — two `LocalModel` instances attaching the same
-    /// model + LoRA suffix in one process would let detach-#1 wipe
-    /// files that detach-#2 still needs. Re-registering the same
-    /// (slug, suffix, filename) by the *same* owner just updates the
-    /// path and is fine.
+    /// Panics on owner collision — two `LocalModel` instances attaching the
+    /// same (slug, suffix, filename) in one process would let detach-#1
+    /// wipe files detach-#2 still needs. Same-owner re-register is fine
+    /// (path update).
     pub fn register(&self, owner: &Owner, slug: &str, suffix: &str, filename: &str, path: PathBuf) {
-        let key = (slug.to_string(), suffix.to_string(), filename.to_string());
+        let key = make_key(slug, suffix, filename);
         let mut entries = self.entries.write();
         if let Some((_, prior)) = entries.get(&key) {
             assert_eq!(
                 prior, owner,
-                "metadata-registry collision on {key:?}: prior owner {prior:?} \
-                 differs from new owner {owner:?}; two attaches of the same \
-                 model+suffix in one process are not supported",
+                "metadata-registry collision on {key:?}: prior={prior:?}, new={owner:?}",
             );
         }
         entries.insert(key, (path, owner.clone()));
@@ -71,15 +76,8 @@ impl MetadataArtifactRegistry {
     pub fn get(&self, slug: &str, suffix: &str, filename: &str) -> Option<PathBuf> {
         self.entries
             .read()
-            .get(&(slug.to_string(), suffix.to_string(), filename.to_string()))
+            .get(&make_key(slug, suffix, filename))
             .map(|(p, _)| p.clone())
-    }
-
-    /// Drop entries for a single registration scoped by `(slug, suffix)`.
-    pub fn unregister(&self, slug: &str, suffix: &str) {
-        self.entries
-            .write()
-            .retain(|(s, sx, _), _| !(s == slug && sx == suffix));
     }
 
     /// Drop every entry registered by `owner`. No-op if `owner` never
@@ -118,36 +116,6 @@ mod tests {
         assert_eq!(reg.get("llama-3-8b", "_base", "tokenizer.json"), Some(p));
         assert!(reg.get("llama-3-8b", "_base", "missing.json").is_none());
         assert!(reg.get("llama-3-8b", "lora-v1", "tokenizer.json").is_none());
-    }
-
-    #[test]
-    fn unregister_only_removes_matching_suffix() {
-        let reg = MetadataArtifactRegistry::new();
-        reg.register(&base(), "m", "_base", "config.json", PathBuf::from("/m/c"));
-        reg.register(
-            &base(),
-            "m",
-            "_base",
-            "tokenizer.json",
-            PathBuf::from("/m/t"),
-        );
-        reg.register(
-            &lora("lora-v1"),
-            "m",
-            "lora-v1",
-            "config.json",
-            PathBuf::from("/m/c"),
-        );
-
-        reg.unregister("m", "_base");
-
-        assert!(reg.get("m", "_base", "config.json").is_none());
-        assert!(reg.get("m", "_base", "tokenizer.json").is_none());
-        assert_eq!(
-            reg.get("m", "lora-v1", "config.json"),
-            Some(PathBuf::from("/m/c"))
-        );
-        assert_eq!(reg.len(), 1);
     }
 
     #[test]

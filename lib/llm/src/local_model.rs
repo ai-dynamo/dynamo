@@ -660,7 +660,8 @@ impl LocalModel {
 
         let discovery = drt.discovery();
         discovery.unregister(instance).await?;
-        drt.metadata_artifacts().unregister_for_owner(&registry_owner);
+        drt.metadata_artifacts()
+            .unregister_for_owner(&registry_owner);
 
         if let Some(lora_name) = lora_name {
             tracing::info!(
