@@ -1332,10 +1332,27 @@ func GetGPUDiscoveryFailureReason(err error) string {
 	errMsg := strings.ToLower(err.Error())
 
 	switch {
-	case strings.Contains(errMsg, "list pods"):
-		return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
+	// Intel XPU / XPUMD-specific failures are matched first. The aggregated XPU
+	// scrape and list errors embed generic substrings ("http get", "list pods",
+	// "parse prometheus metrics", "metrics endpoint ... status"), so these cases
+	// must precede the DCGM-worded cases below; otherwise a B60 discovery failure
+	// is mislabeled and points troubleshooting at DCGM, which is not involved.
 	case strings.Contains(errMsg, "no intel xpumd pods found"):
 		return "Intel XPUMD exporter pods not found"
+	case strings.Contains(errMsg, "listing intel xpumd pods failed"):
+		return "failed to list Intel XPUMD exporter pods (RBAC/cluster connectivity issue)"
+	case strings.Contains(errMsg, "no xpu device memory detected"):
+		return "no XPU device memory detected in XPUMD metrics"
+	case strings.Contains(errMsg, "no xpu devices detected"):
+		return "no XPU devices detected in XPUMD metrics"
+	case strings.Contains(errMsg, "no xpu metrics could be parsed from any intel xpumd exporter pod"):
+		return "no XPU metrics could be parsed from any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)"
+	case strings.Contains(errMsg, "failed to scrape any intel xpumd exporter pod"):
+		return "failed to scrape any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)"
+
+	// DCGM / generic failures.
+	case strings.Contains(errMsg, "list pods"):
+		return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
 	case strings.Contains(errMsg, "gpu operator is not installed"):
 		return "GPU Operator not installed in expected namespace"
 	case strings.Contains(errMsg, "helm init failed"):
@@ -1349,22 +1366,14 @@ func GetGPUDiscoveryFailureReason(err error) string {
 		return "DCGM pod metrics endpoint returned non-200 status"
 	case strings.Contains(errMsg, "parse prometheus metrics"):
 		return "failed to parse dcgm Prometheus metrics (invalid format)"
-	case strings.Contains(errMsg, "no xpu devices detected"):
-		return "no XPU devices detected in XPUMD metrics"
-	case strings.Contains(errMsg, "no xpu device memory detected"):
-		return "no XPU device memory detected in XPUMD metrics"
 	case strings.Contains(errMsg, "no gpus detected"):
 		return "no GPUs detected in dcgm metrics (GPU model or metrics missing)"
 	case strings.Contains(errMsg, "dcgm is not enabled in the gpu operator"):
 		return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
 	case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
 		return "failed to scrape any dcgm exporter pod (check DCGM exporter pod status and network connectivity)"
-	case strings.Contains(errMsg, "failed to scrape any intel xpumd exporter pod"):
-		return "failed to scrape any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)"
 	case strings.Contains(errMsg, "no gpu metrics could be parsed from any dcgm pod"):
 		return "no GPU metrics could be parsed from any DCGM pod (check DCGM exporter pod status and network connectivity)"
-	case strings.Contains(errMsg, "no xpu metrics could be parsed from any intel xpumd exporter pod"):
-		return "no XPU metrics could be parsed from any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)"
 	case strings.Contains(errMsg, "failed to create helm path"):
 		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
 	}
