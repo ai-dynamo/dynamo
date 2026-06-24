@@ -12,7 +12,7 @@ Production-ready deployments for **Qwen/Qwen3-VL-32B-Instruct-FP8**, a 32B visio
 | Configuration | GPUs | Mode | Description |
 |--------------|------|------|-------------|
 | [**vllm/agg**](vllm/agg/) | 1x H100/H200 | Aggregated | Single GPU, vision + decode combined |
-| [**vllm/disagg**](vllm/disagg/) | 1x Intel XPU + 1x NVIDIA GPU | Disaggregated | Encode on XPU, decode on GPU with embedding transfer via RDMA |
+| [**vllm/hetero_hardware_disagg**](vllm/hetero_hardware_disagg/) | 1x Intel XPU + 1x NVIDIA GPU | Disaggregated | Encode on XPU, decode on GPU with embedding transfer via RDMA |
 
 ## Prerequisites
 
@@ -42,9 +42,9 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 # Deploy (choose one configuration)
 kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 # OR for disaggregated (apply resource claim templates first):
-# kubectl apply -f vllm/disagg/intel_xpu_rdma_template.yaml -n ${NAMESPACE}
-# kubectl apply -f vllm/disagg/nvidia_gpu_rdma_template.yaml -n ${NAMESPACE}
-# kubectl apply -f vllm/disagg/deploy.yaml -n ${NAMESPACE}
+# kubectl apply -f vllm/hetero_hardware_disagg/intel_xpu_rdma_template.yaml -n ${NAMESPACE}
+# kubectl apply -f vllm/hetero_hardware_disagg/nvidia_gpu_rdma_template.yaml -n ${NAMESPACE}
+# kubectl apply -f vllm/hetero_hardware_disagg/deploy.yaml -n ${NAMESPACE}
 ```
 
 ## Test the Deployment
@@ -53,7 +53,7 @@ kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 # Port-forward the frontend
 kubectl port-forward svc/qwen3-vl-32b-fp8-vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 # For disaggregated:
-# kubectl port-forward svc/qwen3-vl-32b-fp8-vllm-disagg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/qwen3-vl-32b-fp8-vllm-disagg-frontend 8000:8000 -n ${NAMESPACE}
 
 # Send a text-only request
 curl http://localhost:8000/v1/chat/completions \
@@ -119,4 +119,4 @@ Client → Frontend → EncodeWorker (Intel XPU) ──NIXL/RDMA──→ Decode
 - Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluster before deploying
 - Model download takes approximately 15-30 minutes depending on network speed
 - The disaggregated mode requires RDMA-capable network interfaces between encode and decode nodes
-- `ResourceClaimTemplate` files in `vllm/disagg/` must be applied before the disagg deployment
+- `ResourceClaimTemplate` files in `vllm/hetero_hardware_disagg/` must be applied before the hetero_hardware_disagg deployment
