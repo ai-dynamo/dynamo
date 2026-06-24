@@ -25,6 +25,7 @@ Usage::
 
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -85,9 +86,12 @@ def _parse_dgdr_spec(config_arg: str) -> DynamoGraphDeploymentRequestSpec:
     path = Path(config_arg)
     try:
         is_file = path.is_file()
-    except OSError:
+    except OSError as e:
         # Very long inline JSON strings can exceed path-length limits.
-        is_file = False
+        if e.errno == errno.ENAMETOOLONG:
+            is_file = False
+        else:
+            raise
 
     if is_file:
         text = path.read_text()
