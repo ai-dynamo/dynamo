@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: FlexKV
+subtitle: Integrate FlexKV with Dynamo's vLLM backend for multi-level KV cache offloading across CPU, SSD, and cloud storage.
 ---
 
 ## Introduction

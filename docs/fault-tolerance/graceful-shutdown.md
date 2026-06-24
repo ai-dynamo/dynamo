@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Graceful Shutdown
+subtitle: Coordinates SIGTERM and SIGINT handling so endpoints drain, in-flight requests finish, and pods restart cleanly.
 ---
 
 This document describes how Dynamo components handle shutdown signals to ensure in-flight requests complete successfully and resources are properly cleaned up.

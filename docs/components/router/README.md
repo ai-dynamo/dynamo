@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Router
+subtitle: KV cache-aware router that picks workers by combined prefill and decode cost to maximize throughput and minimize latency.
 ---
 
 <p align="left">
