@@ -40,7 +40,7 @@ impl AuditSink for StderrSink {
         match serde_json::to_string(rec) {
             Ok(js) => {
                 if let Err(e) = writeln!(std::io::stderr(), "{js}") {
-                    tracing::warn!("audit: stderr write failed: {e}");
+                    tracing::warn!(error = %e, "audit: stderr write failed");
                 }
             }
             Err(e) => tracing::warn!("audit: serialize failed: {e}"),

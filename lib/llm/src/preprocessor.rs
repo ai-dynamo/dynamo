@@ -2047,7 +2047,7 @@ impl OpenAIPreprocessor {
             finish_reason_sent: bool,
             usage_chunk_sent: bool,
             /// Buffered plain usage chunk to send to the client after the audit
-            /// chunk (ANNOTATION_LLM_METRICS). Only Some when is_usage_enabled().
+            /// chunk (ANNOTATION_AUDIT_USAGE). Only Some when is_usage_enabled().
             pending_client_usage: Option<Annotated<Resp>>,
             finished: bool,
             emit_audit_usage_chunk: bool,

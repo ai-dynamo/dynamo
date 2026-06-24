@@ -61,7 +61,7 @@ pub mod logging {
         pub const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
         /// OTLP exporter endpoint URL for traces
-        /// Spec: <https://opentelemetry.io/docs/specs/otel/protocol/exporter/>
+        /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
         /// OTLP exporter endpoint URL for logs. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or the protocol default when unset.
