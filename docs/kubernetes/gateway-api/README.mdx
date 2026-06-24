@@ -30,53 +30,87 @@ the NATS-backed event plane, generated Kubernetes resources, and full lifecycle 
 
 | Capability | Vanilla vLLM On-ramp | Full Dynamo |
 |---|---|---|
-| Model servers | Stock `vLLM serve` pods | Dynamo workers for vLLM, SGLang, or TensorRT-LLM |
-| Routing location | Dynamo routing logic embedded in the EPP | EPP selects workers; Dynamo Frontend sidecars forward in direct mode |
-| Worker discovery | EPP watches vLLM pods by label selector | Dynamo discovery through the operator-managed runtime |
-| KV events | EPP subscribes to per-pod vLLM ZMQ events | Dynamo event plane with NATS/JetStream for durable routing state |
-| Startup state | EPP starts with an empty KV index and warms from new traffic | Dynamo can initialize routing state from worker cache state |
-| Kubernetes resources | You create Deployments, RBAC, Service, InferencePool, and HTTPRoute | You apply a DynamoGraphDeployment and an HTTPRoute; the operator generates the rest |
-| Best fit | Adopt Dynamo EPP in an existing GAIE + vLLM stack | Run production Dynamo with operator-managed lifecycle and richer routing state |
+| Model servers | Stock `vLLM serve` pods.<br /><br />**You miss:** Dynamo-managed worker lifecycle, backend abstraction, and SGLang or TensorRT-LLM workers. | Dynamo workers for vLLM, SGLang, or TensorRT-LLM.<br /><br />**You gain:** One Dynamo deployment model across supported backends. |
+| Routing location | Dynamo routing logic is embedded in the EPP.<br /><br />**You miss:** The normal Dynamo Frontend as the request-routing owner. | EPP selects workers; Dynamo Frontend sidecars forward in direct mode.<br /><br />**You gain:** Gateway-level worker selection while keeping Dynamo request handling on the selected worker path. |
+| Worker discovery | EPP watches vLLM pods by label selector.<br /><br />**You miss:** Dynamo discovery metadata and operator-managed component identity. | Dynamo discovery through the operator-managed runtime.<br /><br />**You gain:** Workers, services, EPP resources, and InferencePools stay aligned through the Dynamo control plane. |
+| KV events | EPP subscribes to per-pod vLLM ZMQ events.<br /><br />**You miss:** Durable delivery, replay, and gap recovery through the Dynamo event plane. | Dynamo event plane with NATS/JetStream for durable routing state.<br /><br />**You gain:** Routing state can survive EPP restarts and temporary disconnects. |
+| Startup state | EPP warms its KV index from live traffic after startup.<br /><br />**You miss:** There is no startup snapshot; the EPP index starts empty on every start. | Dynamo initializes routing state from worker cache state.<br /><br />**You gain:** The EPP receives a full index snapshot immediately on every start. |
+| Kubernetes resources | You create Deployments, RBAC, Services, InferencePools, and HTTPRoutes.<br /><br />**You miss:** Operator-generated resources and reconciliation for the serving graph. | You apply a DynamoGraphDeployment and an HTTPRoute; the operator generates the rest.<br /><br />**You gain:** One Dynamo API owns the graph and generated Kubernetes resources. |
+| Best fit | Adopt Dynamo EPP in an existing GAIE + vLLM stack.<br /><br />**You miss:** Full Dynamo lifecycle management and richer routing-state recovery. | Run production Dynamo with operator-managed lifecycle and richer routing state.<br /><br />**You gain:** The production Dynamo path with GAIE as the external entry point. |
 
 ## Request Flow
 
-Both paths put the routing decision in the EPP. The difference is what the EPP discovers and how
-the selected backend serves the request.
+Both paths put the routing decision in the EPP. The difference is what the EPP discovers, how it
+builds routing state, and what receives the request after the gateway selects an endpoint.
+
+### Vanilla vLLM On-ramp
 
 ```mermaid
 flowchart LR
     Client["Client"] --> Gateway["Gateway API Gateway"]
     Gateway --> Route["HTTPRoute"]
     Route --> Pool["InferencePool"]
-    Pool --> EPP["Dynamo EPP"]
-
-    subgraph OnRamp["Vanilla vLLM on-ramp"]
-      EPP --> VLLM["Selected vLLM pod"]
-      VLLM -. "ZMQ KV events" .-> EPP
-    end
-
-    subgraph Full["Full Dynamo"]
-      EPP --> Sidecar["Frontend sidecar<br/>--router-mode direct"]
-      Sidecar --> Worker["Dynamo worker"]
-      Worker -. "KV events" .-> EventPlane["NATS/JetStream"]
-      EventPlane -. "routing state" .-> EPP
-    end
+    Pool --> EPP["Dynamo EPP<br/>EndpointPicker"]
+    EPP -->|"selected endpoint"| VLLM["Stock vLLM pod"]
+    VLLM -. "ZMQ KV events" .-> EPP
+    EPP --> Index["Embedded KV index"]
 ```
+
+The on-ramp EPP watches stock vLLM pods, consumes live ZMQ KV events, and warms its local index from
+traffic observed after startup.
+
+### Full Dynamo
+
+```mermaid
+flowchart LR
+    Client["Client"] --> Gateway["Gateway API Gateway"]
+    Gateway --> Route["HTTPRoute"]
+    Route --> Pool["InferencePool"]
+    Pool --> EPP["Dynamo EPP<br/>EndpointPicker"]
+    EPP -->|"selected worker"| Sidecar["Frontend sidecar<br/>--router-mode direct"]
+    Sidecar --> Worker["Dynamo worker"]
+    Worker -. "KV events" .-> EventPlane["NATS/JetStream"]
+    EventPlane -. "snapshot + updates" .-> EPP
+
+    DGD["DynamoGraphDeployment"] --> Operator["Dynamo operator"]
+    Operator --> Pool
+    Operator --> EPP
+    Operator --> Sidecar
+    Operator --> Worker
+```
+
+Full Dynamo uses the operator-managed runtime. The EPP receives routing state from the Dynamo event
+plane, including the startup snapshot and subsequent updates.
 
 ## Shared Prerequisites
 
-- Kubernetes cluster with GPU nodes.
-- `kubectl` and Helm configured for the cluster.
-- Gateway API and GAIE CRDs installed.
-- An Inference Gateway implementation. These quick starts show
-  [agentgateway](https://agentgateway.dev/) and Istio where setup differs.
+- Kubernetes cluster with GPU nodes. For the baseline Gateway API environment, start with the
+  upstream [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
+  and [GAIE getting started guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
+- `kubectl`, [Helm](https://helm.sh/docs/intro/install/), and
+  [jq](https://jqlang.org/download/) configured for the cluster.
+- Gateway API and GAIE CRDs installed. The upstream Gateway API guide covers
+  [Gateway API CRD installation](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/#installing-gateway-api);
+  the GAIE guide covers
+  [Inference Extension CRD installation](https://gateway-api-inference-extension.sigs.k8s.io/guides/#install-the-inference-extension-crds).
+- An Inference Gateway implementation. See the upstream
+  [GAIE gateway implementation list](https://gateway-api-inference-extension.sigs.k8s.io/implementations/gateways/).
+  These quick starts show [agentgateway](https://agentgateway.dev/docs/) and
+  [Istio Gateway API](https://istio.io/latest/docs/tasks/traffic-management/ingress/gateway-api/)
+  where setup differs.
 - Model credentials required by the workload, such as `hf-token-secret` for gated Hugging Face
-  models.
+  models. For Hugging Face models, see the
+  [user access token documentation](https://huggingface.co/docs/hub/security-tokens).
 
 Install the shared Gateway API layer once per cluster or environment. The two quick starts show the
 same setup explicitly so the commands remain auditable.
 
 ## Gateway Implementation
+
+GAIE needs a Gateway API implementation that understands the inference extension and can call an
+Endpoint Picker Plugin. Dynamo is independent of the Gateway implementation; choose the gateway that
+matches your platform, then point its `HTTPRoute` and `InferencePool` at the Dynamo EPP. The quick
+starts below show the two implementations most useful for Dynamo users today.
 
 | | agentgateway | Istio |
 |---|---|---|
