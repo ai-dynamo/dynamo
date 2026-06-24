@@ -667,7 +667,7 @@ pub fn validate_transfer_delay_ms(transfer_delay_ms: Option<f64>) -> Result<()> 
 
 pub fn validate_transfer_timing(transfer_timing: HandoffTransferTiming) -> Result<()> {
     if let Some(bandwidth_gb_s) = transfer_timing.bandwidth_gb_s
-        && (!bandwidth_gb_s.is_finite() || bandwidth_gb_s < 0.0)
+        && (!bandwidth_gb_s.is_finite() || bandwidth_gb_s <= 0.0)
     {
         bail!("invalid handoff transfer bandwidth {bandwidth_gb_s}");
     }
