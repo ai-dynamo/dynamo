@@ -97,9 +97,7 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    /// Workers registered via `register_workers` (external / GAIE mode) that
-    /// are absent from the discovery-fed `workers_with_configs` map. Shared
-    /// with the `SchedulerQueue` handle that populates it.
+    /// External worker IDs registered via `register_workers`.
     external_worker_ids: Arc<Mutex<HashSet<WorkerId>>>,
 }
 
@@ -278,14 +276,8 @@ impl<
 {
     /// Register externally-provided workers in the slot tracker.
     ///
-    /// Looks up DP rank/size from the discovery watch channel; defaults to
-    /// `(0, 1)` for workers not in discovery. Externally-discovered
-    /// (gateway / InferencePool) workers are **single-rank per endpoint**:
-    /// vLLM data-parallel deployments expose each DP rank as its own endpoint
-    /// (external load balancing), so data parallelism is scaled by adding
-    /// endpoints to the pool and the single-rank default is correct by
-    /// construction. A single endpoint that fans out to multiple internal DP
-    /// ranks is not addressable per-rank from the gateway and is out of scope.
+    /// Uses discovery DP rank/size when present; otherwise defaults to `(0, 1)`.
+    /// External GAIE/vLLM endpoints are treated as single-rank endpoints.
     pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
         let discovery_workers = self.workers_with_configs.borrow();
         for &worker_id in worker_ids {
@@ -303,9 +295,7 @@ impl<
                 tracing::warn!(worker_id, %error, "Invalid externally-provided worker topology");
             }
         }
-        // Track external IDs so `admit_one` can merge a default config for them
-        // into the selector's candidate map (they never appear in the
-        // discovery-fed `workers_with_configs`).
+        // Track external IDs so `admit_one` can include them in selector candidates.
         if let Ok(mut external) = self.external_worker_ids.lock() {
             external.extend(worker_ids.iter().copied());
         }
@@ -599,17 +589,10 @@ impl<
         request.prefill_tokens = prefill_tokens;
 
         let selection = {
-            // External (vanilla-vLLM / GAIE) workers are registered into the
-            // slot tracker but never appear in the discovery-fed config map.
-            // Merge a default config for them so the selector treats them as
-            // eligible candidates. Capacity checks are skipped for
-            // allowed-worker-id requests, and external workers are single-rank
-            // per endpoint (DP is scaled by adding endpoints, not by fanning a
-            // single endpoint across ranks), so a default config is sufficient.
-            // (Synchronous snapshot only; the borrow is dropped before await.)
+            // External workers may be missing from discovery configs.
+            // Merge default configs for missing IDs so selector eligibility works.
+            // This stays allocation-free on the common path.
             let discovery = self.workers_with_configs.borrow();
-            // Hot path: borrow the discovery map with no allocation. Only
-            // clone + merge when an external worker is missing from it.
             let merged: Option<HashMap<WorkerId, C>> = {
                 let external = self.external_worker_ids.lock();
                 match external {
