@@ -22,8 +22,6 @@ import asyncio
 import base64
 import json
 import logging
-import os
-import tempfile
 
 import aiohttp
 import numpy as np
@@ -76,26 +74,35 @@ class RealtimeOmniMockWorkerProcess(ManagedProcess):
 
 
 @pytest.fixture(scope="function")
-def realtime_omni_frontend(request, dynamo_dynamic_ports: ServicePorts):
-    """Launch the frontend + mock-Omni worker; yield the frontend port once discovered."""
+def realtime_omni_frontend(
+    request, file_storage_backend, dynamo_dynamic_ports: ServicePorts
+):
+    """Launch the frontend + mock-Omni worker; yield the frontend port once discovered.
+
+    Uses file-based discovery (the ``file_storage_backend`` fixture sets
+    ``DYN_FILE_KV``), the tcp request plane, and an explicit zmq event plane, so
+    the two processes coordinate without etcd or nats and an ambient
+    ``NATS_SERVER`` never forces a connection. Mirrors ``test_prompt_embeds.py``.
+    """
+    _ = file_storage_backend  # sets DYN_FILE_KV for both subprocesses
     frontend_port = dynamo_dynamic_ports.frontend_port
-    with tempfile.TemporaryDirectory(prefix="dyn_realtime_omni_kv_") as file_kv:
-        os.environ["DYN_FILE_KV"] = file_kv
-        try:
-            with DynamoFrontendProcess(
-                request,
-                frontend_port=frontend_port,
-                extra_args=["--discovery-backend", "file", "--request-plane", "tcp"],
-                terminate_all_matching_process_names=False,
-            ):
-                logger.info("Frontend started on port %s", frontend_port)
-                with RealtimeOmniMockWorkerProcess(
-                    request, frontend_port=frontend_port
-                ):
-                    logger.info("Mock-Omni realtime worker registered %s", MODEL_NAME)
-                    yield frontend_port
-        finally:
-            os.environ.pop("DYN_FILE_KV", None)
+    with DynamoFrontendProcess(
+        request,
+        frontend_port=frontend_port,
+        extra_args=[
+            "--discovery-backend",
+            "file",
+            "--request-plane",
+            "tcp",
+            "--event-plane",
+            "zmq",
+        ],
+        terminate_all_matching_process_names=False,
+    ):
+        logger.info("Frontend started on port %s", frontend_port)
+        with RealtimeOmniMockWorkerProcess(request, frontend_port=frontend_port):
+            logger.info("Mock-Omni realtime worker registered %s", MODEL_NAME)
+            yield frontend_port
 
 
 async def _recv_json(ws: aiohttp.ClientWebSocketResponse, timeout_s: float) -> dict:
