@@ -46,8 +46,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, agent_context_from_headers,
-    apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+    agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -108,6 +108,8 @@ pub(crate) struct ErrorMessage {
     #[serde(rename = "type")]
     error_type: String,
     code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<Box<serde_json::Value>>,
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
@@ -169,6 +171,21 @@ fn find_invalid_argument_in_chain<'a>(
     None
 }
 
+fn find_queue_rejection_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(rejection) =
+            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+        {
+            return Some(rejection);
+        }
+        current = error.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -180,6 +197,7 @@ impl ErrorMessage {
                 message: "Model not found".to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -195,6 +213,7 @@ impl ErrorMessage {
                 message: "Model temporarily unavailable".to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -218,6 +237,7 @@ impl ErrorMessage {
                 message: "Service is not ready".to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -234,6 +254,7 @@ impl ErrorMessage {
                 message,
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -252,6 +273,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -274,6 +296,7 @@ impl ErrorMessage {
                 message: public_msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -299,6 +322,7 @@ impl ErrorMessage {
                 message: err.to_string(),
                 error_type: map_error_code_to_error_type(status),
                 code: status.as_u16(),
+                details: None,
             }),
         )
     }
@@ -316,6 +340,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -329,6 +354,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -338,6 +364,19 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
+            let code = StatusCode::SERVICE_UNAVAILABLE;
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: rejection.to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                    details: serde_json::to_value(rejection).ok().map(Box::new),
+                }),
+            );
+        }
+
         // Check for ResourceExhausted anywhere in the error chain → HTTP 503
         if super::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
@@ -354,6 +393,7 @@ impl ErrorMessage {
                     message: dynamo_err.message().to_string(),
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
+                    details: None,
                 }),
             );
         }
@@ -395,6 +435,7 @@ impl ErrorMessage {
                     message: err.message,
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
+                    details: None,
                 }),
             ),
             Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
@@ -410,6 +451,7 @@ impl From<HttpError> for ErrorMessage {
                 StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             ),
             code: err.code,
+            details: None,
         }
     }
 }
@@ -432,6 +474,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 message: error_message,
                 error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                 code: StatusCode::BAD_REQUEST.as_u16(),
+                details: None,
             }),
         )
             .into_response()
@@ -504,6 +547,9 @@ fn context_from_headers<T: Send + Sync + 'static>(
     if let Some(agent_context) = agent_context_from_headers(headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
+    if let Some(session_affinity) = session_affinity_from_headers(headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     Ok(request)
 }
 
@@ -524,21 +570,33 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
         target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
     }
+    if let Ok(session_affinity) = source.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
+        target.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            session_affinity.as_ref().clone(),
+        );
+    }
 }
 
 /// Warn (once per request) when nvext data is dropped because the extension is
 /// disabled. Only called from the disabled branch, so the default path is free.
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
     use crate::protocols::common::extensions::{
-        HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
-        HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, HEADER_WORKER_INSTANCE_ID,
+        HEADER_DATA_PARALLEL_RANK_ALIAS, HEADER_DP_RANK, HEADER_DP_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK, HEADER_PREFILL_DP_RANK_ALIAS, HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY,
+        HEADER_WORKER_INSTANCE_ID, HEADER_WORKER_INSTANCE_ID_ALIAS,
     };
     let header_present = [
         HEADER_WORKER_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID_ALIAS,
         HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS,
         HEADER_DP_RANK,
         HEADER_DP_RANK_ALIAS,
+        HEADER_DATA_PARALLEL_RANK_ALIAS,
         HEADER_PREFILL_DP_RANK,
+        HEADER_PREFILL_DP_RANK_ALIAS,
         HEADER_REQUEST_PRIORITY,
         HEADER_REQUEST_STRICT_PRIORITY,
     ]
@@ -1360,6 +1418,7 @@ pub(super) async fn check_for_backend_error(
                         message: error_msg,
                         error_type: map_error_code_to_error_type(status_code),
                         code: status_code.as_u16(),
+                        details: None,
                     }),
                 ),
             });
@@ -2719,6 +2778,7 @@ async fn images_edits(
                 message: "input_reference is required for /v1/images/edits".to_string(),
                 error_type: map_error_code_to_error_type(code),
                 code: code.as_u16(),
+                details: None,
             }),
         ));
     }
@@ -3234,6 +3294,24 @@ mod tests {
     }
 
     #[test]
+    fn test_context_metadata_preserves_session_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let source = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let affinity = source
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+        assert_eq!(affinity.as_str(), "session-123");
+
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+        let affinity = target
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity copied");
+        assert_eq!(affinity.as_str(), "session-123");
+    }
+
+    #[test]
     fn test_http_error_response_from_anyhow() {
         let err = http_error_from_engine(400).unwrap_err();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
@@ -3308,6 +3386,32 @@ mod tests {
         assert!(
             !response.1.message.contains("All workers are busy"),
             "client response must not include the underlying engine message"
+        );
+    }
+
+    #[test]
+    fn queue_rejection_maps_to_structured_http_503() {
+        use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
+
+        let rejection = QueueRejection {
+            policy_class: "latency".to_string(),
+            limit_kind: QueueLimitKind::CachedTokens,
+            current: 2048,
+            limit: 1024,
+        };
+        let response =
+            ErrorMessage::from_anyhow(anyhow::Error::new(rejection), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(
+            response.1.details.as_deref(),
+            Some(&serde_json::json!({
+                "policy_class": "latency",
+                "limit_kind": "cached_tokens",
+                "current": 2048,
+                "limit": 1024,
+            }))
         );
     }
 

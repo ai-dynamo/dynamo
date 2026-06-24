@@ -396,7 +396,7 @@ sglang_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["image"],
+                expected_response=["image", "bus", "train", "streetcar"],
                 temperature=0.0,
                 max_tokens=100,
             )

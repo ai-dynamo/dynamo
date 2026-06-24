@@ -149,6 +149,7 @@ echo "Starting PD worker on GPU $DYN_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
   --enable-multimodal \
+  --dedicated-mm-encoder \
   --disaggregation-mode pd \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \

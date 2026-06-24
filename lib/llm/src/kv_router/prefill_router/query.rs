@@ -61,15 +61,9 @@ impl PrefillRouter {
                             dp_rank: Some(worker.dp_rank),
                         })
                     }
-                    crate::kv_router::FindBestMatchOutcome::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    } => Ok(PrefillQueryOutcome::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    }),
+                    crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                        Ok(PrefillQueryOutcome::QueueRejected { rejection })
+                    }
                 }
             }
             InnerPrefillRouter::SimpleRouter(router) => {

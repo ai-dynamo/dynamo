@@ -42,7 +42,8 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, agent_context_from_headers, apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
+    apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -172,6 +173,9 @@ async fn handler_anthropic_messages(
     attach_x_request_id(&mut request, &headers);
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+    }
+    if let Some(session_affinity) = session_affinity_from_headers(&headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     let context = request.context();
 
@@ -898,9 +902,9 @@ mod tests {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-worker-instance-id", "42".parse().unwrap());
-        headers.insert("x-prefill-instance-id", "7".parse().unwrap());
-        headers.insert("x-dp-rank", "3".parse().unwrap());
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-prefill-instance-id", "7".parse().unwrap());
+        headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
 
         apply_anthropic_header_routing_overrides(&mut chat_request, &headers, true);
         let nvext = chat_request.nvext.unwrap();
@@ -916,7 +920,7 @@ mod tests {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
 
         apply_anthropic_header_routing_overrides(&mut chat_request, &headers, false);
         let nvext = chat_request.nvext.unwrap();
