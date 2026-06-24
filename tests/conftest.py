@@ -1119,12 +1119,16 @@ def durable_kv_events(request):
 
 
 @pytest.fixture()
-def runtime_services(request, discovery_backend, request_plane):
+def runtime_services(request, discovery_backend, request_plane, monkeypatch):
     """
     Start runtime services (NATS and/or etcd) based on discovery_backend and request_plane.
 
     - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
+    - For the etcd + NATS combination, DYN_EVENT_PLANE is pinned to nats,
+      reproducing the pre-existing per-backend default (etcd -> NATS). ZMQ is now
+      the default for all backends, so without this pin these tests would silently
+      run the ZMQ event plane instead of the NATS path they intend to exercise.
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -1132,6 +1136,7 @@ def runtime_services(request, discovery_backend, request_plane):
     if request_plane == "nats" and discovery_backend == "etcd":
         with NatsServer(request) as nats_process:
             with EtcdServer(request) as etcd_process:
+                monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
                 yield nats_process, etcd_process
     elif request_plane == "nats":
         with NatsServer(request) as nats_process:

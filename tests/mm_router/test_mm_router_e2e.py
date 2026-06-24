@@ -198,9 +198,13 @@ def mm_runtime_services(request):
     with NatsServer(request, port=0) as nats, EtcdServer(request, port=0) as etcd:
         os.environ["NATS_SERVER"] = f"nats://localhost:{nats.port}"
         os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd.port}"
+        # ZMQ is now the default event plane; pin NATS so this mm-router test keeps
+        # exercising the NATS path it intends (NATS_SERVER alone no longer selects it).
+        os.environ["DYN_EVENT_PLANE"] = "nats"
         yield
         os.environ.pop("NATS_SERVER", None)
         os.environ.pop("ETCD_ENDPOINTS", None)
+        os.environ.pop("DYN_EVENT_PLANE", None)
 
 
 @pytest.fixture(scope="module")
