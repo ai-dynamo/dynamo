@@ -51,6 +51,13 @@
 # --- No TRTLLM stages included
 {% endif %}
 
+# --- Megatron Stages
+{% if framework == "megatron" %}
+    {% include "templates/megatron_runtime.Dockerfile" %}
+{% else %}
+# --- No Megatron stages included
+{% endif %}
+
 {% if make_efa == true and target == "runtime" %}
     {% include "templates/aws.Dockerfile" %}
 {% endif %}

@@ -225,14 +225,25 @@ ARG NIXL_UCX_REF
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF
 
-# Build and install gdrcopy
+# Build and install gdrcopy.
+# Megatron keeps --nodeps because the kmod package's post-install scriptlet
+# runs `dkms build/install`, which requires a live kernel and fails in a
+# container build environment. The scriptlet failure would abort the
+# &&-chain before gdrcopy-devel (which carries gdrapi.h) is installed,
+# causing UCX to silently skip gdrcopy at configure time.
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
     cd gdrcopy/packages && \
     CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
+{% if framework == "megatron" %}
+    rpm -Uvh --nodeps gdrcopy-kmod-*.el8.noarch.rpm && \
+    rpm -Uvh --nodeps gdrcopy-*.el8.${ARCH_ALT}.rpm && \
+    rpm -Uvh --nodeps gdrcopy-devel-*.el8.noarch.rpm && \
+{% else %}
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
     rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
-    rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
+    rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm && \
+{% endif %}
 {% endif %}
 
 # sccache binary is pre-installed in dynamo_base; stage it off-PATH so
@@ -341,7 +352,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --with-cuda=/usr/local/cuda \
         --with-verbs                \
         --with-dm                   \
+{% if framework == "megatron" %}
+        --with-gdrcopy=/usr         \
+{% else %}
         --with-gdrcopy=/usr/local   \
+{% endif %}
         --with-efa                  \
         --enable-mt;                 \
     elif [ "$DEVICE" = "cpu" ]; then  \

@@ -31,9 +31,16 @@ ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
 # Base and runtime images configuration
 ARG BASE_IMAGE={{ context[framework][device_key].base_image }}
 ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
-{% if framework in ["sglang", "trtllm", "vllm"] -%}
+{% if framework in ["sglang", "trtllm", "vllm", "megatron"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
+{%- endif %}
+
+{% if framework == "megatron" -%}
+# Megatron-LM source repo and ref baked into the image. Override at build
+# time to point at a fork / feature branch.
+ARG MEGATRON_REPO={{ context.megatron.megatron_repo }}
+ARG MEGATRON_REF={{ context.megatron.megatron_ref }}
 {%- endif %}
 
 # wheel builder image selection

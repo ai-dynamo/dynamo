@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Third-party Python dependencies for the megatron runtime image. Installed
+# with --no-deps so upstream nvcr.io/nvidia/pytorch's solve stays intact.
+# Megatron-LM's own pyproject pulls the rest of its inference deps via
+# `uv pip install -e /opt/megatron-lm` in the Dockerfile.
+
+# Megatron imports `accelerate` from megatron.training during init.
+accelerate
+# Datasets — imported by dist_checkpointing under some code paths.
+datasets
+# Megatron uses einops heavily in attention/MLP modules.
+einops~=0.8
+# fastapi — pulled in by megatron.core.inference's OpenAI-compat shim
+# (we don't use that frontend, but the import is unconditional).
+fastapi~=0.50
+# flashinfer attention kernels used by some inference paths.
+flashinfer-python>=0.5.0,<0.7.0
+# Megatron's data loaders import megatron-energon unconditionally.
+megatron-energon~=6.0
+# Megatron's InferenceClient wire protocol (DEALER↔ROUTER + per-step partial
+# replies for streaming). Megatron's pyproject pins these; we install them
+# here at fixed lower bounds for the cases where the NGC PyTorch base
+# ships an older copy.
+msgpack>=1.0.7
+# Required by ai_dynamo_runtime.
+msgspec>=0.19.0
+# Checkpoint loading from S3/GCS-style URIs.
+multi-storage-client~=0.27
+# tools/run_dynamic_text_generation_server.py imports
+# `from megatron.post_training.arguments import add_modelopt_args`.
+nvidia-modelopt[torch]>=0.44
+# Megatron's dist_checkpointing.strategies.torch asserts nvrx>=0.6.0.
+nvidia-resiliency-ext>=0.6.0
+# Megatron sprinkles onnxscript imports in some export utilities.
+onnxscript
+# Megatron's config layer.
+omegaconf
+# Instrumentation hooks Megatron loads at import time.
+opentelemetry-api~=1.33.1
+pyzmq>=26.0.0
+# Non-HF tokenizer backends; Megatron's tokenizer module imports them
+# eagerly even when --tokenizer-type=HuggingFaceTokenizer is selected.
+sentencepiece
+tiktoken
+# Distributed checkpoint zarr backend.
+tensorstore>=0.1.47,!=0.1.72
+# Tokenizer used by both the Dynamo frontend (when it sees the served-model-name)
+# and Megatron-LM's HuggingFaceTokenizer flag.
+transformers>=4.45.0
+# Required by ai_dynamo_runtime (companion to msgspec).
+uvloop>=0.21.0
+# General utility — Megatron imports `tqdm` at module top-level in several files.
+tqdm
+# Used by some Megatron data-prep utilities; imported eagerly.
+wget

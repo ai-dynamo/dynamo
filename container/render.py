@@ -44,7 +44,7 @@ def parse_args():
         "--framework",
         type=str,
         default="vllm",
-        choices=["dynamo", "vllm", "sglang", "trtllm"],
+        choices=["dynamo", "vllm", "sglang", "trtllm", "megatron"],
         help="Dockerfile framework to use",
     )
 
@@ -80,7 +80,7 @@ def parse_args():
         type=str,
         default="12.9",
         choices=["12.9", "13.0", "13.1"],
-        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm].  Not required for non-cuda devices.",
+        help="CUDA version to use. [12.9 or 13.0 for vllm/sglang/megatron, 13.1 for trtllm].  Not required for non-cuda devices.",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
@@ -144,6 +144,17 @@ def validate_args(args):
                 "base",
             ],
             "cuda_version": ["12.9", "13.0"],
+        },
+        "megatron": {
+            "device": ["cuda"],
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "wheel_builder",
+                "base",
+            ],
+            "cuda_version": ["12.9"],
         },
     }
 
