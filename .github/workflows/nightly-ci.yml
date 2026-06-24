@@ -256,7 +256,7 @@ jobs:
       build_timeout_minutes: 120
       # Nightly serves as the continuous-compliance source-archival cadence
       # (post-merge-ci skips main and only archives on release/*.*.* cuts).
-      archive_sources: true
+      archive_sources: false
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -273,7 +273,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       inline_compliance: true
       build_timeout_minutes: 120
-      archive_sources: true
+      archive_sources: false
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -290,7 +290,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       inline_compliance: true
       build_timeout_minutes: 120
-      archive_sources: true
+      archive_sources: false
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
