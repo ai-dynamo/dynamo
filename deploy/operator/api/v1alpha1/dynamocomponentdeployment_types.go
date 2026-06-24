@@ -127,8 +127,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// This field determines 1) the minimum number of replicas guaranteed to be
 	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
 	// termination.
-	// For Grove-backed DynamoGraphDeployment services, admission defaults this
-	// field to 0 when replicas is 0 and to 1 otherwise.
+	//
+	// For Grove-backed DynamoGraphDeployment components, admission defaults this
+	// field when omitted: 0 if replicas is 0, otherwise 1. On update, admission also
+	// normalizes the replicas zero-boundary: when scaling replicas from 0 to a
+	// positive value and minAvailable is still 0, it becomes 1; when scaling replicas
+	// to 0, it becomes 0. Other explicit values are preserved and validated.
+	//
 	// For non-Grove deployments, setting this field will result in a validation error.
 	// +kubebuilder:validation:Minimum=0
 	// +optional

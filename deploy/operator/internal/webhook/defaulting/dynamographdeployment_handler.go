@@ -19,6 +19,7 @@ package defaulting
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -56,8 +57,9 @@ func NewDGDDefaulter(operatorVersion string, groveEnabled bool) *DGDDefaulter {
 
 // Default implements admission.CustomDefaulter.
 // On every operation: defaults nil Replicas to 1 for all services.
-// On every Grove-pathway operation: defaults nil MinAvailable to 0 when
-// Replicas is 0 and to 1 otherwise.
+// On every Grove-pathway operation: defaults nil MinAvailable to 0 when Replicas
+// is 0 and to 1 otherwise. On UPDATE, normalizes MinAvailable across
+// replicas-only scale-to/from-zero changes.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
@@ -84,9 +86,21 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// expandRolesForService(). Apply on every operation so that services
 	// added via UPDATE also get the default.
 	grovePathway := d.isGrovePathway(dgd)
+	var oldDGD *nvidiacomv1alpha1.DynamoGraphDeployment
+	if grovePathway && req.Operation == admissionv1.Update && len(req.OldObject.Raw) > 0 {
+		oldDGD = &nvidiacomv1alpha1.DynamoGraphDeployment{}
+		if err := json.Unmarshal(req.OldObject.Raw, oldDGD); err != nil {
+			logger.Error(err, "failed to decode old DGD object, skipping minAvailable update normalization")
+			oldDGD = nil
+		}
+	}
 	for name, svc := range dgd.Spec.Services {
 		if svc == nil {
 			continue
+		}
+		var oldSvc *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		if oldDGD != nil {
+			oldSvc = oldDGD.Spec.Services[name]
 		}
 		if svc.Replicas == nil {
 			svc.Replicas = ptr.To(int32(1))
@@ -99,6 +113,20 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 			}
 			svc.MinAvailable = ptr.To(minAvailable)
 			logger.V(1).Info("defaulted nil minAvailable", "service", name, "minAvailable", minAvailable)
+		}
+		if grovePathway && req.Operation == admissionv1.Update && svc.MinAvailable != nil && svc.Replicas != nil &&
+			oldSvc != nil && oldSvc.MinAvailable != nil {
+			oldReplicas := int32(1)
+			if oldSvc.Replicas != nil {
+				oldReplicas = *oldSvc.Replicas
+			}
+			if oldReplicas > 0 && *svc.Replicas == 0 && *svc.MinAvailable == *oldSvc.MinAvailable {
+				svc.MinAvailable = ptr.To(int32(0))
+				logger.V(1).Info("normalized minAvailable for zero replicas", "service", name)
+			} else if oldReplicas == 0 && *svc.Replicas > 0 && *svc.MinAvailable == 0 && *oldSvc.MinAvailable == 0 {
+				svc.MinAvailable = ptr.To(int32(1))
+				logger.V(1).Info("normalized minAvailable for non-zero replicas", "service", name)
+			}
 		}
 	}
 
