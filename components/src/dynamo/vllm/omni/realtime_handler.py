@@ -14,9 +14,11 @@ Turn model (matching vLLM-Omni's single-active-generation contract):
   * ``input_audio_buffer.commit`` -> opens a turn on the first event and, when
     ``final`` is set, closes the audio stream so the engine drains.
 
-Turns are serialized: at most one response is in flight at a time, so a later
-commit's turn buffers its audio and waits until the previous response completes
--- responses never interleave, and each is identified by its ``response_id``.
+Turns run concurrently -- a commit's turn drives the engine as soon as it opens
+-- but their responses are forwarded to the client in turn order: each turn
+buffers its server events, and a later turn's buffer is held until the previous
+turn's response completes. Responses never interleave and each is identified by
+its ``response_id``.
 
 Each turn emits ``response.created`` -> ``response.output_audio.delta``* (+
 optional ``response.output_audio_transcript.delta`` for the thinker text) ->
@@ -43,7 +45,7 @@ import asyncio
 import base64
 import logging
 import uuid
-from typing import Any, AsyncGenerator, Awaitable, Callable, Optional, Sequence
+from typing import Any, AsyncGenerator, Callable, Optional, Sequence
 
 import numpy as np
 
@@ -104,7 +106,9 @@ class _Turn:
     ``audio_queue`` carries the float32 input (``None`` = end of input);
     ``audio_ref`` tracks the last emitted waveform so cumulative engine outputs
     are de-duplicated into true deltas; ``output_modalities`` is snapshotted from
-    the latest ``session.update``; ``task`` runs the turn's processing.
+    the latest ``session.update``; ``task`` runs the turn's processing;
+    ``events`` buffers its server events for in-order forwarding (``None`` = end
+    of the turn's response).
     """
 
     def __init__(
@@ -124,6 +128,11 @@ class _Turn:
         self.audio_queue: asyncio.Queue[Optional[np.ndarray]] = asyncio.Queue()
         self.audio_ref: np.ndarray | None = None
         self.task: asyncio.Task | None = None
+        # This turn's server events, forwarded to the client in turn order by
+        # ``RealtimeOmniHandler.generate`` (``None`` = end of response). Bounded
+        # so a turn waiting for its forwarding slot exerts backpressure on its
+        # own engine drive rather than buffering unbounded.
+        self.events: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=256)
         self.output_modalities = output_modalities
         self._engine_client = engine_client
         self._streaming_input_factory = streaming_input_factory
@@ -187,10 +196,10 @@ class _Turn:
 class RealtimeOmniHandler:
     """Bridge OpenAI Realtime client events to vLLM-Omni streaming generation.
 
-    Owns the per-connection orchestration (event demux, turn serialization,
-    output queue) and the conversion between the realtime API and model output:
-    it drives each ``_Turn``'s engine generation and translates the engine's
-    stage outputs into OpenAI-spec server events.
+    Owns the per-connection orchestration (event demux, concurrent turns whose
+    responses are forwarded in turn order) and the conversion between the
+    realtime API and model output: it drives each ``_Turn``'s engine generation
+    and translates the engine's stage outputs into OpenAI-spec server events.
     """
 
     def __init__(
@@ -216,49 +225,46 @@ class RealtimeOmniHandler:
             output_modalities=output_modalities,
         )
 
-    async def _run_turn(
-        self,
-        turn: _Turn,
-        context: Context,
-        emit: Callable[[dict], Awaitable[None]],
-        turn_lock: "asyncio.Lock",
-    ) -> None:
-        """Drive one turn's engine generation and translate its outputs.
+    async def _run_turn(self, turn: _Turn, context: Context) -> None:
+        """Drive one turn's engine generation and buffer its server events.
 
-        Holds ``turn_lock`` for the whole ``response.created`` -> ``response.done``
-        lifecycle so only one turn's response is on the wire at a time; later
-        turns block here until this one finishes (their audio keeps buffering in
-        their own queue meanwhile).
+        Events are appended to ``turn.events`` rather than sent to the client
+        directly; ``generate`` forwards each turn's buffer in turn order, so
+        turns may run concurrently while their responses never interleave. A
+        ``None`` sentinel is always appended last to mark the turn's response
+        complete and let the forwarder advance to the next turn.
         """
-        async with turn_lock:
-            await emit(self._response_created_event(turn))
+        events = turn.events
+        try:
+            await events.put(self._response_created_event(turn))
 
             sent_audio = False
-            try:
-                async for output in turn._drive_engine():
-                    if context.is_stopped():
-                        break
-
-                    transcript = self._extract_transcript(output)
-                    if transcript and self._emit_transcript:
-                        await emit(self._transcript_delta_event(turn, transcript))
-
-                    for chunk in self._extract_audio_chunks(turn, output):
-                        sent_audio = True
-                        await emit(self._audio_delta_event(turn, chunk))
-
+            async for output in turn._drive_engine():
                 if context.is_stopped():
-                    # Connection torn down mid-turn; don't claim a completed response.
-                    return
+                    break
 
-                if sent_audio:
-                    await emit(self._audio_done_event(turn))
-                await emit(self._response_done_event(turn))
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
-                logger.exception("realtime omni turn failed: %s", exc)
-                await emit(self._error_event(exc))
+                transcript = self._extract_transcript(output)
+                if transcript and self._emit_transcript:
+                    await events.put(self._transcript_delta_event(turn, transcript))
+
+                for chunk in self._extract_audio_chunks(turn, output):
+                    sent_audio = True
+                    await events.put(self._audio_delta_event(turn, chunk))
+
+            if context.is_stopped():
+                # Connection torn down mid-turn; don't claim a completed response.
+                return
+
+            if sent_audio:
+                await events.put(self._audio_done_event(turn))
+            await events.put(self._response_done_event(turn))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
+            logger.exception("realtime omni turn failed: %s", exc)
+            await events.put(self._error_event(exc))
+        finally:
+            await events.put(None)
 
     # -- response lifecycle events --------------------------------------------
 
@@ -386,32 +392,32 @@ class RealtimeOmniHandler:
     ) -> AsyncGenerator[dict, None]:
         """Serve one realtime connection.
 
-        Inbound client events and the per-turn engine drives both feed server
-        events onto a shared queue; this coroutine yields them in arrival order
-        until the input stream ends and every in-flight turn has drained.
+        Each turn is spawned as a task that drives its engine and buffers its
+        server events on the turn's own queue. Standalone events (e.g.
+        ``session.updated``) and turns are placed on ``out_stream`` in arrival
+        order; this coroutine forwards them in that order, draining a turn's
+        buffered events in full before the next turn -- so turns run concurrently
+        while their responses never interleave.
         """
-        # Bounded for backpressure: a slow client (the consumer draining this
-        # queue) blocks emit() rather than letting server events pile up unbounded.
-        out_queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=256)
+        # Ordered hand-off: each item is either a standalone server event (dict)
+        # to forward as-is, or a ``_Turn`` whose buffered events are drained in
+        # order once reached. Low-volume (one item per turn / session.update) so
+        # unbounded; per-turn audio backpressure lives on each turn's ``events``.
+        out_stream: asyncio.Queue[Any] = asyncio.Queue()
         active_turn: _Turn | None = None
         turns: list[_Turn] = []
         # Latest output modalities requested by the client via session.update;
         # snapshotted into each turn so the engine emits text/audio accordingly.
         session_output_modalities: list[str] | None = None
-        # Serialize turns: at most one response in flight at a time, matching
-        # vLLM-Omni's single-active-generation model (see _run_turn).
-        turn_lock = asyncio.Lock()
-
-        async def emit(event: dict) -> None:
-            await out_queue.put(event)
 
         def ensure_turn() -> _Turn:
             nonlocal active_turn
             if active_turn is None:
                 active_turn = self._new_turn(session_output_modalities)
                 turns.append(active_turn)
+                out_stream.put_nowait(active_turn)
                 active_turn.task = asyncio.create_task(
-                    self._run_turn(active_turn, context, emit, turn_lock)
+                    self._run_turn(active_turn, context)
                 )
             return active_turn
 
@@ -432,7 +438,7 @@ class RealtimeOmniHandler:
                         modalities = _parse_output_modalities(session)
                         if modalities is not None:
                             session_output_modalities = modalities
-                        await emit(_session_updated_event(session))
+                        out_stream.put_nowait(_session_updated_event(session))
                     elif etype == "input_audio_buffer.append":
                         turn = ensure_turn()
                         waveform = _decode_pcm16(client_event.get("audio", ""))
@@ -464,27 +470,37 @@ class RealtimeOmniHandler:
                 if active_turn is not None:
                     active_turn.audio_queue.put_nowait(None)
                     active_turn = None
-                for turn in turns:
-                    if turn.task is not None:
-                        await turn.task
             finally:
-                await out_queue.put(None)
+                # No more turns/events will be queued; lets the forwarder stop
+                # once it has drained every turn already on out_stream.
+                out_stream.put_nowait(None)
 
         pump_task = asyncio.create_task(pump())
         try:
             while True:
-                event = await out_queue.get()
-                if event is None:
+                item = await out_stream.get()
+                if item is None:
                     break
-                yield event
+                if isinstance(item, _Turn):
+                    # Forward this turn's response in full before the next turn;
+                    # _run_turn always closes the buffer with a None sentinel.
+                    while True:
+                        event = await item.events.get()
+                        if event is None:
+                            break
+                        yield event
+                else:
+                    yield item
         finally:
             pump_task.cancel()
             for turn in turns:
                 if turn.task is not None:
                     turn.task.cancel()
-            # Drive cancellation to completion so each turn's engine generate()
-            # async-gen is closed; otherwise the request leaks and asyncio warns
-            # about pending tasks.
+            # Unblock any turn task parked on a full events queue so its
+            # cancellation can propagate, then drive every task to completion --
+            # this closes each engine generate() async-gen instead of leaking it.
+            for turn in turns:
+                _drain_queue(turn.events)
             await asyncio.gather(
                 pump_task,
                 *(turn.task for turn in turns if turn.task is not None),

@@ -224,10 +224,10 @@ def test_session_output_modalities_forwarded_to_engine(session, expected):
     assert engine.seen_output_modalities == [expected]
 
 
-def test_turns_are_serialized_not_interleaved():
-    # Two commits => two turns. They must run one-at-a-time (vLLM-Omni's
-    # single-active-generation assumption): distinct response ids, and turn 2's
-    # events never interleave with turn 1's.
+def test_turn_responses_forwarded_in_order():
+    # Two commits => two turns. Turns run concurrently, but their responses are
+    # forwarded in turn order: distinct response ids, and turn 2's events never
+    # interleave with turn 1's (turn 1 fully completes before turn 2 emits).
     audio_b64 = base64.b64encode(
         np.linspace(-8000, 8000, 16, dtype=np.int16).tobytes()
     ).decode()
@@ -263,3 +263,54 @@ def test_turns_are_serialized_not_interleaved():
     )
     assert first_done < second_created
     assert all(rid(e) != created[1] for e in out[: first_done + 1])
+
+
+def test_turns_run_concurrently():
+    # Both turns' engine drives must be in flight at once: a barrier engine
+    # blocks each generate() until two have started. This only completes if
+    # turns are not serialized -- a one-at-a-time model would deadlock the
+    # barrier and time out. Responses are still forwarded in turn order.
+    class _BarrierEngine:
+        def __init__(self, n: int) -> None:
+            self.n = n
+            self.started = 0
+            self.gate = asyncio.Event()
+
+        async def generate(
+            self,
+            *,
+            prompt,
+            request_id,
+            sampling_params_list=None,
+            output_modalities=None,
+        ):
+            async for _ in prompt:  # drain this turn's audio
+                pass
+            self.started += 1
+            if self.started >= self.n:
+                self.gate.set()
+            await asyncio.wait_for(self.gate.wait(), timeout=5)
+            yield _text_output("ok")
+            yield _audio_output(np.zeros(4, dtype=np.float32))
+
+    audio_b64 = base64.b64encode(
+        np.linspace(-8000, 8000, 16, dtype=np.int16).tobytes()
+    ).decode()
+    engine = _BarrierEngine(2)
+    handler = _make_handler(engine)
+    events = [
+        {"type": "session.update", "session": {"model": MODEL_NAME}},
+        {"type": "input_audio_buffer.append", "audio": audio_b64},
+        {"type": "input_audio_buffer.commit"},
+        {"type": "input_audio_buffer.append", "audio": audio_b64},
+        {"type": "input_audio_buffer.commit"},
+    ]
+    out = asyncio.run(_drive(handler, events, _FakeContext()))
+
+    # Both drives passed the barrier => they were concurrently in flight.
+    assert engine.started == 2
+    assert not any(e["type"] == "error" for e in out)
+    created = [e["response"]["id"] for e in out if e["type"] == "response.created"]
+    done = [e["response"]["id"] for e in out if e["type"] == "response.done"]
+    assert len(set(created)) == 2  # two distinct turns, both completed
+    assert created == done  # forwarded in turn order, non-interleaved
