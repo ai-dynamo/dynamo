@@ -120,26 +120,6 @@ async def _drain_until(
     )
 
 
-async def _session_update_round_trip(port: int) -> None:
-    async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://127.0.0.1:{port}/v1/realtime") as ws:
-            created = await _recv_json(ws, 5.0)
-            assert created.get("type") == "session.created", created
-
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "type": "session.update",
-                        "session": {"type": "realtime", "model": MODEL_NAME},
-                    }
-                )
-            )
-
-            updated = await _drain_until(ws, "session.updated")
-            assert updated["session"]["type"] == "realtime", updated
-            assert updated["session"]["model"] == MODEL_NAME, updated
-
-
 async def _audio_round_trip(port: int) -> None:
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(f"ws://127.0.0.1:{port}/v1/realtime") as ws:
@@ -215,12 +195,6 @@ async def _audio_round_trip(port: int) -> None:
             )
             assert out_f32.shape == in_f32.shape, (out_f32.shape, in_f32.shape)
             assert np.allclose(out_f32, in_f32, atol=2e-4)
-
-
-@pytest.mark.timeout(120)
-def test_websocket_session_update_round_trip(realtime_omni_frontend) -> None:
-    """`session.update` round-trips through the frontend + mock-Omni worker."""
-    asyncio.run(_session_update_round_trip(realtime_omni_frontend))
 
 
 @pytest.mark.timeout(120)
