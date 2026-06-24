@@ -298,7 +298,6 @@ async def _scale_decode_component(
     for component in components:
         if component.get("name") == backend.decode_component:
             component["replicas"] = replicas
-            component["minAvailable"] = 0 if replicas == 0 else 1
             break
     else:
         raise AssertionError(f"component {backend.decode_component!r} not found")
