@@ -678,6 +678,7 @@ func registerControllers(
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                operatorCfg,
 		RuntimeConfig:         runtimeConfig,
+		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
 		SSHKeyManager:         sshKeyManager,

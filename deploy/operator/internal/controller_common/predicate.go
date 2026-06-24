@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -75,7 +76,14 @@ func DetectDRAAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 // reconciliation so the operator doesn't error on clusters without Istio CRDs
 // or with only a partially installed networking.istio.io API group.
 func DetectIstioAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIResourceAvailability(ctx, mgr, "networking.istio.io/v1beta1", "destinationrules")
+	return DetectIstioAvailabilityFromConfig(ctx, mgr.GetConfig())
+}
+
+// DetectIstioAvailabilityFromConfig checks if the DestinationRule API is
+// registered using a rest.Config. This is used by reconcilers that need a
+// best-effort cleanup path without enabling startup-time Istio discovery.
+func DetectIstioAvailabilityFromConfig(ctx context.Context, cfg *rest.Config) bool {
+	return detectAPIResourceAvailability(ctx, cfg, "networking.istio.io/v1beta1", "destinationrules")
 }
 
 // detectAPIGroupAvailability checks if a specific API group, and optionally a
@@ -124,11 +132,10 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 	return false
 }
 
-func detectAPIResourceAvailability(ctx context.Context, mgr ctrl.Manager, groupVersion, resourceName string) bool {
+func detectAPIResourceAvailability(ctx context.Context, cfg *rest.Config, groupVersion, resourceName string) bool {
 	logger := log.FromContext(ctx)
 	logValues := []any{"groupVersion", groupVersion, "resource", resourceName}
 
-	cfg := mgr.GetConfig()
 	if cfg == nil {
 		logger.Info("detection failed, no discovery client available", logValues...)
 		return false
