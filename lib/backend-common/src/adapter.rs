@@ -1233,7 +1233,26 @@ mod tests {
 
     /// Force-enable the recording fast-path and install a fresh subscriber
     /// that captures every `engine.generate` field write into a shared map.
+    /// Pin a global default `tracing` subscriber for the whole test binary.
+    ///
+    /// `tracing` caches "is this span enabled?" per callsite in one global
+    /// table. With tests installing and dropping subscribers in parallel, the
+    /// `engine.generate` callsite can briefly be cached as disabled, so the
+    /// trace-context tests miss their span and flake. An always-present global
+    /// default keeps it enabled; per-test `set_default` subscribers still take
+    /// over on their own thread, so what the tests assert on is unchanged.
+    fn ensure_global_test_subscriber() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // Ignore the error if a global default was already set elsewhere;
+            // any real subscriber is enough to keep the callsite enabled.
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        });
+    }
+
     fn install_capture() -> (CapturedFields, CaptureGuard) {
+        ensure_global_test_subscriber();
         let otlp = OtlpExportOverride::enable();
         let captured = CapturedFields::default();
         let layer = CaptureLayer {
@@ -1348,6 +1367,7 @@ mod tests {
     #[tokio::test]
     async fn auto_span_fires_without_otlp_override() {
         // Install ONLY the capture layer — no `OtlpExportOverride::enable()`.
+        ensure_global_test_subscriber();
         let captured = CapturedFields::default();
         let layer = CaptureLayer {
             out: captured.clone(),
@@ -1546,6 +1566,7 @@ mod tests {
         const TRACE_ID: &str = "11111111111111111111111111111111";
         const SPAN_ID: &str = "2222222222222222";
 
+        ensure_global_test_subscriber();
         let template = Arc::new(std::sync::OnceLock::new());
         let inject = InjectingTraceContext {
             template: template.clone(),

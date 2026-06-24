@@ -152,10 +152,10 @@ source .venv/bin/activate
 #### 4. 安装构建工具
 
 ```bash
-uv pip install pip maturin
+uv pip install pip 'maturin[patchelf]'
 ```
 
-[Maturin](https://github.com/PyO3/maturin) 是 Rust-Python 绑定的构建工具。
+[Maturin](https://github.com/PyO3/maturin) 是 Rust-Python 绑定的构建工具。`patchelf` extra 让 maturin 能在构建期间修补原生扩展库路径。
 
 #### 5. 构建 Rust 绑定
 

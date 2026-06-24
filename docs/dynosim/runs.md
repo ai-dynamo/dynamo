@@ -126,6 +126,9 @@ The trace file must be Mooncake-style JSONL. Each line should contain:
 - `input_length` or `input_tokens`
 - `output_length` or `output_tokens`
 - `hash_ids`
+- optional `priority` (signed soft-priority hint)
+- optional `strict_priority` (unsigned queue tier; larger values run first)
+- optional `policy_class` (requested policy family or explicit class)
 
 Example:
 
@@ -136,6 +139,11 @@ Example:
 
 Rows without `session_id` are independent timestamped requests. Use this shape for wall-clock
 request traces, including agent-converted traces where parallel LLM calls should remain parallel.
+
+`priority` and `strict_priority` affect only KV-router pending-queue ordering when
+`--router-mode kv_router` is active and requests are actually queued. Negative `priority` values
+have no router effect. These fields do not change round-robin routing, mock-engine scheduling,
+direct-admission behavior, or execution ordering inside a selected worker.
 
 DynoSim runs also support multi-turn sessions. Use the same `session_id` on all turns in a session.
 Multi-turn sessions are closed-loop: turn `n+1` waits until turn `n` completes plus either the
@@ -178,7 +186,7 @@ Mooncake request fields. Each row should contain the normal Mooncake fields plus
 
 Rows with no `wait_for` use `timestamp` as their start time. Rows with dependencies wait for every
 listed request to complete, then wait `delay + tool_wait_ms` before dispatch. `branches` records
-child requests spawned by this row, and `prefix_reset` marks the first row in a trajectory.
+child requests spawned by this row, and `prefix_reset` marks the first row in a session.
 
 Use `agent_trace_to_mooncake --agentic` to create this format from Dynamo agent traces:
 
@@ -239,6 +247,8 @@ The dedicated DynoSim CLI exposes:
 - `--prefill-engine-args` (JSON string)
 - `--decode-engine-args` (JSON string)
 - `--router-config` (JSON string)
+- `--router-policy-config` (policy-family/cache-bucket queue YAML path; `DYN_ROUTER_POLICY_CONFIG` fallback)
+- `--model-name` (selects an exact model profile from the policy YAML)
 - `--aic-backend`
 - `--aic-system`
 - `--aic-backend-version`
@@ -286,6 +296,14 @@ as `block_size`, `engine_type`, `dp_size`, `speedup_ratio`, and `decode_speedup_
 `--extra-engine-args`, not as top-level DynoSim CLI flags. `--trace-block-size` is separate and is
 used only for trace-file runs. Unspecified fields fall back to the same defaults used by
 `MockEngineArgs::default()` and `KvRouterConfig::default()`.
+
+`--router-policy-config` sets the startup-only policy YAML path and overrides a
+`router_policy_config` value embedded in `--router-config`. Requests may provide an optional
+`policy_class` field in Mooncake JSONL rows. A recognized family combines with the
+router-observed uncached-ISL bucket to select a physical queue. An exact explicit class
+bypasses cache bucketing. Missing, unknown, and ordinary physical-class names use the selected
+profile's `default_policy_family`. Use `--model-name` to select an exact model profile,
+otherwise the YAML root profile is used.
 
 DynoSim has two independent AIC surfaces:
 
