@@ -81,9 +81,9 @@ async def _collect_output_token_ids(
         if response.get("finish_reason") is not None:
             terminal = response
 
-    assert terminal is not None, (
-        "generate_from_request stream did not emit terminal chunk"
-    )
+    assert (
+        terminal is not None
+    ), "generate_from_request stream did not emit terminal chunk"
     return output_token_ids, terminal
 
 
