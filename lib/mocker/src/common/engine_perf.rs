@@ -1068,9 +1068,16 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .map(|value| to_u32(value, "aic_moe_ep_size"))
                 .transpose()?,
         },
+        // Native analytics path: quant dtypes are parsed by `parse_data_type`
+        // into `aiconfigurator_core::DataType` (accepted: bfloat16, float16,
+        // fp8, fp8_static, fp8_block, nvfp4, int8, int4, w4afp8, w4a16_mxfp4,
+        // w4a8_mxfp4_mxfp8) -- a separate vocabulary from the Python callback
+        // path's per-field AIC quant-mode names. This path also does not model
+        // communication dtype (`QuantizationConfig` has no comm field), so
+        // `aic_comm_dtype` is intentionally not applied here.
         quantization: QuantizationConfig {
             weight_dtype: args
-                .aic_weight_dtype
+                .aic_gemm_dtype
                 .as_deref()
                 .map(parse_data_type)
                 .transpose()?,
@@ -1080,7 +1087,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .map(parse_data_type)
                 .transpose()?,
             activation_dtype: args
-                .aic_activation_dtype
+                .aic_fmha_dtype
                 .as_deref()
                 .map(parse_data_type)
                 .transpose()?,
@@ -1613,9 +1620,9 @@ mod tests {
             &serde_json::json!({
                 "aic_backend": "vllm",
                 "aic_model_path": "model",
-                "aic_weight_dtype": "fp8_block",
+                "aic_gemm_dtype": "fp8_block",
                 "aic_moe_dtype": "w4a16_mxfp4",
-                "aic_activation_dtype": "bfloat16",
+                "aic_fmha_dtype": "bfloat16",
                 "aic_kv_cache_dtype": "fp8",
             })
             .to_string(),

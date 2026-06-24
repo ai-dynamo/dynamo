@@ -101,9 +101,9 @@ fn build_rust_engine(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
-    weight_dtype: Option<&str>,
+    gemm_dtype: Option<&str>,
     moe_dtype: Option<&str>,
-    activation_dtype: Option<&str>,
+    fmha_dtype: Option<&str>,
     kv_cache_dtype: Option<&str>,
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
@@ -140,9 +140,9 @@ fn build_rust_engine(
             .call_method1("_resolve_quant_mode_name", (field, value))?
             .extract()
     };
-    let weight_dtype = resolve_quant_mode("gemm", weight_dtype)?;
+    let gemm_dtype = resolve_quant_mode("gemm", gemm_dtype)?;
     let moe_dtype = resolve_quant_mode("moe", moe_dtype)?;
-    let activation_dtype = resolve_quant_mode("fmha", activation_dtype)?;
+    let fmha_dtype = resolve_quant_mode("fmha", fmha_dtype)?;
     let kv_cache_dtype = resolve_quant_mode("kvcache", kv_cache_dtype)?;
     let comm_dtype = resolve_quant_mode("comm", comm_dtype)?;
 
@@ -153,7 +153,7 @@ fn build_rust_engine(
     // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{weight_dtype:?}|{moe_dtype:?}|{activation_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
+        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
@@ -178,15 +178,15 @@ fn build_rust_engine(
         attention_dp_size.unwrap_or(1) as u32,
         moe_tp_size.map(|x| x as u32),
         moe_ep_size.map(|x| x as u32),
-        weight_dtype.as_deref(),     // gemm_quant_mode
-        moe_dtype.as_deref(),        // moe_quant_mode
-        kv_cache_dtype.as_deref(),   // kvcache_quant_mode
-        activation_dtype.as_deref(), // fmha_quant_mode
-        comm_dtype.as_deref(),       // comm_quant_mode
-        nextn,                       // speculative (MTP) tokens; 0 for dense
-        nextn_accept_rates,          // per-position accept rates
-        None,                        // kv_block_size
-        None,                        // systems_path (resolved via env above / build-time default)
+        gemm_dtype.as_deref(),     // gemm_quant_mode
+        moe_dtype.as_deref(),      // moe_quant_mode
+        kv_cache_dtype.as_deref(), // kvcache_quant_mode
+        fmha_dtype.as_deref(),     // fmha_quant_mode
+        comm_dtype.as_deref(),     // comm_quant_mode
+        nextn,                     // speculative (MTP) tokens; 0 for dense
+        nextn_accept_rates,        // per-position accept rates
+        None,                      // kv_block_size
+        None,                      // systems_path (resolved via env above / build-time default)
     )
     .map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -213,9 +213,9 @@ pub(super) fn create_aic_callback(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
-    weight_dtype: Option<&str>,
+    gemm_dtype: Option<&str>,
     moe_dtype: Option<&str>,
-    activation_dtype: Option<&str>,
+    fmha_dtype: Option<&str>,
     kv_cache_dtype: Option<&str>,
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
@@ -233,9 +233,9 @@ pub(super) fn create_aic_callback(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
-            weight_dtype,
+            gemm_dtype,
             moe_dtype,
-            activation_dtype,
+            fmha_dtype,
             kv_cache_dtype,
             comm_dtype,
             nextn,
@@ -263,9 +263,9 @@ pub(super) fn create_aic_prefill_load_estimator(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
-    weight_dtype: Option<&str>,
+    gemm_dtype: Option<&str>,
     moe_dtype: Option<&str>,
-    activation_dtype: Option<&str>,
+    fmha_dtype: Option<&str>,
     kv_cache_dtype: Option<&str>,
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
@@ -283,9 +283,9 @@ pub(super) fn create_aic_prefill_load_estimator(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
-            weight_dtype,
+            gemm_dtype,
             moe_dtype,
-            activation_dtype,
+            fmha_dtype,
             kv_cache_dtype,
             comm_dtype,
             nextn,
@@ -316,9 +316,9 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
-    weight_dtype: Option<&str>,
+    gemm_dtype: Option<&str>,
     moe_dtype: Option<&str>,
-    activation_dtype: Option<&str>,
+    fmha_dtype: Option<&str>,
     kv_cache_dtype: Option<&str>,
     comm_dtype: Option<&str>,
 ) -> PyResult<usize> {
@@ -337,9 +337,9 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     kwargs.set_item("moe_tp_size", moe_tp_size)?;
     kwargs.set_item("moe_ep_size", moe_ep_size)?;
     kwargs.set_item("attention_dp_size", attention_dp_size)?;
-    kwargs.set_item("weight_dtype", weight_dtype)?;
+    kwargs.set_item("gemm_dtype", gemm_dtype)?;
     kwargs.set_item("moe_dtype", moe_dtype)?;
-    kwargs.set_item("activation_dtype", activation_dtype)?;
+    kwargs.set_item("fmha_dtype", fmha_dtype)?;
     kwargs.set_item("kv_cache_dtype", kv_cache_dtype)?;
     kwargs.set_item("comm_dtype", comm_dtype)?;
     let blocks = module.call_method("estimate_num_gpu_blocks", (), Some(&kwargs))?;

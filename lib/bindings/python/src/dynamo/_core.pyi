@@ -1651,9 +1651,9 @@ class AicPerfConfig:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
-        aic_weight_dtype: Optional[str] = None,
+        aic_gemm_dtype: Optional[str] = None,
         aic_moe_dtype: Optional[str] = None,
-        aic_activation_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
         aic_kv_cache_dtype: Optional[str] = None,
         aic_comm_dtype: Optional[str] = None,
     ) -> None:
@@ -1995,9 +1995,9 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: int = 42,
-        aic_weight_dtype: Optional[str] = None,
+        aic_gemm_dtype: Optional[str] = None,
         aic_moe_dtype: Optional[str] = None,
-        aic_activation_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
         aic_kv_cache_dtype: Optional[str] = None,
         aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
@@ -2142,10 +2142,10 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
-    def aic_weight_dtype(self) -> Optional[str]: ...
+    def aic_gemm_dtype(self) -> Optional[str]: ...
 
-    @aic_weight_dtype.setter
-    def aic_weight_dtype(self, value: Optional[str]) -> None: ...
+    @aic_gemm_dtype.setter
+    def aic_gemm_dtype(self, value: Optional[str]) -> None: ...
 
     @property
     def aic_moe_dtype(self) -> Optional[str]: ...
@@ -2154,10 +2154,10 @@ class MockEngineArgs:
     def aic_moe_dtype(self, value: Optional[str]) -> None: ...
 
     @property
-    def aic_activation_dtype(self) -> Optional[str]: ...
+    def aic_fmha_dtype(self) -> Optional[str]: ...
 
-    @aic_activation_dtype.setter
-    def aic_activation_dtype(self, value: Optional[str]) -> None: ...
+    @aic_fmha_dtype.setter
+    def aic_fmha_dtype(self, value: Optional[str]) -> None: ...
 
     @property
     def aic_kv_cache_dtype(self) -> Optional[str]: ...
@@ -2235,9 +2235,9 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: Optional[int] = None,
-        aic_weight_dtype: Optional[str] = None,
+        aic_gemm_dtype: Optional[str] = None,
         aic_moe_dtype: Optional[str] = None,
-        aic_activation_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
         aic_kv_cache_dtype: Optional[str] = None,
         aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,

@@ -510,9 +510,9 @@ struct MockEngineArgsSerde {
     aic_moe_tp_size: OptionalConfigValue<usize>,
     aic_moe_ep_size: OptionalConfigValue<usize>,
     aic_attention_dp_size: OptionalConfigValue<usize>,
-    aic_weight_dtype: OptionalConfigValue<String>,
+    aic_gemm_dtype: OptionalConfigValue<String>,
     aic_moe_dtype: OptionalConfigValue<String>,
-    aic_activation_dtype: OptionalConfigValue<String>,
+    aic_fmha_dtype: OptionalConfigValue<String>,
     aic_kv_cache_dtype: OptionalConfigValue<String>,
     aic_comm_dtype: OptionalConfigValue<String>,
     aic_nextn: OptionalConfigValue<usize>,
@@ -681,7 +681,7 @@ pub struct MockEngineArgs {
     /// Weight dtype override for AIC latency prediction.
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_weight_dtype: Option<String>,
+    pub aic_gemm_dtype: Option<String>,
 
     /// MoE kernel dtype override for AIC latency prediction.
     #[serde(skip)]
@@ -691,7 +691,7 @@ pub struct MockEngineArgs {
     /// Activation dtype override for AIC latency prediction.
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_activation_dtype: Option<String>,
+    pub aic_fmha_dtype: Option<String>,
 
     /// KV-cache dtype override for AIC latency prediction.
     #[serde(skip)]
@@ -1060,14 +1060,14 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(aic_attention_dp_size) = compat.aic_attention_dp_size.into_nullable() {
             builder = builder.aic_attention_dp_size(aic_attention_dp_size);
         }
-        if let Some(aic_weight_dtype) = compat.aic_weight_dtype.into_nullable() {
-            builder = builder.aic_weight_dtype(aic_weight_dtype);
+        if let Some(aic_gemm_dtype) = compat.aic_gemm_dtype.into_nullable() {
+            builder = builder.aic_gemm_dtype(aic_gemm_dtype);
         }
         if let Some(aic_moe_dtype) = compat.aic_moe_dtype.into_nullable() {
             builder = builder.aic_moe_dtype(aic_moe_dtype);
         }
-        if let Some(aic_activation_dtype) = compat.aic_activation_dtype.into_nullable() {
-            builder = builder.aic_activation_dtype(aic_activation_dtype);
+        if let Some(aic_fmha_dtype) = compat.aic_fmha_dtype.into_nullable() {
+            builder = builder.aic_fmha_dtype(aic_fmha_dtype);
         }
         if let Some(aic_kv_cache_dtype) = compat.aic_kv_cache_dtype.into_nullable() {
             builder = builder.aic_kv_cache_dtype(aic_kv_cache_dtype);
@@ -1436,9 +1436,9 @@ mod tests {
     fn test_mock_engine_args_json_accepts_aic_quant_dtypes() {
         let args = MockEngineArgs::from_json_str(
             &json!({
-                "aic_weight_dtype": "fp8_block",
+                "aic_gemm_dtype": "fp8_block",
                 "aic_moe_dtype": "w4a16_mxfp4",
-                "aic_activation_dtype": "bfloat16",
+                "aic_fmha_dtype": "bfloat16",
                 "aic_kv_cache_dtype": "fp8",
                 "aic_comm_dtype": "fp8",
             })
@@ -1446,9 +1446,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(args.aic_weight_dtype.as_deref(), Some("fp8_block"));
+        assert_eq!(args.aic_gemm_dtype.as_deref(), Some("fp8_block"));
         assert_eq!(args.aic_moe_dtype.as_deref(), Some("w4a16_mxfp4"));
-        assert_eq!(args.aic_activation_dtype.as_deref(), Some("bfloat16"));
+        assert_eq!(args.aic_fmha_dtype.as_deref(), Some("bfloat16"));
         assert_eq!(args.aic_kv_cache_dtype.as_deref(), Some("fp8"));
         assert_eq!(args.aic_comm_dtype.as_deref(), Some("fp8"));
     }

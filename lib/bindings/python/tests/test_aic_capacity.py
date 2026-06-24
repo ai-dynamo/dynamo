@@ -251,9 +251,9 @@ def test_estimate_num_gpu_blocks_forwards_normalized_quant_modes(monkeypatch):
         tp_size=1,
         block_size=10,
         max_num_batched_tokens=128,
-        weight_dtype="int4",
+        gemm_dtype="int4",
         moe_dtype="w4a16_mxfp4",
-        activation_dtype="auto",
+        fmha_dtype="auto",
         kv_cache_dtype="fp8",
         comm_dtype="fp8",
     )
@@ -327,9 +327,9 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
         system="h200_sxm",
         model_path="m",
         tp_size=1,
-        weight_dtype="int4",
+        gemm_dtype="int4",
         moe_dtype="w4a16_mxfp4",
-        activation_dtype="fp8",
+        fmha_dtype="fp8",
         kv_cache_dtype="auto",  # -> omitted, ModelConfig keeps its default
         comm_dtype="fp8",
     )

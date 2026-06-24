@@ -157,9 +157,9 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         moe_tp_size=raw.get("aic_moe_tp_size"),
         moe_ep_size=raw.get("aic_moe_ep_size"),
         attention_dp_size=raw.get("aic_attention_dp_size"),
-        weight_dtype=_aic_quant_mode(raw, "aic_weight_dtype"),
+        gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
         moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
-        activation_dtype=_aic_quant_mode(raw, "aic_activation_dtype"),
+        fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
         kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
         comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
     )
@@ -239,9 +239,9 @@ def _load_aic_perf_config(args: argparse.Namespace):
         # Normalize here so `--aic-*-dtype auto` (== model default) doesn't make
         # the "any AIC value set?" check below think an AIC config was requested
         # and then demand --aic-backend/--aic-system/--aic-model-path.
-        "aic_weight_dtype": _normalize_aic_quant_mode(args.aic_weight_dtype),
+        "aic_gemm_dtype": _normalize_aic_quant_mode(args.aic_gemm_dtype),
         "aic_moe_dtype": _normalize_aic_quant_mode(args.aic_moe_dtype),
-        "aic_activation_dtype": _normalize_aic_quant_mode(args.aic_activation_dtype),
+        "aic_fmha_dtype": _normalize_aic_quant_mode(args.aic_fmha_dtype),
         "aic_kv_cache_dtype": _normalize_aic_quant_mode(args.aic_kv_cache_dtype),
         "aic_comm_dtype": _normalize_aic_quant_mode(args.aic_comm_dtype),
         "aic_nextn": args.aic_nextn,
@@ -268,9 +268,9 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_moe_tp_size=values["aic_moe_tp_size"],
         aic_moe_ep_size=values["aic_moe_ep_size"],
         aic_attention_dp_size=values["aic_attention_dp_size"],
-        aic_weight_dtype=values["aic_weight_dtype"],
+        aic_gemm_dtype=values["aic_gemm_dtype"],
         aic_moe_dtype=values["aic_moe_dtype"],
-        aic_activation_dtype=values["aic_activation_dtype"],
+        aic_fmha_dtype=values["aic_fmha_dtype"],
         aic_kv_cache_dtype=values["aic_kv_cache_dtype"],
         aic_comm_dtype=values["aic_comm_dtype"],
         aic_nextn=values["aic_nextn"],
@@ -579,6 +579,12 @@ def _run_planner_replay(
             try:
                 from dynamo._internal.aic import create_session
 
+                # The bootstrap uses one shared AIC identity (model / backend /
+                # quantization, from ref_args) for both prefill and decode FPM
+                # generation. That matches the planner's current model, where
+                # prefill and decode differ only in parallelism — not in model
+                # or quant — so a single AIC session is sufficient here.
+                # Pre-existing behavior.
                 aic_session = create_session(
                     backend_name=aic_backend,
                     system=ref_args.aic_system,
@@ -593,9 +599,9 @@ def _run_planner_replay(
                     # regression is bootstrapped at the quantized precision
                     # instead of the model's default dtype. (AicSession
                     # normalizes the strings via _resolve_quant_mode.)
-                    weight_dtype=ref_args.aic_weight_dtype,
+                    gemm_dtype=ref_args.aic_gemm_dtype,
                     moe_dtype=ref_args.aic_moe_dtype,
-                    activation_dtype=ref_args.aic_activation_dtype,
+                    fmha_dtype=ref_args.aic_fmha_dtype,
                     kv_cache_dtype=ref_args.aic_kv_cache_dtype,
                     comm_dtype=ref_args.aic_comm_dtype,
                     nextn=d_args.aic_nextn,
@@ -697,8 +703,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-moe-ep-size", type=int)
     parser.add_argument("--aic-attention-dp-size", type=int)
     parser.add_argument(
-        "--aic-weight-dtype",
-        help="dense-GEMM (weight) quant mode for the AIC KV-router prefill-load "
+        "--aic-gemm-dtype",
+        help="dense-GEMM quant mode for the AIC KV-router prefill-load "
         "estimator, e.g. fp8, fp8_block, int4, nvfp4; 'auto'/omitted = model "
         "default. Worker-engine quant is set via --extra-engine-args.",
     )
@@ -708,7 +714,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "nvfp4, w4a16_mxfp4; 'auto'/omitted = model default",
     )
     parser.add_argument(
-        "--aic-activation-dtype",
+        "--aic-fmha-dtype",
         help="attention (FMHA) quant mode for the AIC prefill-load estimator, "
         "e.g. fp8; 'auto'/omitted = model default",
     )
