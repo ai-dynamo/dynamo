@@ -79,13 +79,13 @@ func makeSnapshotForReconcile() *nvidiacomv1alpha1.PodSnapshot {
 	}
 }
 
-// scheduledPod builds a scheduled source pod named "worker-0". The checkpoint ID lives on the pod
-// label (the reconciler reads it from there); pass "" to omit the label and exercise the
-// missing-id path.
-func scheduledPod(node, checkpointID string) *corev1.Pod {
+// scheduledPod builds a scheduled source pod named "worker-0" on node "node-a". The checkpoint ID
+// lives on the pod label (the reconciler reads it from there); pass "" to omit the label and exercise
+// the missing-id path.
+func scheduledPod(checkpointID string) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid-9")},
-		Spec:       corev1.PodSpec{NodeName: node},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
 	}
 	if checkpointID != "" {
 		pod.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID}
@@ -122,7 +122,7 @@ func TestSnapshotReconciler_PodUnscheduledBacksOff(t *testing.T) {
 func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
-	r := makeSnapshotReconciler(s, snap, scheduledPod("node-a", "abc123"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
 
 	// Creation path records the binding and returns without a requeue; conditions are mirrored on the
 	// next (bound-path) reconcile that the content watch drives.
@@ -157,7 +157,7 @@ func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {
 	// The PodSnapshot pins a source pod UID that does not match the live pod (pod-uid-9):
 	// a same-named recreation must not be captured as the wrong workload.
 	snap.Spec.Source.PodRef.UID = types.UID("old-pod-uid")
-	r := makeSnapshotReconciler(s, snap, scheduledPod("node-a", "abc123"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -250,7 +250,7 @@ func TestSnapshotReconciler_AlreadyFailedShortCircuits(t *testing.T) {
 	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
 		Type: nvidiacomv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue, Reason: "SourcePodNotFound", Message: "gone"})
 	// Failed is terminal & sticky: even with a (now) live pod present, it never becomes Ready.
-	r := makeSnapshotReconciler(s, snap, scheduledPod("node-a", "abc123"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -315,7 +315,7 @@ func TestSnapshotReconciler_ContentConflictFails(t *testing.T) {
 			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
 		},
 	}
-	r := makeSnapshotReconciler(s, snap, content, scheduledPod("node-a", "abc123"))
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod("abc123"))
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -342,7 +342,7 @@ func TestSnapshotReconciler_AdoptsExistingContentAndMirrors(t *testing.T) {
 			Conditions: []metav1.Condition{{Type: nvidiacomv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}},
 		},
 	}
-	r := makeSnapshotReconciler(s, snap, content, scheduledPod("node-a", "abc123"))
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod("abc123"))
 
 	// First pass: adopt and bind, no mirroring yet (no ContentConflict).
 	reconcileSnapshot(t, r, snap.Name)
@@ -415,7 +415,7 @@ func TestSnapshotReconciler_ProceedsWithoutCheckpointIDLabel(t *testing.T) {
 	snap := makeSnapshotForReconcile()
 	// The source pod carries no checkpoint-id label: the content is named from the PodSnapshot
 	// UID, not the ID, so reconcile proceeds and binds rather than failing.
-	r := makeSnapshotReconciler(s, snap, scheduledPod("node-a", ""))
+	r := makeSnapshotReconciler(s, snap, scheduledPod(""))
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -516,7 +516,7 @@ func TestSnapshotReconciler_EnsureFinalizerAddsThenProceeds(t *testing.T) {
 			Source: nvidiacomv1alpha1.PodSnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}},
 		},
 	}
-	r := makeSnapshotReconciler(s, snap, scheduledPod("node-a", "abc123"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
 
 	res := reconcileSnapshot(t, r, snap.Name)
 	assert.Zero(t, res.RequeueAfter)
@@ -654,7 +654,7 @@ func TestSnapshotReconciler_SourcePodGetErrorRequeues(t *testing.T) {
 		}
 		return c.Get(ctx, key, obj, opts...)
 	}}
-	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, scheduledPod("node-a", "abc123"))
+	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, scheduledPod("abc123"))
 
 	_, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name}})
@@ -676,7 +676,7 @@ func TestSnapshotReconciler_ContentCreateErrorEmitsEventAndRequeues(t *testing.T
 		}
 		return c.Create(ctx, obj, opts...)
 	}}
-	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, scheduledPod("node-a", "abc123"))
+	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, scheduledPod("abc123"))
 
 	_, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name}})
