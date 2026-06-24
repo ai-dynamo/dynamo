@@ -142,7 +142,12 @@ local_resource(
 # CRDs — regenerate & apply via server-side apply on change
 # ---------------------------------------------------------------------------
 SKIP_CODEGEN = settings['skip_codegen']
-_crd_cmd = kubectl_cmd + ' apply --server-side --force-conflicts -f ' + CRD_DIR
+_crd_cmd = (
+    'go run ./cmd/crd-apply --crds-dir=' + CRD_DIR +
+    ' --version=' + OPERATOR_VERSION +
+    ' --conversion-webhook-service-name=dynamo-dynamo-operator-webhook-service' +
+    ' --conversion-webhook-service-namespace=' + NAMESPACE
+)
 if not SKIP_CODEGEN:
     _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
 
