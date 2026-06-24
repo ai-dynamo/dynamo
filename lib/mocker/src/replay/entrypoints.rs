@@ -465,6 +465,7 @@ pub fn simulate_trace_requests(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_requests_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -892,6 +893,7 @@ pub fn simulate_concurrency_requests(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_requests_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -1067,6 +1069,7 @@ pub fn simulate_concurrency_workload(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_workload_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
