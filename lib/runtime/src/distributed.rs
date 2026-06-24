@@ -637,7 +637,7 @@ impl DiscoveryBackend {
             Ok(other) => {
                 tracing::warn!(
                     "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'. \
-                     Defaulting to Zmq.",
+                     Defaulting to ZMQ.",
                     other
                 );
                 EventTransportKind::Zmq

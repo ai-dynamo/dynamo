@@ -20,11 +20,11 @@ Key use cases:
 
 The event plane supports two transports:
 
-| | NATS | ZMQ (default) |
+| | ZMQ (default) | NATS |
 |---|---|---|
-| **External infrastructure** | Requires a NATS server | None (peer-to-peer) |
-| **Setup complexity** | Simple -- point at a NATS server | Automatic -- workers bind sockets and register via discovery |
-| **Best for** | NATS-based event bus / durable KV events | Default; low operational overhead, no extra services |
+| **External infrastructure** | None (peer-to-peer) | Requires a NATS server |
+| **Setup complexity** | Automatic -- workers bind sockets and register via discovery | Simple -- point at a NATS server |
+| **Best for** | Default; low operational overhead, no extra services | NATS-based event bus / durable KV events |
 
 ## Configuration
 
@@ -57,10 +57,8 @@ python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 | `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | `zmq` (all backends) |
 | `NATS_SERVER` | NATS server URL (NATS transport only) | `nats://localhost:4222` |
 
-When `DYN_EVENT_PLANE` is not set, the default is **zmq** for every discovery backend
-(`file`, `mem`, `etcd`, `kubernetes`) — no external NATS server is required. Set
-`DYN_EVENT_PLANE=nats` to opt into the NATS transport (also required for durable/JetStream
-KV events).
+When `DYN_EVENT_PLANE` is not set, the default is **zmq**. Set `DYN_EVENT_PLANE=nats`
+to opt into the NATS transport (also required for durable/JetStream KV events).
 
 ## NATS Transport
 
