@@ -49,6 +49,7 @@ impl RadixBlock {
 pub struct RadixTree {
     root: SharedRadixBlock,
     lookup: FxHashMap<WorkerWithDpRank, WorkerLookup>,
+    eagerly_removed_suffixes: FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>,
 }
 
 impl Default for RadixTree {
@@ -83,6 +84,7 @@ impl RadixTree {
         Self {
             root: Rc::new(RefCell::new(RadixBlock::root())),
             lookup: FxHashMap::default(),
+            eagerly_removed_suffixes: FxHashMap::default(),
         }
     }
 
@@ -513,6 +515,14 @@ impl RadixTree {
     ) -> bool {
         let lookup = self.lookup.get_mut(&worker).unwrap();
         let mut changed = false;
+        if let Some(removed) = self.eagerly_removed_suffixes.get_mut(&worker) {
+            for block in blocks {
+                removed.remove(&block.block_hash);
+            }
+            if removed.is_empty() {
+                self.eagerly_removed_suffixes.remove(&worker);
+            }
+        }
         for block in blocks {
             match lookup.insert(block.block_hash, node.clone()) {
                 Some(existing) if Rc::ptr_eq(&existing, node) => {}
@@ -558,6 +568,10 @@ impl RadixTree {
                 .cloned()
             else {
                 if eagerly_removed.contains(&block_hash) {
+                    self.consume_eagerly_removed_suffix(worker, block_hash);
+                    continue;
+                }
+                if self.consume_eagerly_removed_suffix(worker, block_hash) {
                     continue;
                 }
                 tracing::warn!(
@@ -590,13 +604,36 @@ impl RadixTree {
             for stale_hash in outcome.stale_hashes {
                 lookup.remove(&stale_hash);
                 eagerly_removed.insert(stale_hash);
+                if stale_hash != block_hash {
+                    self.eagerly_removed_suffixes
+                        .entry(worker)
+                        .or_default()
+                        .insert(stale_hash);
+                }
             }
         }
 
         first_error.map_or(Ok(()), Err)
     }
 
+    fn consume_eagerly_removed_suffix(
+        &mut self,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> bool {
+        let Some(removed) = self.eagerly_removed_suffixes.get_mut(&worker) else {
+            return false;
+        };
+        let found = removed.remove(&block_hash);
+        if removed.is_empty() {
+            self.eagerly_removed_suffixes.remove(&worker);
+        }
+        found
+    }
+
     fn remove_or_clear_worker_blocks(&mut self, worker_id: WorkerId, keep_worker: bool) {
+        self.eagerly_removed_suffixes
+            .retain(|worker, _| worker.worker_id != worker_id);
         let workers = self
             .lookup
             .keys()
@@ -629,6 +666,7 @@ impl RadixTree {
 
     pub fn remove_worker_dp_rank(&mut self, worker_id: WorkerId, dp_rank: DpRank) {
         let worker = WorkerWithDpRank { worker_id, dp_rank };
+        self.eagerly_removed_suffixes.remove(&worker);
         let Some(blocks) = self.lookup.remove(&worker) else {
             return;
         };
@@ -772,7 +810,10 @@ mod tests {
 
     use super::*;
     use crate::indexer::WorkerKvQueryResponse;
-    use crate::test_utils::{create_store_event, make_store_event, snapshot_events};
+    use crate::test_utils::{
+        create_store_event, make_remove_event, make_remove_event_with_parent, make_store_event,
+        make_store_event_with_parent, snapshot_events,
+    };
 
     #[test]
     fn rejects_self_referencing_store() {
@@ -802,6 +843,49 @@ mod tests {
             snapshot_events(tree.dump_tree_as_events()),
             vec![make_store_event(0, &[1, 2, 3, 4])]
         );
+    }
+
+    #[test]
+    fn later_explicit_suffix_removes_are_idempotent_after_eager_cleanup() {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let mut tree = RadixTree::new();
+        tree.apply_event(make_store_event(0, &[1, 2, 3, 4]))
+            .unwrap();
+
+        tree.apply_event(make_remove_event_with_parent(0, &[1], &[2]))
+            .unwrap();
+        assert_eq!(tree.tree_size_for_worker(worker), Some(1));
+
+        tree.apply_event(make_remove_event_with_parent(0, &[1, 2], &[3]))
+            .unwrap();
+        tree.apply_event(make_remove_event_with_parent(0, &[1, 2, 3], &[4]))
+            .unwrap();
+        assert_eq!(tree.tree_size_for_worker(worker), Some(1));
+
+        let unknown = tree.apply_event(make_remove_event(0, &[999]));
+        assert!(matches!(unknown, Err(KvCacheEventError::BlockNotFound)));
+    }
+
+    #[test]
+    fn restorage_clears_eager_suffix_remove_tombstones() {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let mut tree = RadixTree::new();
+        tree.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+
+        tree.apply_event(make_remove_event_with_parent(0, &[1], &[2]))
+            .unwrap();
+        assert_eq!(tree.tree_size_for_worker(worker), Some(1));
+
+        tree.apply_event(make_store_event_with_parent(0, &[1], &[2, 3]))
+            .unwrap();
+        assert_eq!(tree.tree_size_for_worker(worker), Some(3));
+
+        tree.apply_event(make_remove_event_with_parent(0, &[1, 2], &[3]))
+            .unwrap();
+        assert_eq!(tree.tree_size_for_worker(worker), Some(2));
+
+        let duplicate = tree.apply_event(make_remove_event_with_parent(0, &[1, 2], &[3]));
+        assert!(matches!(duplicate, Err(KvCacheEventError::BlockNotFound)));
     }
 
     #[test]
