@@ -20,6 +20,22 @@ fn acknowledge(
     coordinator.on_action_outcome(action.id, outcome).unwrap()
 }
 
+fn transfer_timing(delay_ms: Option<f64>) -> HandoffTransferTiming {
+    HandoffTransferTiming {
+        mode: KvTransferTimingMode::FullPrompt,
+        full_prompt_tokens: 1,
+        kv_bytes_per_token: delay_ms.map(|delay_ms| (delay_ms * 1_000_000.0) as usize),
+        bandwidth_gb_s: delay_ms.map(|_| 1.0),
+    }
+}
+
+fn destination_reserved(handoff_id: HandoffId) -> HandoffFact {
+    HandoffFact::DestinationReserved {
+        handoff_id,
+        transferable_prompt_tokens: 1,
+    }
+}
+
 fn drive_success(order: HandoffOrder) {
     let id = handoff_id();
     let mut coordinator = HandoffCoordinatorCore::new(id, order);
@@ -34,7 +50,7 @@ fn drive_success(order: HandoffOrder) {
             one(coordinator
                 .on_fact(HandoffFact::SourceHeld {
                     handoff_id: id,
-                    transfer_delay_ms: Some(2.5),
+                    transfer_timing: transfer_timing(Some(2.5)),
                 })
                 .unwrap())
         }
@@ -47,9 +63,7 @@ fn drive_success(order: HandoffOrder) {
         }
     };
     assert!(acknowledge(&mut coordinator, reserve, HandoffActionOutcome::Accepted).is_empty());
-    let after_reserved = coordinator
-        .on_fact(HandoffFact::DestinationReserved { handoff_id: id })
-        .unwrap();
+    let after_reserved = coordinator.on_fact(destination_reserved(id)).unwrap();
 
     let transfer = match order {
         HandoffOrder::SourceFirst => one(after_reserved),
@@ -62,7 +76,7 @@ fn drive_success(order: HandoffOrder) {
             one(coordinator
                 .on_fact(HandoffFact::SourceHeld {
                     handoff_id: id,
-                    transfer_delay_ms: Some(2.5),
+                    transfer_timing: transfer_timing(Some(2.5)),
                 })
                 .unwrap())
         }
@@ -102,6 +116,72 @@ fn backend_orders_reach_the_same_safe_completion_sequence() {
 }
 
 #[test]
+fn timing_mode_selects_full_or_destination_missing_footprint() {
+    for (mode, expected_delay_ms) in [
+        (KvTransferTimingMode::FullPrompt, 8.0),
+        (KvTransferTimingMode::DestinationMissing, 4.0),
+    ] {
+        let id = handoff_id();
+        let mut coordinator = HandoffCoordinatorCore::new(id, HandoffOrder::SourceFirst);
+        let submit = one(coordinator.start().unwrap());
+        acknowledge(&mut coordinator, submit, HandoffActionOutcome::Submitted);
+        let reserve = one(coordinator
+            .on_fact(HandoffFact::SourceHeld {
+                handoff_id: id,
+                transfer_timing: HandoffTransferTiming {
+                    mode,
+                    full_prompt_tokens: 8,
+                    kv_bytes_per_token: Some(1_000_000),
+                    bandwidth_gb_s: Some(1.0),
+                },
+            })
+            .unwrap());
+        acknowledge(&mut coordinator, reserve, HandoffActionOutcome::Accepted);
+        let transfer = one(coordinator
+            .on_fact(HandoffFact::DestinationReserved {
+                handoff_id: id,
+                transferable_prompt_tokens: 4,
+            })
+            .unwrap());
+        assert!(matches!(
+            transfer.action,
+            HandoffAction::StartTransfer { delay_ms, .. }
+                if delay_ms == expected_delay_ms
+        ));
+    }
+}
+
+#[test]
+fn full_destination_hit_keeps_zero_delay_transfer_transition() {
+    let id = handoff_id();
+    let mut coordinator = HandoffCoordinatorCore::new(id, HandoffOrder::SourceFirst);
+    let submit = one(coordinator.start().unwrap());
+    acknowledge(&mut coordinator, submit, HandoffActionOutcome::Submitted);
+    let reserve = one(coordinator
+        .on_fact(HandoffFact::SourceHeld {
+            handoff_id: id,
+            transfer_timing: HandoffTransferTiming {
+                mode: KvTransferTimingMode::DestinationMissing,
+                full_prompt_tokens: 8,
+                kv_bytes_per_token: Some(1_000_000),
+                bandwidth_gb_s: Some(1.0),
+            },
+        })
+        .unwrap());
+    acknowledge(&mut coordinator, reserve, HandoffActionOutcome::Accepted);
+    let transfer = one(coordinator
+        .on_fact(HandoffFact::DestinationReserved {
+            handoff_id: id,
+            transferable_prompt_tokens: 0,
+        })
+        .unwrap());
+    assert!(matches!(
+        transfer.action,
+        HandoffAction::StartTransfer { delay_ms: 0.0, .. }
+    ));
+}
+
+#[test]
 fn cancellation_cleans_actions_that_may_have_been_applied() {
     let id = handoff_id();
     let mut coordinator = HandoffCoordinatorCore::new(id, HandoffOrder::SourceFirst);
@@ -110,7 +190,7 @@ fn cancellation_cleans_actions_that_may_have_been_applied() {
     let reserve = one(coordinator
         .on_fact(HandoffFact::SourceHeld {
             handoff_id: id,
-            transfer_delay_ms: None,
+            transfer_timing: transfer_timing(None),
         })
         .unwrap());
 
@@ -159,16 +239,14 @@ fn drive_to_activation(order: HandoffOrder) -> (HandoffCoordinatorCore, IssuedHa
             one(coordinator
                 .on_fact(HandoffFact::SourceHeld {
                     handoff_id: id,
-                    transfer_delay_ms: None,
+                    transfer_timing: transfer_timing(None),
                 })
                 .unwrap())
         }
         HandoffOrder::DestinationFirst => first,
     };
     acknowledge(&mut coordinator, reserve, HandoffActionOutcome::Accepted);
-    let after_reserved = coordinator
-        .on_fact(HandoffFact::DestinationReserved { handoff_id: id })
-        .unwrap();
+    let after_reserved = coordinator.on_fact(destination_reserved(id)).unwrap();
     let transfer = match order {
         HandoffOrder::SourceFirst => one(after_reserved),
         HandoffOrder::DestinationFirst => {
@@ -177,7 +255,7 @@ fn drive_to_activation(order: HandoffOrder) -> (HandoffCoordinatorCore, IssuedHa
             one(coordinator
                 .on_fact(HandoffFact::SourceHeld {
                     handoff_id: id,
-                    transfer_delay_ms: None,
+                    transfer_timing: transfer_timing(None),
                 })
                 .unwrap())
         }
@@ -243,7 +321,7 @@ fn invalid_same_handoff_ordering_is_rejected() {
         coordinator
             .on_fact(HandoffFact::SourceHeld {
                 handoff_id: id,
-                transfer_delay_ms: None,
+                transfer_timing: transfer_timing(None),
             })
             .is_err()
     );
@@ -259,8 +337,8 @@ fn invalid_same_handoff_ordering_is_rejected() {
 }
 
 #[test]
-fn invalid_transfer_delays_are_rejected_before_scheduling() {
-    for delay_ms in [-1.0, f64::NAN, f64::INFINITY] {
+fn invalid_transfer_timing_is_rejected_before_scheduling() {
+    for bandwidth_gb_s in [-1.0, f64::NAN, f64::INFINITY] {
         let id = handoff_id();
         let mut coordinator = HandoffCoordinatorCore::new(id, HandoffOrder::SourceFirst);
         let submit = one(coordinator.start().unwrap());
@@ -269,10 +347,17 @@ fn invalid_transfer_delays_are_rejected_before_scheduling() {
         let error = coordinator
             .on_fact(HandoffFact::SourceHeld {
                 handoff_id: id,
-                transfer_delay_ms: Some(delay_ms),
+                transfer_timing: HandoffTransferTiming {
+                    bandwidth_gb_s: Some(bandwidth_gb_s),
+                    ..transfer_timing(Some(1.0))
+                },
             })
             .unwrap_err();
-        assert!(error.to_string().contains("invalid handoff transfer delay"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid handoff transfer bandwidth")
+        );
     }
 }
 
@@ -323,9 +408,7 @@ fn destination_first_unacknowledged_prefill_is_cleaned_as_ambiguous_ownership() 
     let mut coordinator = HandoffCoordinatorCore::new(id, HandoffOrder::DestinationFirst);
     let reserve = one(coordinator.start().unwrap());
     acknowledge(&mut coordinator, reserve, HandoffActionOutcome::Accepted);
-    let submit = one(coordinator
-        .on_fact(HandoffFact::DestinationReserved { handoff_id: id })
-        .unwrap());
+    let submit = one(coordinator.on_fact(destination_reserved(id)).unwrap());
     assert!(matches!(submit.action, HandoffAction::SubmitPrefill { .. }));
 
     let cleanup = coordinator
@@ -366,16 +449,14 @@ fn timeout_after_transfer_is_scheduled_cleans_both_owners() {
                 one(coordinator
                     .on_fact(HandoffFact::SourceHeld {
                         handoff_id: id,
-                        transfer_delay_ms: None,
+                        transfer_timing: transfer_timing(None),
                     })
                     .unwrap())
             }
             HandoffOrder::DestinationFirst => first,
         };
         acknowledge(&mut coordinator, reserve, HandoffActionOutcome::Accepted);
-        let after_reserved = coordinator
-            .on_fact(HandoffFact::DestinationReserved { handoff_id: id })
-            .unwrap();
+        let after_reserved = coordinator.on_fact(destination_reserved(id)).unwrap();
         let transfer = match order {
             HandoffOrder::SourceFirst => one(after_reserved),
             HandoffOrder::DestinationFirst => {
@@ -384,7 +465,7 @@ fn timeout_after_transfer_is_scheduled_cleans_both_owners() {
                 one(coordinator
                     .on_fact(HandoffFact::SourceHeld {
                         handoff_id: id,
-                        transfer_delay_ms: None,
+                        transfer_timing: transfer_timing(None),
                     })
                     .unwrap())
             }
@@ -454,7 +535,7 @@ fn duplicates_are_idempotent_but_conflicts_are_rejected() {
 
     let fact = HandoffFact::SourceHeld {
         handoff_id: id,
-        transfer_delay_ms: None,
+        transfer_timing: transfer_timing(None),
     };
     assert_eq!(coordinator.on_fact(fact.clone()).unwrap().len(), 1);
     assert!(coordinator.on_fact(fact).unwrap().is_empty());
@@ -462,6 +543,7 @@ fn duplicates_are_idempotent_but_conflicts_are_rejected() {
         coordinator
             .on_fact(HandoffFact::DestinationReserved {
                 handoff_id: HandoffId::from(Uuid::from_u128(99)),
+                transferable_prompt_tokens: 1,
             })
             .is_err()
     );

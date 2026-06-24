@@ -748,6 +748,7 @@ mod tests {
             SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id: observed,
                 request_id,
+                ..
             } if *observed == handoff_id && *request_id == Uuid::from_u128(2)
         )));
         assert_eq!(engine.worker_count(), 1);
@@ -853,6 +854,7 @@ mod tests {
             SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id: observed,
                 request_id,
+                ..
             } if *observed == handoff_id && *request_id == Uuid::from_u128(103)
         )));
     }

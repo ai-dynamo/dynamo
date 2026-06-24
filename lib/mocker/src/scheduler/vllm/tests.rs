@@ -391,6 +391,35 @@ mod destination_lifecycle {
     }
 
     #[test]
+    fn destination_transfer_footprint_excludes_decode_headroom() {
+        let footprint = |max_output_tokens| {
+            let mut core = VllmCore::new(args(WorkerType::Decode));
+            let effects = core
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: HandoffId::new(),
+                        request: request(Uuid::new_v4(), (0..10).collect(), max_output_tokens),
+                    },
+                    true,
+                )
+                .unwrap();
+            let [
+                SchedulerLifecycleEvent::DestinationReserved {
+                    transferable_prompt_tokens,
+                    ..
+                },
+            ] = effects.lifecycle_events.as_slice()
+            else {
+                panic!("destination reservation should complete immediately");
+            };
+            *transferable_prompt_tokens
+        };
+
+        assert_eq!(footprint(1), 12);
+        assert_eq!(footprint(128), 12);
+    }
+
+    #[test]
     fn handoff_prefill_to_reserved_decode_owns_kv_until_normal_admission() {
         let logical_uuid = Uuid::from_u128(10_001);
         let handoff_id = HandoffId::from(Uuid::from_u128(10_002));
@@ -464,7 +493,9 @@ mod destination_lifecycle {
             [SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id: reserved_handoff,
                 request_id: reserved_request,
+                transferable_prompt_tokens,
             }] if *reserved_handoff == handoff_id && *reserved_request == logical_uuid
+                && *transferable_prompt_tokens == 4
         ));
         assert!(destination.kv_manager.num_active_blocks() > usage_before_physical_reservation);
         let reserved_block_ids = destination.destination_block_ids(handoff_id);
@@ -658,6 +689,7 @@ mod destination_lifecycle {
             [SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id,
                 request_id,
+                ..
             }] if *handoff_id == pending_handoff && *request_id == pending_request
         ));
         assert_eq!(
@@ -2501,6 +2533,7 @@ mod offload {
             SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id: observed,
                 request_id,
+                ..
             } if *observed == handoff_id && *request_id == Uuid::from_u128(2)
         )));
         assert!(!core.destination_block_ids(handoff_id).is_empty());
@@ -2916,6 +2949,7 @@ mod offload {
             SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id,
                 request_id,
+                ..
             } if *handoff_id == follower_handoff && *request_id == follower_uuid
         )));
 
@@ -3400,6 +3434,7 @@ mod offload {
             SchedulerLifecycleEvent::DestinationReserved {
                 handoff_id: observed_handoff,
                 request_id: observed_request,
+                ..
             } if *observed_handoff == handoff_id && *observed_request == request_id
         )));
         assert!(core.destination_is_held(handoff_id));

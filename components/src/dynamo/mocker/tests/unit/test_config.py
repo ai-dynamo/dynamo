@@ -46,6 +46,7 @@ def make_args(**overrides):
         "startup_time": None,
         "durable_kv_events": False,
         "kv_transfer_bandwidth": 64.0,
+        "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
         "sglang_schedule_policy": None,
         "sglang_page_size": None,
@@ -273,6 +274,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         durable_kv_events=False,
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
+        kv_transfer_timing_mode="destination_missing",
         num_g2_blocks=8192,
         num_g3_blocks=16384,
         offload_batch_size=32,
@@ -322,6 +324,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     assert engine_args.aic_moe_ep_size is None
     assert engine_args.aic_attention_dp_size is None
     assert engine_args.bootstrap_port is None
+    assert engine_args.kv_transfer_timing_mode == "destination_missing"
     assert engine_args.num_g2_blocks == 8192
     assert engine_args.num_g3_blocks == 16384
     assert engine_args.offload_batch_size == 32

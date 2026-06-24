@@ -58,6 +58,7 @@ fn use_single_runtime(num_workers: usize, router_mode: ReplayRouterMode) -> bool
 #[doc(hidden)]
 pub fn run_offline_handoff_conformance(
     engine_type: EngineType,
+    transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
 ) -> Result<NormalizedHandoffConformance> {
     if engine_type == EngineType::Trtllm {
         anyhow::bail!("TRT-LLM does not support destination handoff");
@@ -74,7 +75,8 @@ pub fn run_offline_handoff_conformance(
             .speedup_ratio(1000.0)
             .decode_speedup_ratio(1000.0)
             .kv_transfer_bandwidth(Some(1.0))
-            .kv_bytes_per_token(Some(1_000_000));
+            .kv_bytes_per_token(Some(1_000_000))
+            .kv_transfer_timing_mode(transfer_timing_mode);
         if engine_type == EngineType::Sglang {
             builder = builder.sglang(Some(SglangArgs {
                 page_size: Some(4),

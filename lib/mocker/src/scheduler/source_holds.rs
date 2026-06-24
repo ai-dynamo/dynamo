@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
-use crate::common::handoff::HandoffId;
+use crate::common::handoff::{HandoffId, HandoffTransferTiming};
 use crate::common::protocols::DirectRequest;
 
 #[allow(dead_code)]
@@ -48,11 +48,12 @@ pub enum SchedulerLifecycleEvent {
     SourceHeld {
         handoff_id: HandoffId,
         request_id: Uuid,
-        transfer_delay_ms: Option<f64>,
+        transfer_timing: HandoffTransferTiming,
     },
     DestinationReserved {
         handoff_id: HandoffId,
         request_id: Uuid,
+        transferable_prompt_tokens: usize,
     },
 }
 
