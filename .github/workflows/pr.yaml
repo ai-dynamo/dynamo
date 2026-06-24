@@ -233,6 +233,9 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # temp: exercise cargo-vendor source archival on this PR to validate the
+      # ext-proc fix. Revert before merge.
+      archive_sources: true
     secrets: inherit
 
   vllm-dev-build:
