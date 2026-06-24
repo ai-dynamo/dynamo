@@ -24,6 +24,8 @@ pub fn compute_prefill_handoff_delay_ms(
 
     match (kv_transfer_bandwidth, kv_bytes_per_token) {
         (Some(bw), Some(bpt)) if bw > 0.0 => {
+            // TODO(disagg): Keep full-prompt timing until destination-cache-aware sizing is
+            // optional across backends: https://github.com/ai-dynamo/dynamo/issues/10911
             let kv_bytes = num_input_tokens as f64 * bpt as f64;
             let delay_ms = kv_bytes / (bw * 1e9) * 1000.0;
             tracing::debug!(

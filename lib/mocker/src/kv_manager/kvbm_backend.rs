@@ -360,6 +360,7 @@ impl KvManager {
         &mut self,
         evicted: &[G2OffloadBlock],
         source_slots: Vec<MutableBlock<G1>>,
+        now_ms: Option<f64>,
     ) -> Vec<G2RouterEvent> {
         let Some(engine_arc) = self.offload_engine.as_ref() else {
             drop(source_slots);
@@ -370,7 +371,7 @@ impl KvManager {
             return Vec::new();
         }
         let mut engine = engine_arc.lock().expect("offload engine mutex poisoned");
-        engine.enqueue_g1_evictions_with_metadata(evicted, source_slots, None);
+        engine.enqueue_g1_evictions_with_metadata(evicted, source_slots, now_ms);
         engine.drain_g2_router_events()
     }
 
@@ -753,17 +754,21 @@ impl KvManager {
     }
 
     pub fn reserve_decode_blocks(&mut self, count: usize) -> Option<DecodeBlockReservation> {
-        let blocks = self.allocate_unpublished_blocks(count)?;
+        let blocks = self.allocate_unpublished_blocks(count, None)?;
         Some(DecodeBlockReservation { blocks })
     }
 
-    fn allocate_unpublished_blocks(&mut self, count: usize) -> Option<Vec<MutableBlock<G1>>> {
+    fn allocate_unpublished_blocks(
+        &mut self,
+        count: usize,
+        eviction_now_ms: Option<f64>,
+    ) -> Option<Vec<MutableBlock<G1>>> {
         if count == 0 {
             return Some(Vec::new());
         }
         let (blocks, evicted_plhs) = self.block_manager.allocate_blocks_with_evictions(count)?;
         if self.should_block_on_g1_offload(&evicted_plhs) {
-            self.handle_evictions_with_source_slots(evicted_plhs, blocks);
+            self.handle_evictions_with_source_slots_at(evicted_plhs, blocks, eviction_now_ms);
             return None;
         }
 
@@ -833,9 +838,10 @@ impl KvManager {
         FullBlockCommit::Stored
     }
 
-    pub(crate) fn reserve_destination(
+    pub(crate) fn reserve_destination_at(
         &mut self,
         sequence: &ActiveSequence,
+        eviction_now_ms: Option<f64>,
     ) -> Option<VllmDestinationReservation> {
         let layout = sequence.prepare_allocation(sequence.num_input_tokens());
         let Some(MoveBlock::Use(blocks, _, plhs, _, _)) = layout.as_ref() else {
@@ -859,7 +865,7 @@ impl KvManager {
         }
 
         let unpublished_blocks =
-            self.allocate_unpublished_blocks(blocks.len() - cached_prefix.len())?;
+            self.allocate_unpublished_blocks(blocks.len() - cached_prefix.len(), eviction_now_ms)?;
         Some(VllmDestinationReservation {
             cached_prefix,
             unpublished_blocks,
@@ -1443,6 +1449,17 @@ impl KvManager {
         evicted_plhs: Vec<PositionalLineageHash>,
         source_slots: Vec<MutableBlock<G1>>,
     ) {
+        self.handle_evictions_with_source_slots_at(evicted_plhs, source_slots, None);
+    }
+
+    fn handle_evictions_with_source_slots_at(
+        &mut self,
+        evicted_plhs: Vec<PositionalLineageHash>,
+        source_slots: Vec<MutableBlock<G1>>,
+        eviction_now_ms: Option<f64>,
+    ) {
+        #[cfg(not(feature = "kvbm-offload"))]
+        let _ = eviction_now_ms;
         if evicted_plhs.is_empty() {
             drop(source_slots);
             return;
@@ -1478,7 +1495,7 @@ impl KvManager {
                     "kvbm-offload: source-slot hold count does not match offload block count"
                 );
             }
-            self.enqueue_evictions_to_g2(&offload_blocks, source_slots)
+            self.enqueue_evictions_to_g2(&offload_blocks, source_slots, eviction_now_ms)
         };
         #[cfg(not(feature = "kvbm-offload"))]
         drop(source_slots);
@@ -2284,7 +2301,7 @@ mod tests {
         );
         let sequence = ActiveSequence::new(vec![1, 2, 3, 4], 1, Some(4), true, true);
         let reservation = mgr
-            .reserve_destination(&sequence)
+            .reserve_destination_at(&sequence, None)
             .expect("destination reservation should fit");
         let reserved_block_id = reservation.block_ids()[0];
         assert_eq!(mgr.num_active_blocks(), 1);
@@ -2334,7 +2351,7 @@ mod tests {
         let (mut mgr, sink) = make_mgr_capturing(8, 4);
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, true);
         let reservation = mgr
-            .reserve_destination(&sequence)
+            .reserve_destination_at(&sequence, None)
             .expect("destination reservation should fit");
         let signal = sequence
             .prepare_allocation(sequence.num_input_tokens())
@@ -2384,7 +2401,7 @@ mod tests {
     fn destination_activation_validates_layout_before_committing_blocks() {
         let mut mgr = make_mgr(4, 4);
         let unpublished_blocks = mgr
-            .allocate_unpublished_blocks(2)
+            .allocate_unpublished_blocks(2, None)
             .expect("destination capacity should be available");
         let reservation = VllmDestinationReservation {
             cached_prefix: Vec::new(),

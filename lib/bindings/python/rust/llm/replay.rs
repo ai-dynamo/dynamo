@@ -171,7 +171,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -203,6 +203,7 @@ impl MockEngineArgs {
         free_gpu_memory_fraction: Option<f64>,
         enable_local_indexer: bool,
         bootstrap_port: Option<u16>,
+        handoff_session_timeout_ms: u64,
         kv_bytes_per_token: Option<usize>,
         kv_transfer_bandwidth: Option<f64>,
         reasoning: Option<ReasoningConfig>,
@@ -263,6 +264,7 @@ impl MockEngineArgs {
             .free_gpu_memory_fraction(free_gpu_memory_fraction)
             .enable_local_indexer(enable_local_indexer)
             .bootstrap_port(bootstrap_port)
+            .handoff_session_timeout_ms(handoff_session_timeout_ms)
             .kv_bytes_per_token(kv_bytes_per_token)
             .kv_transfer_bandwidth(kv_transfer_bandwidth)
             .num_g2_blocks(num_g2_blocks)
@@ -379,6 +381,20 @@ impl MockEngineArgs {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+
+    #[getter]
+    fn handoff_session_timeout_ms(&self) -> u64 {
+        self.inner.handoff_session_timeout_ms
+    }
+
+    #[getter]
+    fn engine_type(&self) -> &'static str {
+        match self.inner.engine_type {
+            dynamo_mocker::common::protocols::EngineType::Vllm => "vllm",
+            dynamo_mocker::common::protocols::EngineType::Sglang => "sglang",
+            dynamo_mocker::common::protocols::EngineType::Trtllm => "trtllm",
+        }
     }
 
     #[getter]
@@ -903,8 +919,9 @@ pub fn run_mocker_trace_replay(
                     ),
                 }
             }
-            ReplayArgsSelection::Disagg(config) => match (replay_mode.as_str(), replay_concurrency)
-            {
+            ReplayArgsSelection::Disagg(config) => {
+                validate_disagg_replay_mode(&replay_mode)?;
+                match (replay_mode.as_str(), replay_concurrency) {
                 ("offline", Some(max_in_flight)) => {
                     dynamo_mocker::replay::simulate_concurrency_file_disagg_with_router_mode_and_format(
                         *config,
@@ -937,12 +954,12 @@ pub fn run_mocker_trace_replay(
                         sla,
                     )
                 }
-                ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
                 (other, _) => anyhow::bail!(
                     "replay_mode must be either 'offline' or 'online', got '{}'",
                     other
                 ),
-            },
+                }
+            }
         }
     });
     let report = report.map_err(to_pyerr)?;
@@ -1106,6 +1123,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     ),
                 },
                 ReplayArgsSelection::Disagg(config) => {
+                    validate_disagg_replay_mode(&replay_mode)?;
                     match (replay_mode.as_str(), replay_concurrency) {
                         ("offline", Some(max_in_flight)) => dynamo_mocker::replay::simulate_concurrency_workload_disagg_with_router_mode(
                             *config,
@@ -1121,9 +1139,6 @@ pub fn run_mocker_synthetic_trace_replay(
                             prefill_load_estimator.clone(),
                             trace,
                             router_mode,
-                        ),
-                        ("online", _) => anyhow::bail!(
-                            "disagg replay only supports replay_mode='offline'"
                         ),
                         (other, _) => anyhow::bail!(
                             "replay_mode must be either 'offline' or 'online', got '{}'",
@@ -1192,8 +1207,9 @@ pub fn run_mocker_synthetic_trace_replay(
                     other
                 ),
             },
-            ReplayArgsSelection::Disagg(config) => match (replay_mode.as_str(), replay_concurrency)
-            {
+            ReplayArgsSelection::Disagg(config) => {
+                validate_disagg_replay_mode(&replay_mode)?;
+                match (replay_mode.as_str(), replay_concurrency) {
                 ("offline", Some(max_in_flight)) => {
                     dynamo_mocker::replay::simulate_concurrency_requests_disagg_with_router_mode(
                         *config,
@@ -1214,12 +1230,12 @@ pub fn run_mocker_synthetic_trace_replay(
                         router_mode,
                     )
                 }
-                ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
                 (other, _) => anyhow::bail!(
                     "replay_mode must be either 'offline' or 'online', got '{}'",
                     other
                 ),
-            },
+                }
+            }
         }
     });
     let report = report.map_err(to_pyerr)?;
@@ -1231,6 +1247,29 @@ pub fn run_mocker_synthetic_trace_replay(
 enum ReplayArgsSelection {
     Aggregated(Box<RsMockEngineArgs>),
     Disagg(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>),
+}
+
+fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
+    if replay_mode == "online" {
+        anyhow::bail!("disagg replay only supports replay_mode='offline'");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_disagg_replay_mode;
+
+    #[test]
+    fn online_disaggregation_is_rejected_with_stable_message() {
+        assert_eq!(
+            validate_disagg_replay_mode("online")
+                .unwrap_err()
+                .to_string(),
+            "disagg replay only supports replay_mode='offline'"
+        );
+        assert!(validate_disagg_replay_mode("offline").is_ok());
+    }
 }
 
 fn load_replay_args_selection(

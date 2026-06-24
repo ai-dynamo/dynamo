@@ -425,9 +425,18 @@ impl AggRuntime {
 
     #[cfg(feature = "kvbm-offload")]
     fn tick_offload_engines(&mut self) -> anyhow::Result<bool> {
-        let events = self.engine.tick_offload_engines(self.now_ms);
-        let changed = !events.is_empty();
-        self.apply_router_events(events)?;
+        let crate::scheduler::OffloadTickEffects {
+            kv_events,
+            lifecycle_events,
+        } = self.engine.tick_offload_engines(self.now_ms);
+        if !lifecycle_events.is_empty() {
+            bail!(
+                "aggregated replay received {} handoff lifecycle events from an offload tick",
+                lifecycle_events.len()
+            );
+        }
+        let changed = !kv_events.is_empty();
+        self.apply_router_events(kv_events)?;
         Ok(changed)
     }
 
@@ -647,6 +656,13 @@ impl AggRuntime {
             changed |= self.apply_worker_ready_events()?;
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_ready_workers()?;
+            let removed = self.engine.try_remove_drained();
+            if let Some(router) = self.router.as_mut() {
+                for worker_id in &removed {
+                    router.finalize_worker_removal(*worker_id)?;
+                }
+            }
+            changed |= !removed.is_empty();
 
             if !changed {
                 break;
@@ -738,7 +754,7 @@ impl AggRuntime {
     /// Scale-down: the worker is removed from the router immediately (so no
     /// new requests land on it) and drains in-flight work in the engine.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
-        let (added, newly_marked) = self.engine.apply_target_count(target_workers);
+        let (added, newly_marked, removed) = self.engine.apply_target_count(target_workers);
         #[cfg(test)]
         if let Some(new_len) = added.iter().max().map(|id| id + 1) {
             self.worker_active_requests.resize(new_len, Vec::new());
@@ -767,6 +783,9 @@ impl AggRuntime {
         let admissions = if let Some(router) = self.router.as_mut() {
             for id in newly_marked {
                 router.remove_worker(id)?;
+            }
+            for id in removed {
+                router.finalize_worker_removal(id)?;
             }
             let admissions = router.on_topology_changed(self.now_ms)?.admissions;
             self.record_router_pending();
@@ -2570,6 +2589,167 @@ mod tests {
         // Without startup delay, new worker is immediately active.
         assert_eq!(rt.active_worker_count(), 2);
         assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn idle_scale_down_finalizes_router_state_and_worker_seconds() {
+        let args = fast_router_args();
+        let requests = normalize_trace_requests(
+            vec![
+                DirectRequest {
+                    tokens: vec![11; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(1)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: vec![22; 64],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(2)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+            ],
+            1.0,
+        )
+        .unwrap();
+        let mut rt = AggRuntime::new(
+            &args,
+            Some(planner_router_config()),
+            None,
+            requests,
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        while !rt.is_done() {
+            assert!(rt.advance_one_timestamp().unwrap());
+        }
+        let before = rt.debug_snapshot();
+        assert!(
+            before
+                .router
+                .as_ref()
+                .unwrap()
+                .indexer
+                .cached_blocks_by_worker
+                .iter()
+                .any(|(worker_id, _)| *worker_id == 1),
+            "the retiring worker should have retained cache state before finalization"
+        );
+
+        let scale_time_ms = rt.now_ms();
+        rt.apply_scaling(1).unwrap();
+        assert_eq!(rt.active_worker_count(), 1);
+        assert_eq!(rt.total_worker_count(), 1);
+        let after = rt.debug_snapshot();
+        let router = after.router.as_ref().unwrap();
+        assert!(
+            router
+                .indexer
+                .cached_blocks_by_worker
+                .iter()
+                .all(|(worker_id, _)| *worker_id != 1)
+        );
+        assert!(
+            router
+                .active_blocks_by_worker
+                .iter()
+                .all(|(worker_id, _)| *worker_id != 1)
+        );
+
+        rt.advance_now_ms(scale_time_ms + 1000.0);
+        let report = rt.finalize_report();
+        assert!(
+            (report.throughput.decode_worker_seconds - 1.0).abs() < 1e-6,
+            "only the remaining worker should accrue during the post-scale interval, got {}",
+            report.throughput.decode_worker_seconds
+        );
+    }
+
+    #[test]
+    fn busy_scale_down_retires_after_final_completion() {
+        let args = fast_router_args();
+        let requests = normalize_trace_requests(
+            vec![
+                DirectRequest {
+                    tokens: vec![11; 64],
+                    max_output_tokens: 32,
+                    uuid: Some(Uuid::from_u128(1)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: vec![22; 64],
+                    max_output_tokens: 32,
+                    uuid: Some(Uuid::from_u128(2)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+            ],
+            1.0,
+        )
+        .unwrap();
+        let mut rt = AggRuntime::new(
+            &args,
+            Some(planner_router_config()),
+            None,
+            requests,
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        assert!(rt.advance_one_timestamp().unwrap());
+        assert_eq!(
+            rt.debug_snapshot()
+                .worker_active_requests
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+
+        rt.apply_scaling(1).unwrap();
+        assert_eq!(rt.active_worker_count(), 1);
+        assert_eq!(
+            rt.total_worker_count(),
+            2,
+            "busy retiring worker must remain provisioned while draining"
+        );
+        assert!(
+            rt.debug_snapshot()
+                .router
+                .as_ref()
+                .unwrap()
+                .active_tokens_by_worker
+                .iter()
+                .any(|(worker_id, _)| *worker_id == 1),
+            "router ownership must remain until the worker's final completion"
+        );
+
+        while rt.total_worker_count() == 2 {
+            assert!(rt.advance_one_timestamp().unwrap());
+        }
+        assert_eq!(rt.total_worker_count(), 1);
+        let router = rt.debug_snapshot().router.unwrap();
+        assert!(
+            router
+                .active_tokens_by_worker
+                .iter()
+                .all(|(worker_id, _)| *worker_id != 1)
+        );
+        assert!(
+            router
+                .indexer
+                .cached_blocks_by_worker
+                .iter()
+                .all(|(worker_id, _)| *worker_id != 1)
+        );
     }
 
     #[test]

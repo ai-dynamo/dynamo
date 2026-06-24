@@ -518,6 +518,7 @@ struct MockEngineArgsSerde {
     free_gpu_memory_fraction: OptionalConfigValue<f64>,
     enable_local_indexer: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
+    handoff_session_timeout_ms: OptionalConfigValue<u64>,
     kv_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
     num_g2_blocks: OptionalConfigValue<usize>,
@@ -718,6 +719,11 @@ pub struct MockEngineArgs {
     /// If None, bootstrap rendezvous is disabled.
     #[builder(default = "None")]
     pub bootstrap_port: Option<u16>,
+
+    /// Absolute live handoff session timeout, excluding modeled transfer delay.
+    #[builder(default = "300_000")]
+    #[validate(range(min = 1))]
+    pub handoff_session_timeout_ms: u64,
 
     /// KV cache bytes per token, auto-computed from model config by Python CLI.
     /// Formula: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
@@ -1057,6 +1063,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(bootstrap_port) = compat.bootstrap_port.into_nullable() {
             builder = builder.bootstrap_port(bootstrap_port);
         }
+        if let Some(timeout_ms) = compat
+            .handoff_session_timeout_ms
+            .into_non_null("handoff_session_timeout_ms")?
+        {
+            builder = builder.handoff_session_timeout_ms(timeout_ms);
+        }
         if let Some(kv_bytes_per_token) = compat.kv_bytes_per_token.into_nullable() {
             builder = builder.kv_bytes_per_token(kv_bytes_per_token);
         }
@@ -1156,6 +1168,14 @@ impl MockEngineArgs {
     /// provisioned worker-seconds into GPU-hours.
     pub fn aic_gpus_per_worker(&self) -> usize {
         self.aic_tp_size.unwrap_or(1) * self.aic_attention_dp_size.unwrap_or(1)
+    }
+
+    /// Finite ownership bound for live handoff queues and sessions.
+    ///
+    /// An unset runnable-sequence limit is semantically unbounded, so use the
+    /// physical KV block count as the conservative process-local bound.
+    pub fn effective_handoff_capacity(&self) -> usize {
+        self.max_num_seqs.unwrap_or(self.num_gpu_blocks).max(1)
     }
 
     pub fn normalized(mut self) -> anyhow::Result<Self> {
@@ -1341,6 +1361,7 @@ mod tests {
             "aic_model_path": args.aic_model_path,
             "enable_local_indexer": args.enable_local_indexer,
             "bootstrap_port": args.bootstrap_port,
+            "handoff_session_timeout_ms": args.handoff_session_timeout_ms,
             "kv_bytes_per_token": args.kv_bytes_per_token,
             "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
             "num_g2_blocks": args.num_g2_blocks,
