@@ -9,6 +9,7 @@ import os
 
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import fail
+from gpu_memory_service.common.vmm.device import VMMDevice
 
 try:
     from cuda.bindings import driver as cuda
@@ -295,7 +296,7 @@ def cuda_memcpy_d2h_async(
     )
 
 
-class CudaVMM:
+class CudaVMM(VMMDevice):
     """``VMMDevice`` Protocol implementation backed by the CUDA driver API.
 
     Methods delegate to the module-level helper.
