@@ -2941,6 +2941,7 @@ func Test_computeRestartStatus(t *testing.T) {
 
 	tests := []struct {
 		name              string
+		dgdGeneration     int64
 		dgdSpec           v1alpha1.DynamoGraphDeploymentSpec
 		dgdStatus         v1alpha1.DynamoGraphDeploymentStatus
 		existingResources []client.Object
@@ -3012,6 +3013,72 @@ func Test_computeRestartStatus(t *testing.T) {
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseFailed,
+			},
+		},
+		{
+			name: "restart requested on initial create records observed id without restarting",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name:          "restart requested on initial create with existing Grove resources does not restart",
+			dgdGeneration: 1,
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "sglang",
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"decode": {
+						ServiceName:   "decode",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(1)),
+					},
+				},
+			},
+			existingResources: []client.Object{
+				&grovev1alpha1.PodCliqueSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd",
+						Namespace: "default",
+					},
+				},
+			},
+			groveEnabled: true,
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name:          "restart requested after initial generation triggers restart",
+			dgdGeneration: 2,
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
 			},
 		},
 		{
@@ -3147,6 +3214,9 @@ func Test_computeRestartStatus(t *testing.T) {
 						Replicas: ptr.To(int32(2)),
 					},
 				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				ObservedGeneration: 1,
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
@@ -3308,7 +3378,9 @@ func Test_computeRestartStatus(t *testing.T) {
 					},
 				},
 			},
-			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				ObservedGeneration: 1,
+			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
@@ -3350,7 +3422,8 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 		},
 		{
-			name: "parallel restart - new request with ready resources should NOT complete immediately (race condition fix)",
+			name:          "parallel restart - new request with ready resources should NOT complete immediately (race condition fix)",
+			dgdGeneration: 2,
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
 					ID: newID,
@@ -3761,6 +3834,10 @@ func Test_computeRestartStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
+			generation := tt.dgdGeneration
+			if generation == 0 {
+				generation = 1
+			}
 
 			s := scheme.Scheme
 			err := v1alpha1.AddToScheme(s)
@@ -3770,8 +3847,9 @@ func Test_computeRestartStatus(t *testing.T) {
 
 			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
+					Name:       "test-dgd",
+					Namespace:  "default",
+					Generation: generation,
 				},
 				Spec:   tt.dgdSpec,
 				Status: tt.dgdStatus,

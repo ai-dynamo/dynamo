@@ -1175,6 +1175,20 @@ func isNewRestartRequest(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	return dgd.Spec.Restart.ID != dgd.Status.Restart.ObservedID
 }
 
+func (r *DynamoGraphDeploymentReconciler) isInitialRestartObservation(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	if dgd.Status.Restart != nil ||
+		dgd.Generation > 1 ||
+		dgd.Status.ObservedGeneration != 0 ||
+		dgd.Status.RollingUpdate != nil ||
+		len(dgd.Status.Components) > 0 ||
+		len(dgd.Status.Conditions) > 0 ||
+		len(dgd.Status.Checkpoints) > 0 {
+		return false
+	}
+
+	return true
+}
+
 // computeParallelRestartStatus handles parallel restart where all components restart together.
 func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 	ctx context.Context,
@@ -1352,6 +1366,13 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 			return dgd.Status.Restart
 		}
 		return nil
+	}
+
+	if r.isInitialRestartObservation(dgd) {
+		return &nvidiacomv1beta1.RestartStatus{
+			ObservedID: dgd.Spec.Restart.ID,
+			Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
+		}
 	}
 
 	// If restart was already processed (completed, failed, or superseded), return existing status
