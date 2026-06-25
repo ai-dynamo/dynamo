@@ -154,6 +154,19 @@ on the same Dynamo release line unless a recipe says otherwise.
 | On-ramp data plane | Gateway -> EPP -> stock vLLM pod | KV events flow directly from vLLM pods to the EPP over ZMQ. |
 | Full Dynamo data plane | Gateway -> EPP -> Frontend sidecar -> Dynamo worker | KV events and startup snapshots flow through the Dynamo event plane. |
 
+## Expected Gotchas
+
+Most GAIE failures are wiring problems between Gateway API resources, the EPP service, and the model
+namespace. Check these first before debugging model serving.
+
+| Symptom | Likely cause | Check |
+|---|---|---|
+| `HTTPRoute` is not accepted | `parentRefs` points at the wrong Gateway name or namespace. | `kubectl describe httproute -n <model-namespace>` and compare `spec.parentRefs` with the Gateway. |
+| Requests reach the model but EPP logs stay quiet | The route bypasses the `InferencePool`, or the pool points at the wrong EPP service. | Verify `rules.backendRefs` points at the `InferencePool` and `endpointPickerRef` points at the Dynamo EPP service. |
+| EPP starts but routing state is empty | The vanilla vLLM on-ramp has no startup snapshot; its KV index warms from new ZMQ events only. | Send traffic after startup, then inspect EPP logs for pod discovery and endpoint selection. |
+| Full Dynamo EPP does not receive immediate routing state | Dynamo event-plane components are not ready, or the EPP image tag does not match the runtime/operator line. | Check Dynamo platform pods, DGD status, and image tags against the compatibility table. |
+| Istio path cannot call the EPP | Istio was installed without GAIE enabled, or mesh TLS policy blocks the EPP call. | Confirm `ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true` and apply the Istio variant's `DestinationRule`. |
+
 ## Gateway Implementation
 
 GAIE needs a Gateway API implementation that understands the inference extension and can call an
