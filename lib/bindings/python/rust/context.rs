@@ -467,9 +467,10 @@ impl Context {
             // contiguous in the distributed trace. No-op when the inbound
             // context is absent or malformed — the span is then a root.
             if let Some(tc) = self.trace_context.as_ref()
-                && let (Ok(trace_id), Ok(span_id)) =
-                    (TraceId::from_hex(&tc.trace_id), SpanId::from_hex(&tc.span_id))
-            {
+                && let (Ok(trace_id), Ok(span_id)) = (
+                    TraceId::from_hex(&tc.trace_id),
+                    SpanId::from_hex(&tc.span_id),
+                )            {
                 let parent = OtelContext::new().with_remote_span_context(SpanContext::new(
                     trace_id,
                     span_id,
