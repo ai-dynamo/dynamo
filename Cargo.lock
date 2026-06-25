@@ -2847,6 +2847,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-smg-sidecar"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "futures",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "protobuf-src",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7019,6 +7043,15 @@ dependencies = [
  "once_cell",
  "protobuf-support",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "protobuf-src"
+version = "2.1.1+27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6217c3504da19b85a3a4b2e9a5183d635822d83507ba0986624b5c05b83bfc40"
+dependencies = [
+ "cmake",
 ]
 
 [[package]]

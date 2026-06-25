@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated serving via the upstream SGLang SMG sidecar.
+#
+# Each worker pod runs TWO containers sharing the pod network (localhost):
+#   - sglang-engine : upstream SGLang --grpc-mode SMG scheduler service (GPU)
+#   - mainContainer: the Dynamo SGLang SMG sidecar worker, an SMG client (CPU)
+#
+# The image must include SGLang with its optional gRPC dependencies, for example
+# `smg-grpc-servicer[sglang]>=0.5.2`, plus the `dynamo-sglang-smg-sidecar`
+# binary from this workspace.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-smg-sidecar-disagg
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+    decode:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        containers:
+          - name: sglang-engine
+            image: my-registry/sglang-runtime:my-tag
+            env:
+              - name: SGLANG_GRPC_PORT
+                value: "40002"
+            command:
+              - python3
+              - -m
+              - sglang.launch_server
+            args:
+              - --grpc-mode
+              - --model-path
+              - Qwen/Qwen3-0.6B
+              - --served-model-name
+              - Qwen/Qwen3-0.6B
+              - --host
+              - 0.0.0.0
+              - --port
+              - "30002"
+              - --tp
+              - "1"
+              - --trust-remote-code
+              - --disable-cuda-graph
+              - --disaggregation-mode
+              - decode
+              - --disaggregation-transfer-backend
+              - nixl
+              - --disaggregation-bootstrap-port
+              - "12345"
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - dynamo-sglang-smg-sidecar
+          args:
+            - --smg-endpoint
+            - 127.0.0.1:40002
+    prefill:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        containers:
+          - name: sglang-engine
+            image: my-registry/sglang-runtime:my-tag
+            env:
+              - name: SGLANG_GRPC_PORT
+                value: "40001"
+            command:
+              - python3
+              - -m
+              - sglang.launch_server
+            args:
+              - --grpc-mode
+              - --model-path
+              - Qwen/Qwen3-0.6B
+              - --served-model-name
+              - Qwen/Qwen3-0.6B
+              - --host
+              - 0.0.0.0
+              - --port
+              - "30001"
+              - --tp
+              - "1"
+              - --trust-remote-code
+              - --disable-cuda-graph
+              - --disaggregation-mode
+              - prefill
+              - --disaggregation-transfer-backend
+              - nixl
+              - --disaggregation-bootstrap-port
+              - "12345"
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - dynamo-sglang-smg-sidecar
+          args:
+            - --smg-endpoint
+            - 127.0.0.1:40001

@@ -1,0 +1,226 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Minimal SGLang SMG scheduler proto subset.
+//
+// Package/service/field numbers match the upstream SGLang SMG scheduler proto
+// used by smg-grpc-client 1.0.0. Messages unrelated to Dynamo's sidecar path
+// are intentionally omitted; proto3 unknown fields preserve compatibility with
+// upstream servicers that send or accept a larger schema.
+
+syntax = "proto3";
+
+package sglang.grpc.scheduler;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+service SglangScheduler {
+  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Abort(AbortRequest) returns (AbortResponse);
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+}
+
+message SamplingParams {
+  float temperature = 1;
+  float top_p = 2;
+  int32 top_k = 3;
+  float min_p = 4;
+  float frequency_penalty = 5;
+  float presence_penalty = 6;
+  float repetition_penalty = 7;
+  optional int32 max_new_tokens = 8;
+  repeated string stop = 9;
+  repeated uint32 stop_token_ids = 10;
+  bool skip_special_tokens = 11;
+  bool spaces_between_special_tokens = 12;
+
+  oneof constraint {
+    string regex = 13;
+    string json_schema = 14;
+    string ebnf_grammar = 15;
+    string structural_tag = 16;
+  }
+
+  int32 n = 17;
+  int32 min_new_tokens = 18;
+  bool ignore_eos = 19;
+  bool no_stop_trim = 20;
+  optional int32 stream_interval = 21;
+  map<string, float> logit_bias = 22;
+  google.protobuf.Struct custom_params = 23;
+}
+
+message DisaggregatedParams {
+  string bootstrap_host = 1;
+  int32 bootstrap_port = 2;
+  int32 bootstrap_room = 3;
+}
+
+message GenerateRequest {
+  string request_id = 1;
+  TokenizedInput tokenized = 2;
+  MultimodalInputs mm_inputs = 3;
+  SamplingParams sampling_params = 4;
+  bool return_logprob = 5;
+  int32 logprob_start_len = 6;
+  int32 top_logprobs_num = 7;
+  repeated uint32 token_ids_logprob = 8;
+  bool return_hidden_states = 9;
+  DisaggregatedParams disaggregated_params = 10;
+  string custom_logit_processor = 11;
+  google.protobuf.Timestamp timestamp = 12;
+  bool log_metrics = 13;
+  repeated float input_embeds = 14;
+  string lora_id = 15;
+  int32 data_parallel_rank = 16;
+  bool stream = 17;
+}
+
+message TokenizedInput {
+  string original_text = 1;
+  repeated uint32 input_ids = 2;
+}
+
+message MultimodalInputs {
+  repeated string image_urls = 1;
+  repeated string video_urls = 2;
+  repeated string audio_urls = 3;
+  google.protobuf.Struct processed_features = 4;
+  repeated bytes image_data = 5;
+  repeated bytes video_data = 6;
+  repeated bytes audio_data = 7;
+  repeated string modalities = 8;
+}
+
+message GenerateResponse {
+  string request_id = 1;
+  oneof response {
+    GenerateStreamChunk chunk = 2;
+    GenerateComplete complete = 3;
+    GenerateError error = 4;
+  }
+}
+
+message GenerateStreamChunk {
+  repeated uint32 token_ids = 1;
+  int32 prompt_tokens = 2;
+  int32 completion_tokens = 3;
+  int32 cached_tokens = 4;
+  OutputLogProbs output_logprobs = 5;
+  repeated float hidden_states = 6;
+  InputLogProbs input_logprobs = 7;
+  uint32 index = 8;
+}
+
+message GenerateComplete {
+  repeated uint32 output_ids = 1;
+  string finish_reason = 2;
+  int32 prompt_tokens = 3;
+  int32 completion_tokens = 4;
+  int32 cached_tokens = 5;
+  OutputLogProbs output_logprobs = 6;
+  repeated HiddenStates all_hidden_states = 7;
+  oneof matched_stop {
+    uint32 matched_token_id = 8;
+    string matched_stop_str = 9;
+  }
+  InputLogProbs input_logprobs = 10;
+  uint32 index = 11;
+}
+
+message GenerateError {
+  string message = 1;
+  string http_status_code = 2;
+  string details = 3;
+}
+
+message OutputLogProbs {
+  repeated float token_logprobs = 1;
+  repeated int32 token_ids = 2;
+  repeated TopLogProbs top_logprobs = 3;
+}
+
+message InputLogProbs {
+  repeated InputTokenLogProb token_logprobs = 1;
+  repeated int32 token_ids = 2;
+  repeated TopLogProbs top_logprobs = 3;
+}
+
+message InputTokenLogProb {
+  optional float value = 1;
+}
+
+message TopLogProbs {
+  repeated float values = 1;
+  repeated int32 token_ids = 2;
+}
+
+message HiddenStates {
+  repeated float values = 1;
+  int32 layer = 2;
+  int32 position = 3;
+}
+
+message EmbedRequest {
+  string request_id = 1;
+}
+
+message EmbedResponse {
+}
+
+message HealthCheckRequest {
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
+
+message AbortRequest {
+  string request_id = 1;
+  string reason = 2;
+}
+
+message AbortResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetModelInfoRequest {
+}
+
+message GetModelInfoResponse {
+  string model_path = 1;
+  string tokenizer_path = 2;
+  bool is_generation = 3;
+  string preferred_sampling_params = 4;
+  string weight_version = 5;
+  string served_model_name = 6;
+  int32 max_context_length = 7;
+  int32 vocab_size = 8;
+  bool supports_vision = 9;
+  string model_type = 10;
+  repeated int32 eos_token_ids = 11;
+  int32 pad_token_id = 12;
+  int32 bos_token_id = 13;
+  int32 max_req_input_len = 14;
+}
+
+message GetServerInfoRequest {
+}
+
+message GetServerInfoResponse {
+  google.protobuf.Struct server_args = 1;
+  google.protobuf.Struct scheduler_info = 2;
+  int32 active_requests = 3;
+  bool is_paused = 4;
+  double last_receive_timestamp = 5;
+  double uptime_seconds = 6;
+  string sglang_version = 7;
+  string server_type = 8;
+  google.protobuf.Timestamp start_time = 9;
+}

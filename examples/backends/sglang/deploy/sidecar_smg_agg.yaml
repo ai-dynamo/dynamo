@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated serving via the upstream SGLang SMG sidecar.
+#
+# Each worker pod runs TWO containers sharing the pod network (localhost):
+#   - sglang-engine : upstream SGLang --grpc-mode SMG scheduler service (GPU)
+#   - mainContainer: the Dynamo SGLang SMG sidecar worker, an SMG client (CPU)
+#
+# The image must include SGLang with its optional gRPC dependencies, for example
+# `smg-grpc-servicer[sglang]>=0.5.2`, plus the `dynamo-sglang-smg-sidecar`
+# binary from this workspace.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-smg-sidecar-agg
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+    SglangSmgSidecarWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        containers:
+          - name: sglang-engine
+            image: my-registry/sglang-runtime:my-tag
+            env:
+              - name: SGLANG_GRPC_PORT
+                value: "40000"
+            command:
+              - python3
+              - -m
+              - sglang.launch_server
+            args:
+              - --grpc-mode
+              - --model-path
+              - Qwen/Qwen3-0.6B
+              - --served-model-name
+              - Qwen/Qwen3-0.6B
+              - --host
+              - 127.0.0.1
+              - --port
+              - "30000"
+              - --tp
+              - "1"
+              - --trust-remote-code
+              - --disable-cuda-graph
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - dynamo-sglang-smg-sidecar
+          args:
+            - --smg-endpoint
+            - 127.0.0.1:40000
