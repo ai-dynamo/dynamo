@@ -1115,20 +1115,24 @@ def durable_kv_events(request):
         def test_example(runtime_services_dynamic_ports):
             ...
     """
-    return getattr(request, "param", False)
+    value = getattr(request, "param", False)
+    if value:
+        # Durable/JetStream KV events only exist on the NATS event plane. ZMQ is now
+        # the default, so pin NATS here; otherwise the durable subscriber bails at
+        # startup ("--durable-kv-events requires NATS event plane").
+        monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
+    return value
 
 
 @pytest.fixture()
-def runtime_services(request, discovery_backend, request_plane, monkeypatch):
+def runtime_services(request, discovery_backend, request_plane):
     """
     Start runtime services (NATS and/or etcd) based on discovery_backend and request_plane.
 
     - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
-    - For the etcd + NATS combination, DYN_EVENT_PLANE is pinned to nats,
-      reproducing the pre-existing per-backend default (etcd -> NATS). ZMQ is now
-      the default for all backends, so without this pin these tests would silently
-      run the ZMQ event plane instead of the NATS path they intend to exercise.
+    - The event plane follows the runtime default (ZMQ); set DYN_EVENT_PLANE=nats
+      (or use durable_kv_events) for tests that need the NATS event plane.
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -1136,7 +1140,6 @@ def runtime_services(request, discovery_backend, request_plane, monkeypatch):
     if request_plane == "nats" and discovery_backend == "etcd":
         with NatsServer(request) as nats_process:
             with EtcdServer(request) as etcd_process:
-                monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
                 yield nats_process, etcd_process
     elif request_plane == "nats":
         with NatsServer(request) as nats_process:
@@ -1164,24 +1167,15 @@ def runtime_services_dynamic_ports(
       leak across workers.
 
     - If discovery_backend != "etcd", etcd is not started (returns None)
-    - When etcd is used this fixture pins DYN_EVENT_PLANE=nats, reproducing the
-      pre-existing per-backend default (etcd/kubernetes -> NATS). The product
-      default is now ZMQ for all backends, but the in-process e2e harness delivers
-      KV events between a separate engine subprocess and an in-process router over
-      a naive direct ZMQ PUB/SUB path with no broker; that path suffers the
-      slow-joiner problem (events published before the SUB connects are dropped),
-      so the router would observe zero KV events. NATS Core buffers and supports
-      request/reply, so these tests rely on it. Both the in-process router
-      (get_runtime(event_plane=None)) and engine subprocesses (env =
-      os.environ.copy()) inherit this; explicit event_plane="zmq" overrides at the
-      call site still win. file/mem backends are left on the ZMQ default.
-    - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True.
+    - The event plane follows the runtime default (ZMQ). NATS is still started so
+      the NATS opt-in paths stay available; durable_kv_events=True pins
+      DYN_EVENT_PLANE=nats (see the durable_kv_events fixture).
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Start NATS when etcd is used so the NATS opt-in paths stay available.
-    # When durable_kv_events=False (default), disable JetStream for faster startup.
+    # When durable_kv_events=False (default), disable JetStream for faster startup
     if discovery_backend == "etcd":
         with NatsServer(
             request, port=0, disable_jetstream=not durable_kv_events
@@ -1196,10 +1190,6 @@ def runtime_services_dynamic_ports(
                 monkeypatch.setenv(
                     "ETCD_ENDPOINTS", f"http://localhost:{etcd_process.port}"
                 )
-                # Pin the NATS event plane for etcd-backed tests: the in-process e2e
-                # harness cannot reliably deliver KV events over the (now-default) ZMQ
-                # plane without a broker (slow-joiner loss). See the fixture docstring.
-                monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
 
                 yield nats_process, etcd_process
     elif request_plane == "nats":
