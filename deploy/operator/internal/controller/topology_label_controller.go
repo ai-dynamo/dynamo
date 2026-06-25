@@ -42,7 +42,7 @@ type TopologyLabelReconciler struct {
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get
-// +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get
+// +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get
 
 func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
