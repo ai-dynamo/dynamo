@@ -507,7 +507,7 @@ impl LocalModel {
         );
 
         if self.self_host_metadata {
-            self.move_to_self_host(endpoint, model_suffix.as_deref())
+            self.move_to_self_host(endpoint.drt(), model_suffix.as_deref())
                 .context("move_to_self_host")?;
         }
 
@@ -550,10 +550,9 @@ impl LocalModel {
     /// (recorded as `BASE_SUFFIX` in the registry).
     fn move_to_self_host(
         &mut self,
-        endpoint: &Endpoint,
+        drt: &dynamo_runtime::DistributedRuntime,
         model_suffix: Option<&str>,
     ) -> anyhow::Result<()> {
-        let drt = endpoint.drt();
         let Some(base_url) = self_host_base_url(drt)? else {
             tracing::warn!(
                 model_slug = %self.card.slug(),

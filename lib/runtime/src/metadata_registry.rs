@@ -33,22 +33,12 @@ pub const BASE_SUFFIX: &str = "_base";
 /// `(instance_id, lora_slug)`. `None` lora_slug = base model.
 pub type Owner = (u64, Option<String>);
 
+type Key = (String, String, String);
+
 /// Cloning shares the underlying map.
 #[derive(Clone, Debug, Default)]
 pub struct MetadataArtifactRegistry {
-    // Key is a single concatenated `{slug}\0{suffix}\0{filename}` string —
-    // one allocation per lookup instead of a 3-`String` tuple.
-    entries: Arc<RwLock<HashMap<String, (PathBuf, Owner)>>>,
-}
-
-fn make_key(slug: &str, suffix: &str, filename: &str) -> String {
-    let mut s = String::with_capacity(slug.len() + suffix.len() + filename.len() + 2);
-    s.push_str(slug);
-    s.push('\0');
-    s.push_str(suffix);
-    s.push('\0');
-    s.push_str(filename);
-    s
+    entries: Arc<RwLock<HashMap<Key, (PathBuf, Owner)>>>,
 }
 
 impl MetadataArtifactRegistry {
@@ -61,7 +51,7 @@ impl MetadataArtifactRegistry {
     /// wipe files detach-#2 still needs. Same-owner re-register is fine
     /// (path update).
     pub fn register(&self, owner: &Owner, slug: &str, suffix: &str, filename: &str, path: PathBuf) {
-        let key = make_key(slug, suffix, filename);
+        let key = (slug.to_string(), suffix.to_string(), filename.to_string());
         let mut entries = self.entries.write();
         if let Some((_, prior)) = entries.get(&key) {
             assert_eq!(
@@ -74,10 +64,8 @@ impl MetadataArtifactRegistry {
     }
 
     pub fn get(&self, slug: &str, suffix: &str, filename: &str) -> Option<PathBuf> {
-        self.entries
-            .read()
-            .get(&make_key(slug, suffix, filename))
-            .map(|(p, _)| p.clone())
+        let key = (slug.to_string(), suffix.to_string(), filename.to_string());
+        self.entries.read().get(&key).map(|(p, _)| p.clone())
     }
 
     /// Drop every entry registered by `owner`. No-op if `owner` never
