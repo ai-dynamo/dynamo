@@ -78,6 +78,7 @@ def _pin_nats_event_plane_for_mocker(request, monkeypatch):
         monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
     yield
 
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
