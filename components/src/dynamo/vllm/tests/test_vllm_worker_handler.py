@@ -1493,6 +1493,46 @@ class TestRLAdminRouteHardening:
         assert resp["request_id"] == "req-y"
 
     @pytest.mark.asyncio
+    async def test_update_weights_via_mx_requires_pause(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+
+        resp = await handler.update_weights_via_mx({"version": 7, "mx_config": {}})
+
+        assert resp["status"] == "error"
+        assert "pause_generation" in resp["message"]
+        handler.engine_client.collective_rpc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_weights_via_mx_collective_rpc(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(return_value=[True, True])
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        mx_config = {"mx_server_url": "modelexpress:8001"}
+        resp = await handler.update_weights_via_mx(
+            {"version": "7", "mx_config": mx_config}
+        )
+
+        assert resp == {
+            "status": "ok",
+            "version": 7,
+            "workers_ok": 2,
+            "workers_total": 2,
+        }
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "update_weights_via_mx",
+            kwargs={"version": 7, "mx_config": mx_config},
+        )
+        handler.engine_client.reset_prefix_cache.assert_awaited_once()
+        assert handler._weight_version == 7
+
+    @pytest.mark.asyncio
     async def test_deferred_abort_does_not_block_before_first_token(self):
         # abort() before the first token must return promptly (the real abort is
         # deferred to a background task), not hang on the first-token event.

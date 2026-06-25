@@ -1662,6 +1662,79 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"[RL] update_weights_from_distributed failed: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def update_weights_via_mx(self, body: dict) -> dict:
+        """Receive weights from a ModelExpress v2 publisher via worker extension."""
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
+
+        async with self._pause_lock:
+            if not getattr(self, "_paused", False):
+                return {
+                    "status": "error",
+                    "message": (
+                        "Worker must be paused via pause_generation() before "
+                        "updating weights. Call pause_generation() first, then "
+                        "update, then resume_generation()."
+                    ),
+                }
+
+            version = body.get("version", body.get("weight_version"))
+            if version is None:
+                return {"status": "error", "message": "Missing 'version' in body"}
+            try:
+                version = int(version)
+            except (TypeError, ValueError):
+                return {
+                    "status": "error",
+                    "message": "'version' must be an integer",
+                }
+
+            mx_config = body.get("mx_config") or {}
+            if not isinstance(mx_config, dict):
+                return {
+                    "status": "error",
+                    "message": "'mx_config' must be a JSON object",
+                }
+
+            try:
+                results = await self.engine_client.collective_rpc(
+                    "update_weights_via_mx",
+                    kwargs={"version": version, "mx_config": mx_config},
+                )
+                worker_results = results if isinstance(results, list) else [results]
+                workers_ok = sum(1 for result in worker_results if result)
+                workers_total = len(worker_results)
+                all_ok = workers_total > 0 and workers_ok == workers_total
+
+                if workers_ok:
+                    await self.engine_client.reset_prefix_cache()
+                if all_ok:
+                    self._weight_version = version
+
+                logger.info(
+                    "[RL] ModelExpress weights update complete "
+                    "(version=%s, workers_ok=%s, workers_total=%s)",
+                    version,
+                    workers_ok,
+                    workers_total,
+                )
+                return {
+                    "status": "ok" if all_ok else "error",
+                    "version": version,
+                    "workers_ok": workers_ok,
+                    "workers_total": workers_total,
+                }
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.error(f"[RL] update_weights_via_mx failed: {e}")
+                return {"status": "error", "message": str(e)}
+
     async def update_weights_from_tensor(self, body: dict) -> dict:
         """Not implemented: in-process tensor transfer is not yet supported."""
         if body is None:

@@ -908,6 +908,7 @@ class WorkerFactory:
             "abort_request": handler.abort_request,
             "update_weights_from_disk": handler.update_weights_from_disk,
             "update_weights_from_distributed": handler.update_weights_from_distributed,
+            "update_weights_via_mx": handler.update_weights_via_mx,
             "update_weights_from_tensor": handler.update_weights_from_tensor,
             "init_weights_update_group": handler.init_weights_update_group,
             "destroy_weights_update_group": handler.destroy_weights_update_group,

@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 MX_LOAD_FORMATS = {"modelexpress", "mx"}
+MX_REFIT_WORKER_EXTENSION = "dynamo.vllm.mx_refit.extension.MxRefitWorkerExtension"
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
@@ -82,6 +83,23 @@ def should_prefetch_model(config: Config) -> bool:
 
 def should_register_model_ignore_weights(config: Config) -> bool:
     return uses_modelexpress_load_format(config)
+
+
+def _configure_mx_refit_worker_extension(engine_args: Any) -> None:
+    if os.environ.get("DYN_MX_REFIT_ENABLED") != "1":
+        return
+
+    existing_ext = getattr(engine_args, "worker_extension_cls", None)
+    if existing_ext and existing_ext != MX_REFIT_WORKER_EXTENSION:
+        logger.warning(
+            "[mx-refit] worker_extension_cls already set to %r; overriding to %r. "
+            "Stacking extensions is not supported.",
+            existing_ext,
+            MX_REFIT_WORKER_EXTENSION,
+        )
+
+    engine_args.worker_extension_cls = MX_REFIT_WORKER_EXTENSION
+    logger.info("[mx-refit] enabled; worker_extension_cls=%s", MX_REFIT_WORKER_EXTENSION)
 
 
 def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
@@ -146,6 +164,7 @@ def run_dynamo_headless(config: Config) -> None:
 
     # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
     # Dynamo does not set a custom worker class here.
+    _configure_mx_refit_worker_extension(config.engine_args)
 
     # Keep the upstream CLI import local so tests that only exercise
     # build_headless_namespace() do not pull in vLLM's full CLI import graph.
@@ -570,6 +589,8 @@ def setup_vllm_engine(
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
+
+    _configure_mx_refit_worker_extension(engine_args)
 
     # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
     # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.

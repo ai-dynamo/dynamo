@@ -523,6 +523,21 @@ def test_should_register_model_fetch_weights_for_default_load_format():
     assert should_register_model_ignore_weights(config) is False
 
 
+def test_mx_refit_env_sets_worker_extension(monkeypatch):
+    from dynamo.vllm.main import (
+        MX_REFIT_WORKER_EXTENSION,
+        _configure_mx_refit_worker_extension,
+    )
+
+    engine_args = SimpleNamespace(worker_extension_cls=None)
+
+    monkeypatch.setenv("DYN_MX_REFIT_ENABLED", "1")
+
+    _configure_mx_refit_worker_extension(engine_args)
+
+    assert engine_args.worker_extension_cls == MX_REFIT_WORKER_EXTENSION
+
+
 def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     from dynamo.vllm import main as vllm_main
 
