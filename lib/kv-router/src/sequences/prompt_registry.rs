@@ -77,6 +77,22 @@ impl WorkerLoadSnapshot {
 
 #[derive(Debug)]
 struct WorkerLoadSlot {
+    // SeqLock gives the hot projection path a lock-free read of the latest
+    // whole-worker snapshot. Readers sample a sequence counter, copy the
+    // `Copy` payload, then retry if a writer changed the sequence while the
+    // copy was in flight. Writers still serialize with each other, but they do
+    // not wait for readers.
+    //
+    // The upstream crate implements the copy with `read_volatile`, which is
+    // technically UB under Rust/LLVM if a writer mutates the same memory at the
+    // same time: volatile is not atomic and does not by itself legalize a data
+    // race. See https://github.com/Amanieu/seqlock/issues/2#issuecomment-473606523.
+    //
+    // This use is intentionally narrow. `WorkerLoadSnapshot` is a small `Copy`
+    // value with no references or ownership, any torn read is discarded when
+    // the sequence changes, and the value is only advisory routing load state.
+    // In practice this is the same seqlock/READ_ONCE pattern the crate is
+    // designed for, while avoiding the per-worker RwLock read on every request.
     load: SeqLock<WorkerLoadSnapshot>,
 }
 
