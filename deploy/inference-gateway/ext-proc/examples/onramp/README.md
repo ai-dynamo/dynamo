@@ -3,126 +3,90 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Dynamo Router on-ramp (raw vLLM, no Dynamo control plane)
+# Dynamo EPP on-ramp for vanilla vLLM
 
-This directory is the **smallest possible** way to put Dynamo's KV/load-aware
-router in front of an existing **vanilla `vllm serve`** fleet that already sits
-behind a Gateway-API gateway with the Inference Extension (GAIE).
+This directory contains raw Kubernetes manifests for running Dynamo's Endpoint Picker Plugin (EPP)
+with stock `vllm serve` pods behind Gateway API Inference Extension (GAIE), without installing the
+Dynamo operator or Dynamo runtime.
 
-If you already run GAIE + vLLM, you **replace only your EndpointPicker (EPP)**
-with the Dynamo EPP and you are done — no Dynamo operator, no Dynamo runtime,
-no Dynamo worker.
-
-| | This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
-|---|---|---|
-| Workers | stock `vllm serve` | Dynamo workers (vLLM/SGLang/TRT-LLM) |
-| Discovery | K8s pod reflector + label selector | Dynamo discovery (etcd/K8s) |
-| KV events | per-pod vLLM ZMQ → EPP wrapper | Dynamo event plane |
-| Runtime | none, `DYN_EVENT_PLANE=zmq` | etcd + NATS |
-| Operator | not required | required (DynamoGraphDeployment) |
-| Tokenization | EPP tokenizes for routing; worker re-tokenizes | model-card preprocessor, no double tokenization |
-
-The EPP can be served in 2 modes. The two modes are selected at startup by **`DYN_EPP_MODE`** (`full-dynamo-stack` | `router-only`). The same EPP binary serves both.
-
-## Limitations
-
-| This on-ramp (router-only mode) | Full Dynamo (full-dynamo-stack mode) |
-|---|---|
-Duplicate store/remove (vLLM "retries") | parity
-In-stream ordering |  parity
-Transient disconnects | parity-ish. If the EPP's connection to a worker drops for a moment (a brief network blip or a quick pod restart), it reconnects on its own and keeps routing; the only catch is that any KV-cache updates the worker sent during that short gap are missed (ZMQ doesn't replay them), so the router's view is briefly a little out of date until normal traffic refreshes it — almost the same as the full stack, which can replay those missed updates.
-Dropped events / gaps | Not handled. (NATS/JetStream is durable + replayable; the standalone indexer does seq-watermark gap detection + replay.)
-Initial cache state | Not handled. (The Dynamo path does an initial worker dump).
-Backpressure / EPP restart | PUB drops to slow subscribers (HWM) → silent loss; on restart the index is empty and only re-warms from new traffic.
-Data Parallelism | Not supported
+For the user-facing walkthrough, start with
+[GAIE Quickstart: Vanilla vLLM On-ramp](../../../../../docs/kubernetes/gateway-api/vanilla-vllm-onramp.mdx).
+That page shows the Gateway API, GAIE, agentgateway, Istio, credentials, verification, and cleanup
+steps in order.
 
 ## Examples
 
-- `agg.yaml` — aggregated: one vLLM pool, KV-aware load balancing.
-- `disagg.yaml` — disaggregated: prefill + decode pools, KV-aware P/D selection. Note that for the disaggregated serving you need to also build the sidecar to orchestrate the pull of the kv cache from the prefill worker.
+| Manifest | Topology | Notes |
+|---|---|---|
+| `agg.yaml` | Aggregated | Turnkey on-ramp example. The EPP chooses among stock vLLM pods. |
+| `disagg.yaml` | Disaggregated | Experimental. Requires a P/D sidecar image for the decode pods before applying. |
 
-## Prerequisites
+Both manifests are namespace-neutral. Apply them with `kubectl apply -n <namespace> -f ...` after
+creating the namespace, Gateway API resources, GAIE CRDs, a Gateway, and any model credentials.
 
-```bash
-# Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`
-deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+## Images and versions
 
-# HF token secret (the EPP downloads the tokenizer to tokenize for routing)
-kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-token>
-```
-The Dynamo EPP image is named "frontend" and provided to you with each release.
-For disaggreaged serving you also need to use the "sidecar" image provided with the release or build it with commands below.
+The Dynamo EPP is packaged in the public Dynamo Frontend image:
 
-### Build the P/D routing sidecar image (disaggregated only)
-
-The sidecar is a standalone Rust crate at `deploy/inference-gateway/pd-sidecar/`.
-It is a workspace member, so build it with the **repo root as the `dynamo` build
-context** (the 2-stage Dockerfile copies the workspace, then compiles only
-`dynamo-pd-sidecar`):
-
-```bash
-cd deploy/inference-gateway/pd-sidecar
-docker buildx build \
-  --build-context dynamo=../../.. \
-  -t dynamo/pd-sidecar:dev \
-  -f Dockerfile --load .
-
-# make it reachable by your cluster, e.g. for kind:
-kind load docker-image dynamo/pd-sidecar:dev --name <cluster>
+```text
+nvcr.io/nvidia/ai-dynamo/dynamo-frontend:<dynamo-version>
 ```
 
-Then set the `pd-router-sidecar` container's `image:` in `disagg.yaml` to the tag
-you built. The sidecar reads the `x-prefiller-host-port` header the EPP emits and
-runs vLLM's `kv_transfer_params` handshake against the selected prefill pod.
+Use an EPP image tag from the same Dynamo release line as any Dynamo runtime images in the same
+deployment. These examples currently use `dynamo-frontend:1.3.0-dev.1`, the full-platform preview
+tag listed in the [Release Artifacts](../../../../../docs/reference/release-artifacts.md#v130-dev1).
 
+The aggregated on-ramp uses the public `vllm/vllm-openai:latest` image. The disaggregated on-ramp
+also needs a P/D sidecar image built from `deploy/inference-gateway/pd-sidecar/` and pushed to a
+registry your cluster can pull:
 
-## Run
-
-```bash
-kubectl apply -n <ns> -f agg.yaml        # or disagg.yaml
-kubectl apply  -n <ns> -f http-route.yaml # adjust per your namespace
-
-# terminal 1
-kubectl -n agentgateway-system port-forward svc/inference-gateway 8000:80
-
-# terminal 2
-GATEWAY_URL=http://localhost:8000
-
-# quick health/smoke first
-curl --max-time 20 -sS "$GATEWAY_URL/v1/models" | jq .
-
-# then chat completion
-curl --max-time 120 -sS "$GATEWAY_URL/v1/chat/completions" \
-  -H 'content-type: application/json' \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role":"user","content":"hello"}]
-  }' | jq .
-
+```yaml
+image: "<your-registry>/dynamo-pd-sidecar:dev"
 ```
 
-## router-only-mode environment contract
+## How the on-ramp works
 
-| Env | Meaning |
-|---|---|
-| `DYN_EPP_MODE=router-only` | Select router-only (on-ramp) mode; `full-dynamo-stack` (default) keeps Dynamo mode |
-| `DYN_EPP_POD_SELECTOR` | Label selector for raw vLLM pods (reflector) |
-| `DYN_EPP_TARGET_PORT` | vLLM OpenAI HTTP port (pool targetPort) |
-| `DYN_EPP_KV_EVENTS=true` | Subscribe to per-pod vLLM ZMQ KV events |
-| `DYN_EPP_KV_EVENT_PORT` | vLLM `--kv-events-config` PUB port (e.g. 5557) |
-| `DYN_EPP_KV_EVENT_TOPIC` | vLLM `--kv-events-config` topic (`""` default) |
-| `DYN_MODEL_NAME` | Model id (no model card in router-only mode) |
-| `DYN_KV_CACHE_BLOCK_SIZE` | MUST equal vLLM `--block-size` |
-| `DYN_DISCOVERY_BACKEND=mem` | Inert runtime — no etcd |
-| `DYN_EVENT_PLANE=zmq` | Inert runtime — no NATS |
-| `DYN_EPP_ROLE_LABEL` | (disagg) pod label key splitting prefill/decode |
-| `DYN_ENFORCE_DISAGG` | (disagg) fail instead of agg fallback |
-| `DYN_EPP_EMIT_PREFILLER_HOST_PORT` | (disagg) emit `x-prefiller-host-port` |
+In a normal full Dynamo deployment, the Dynamo Frontend performs request routing. In this on-ramp,
+the EPP embeds the relevant routing logic so GAIE can ask the EPP to choose an endpoint for an
+existing vLLM fleet. The literal switch is set on the EPP container:
 
-## How KV events reach the router without NATS
+```yaml
+- name: DYN_EPP_MODE
+  value: "router-only"
+```
 
-vanilla vLLM publishes native KV-cache events on a ZMQ PUB socket
-(`--kv-events-config`). In router-only mode the EPP runs an in-process **ZMQ
-wrapper**: it subscribes to each Ready pod's PUB socket, normalizes the events,
-and feeds them into the embedded `KvRouter`'s index over the runtime's ZMQ event
-plane.
+The EPP watches ready vLLM pods with `DYN_EPP_POD_SELECTOR`, subscribes to native vLLM KV cache
+events when `DYN_EPP_KV_EVENTS=true`, tokenizes prompts for routing, and returns the selected
+endpoint to the gateway.
+
+```mermaid
+flowchart LR
+    subgraph Workers["vLLM pods"]
+      W1["vLLM pod A<br/>KV PUB :5557"]
+      W2["vLLM pod B<br/>KV PUB :5557"]
+    end
+
+    W1 -. "ZMQ KV events" .-> Subscribers["EPP ZMQ subscribers"]
+    W2 -. "ZMQ KV events" .-> Subscribers
+    Subscribers --> Normalize["Normalize events"]
+    Normalize --> Index["Embedded KV index"]
+    Index --> Picker["Endpoint picker"]
+```
+
+## What full Dynamo adds
+
+Router-only mode keeps the on-ramp lightweight, but it starts with an empty KV index. It does not
+know what prefixes are already cached on existing vLLM pods. Early requests are routed with little
+or no cache-awareness, and the index warms only as fresh KV events arrive after startup.
+
+Full Dynamo adds the managed runtime around the same routing goal:
+
+- NATS/JetStream-backed event delivery for routing state.
+- Replay after EPP restart or temporary disconnects.
+- Gap detection and recovery when events are missed.
+- Initial worker cache-state synchronization instead of rebuilding the index from live traffic.
+- Operator-managed lifecycle for workers, services, InferencePools, and EPP resources.
+
+Use the
+[GAIE Quickstart: Full Dynamo](../../../../../docs/kubernetes/gateway-api/full-dynamo.mdx) when you
+need those properties.

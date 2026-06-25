@@ -95,6 +95,17 @@ navigation:
             path: kubernetes/deployment/dynamomodel-guide.md
           - page: DGDR Reference
             path: kubernetes/dgdr.md
+      - section: Gateway API
+        contents:
+          - section: Gateway API Inference Extension (GAIE)
+            path: kubernetes/gateway-api/README.mdx
+            contents:
+              - page: Overview
+                path: kubernetes/gateway-api/README.mdx
+              - page: Vanilla vLLM On-ramp
+                path: kubernetes/gateway-api/vanilla-vllm-onramp.mdx
+              - page: Full Dynamo
+                path: kubernetes/gateway-api/full-dynamo.mdx
       - section: Model Loading
         contents:
           - page: Model Caching
@@ -411,15 +422,6 @@ navigation:
         contents:
           - page: LWS
             path: kubernetes/lws.md
-          - section: Gateway API Inference Extension (GAIE)
-            path: kubernetes/gateway-api/README.mdx
-            contents:
-              - page: Overview
-                path: kubernetes/gateway-api/README.mdx
-              - page: Vanilla vLLM On-ramp
-                path: kubernetes/gateway-api/vanilla-vllm-onramp.mdx
-              - page: Full Dynamo
-                path: kubernetes/gateway-api/full-dynamo.mdx
 
   # ==================== Design Docs ====================
   - section: Design Docs

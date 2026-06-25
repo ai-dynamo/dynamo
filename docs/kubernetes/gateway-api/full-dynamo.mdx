@@ -286,11 +286,16 @@ curl --max-time 180 -sS "$GATEWAY_URL/v1/chat/completions" \
 ```
 </CodeBlocks>
 
-Check that the EPP path handled the request:
+Finish by checking that the EPP path handled the request. A successful smoke test should show the EPP
+receiving endpoint-picker traffic and selecting a worker near the time of your request; that proves
+the request flowed through Gateway API and the Dynamo EPP before it reached the Frontend sidecar.
 
 ```bash
-kubectl logs -n "$NAMESPACE" -l nvidia.com/dynamo-component-type=epp --tail=100
+kubectl logs -n "$NAMESPACE" -l nvidia.com/dynamo-component-type=epp --tail=200
 ```
+
+If the log output is quiet, run the chat request again while tailing the EPP logs in another
+terminal.
 
 ## Istio Variant
 

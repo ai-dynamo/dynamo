@@ -9,6 +9,26 @@ Use Gateway API Inference Extension (GAIE) when the Kubernetes Gateway should se
 serving endpoint before the request reaches a model server. Dynamo integrates with GAIE through
 an Endpoint Picker Plugin (EPP) that performs KV cache aware routing at the gateway layer.
 
+## What GAIE Adds
+
+Gateway API gives Kubernetes a standard `Gateway` and `HTTPRoute` model for exposing traffic. GAIE
+adds inference-specific endpoint selection: the gateway calls an Endpoint Picker Plugin before it
+forwards the request. Dynamo's EPP uses Dynamo routing logic to choose the model endpoint, including
+KV cache aware routing when KV events are available.
+
+Use GAIE when your platform wants the Kubernetes Gateway to be the entry point for inference traffic,
+policy, and observability. Use the standard Dynamo Kubernetes quickstart when you want the Dynamo
+Frontend to be the entry point and do not need Gateway API integration.
+
+## Who Should Use This
+
+- Platform teams that standardize on Gateway API and want inference requests to flow through a
+  Kubernetes `Gateway`.
+- Existing GAIE users who already run vLLM pods and want to try Dynamo's EPP without adopting the
+  full Dynamo operator on day one.
+- Dynamo users who want the operator-managed serving graph while keeping gateway-level routing,
+  policy, and integration points at the cluster edge.
+
 ## Choose Your Path
 
 <CardGroup cols={2}>
@@ -82,6 +102,19 @@ flowchart LR
 Full Dynamo uses the operator-managed runtime. The EPP receives routing state from the Dynamo event
 plane, including the startup snapshot and subsequent updates.
 
+## Routing Modes
+
+GAIE does not require one specific scoring strategy. Choose the routing behavior based on the routing
+state available to the EPP.
+
+| Mode | What the EPP uses | When to use it |
+|---|---|---|
+| KV cache aware routing | Live KV cache events from vLLM in the on-ramp path, or Dynamo's event plane in the full Dynamo path. | Default path when workers publish KV events and you want cache locality to influence endpoint selection. |
+| Approximate routing | Endpoint availability and non-KV routing signals, without exact cached-prefix ownership. | Fallback path when KV events are unavailable, disabled, or not yet supported by the chosen backend or deployment shape. |
+
+The on-ramp path reads best-effort vLLM ZMQ events directly. Full Dynamo adds NATS/JetStream-backed
+event delivery, replay, gap recovery, and startup cache-state synchronization.
+
 ## Shared Prerequisites
 
 - Kubernetes cluster with GPU nodes. For the baseline Gateway API environment, start with the
@@ -104,6 +137,22 @@ plane, including the startup snapshot and subsequent updates.
 
 Install the shared Gateway API layer once per cluster or environment. The two quick starts show the
 same setup explicitly so the commands remain auditable.
+
+## Compatibility and Defaults
+
+The quickstarts pin the Gateway API layer so manual setup is repeatable. Keep Dynamo component images
+on the same Dynamo release line unless a recipe says otherwise.
+
+| Component | Default shown here | Notes |
+|---|---|---|
+| Gateway API CRDs | `v1.5.1` | Installed from the upstream Gateway API release. |
+| GAIE CRDs | `v1.2.1` | Installed from the upstream Gateway API Inference Extension release. |
+| agentgateway | `v1.0.0` | Installed with `inferenceExtension.enabled=true`. |
+| Istio | `1.29.2` | Install with `ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true`. |
+| Dynamo EPP image | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:<dynamo-version>` | The EPP is packaged in the public Dynamo Frontend image. Use a tag from the same Dynamo release as your runtime images. |
+| Current 1.3 preview tag | `1.3.0-dev.1` | The current full-platform preview includes `dynamo-frontend:1.3.0-dev.1` and matching runtime images. See [Release Artifacts](../../reference/release-artifacts.md#v130-dev1). |
+| On-ramp data plane | Gateway -> EPP -> stock vLLM pod | KV events flow directly from vLLM pods to the EPP over ZMQ. |
+| Full Dynamo data plane | Gateway -> EPP -> Frontend sidecar -> Dynamo worker | KV events and startup snapshots flow through the Dynamo event plane. |
 
 ## Gateway Implementation
 

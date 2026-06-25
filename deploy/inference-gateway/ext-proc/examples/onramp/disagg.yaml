@@ -26,7 +26,8 @@
 # selects all of them) plus a role label `dynamo-role: prefill|decode` that the
 # EPP uses to tell the two pools apart.
 #
-# Prereqs: deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+# Prereqs: install Gateway API, GAIE, a Gateway implementation, and replace
+#          the pd-router-sidecar image with an image published to your cluster.
 # Apply:   kubectl apply -n <ns> -f disagg.yaml
 # -----------------------------------------------------------------------------
 
@@ -178,7 +179,7 @@ spec:
               type: RuntimeDefault
         # decode-side P/D routing sidecar -------------------------
         - name: pd-router-sidecar
-          image: docker.io/lambda108/pd-sidecar-dynamo:disagg-test
+          image: "<your-registry>/dynamo-pd-sidecar:dev"
       tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -240,7 +241,7 @@ spec:
       serviceAccountName: qwen-epp
       containers:
         - name: epp
-          image:  docker.io/lambda108/epp-inference-extension-dynamo:disagg-test
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0-dev.1
           ports:
             - name: grpc
               containerPort: 9002

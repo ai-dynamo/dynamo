@@ -37,7 +37,12 @@ incoming prompts for routing, and returns the selected endpoint to the gateway.
 - `kubectl`, Helm, and `jq`.
 - A model namespace that can run GPU workloads.
 - Hugging Face credentials if the model requires them.
-- Access to the Dynamo EPP image and the vLLM image used by the example.
+- Access to the Dynamo EPP image and the vLLM image used by the example. The EPP image is
+  `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:<dynamo-version>`; the example currently uses the
+  `1.3.0-dev.1` preview tag.
+- For the disaggregated on-ramp only, a P/D sidecar image published to a registry your cluster can
+  pull. The source lives in `deploy/inference-gateway/pd-sidecar/`; update the
+  `pd-router-sidecar` image in `disagg.yaml` before applying it.
 
 Set the namespace once and use it for every namespaced resource in this quick start:
 
@@ -184,6 +189,9 @@ Service, InferencePool, and HTTPRoute.
     ```
   </Tab>
   <Tab title="Disaggregated" language="bash">
+    The disaggregated on-ramp is experimental and not turnkey. Before applying it, replace the
+    `pd-router-sidecar` image placeholder in `disagg.yaml` with an image available to your cluster.
+
     ```bash
     kubectl apply -n "$NAMESPACE" \
       -f deploy/inference-gateway/ext-proc/examples/onramp/disagg.yaml
@@ -252,11 +260,16 @@ curl --max-time 120 -sS "$GATEWAY_URL/v1/chat/completions" \
 ```
 </CodeBlocks>
 
-Check the EPP logs for pod discovery and routing decisions:
+Finish by checking the EPP logs. A successful smoke test should show pod discovery and endpoint
+selection near the time of your request; that is the signal that Gateway API called the Dynamo EPP
+instead of bypassing the endpoint picker.
 
 ```bash
-kubectl logs -n "$NAMESPACE" deployment/qwen-epp -c epp --tail=100
+kubectl logs -n "$NAMESPACE" deployment/qwen-epp -c epp --tail=200
 ```
+
+If the log output is quiet, run the chat request again while tailing the EPP logs in another
+terminal.
 
 ## Configure the EPP Router Mode
 
