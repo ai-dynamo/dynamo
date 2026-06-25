@@ -23,6 +23,9 @@ from dynamo.common.snapshot.constants import (
 logger = logging.getLogger(__name__)
 ConfigT = TypeVar("ConfigT")
 
+NCCL_CHECKPOINT_KVS_PATH_ENV = "NCCL_CHECKPOINT_KVS_PATH"
+DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV = "DYN_SNAPSHOT_NCCL_KVS_ENDPOINT"
+
 _RESTORE_RUNTIME_CONFIG_FIELDS = (
     "namespace",
     "discovery_backend",
@@ -240,4 +243,30 @@ def maybe_run_restore_standby_mode() -> None:
         return
 
     write_snapshot_restore_context()
+    write_nccl_checkpoint_kvs_endpoint()
     os.execvp("sleep", ["sleep", "infinity"])
+
+
+def write_nccl_checkpoint_kvs_endpoint() -> None:
+    """Write the NCCL checkpoint KVS endpoint file when configured."""
+
+    has_kvs_path = NCCL_CHECKPOINT_KVS_PATH_ENV in os.environ
+    has_endpoint = DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV in os.environ
+    kvs_path = os.environ.get(NCCL_CHECKPOINT_KVS_PATH_ENV)
+    endpoint = os.environ.get(DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV)
+    if not kvs_path or not endpoint:
+        if has_kvs_path != has_endpoint:
+            logger.warning(
+                "NCCL checkpoint KVS endpoint writer requires both %s and %s; "
+                "skipping because only one is set.",
+                NCCL_CHECKPOINT_KVS_PATH_ENV,
+                DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV,
+            )
+        return
+
+    path = Path(kvs_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(endpoint + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+    logger.info("Wrote NCCL checkpoint KVS endpoint %s to %s", endpoint, path)
