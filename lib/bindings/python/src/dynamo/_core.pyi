@@ -1651,6 +1651,11 @@ class AicPerfConfig:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1990,6 +1995,11 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: int = 42,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
@@ -2143,6 +2153,36 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_gemm_dtype(self) -> Optional[str]: ...
+
+    @aic_gemm_dtype.setter
+    def aic_gemm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_moe_dtype(self) -> Optional[str]: ...
+
+    @aic_moe_dtype.setter
+    def aic_moe_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_fmha_dtype(self) -> Optional[str]: ...
+
+    @aic_fmha_dtype.setter
+    def aic_fmha_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_kv_cache_dtype(self) -> Optional[str]: ...
+
+    @aic_kv_cache_dtype.setter
+    def aic_kv_cache_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_comm_dtype(self) -> Optional[str]: ...
+
+    @aic_comm_dtype.setter
+    def aic_comm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
     def aic_nextn(self) -> Optional[int]: ...
 
     @aic_nextn.setter
@@ -2206,6 +2246,11 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: Optional[int] = None,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
