@@ -30,6 +30,8 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
 - [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
 - [DynamoModel](#dynamomodel)
+- [PodSnapshot](#podsnapshot)
+- [PodSnapshotContent](#podsnapshotcontent)
 
 
 
@@ -1122,6 +1124,190 @@ _Appears in:_
 | `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
 | `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
+
+
+#### PodReference
+
+
+
+PodReference names a pod in the same namespace as the referencing PodSnapshot.
+
+
+
+_Appears in:_
+- [PodSnapshotContentSource](#podsnapshotcontentsource)
+- [PodSnapshotSource](#podsnapshotsource)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the source pod. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | UID of the source pod, recorded so the node agent dumps that specific<br />pod and not a same-named recreation. |  | Optional: \{\} <br /> |
+
+
+#### PodSnapshot
+
+
+
+PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
+for a captured container checkpoint and is consumed by restore paths.
+
+No conversion: this type exists only in v1alpha1 (no other API version), so it
+is not part of any conversion scheme.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `PodSnapshot` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[PodSnapshotSpec](#podsnapshotspec)_ |  |  |  |
+| `status` _[PodSnapshotStatus](#podsnapshotstatus)_ |  |  |  |
+
+
+#### PodSnapshotContent
+
+
+
+PodSnapshotContent is the Schema for the snapshotcontents API. It is the
+cluster-scoped artifact-of-record for a captured container checkpoint.
+
+No conversion: this type exists only in v1alpha1 (no other API version), so it
+is not part of any conversion scheme.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `PodSnapshotContent` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[PodSnapshotContentSpec](#podsnapshotcontentspec)_ |  |  |  |
+| `status` _[PodSnapshotContentStatus](#podsnapshotcontentstatus)_ |  |  |  |
+
+
+#### PodSnapshotContentSource
+
+
+
+PodSnapshotContentSource is the immutable source descriptor: what to dump
+(PodRef) and where it runs (NodeName).
+
+
+
+_Appears in:_
+- [PodSnapshotContentSpec](#podsnapshotcontentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `podRef` _[PodReference](#podreference)_ | PodRef identifies the pod to dump. Its UID guards against dumping a<br />same-named recreation of the pod. |  | Required: \{\} <br /> |
+| `nodeName` _string_ | NodeName is the node the source pod runs on, denormalized from the live<br />pod so it travels with PodRef as one immutable unit and selects the node<br />agent that performs the dump. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### PodSnapshotContentSpec
+
+
+
+PodSnapshotContentSpec defines the desired state of PodSnapshotContent. It is
+populated by the PodSnapshotReconciler (operator) at creation time and is
+immutable thereafter.
+
+
+
+_Appears in:_
+- [PodSnapshotContent](#podsnapshotcontent)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `snapshotRef` _[PodSnapshotReference](#podsnapshotreference)_ | PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span<br />namespaces because PodSnapshotContent is cluster-scoped. |  | Required: \{\} <br /> |
+| `source` _[PodSnapshotContentSource](#podsnapshotcontentsource)_ | Source describes what to capture: the source pod and the node it runs on. |  | Required: \{\} <br /> |
+
+
+#### PodSnapshotContentStatus
+
+
+
+PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
+
+
+
+_Appears in:_
+- [PodSnapshotContent](#podsnapshotcontent)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reflect the latest observations of the PodSnapshotContent's state.<br />Standard types are Ready and Failed. |  | Optional: \{\} <br /> |
+
+
+#### PodSnapshotReference
+
+
+
+PodSnapshotReference is a cross-namespace reference to a PodSnapshot.
+
+
+
+_Appears in:_
+- [PodSnapshotContentSpec](#podsnapshotcontentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `namespace` _string_ | Namespace of the referenced PodSnapshot. |  | Required: \{\} <br /> |
+| `name` _string_ | Name of the referenced PodSnapshot. |  | Required: \{\} <br /> |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | UID of the referenced PodSnapshot, recorded at binding time to detect a<br />stale reference after a delete and recreate. |  | Optional: \{\} <br /> |
+
+
+#### PodSnapshotSource
+
+
+
+PodSnapshotSource identifies the workload captured by a PodSnapshot.
+
+
+
+_Appears in:_
+- [PodSnapshotSpec](#podsnapshotspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `podRef` _[PodReference](#podreference)_ | PodRef references the pod, in the PodSnapshot's namespace, that is captured.<br />The operator prepares the pod (control volume, target-container annotation,<br />checkpoint storage mount) before creating the PodSnapshot. |  | Required: \{\} <br /> |
+
+
+#### PodSnapshotSpec
+
+
+
+PodSnapshotSpec defines the desired state of PodSnapshot.
+
+
+
+_Appears in:_
+- [PodSnapshot](#podsnapshot)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `source` _[PodSnapshotSource](#podsnapshotsource)_ | Source identifies the captured workload. It is a struct (rather than an<br />inlined reference) so future source variants can be added additively. |  | Required: \{\} <br /> |
+
+
+#### PodSnapshotStatus
+
+
+
+PodSnapshotStatus defines the observed state of PodSnapshot.
+
+
+
+_Appears in:_
+- [PodSnapshot](#podsnapshot)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `boundSnapshotContentName` _string_ | BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent<br />this PodSnapshot is bound to. It is nil until the agent has created the<br />content and recorded the binding. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reflect the latest observations of the PodSnapshot's state.<br />Standard types are Ready and Failed. |  | Optional: \{\} <br /> |
 
 
 #### ProfilingConfigSpec
