@@ -153,7 +153,7 @@ async fn prefill_task(
 
     let prefill_request = SpeculativePrefillRequest::new(messages);
     let formatted_prompt = formatter.render(&prefill_request)?;
-    let encoding = tokenizer.encode(&formatted_prompt)?;
+    let encoding = super::OpenAIPreprocessor::encode_on_rayon(tokenizer, formatted_prompt).await?;
     let token_ids = encoding.token_ids().to_vec();
 
     tracing::info!(

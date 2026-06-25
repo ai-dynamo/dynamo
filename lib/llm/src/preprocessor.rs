@@ -33,7 +33,6 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
-use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -263,6 +262,7 @@ impl OpenAIPreprocessor {
         let annotations = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
             self.gather_tokens(request, &mut builder, formatted_prompt.clone(), tracker)
+                .await
                 .with_context(|| "Failed to gather tokens")?
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
@@ -532,7 +532,7 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    pub fn gather_tokens<
+    pub async fn gather_tokens<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -613,10 +613,10 @@ impl OpenAIPreprocessor {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"
                                 );
-                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker).await?;
                                 (encoding.token_ids().to_vec(), false)
                             } else {
-                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker).await?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -634,7 +634,8 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.encode_with_timing(&texts[0], tracker)?;
+                                let encoding =
+                                    self.encode_with_timing(texts[0].clone(), tracker).await?;
                                 let tokens = encoding.token_ids().to_vec();
                                 token_count = Some(tokens.len());
                                 builder.token_ids(tokens);
@@ -681,23 +682,56 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    fn encode_with_timing(
+    async fn encode_with_timing(
         &self,
-        prompt: &str,
+        prompt: String,
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
-        let prompt = if prompt.contains('\0') {
-            tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
-            Cow::Owned(prompt.replace('\0', ""))
-        } else {
-            Cow::Borrowed(prompt)
-        };
-        let encoding = self.tokenizer.encode(prompt.as_ref())?;
+        let tokenizer = self.tokenizer.clone();
+        let encoding = Self::encode_on_rayon(tokenizer, prompt).await?;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
         Ok(encoding)
+    }
+
+    async fn encode_on_rayon(
+        tokenizer: Arc<dyn Tokenizer>,
+        prompt: String,
+    ) -> anyhow::Result<Encoding> {
+        if let Some(pool) = dynamo_runtime::compute::thread_local::get_pool() {
+            pool.execute(move || tokenizer.encode(&Self::sanitize_prompt(prompt)))
+                .await?
+        } else {
+            tokio_rayon::spawn(move || tokenizer.encode(&Self::sanitize_prompt(prompt))).await
+        }
+    }
+
+    async fn encode_batch_on_rayon(
+        tokenizer: Arc<dyn Tokenizer>,
+        prompts: Vec<String>,
+    ) -> anyhow::Result<Vec<Encoding>> {
+        let encode_batch = move || {
+            let prompts: Vec<String> = prompts.into_iter().map(Self::sanitize_prompt).collect();
+            let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
+            tokenizer.encode_batch(&prompt_refs)
+        };
+
+        if let Some(pool) = dynamo_runtime::compute::thread_local::get_pool() {
+            pool.execute(encode_batch).await?
+        } else {
+            tokio_rayon::spawn(encode_batch).await
+        }
+    }
+
+    fn sanitize_prompt(prompt: String) -> String {
+        if prompt.contains('\0') {
+            tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
+            prompt.replace('\0', "")
+        } else {
+            prompt
+        }
     }
 
     /// Preprocess an embedding request, handling both text and token ID inputs.
@@ -716,19 +750,12 @@ impl OpenAIPreprocessor {
 
         let all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
+                let encoding = Self::encode_on_rayon(self.tokenizer.clone(), s.clone()).await?;
                 vec![encoding.token_ids().to_vec()]
             }
             dynamo_protocols::types::EmbeddingInput::StringArray(arr) => {
-                let input_strs: Vec<String> = arr.to_vec();
-                let encodings = tokio::task::spawn_blocking({
-                    let tokenizer = self.tokenizer.clone();
-                    let strs = input_strs.clone();
-                    move || {
-                        tokenizer.encode_batch(&strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())
-                    }
-                })
-                .await??;
+                let encodings =
+                    Self::encode_batch_on_rayon(self.tokenizer.clone(), arr.to_vec()).await?;
                 let token_arrays: Vec<Vec<u32>> = encodings
                     .into_iter()
                     .map(|encoding| encoding.token_ids().to_vec())
@@ -1666,7 +1693,8 @@ impl
             HashMap::new()
         } else {
             // Normal path: tokenize the prompt
-            self.gather_tokens(&request, &mut builder, None, tracker.as_deref())?
+            self.gather_tokens(&request, &mut builder, None, tracker.as_deref())
+                .await?
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
@@ -1832,6 +1860,54 @@ mod strip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokenizers::DecodeResult;
+    use std::sync::Mutex;
+
+    struct RecordingTokenizer {
+        encode_thread: Arc<Mutex<Option<std::thread::ThreadId>>>,
+    }
+
+    impl crate::tokenizers::traits::Encoder for RecordingTokenizer {
+        fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+            *self.encode_thread.lock().unwrap() = Some(std::thread::current().id());
+            assert_eq!(input, "hello");
+            Ok(Encoding::Sp(vec![1, 2, 3]))
+        }
+
+        fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
+            inputs.iter().map(|input| self.encode(input)).collect()
+        }
+    }
+
+    impl crate::tokenizers::traits::Decoder for RecordingTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[crate::tokenizers::TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<DecodeResult> {
+            Ok(DecodeResult::Complete(String::new()))
+        }
+    }
+
+    impl crate::tokenizers::traits::Tokenizer for RecordingTokenizer {}
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn test_encode_on_rayon_leaves_tokio_worker_thread() {
+        let tokio_thread = std::thread::current().id();
+        let encode_thread = Arc::new(Mutex::new(None));
+        let tokenizer: Arc<dyn crate::tokenizers::traits::Tokenizer> =
+            Arc::new(RecordingTokenizer {
+                encode_thread: encode_thread.clone(),
+            });
+
+        let encoding = OpenAIPreprocessor::encode_on_rayon(tokenizer, "he\0llo".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(encoding.token_ids(), &[1, 2, 3]);
+        let encode_thread = encode_thread.lock().unwrap().expect("encode was called");
+        assert_ne!(encode_thread, tokio_thread);
+    }
 
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
