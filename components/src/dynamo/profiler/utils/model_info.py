@@ -185,6 +185,20 @@ def model_has_auto_map(
     return bool(cfg.get("auto_map"))
 
 
+def model_ref_allows_implicit_trust_remote_code(
+    model_name_or_path: Union[str, Path],
+) -> bool:
+    """Return True when implicit trust_remote_code is allowed for this ref.
+
+    Until DGDR carries an immutable remote revision through to the profiler,
+    remote HF model IDs are treated as mutable and must opt in explicitly.
+    Only local directories (including PVC-resolved snapshots) qualify for
+    implicit ``--trust-remote-code`` injection.
+    """
+    path = Path(model_name_or_path)
+    return path.exists() and path.is_dir()
+
+
 class ModelInfo(BaseModel):
     model_size: float
     architecture: str
