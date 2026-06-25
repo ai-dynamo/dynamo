@@ -1652,7 +1652,7 @@ fn materialize_replay_mocker_args(
         // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
         // here, after candidate TP/backend/model overrides have been applied.
         if !extra_args.num_gpu_blocks_explicit() {
-            args.num_gpu_blocks = estimate_aic_num_gpu_blocks(
+            let per_rank_blocks = estimate_aic_num_gpu_blocks(
                 py,
                 &backend,
                 &system,
@@ -1681,6 +1681,14 @@ fn materialize_replay_mocker_args(
                     e
                 ))
             })?;
+            // AIC returns a per-rank (per-GPU) block count. Offline replay models a single
+            // KV pool per engine, so under DP-attention -- where each of the `dp` ranks holds
+            // a full KV replica for its slice of the batch -- the engine-wide pool is
+            // `per_rank * dp`. (The live mocker instead replicates one scheduler per dp rank,
+            // see lib/llm/src/mocker.rs, so it must keep the per-rank count; that is why this
+            // scaling lives on the offline-replay path and not inside the estimator.)
+            let dp = attention_dp_size.unwrap_or(1).max(1);
+            args.num_gpu_blocks = per_rank_blocks.saturating_mul(dp);
         }
         let callback = create_aic_callback(
             py,

@@ -127,7 +127,7 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     mem_fraction_static = raw.get("mem_fraction_static")
     free_gpu_memory_fraction = raw.get("free_gpu_memory_fraction")
 
-    raw["num_gpu_blocks"] = estimate_num_gpu_blocks(
+    per_rank_blocks = estimate_num_gpu_blocks(
         backend_name=aic_backend,
         system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
         model_path=aic_model_path,
@@ -163,6 +163,14 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
         comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
     )
+    # AIC returns a per-rank (per-GPU) block count. Offline replay models a single KV
+    # pool per engine, so under DP-attention -- where each of the `dp` ranks holds a full
+    # KV replica for its slice of the batch -- the engine-wide pool is per_rank * dp. The
+    # live mocker instead replicates one scheduler per dp rank (lib/llm/src/mocker.rs), so
+    # it keeps the per-rank count; this scaling lives on the offline-replay path, not in
+    # estimate_num_gpu_blocks itself.
+    dp = raw.get("aic_attention_dp_size") or 1
+    raw["num_gpu_blocks"] = per_rank_blocks * dp
 
 
 def _resolve_kv_bytes_per_token(raw: dict) -> None:
