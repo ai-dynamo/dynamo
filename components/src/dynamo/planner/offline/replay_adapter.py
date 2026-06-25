@@ -225,13 +225,16 @@ class ReplayPlannerAdapter:
         # Replay's ``run()`` is synchronous; we own a scoped event loop to
         # drive the async engine calls without forcing callers to use
         # ``asyncio.run``.
-        self._loop = asyncio.new_event_loop()
+        self._loop: Optional[asyncio.AbstractEventLoop] = asyncio.new_event_loop()
 
         # Last-seen FPM caches (separate for prefill/decode)
         self._prefill_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
         self._decode_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
         self._pending_prefill_fpm_snaps: list[dict[str, Any]] = []
         self._pending_decode_fpm_snaps: list[dict[str, Any]] = []
+        # Partial traffic window accumulated across ticks until a throughput tick
+        # consumes it (``None`` = nothing pending).
+        self._pending_traffic: Optional[dict[str, Any]] = None
 
         # Scaling targets -- used as `expected` in WorkerCounts
         self._scaling_target_prefill: Optional[int] = None

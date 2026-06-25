@@ -2404,12 +2404,23 @@ def run_mocker_synthetic_trace_replay(
     num_prefix_groups: int = 0,
     inter_turn_delay_ms: float = 0.0,
     model_name: Optional[str] = None,
+    sla_ttft_ms: Optional[float] = None,
+    sla_itl_ms: Optional[float] = None,
+    sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a synthetic mocker workload without requiring a trace file."""
+    """Replay a synthetic mocker workload without requiring a trace file.
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+    (offline replay only); when any is set the report carries ``goodput_*`` keys
+    classifying SLA-satisfying requests.
+    """
     ...
 
 class PlannerReplayBridge:
-    """Step-based bridge for driving an offline replay with a Python planner."""
+    """Drives an offline replay to completion with a Python planner. The Rust
+    simulation owns the drive loop and calls back into ``planner`` once per
+    ``PlannerTick`` via ``run(planner)`` (``planner`` exposes
+    ``initial_tick_ms() -> float`` and ``on_tick(metrics: dict) -> dict``)."""
 
     def __init__(
         self,
@@ -2491,9 +2502,7 @@ class PlannerReplayBridge:
         sla_e2e_ms: Optional[float] = None,
     ) -> "PlannerReplayBridge": ...
 
-    def advance_to(self, until_ms: float) -> Dict[str, Any]: ...
-    def apply_scaling(self, target_prefill: int, target_decode: int) -> None: ...
-    def finalize(self) -> Dict[str, Any]: ...
+    def run(self, planner: Any) -> Dict[str, Any]: ...
 
 class Layer:
     """
