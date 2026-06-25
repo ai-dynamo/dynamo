@@ -3075,6 +3075,9 @@ func Test_computeRestartStatus(t *testing.T) {
 					},
 				},
 			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				ObservedGeneration: 1,
+			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
@@ -3439,6 +3442,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				// No existing restart status - brand new restart request
+				ObservedGeneration: 1,
 			},
 			existingResources: []client.Object{
 				// DCD is READY - simulating state BEFORE restart annotation is applied
