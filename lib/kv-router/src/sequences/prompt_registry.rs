@@ -98,6 +98,8 @@ impl WorkerLoadSlot {
 
 #[derive(Debug, Default)]
 struct WorkerLoadTable {
+    // Admission projects every registered worker's load. Keep that hot scan as a dense Vec walk;
+    // the hash index is only for point updates/removes when worker state changes.
     slots: Vec<WorkerLoadSlot>,
     index: FxHashMap<WorkerWithDpRank, usize>,
 }
