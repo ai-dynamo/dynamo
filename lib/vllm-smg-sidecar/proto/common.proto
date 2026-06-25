@@ -1,0 +1,94 @@
+syntax = "proto3";
+package smg.grpc.common;
+
+// =====================
+// Tokenizer
+// =====================
+
+message GetTokenizerRequest {}
+
+message GetTokenizerChunk {
+  bytes data = 1;       // Raw zip bytes (concatenate all chunks)
+  string sha256 = 2;    // SHA-256 fingerprint; set on final chunk only, empty on previous
+}
+
+// =====================
+// KV Cache Events
+// =====================
+
+message SubscribeKvEventsRequest {
+  // Resume from this sequence number (0 = start from current state).
+  uint64 start_sequence_number = 1;
+}
+
+message KvEventBatch {
+  uint64 sequence_number = 1;
+  double timestamp = 2;
+  repeated KvCacheEvent events = 3;
+  optional int32 dp_rank = 4;
+}
+
+message KvCacheEvent {
+  uint64 event_id = 1;
+  oneof data {
+    KvBlocksStored stored = 2;
+    KvBlocksRemoved removed = 3;
+    KvCacheCleared cleared = 4;
+  }
+}
+
+message KvBlocksStored {
+  repeated KvBlock blocks = 1;
+  optional int64 parent_block_hash = 2;
+}
+
+message KvBlock {
+  int64 block_hash = 1;
+  repeated uint32 token_ids = 2;
+  int32 block_size = 3;
+  optional int64 lora_id = 4;
+  optional int32 cache_level = 5;
+}
+
+message KvBlocksRemoved {
+  repeated int64 block_hashes = 1;
+  optional int32 cache_level = 2;
+}
+
+message KvCacheCleared {}
+
+// =====================
+// Admin Operations
+// =====================
+
+message FlushCacheRequest {
+  // Seconds to wait for the scheduler to go idle before flushing.
+  // 0 = flush immediately (fails if requests are in flight).
+  float timeout_s = 1;
+}
+
+message FlushCacheResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message StartProfileRequest {
+  // Directory where profiler traces are written (backend default if unset).
+  optional string output_dir = 1;
+  // Forward step at which profiling starts (immediately if unset).
+  optional int32 start_step = 2;
+  // Number of forward steps to profile (until StopProfile if unset).
+  optional int32 num_steps = 3;
+  // Profiler activities, e.g. "CPU", "GPU", "MEM". Backend default if empty.
+  repeated string activities = 4;
+  optional bool with_stack = 5;
+  optional bool record_shapes = 6;
+  bool profile_by_stage = 7;
+}
+
+message StopProfileRequest {}
+
+message ProfileResponse {
+  bool success = 1;
+  string message = 2;
+}
