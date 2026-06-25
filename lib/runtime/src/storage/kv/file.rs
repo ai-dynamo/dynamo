@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -295,27 +296,53 @@ impl fmt::Display for Directory {
 
 #[async_trait]
 impl Bucket for Directory {
-    /// Write a file to the directory using atomic write (temp file + rename).
+    /// Write a file to the directory by publishing a completed temp file.
     /// This ensures watchers never see a partially written file.
     async fn insert(
         &self,
         key: &Key,
         value: bytes::Bytes,
-        _revision: u64, // Not used. Maybe put in file name?
+        revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
 
-        // Use atomic write: write to temp file, then rename.
-        // This prevents watchers from seeing partially written files.
         let temp_name = format!("{TEMP_FILE_PREFIX}{:016x}", rand::random::<u64>());
         let temp_path = self.p.join(&temp_name);
 
-        // Write to temp file first
         fs::write(&temp_path, &value)
             .with_context(|| format!("writing temp file {}", temp_path.display()))
             .map_err(a_to_fs_err)?;
+
+        if revision == 0 {
+            // No-clobber publish: the link fails if another writer already created the key,
+            // and readers never see a partial target file.
+            match fs::hard_link(&temp_path, &full_path) {
+                Ok(()) => {
+                    if let Err(err) = fs::remove_file(&temp_path) {
+                        tracing::warn!(
+                            path = %temp_path.display(),
+                            error = %err,
+                            "Failed to remove FileStore temp file after create-if-absent publish"
+                        );
+                    }
+                    self.owned_files.lock().insert(full_path.clone());
+                    return Ok(StoreOutcome::Created(0));
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    if let Err(remove_err) = fs::remove_file(&temp_path) {
+                        tracing::warn!(
+                            path = %temp_path.display(),
+                            error = %remove_err,
+                            "Failed to remove unused FileStore temp file after create-if-absent conflict"
+                        );
+                    }
+                    return Ok(StoreOutcome::Exists(0));
+                }
+                Err(err) => return Err(to_fs_err(err)),
+            }
+        }
 
         // Atomic rename to target path
         fs::rename(&temp_path, &full_path)
@@ -523,7 +550,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _};
+    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _, StoreOutcome};
 
     #[tokio::test]
     async fn test_entries_full_path() {
@@ -546,5 +573,84 @@ mod tests {
 
         assert!(keys.contains(&Key::new("v1/tests/key1/multi/part".to_string())));
         assert!(keys.contains(&Key::new("v1/tests/key2".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_insert_revision_zero_is_create_if_absent() {
+        let t = tempfile::tempdir().unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let m = FileStore::new(cancel_token.clone(), t.path());
+        let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let key = Key::new("singleton".to_string());
+
+        let first = bucket.insert(&key, "winner".into(), 0).await.unwrap();
+        let second = bucket.insert(&key, "loser".into(), 0).await.unwrap();
+        let value = bucket.get(&key).await.unwrap().unwrap();
+        cancel_token.cancel();
+
+        assert_eq!(first, StoreOutcome::Created(0));
+        assert_eq!(second, StoreOutcome::Exists(0));
+        assert_eq!(value.as_ref(), b"winner");
+    }
+
+    #[tokio::test]
+    async fn test_insert_nonzero_revision_overwrites() {
+        let t = tempfile::tempdir().unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let m = FileStore::new(cancel_token.clone(), t.path());
+        let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let key = Key::new("existing".to_string());
+
+        bucket.insert(&key, "old".into(), 0).await.unwrap();
+        let outcome = bucket.insert(&key, "new".into(), 1).await.unwrap();
+        let value = bucket.get(&key).await.unwrap().unwrap();
+        cancel_token.cancel();
+
+        assert_eq!(outcome, StoreOutcome::Created(0));
+        assert_eq!(value.as_ref(), b"new");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_insert_revision_zero_has_one_winner() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().to_path_buf();
+        let key = Key::new("singleton".to_string());
+
+        let mut tasks = Vec::new();
+        for index in 0..16 {
+            let root = root.clone();
+            let key = key.clone();
+            tasks.push(tokio::spawn(async move {
+                let cancel_token = CancellationToken::new();
+                let store = FileStore::new(cancel_token.clone(), root);
+                let bucket = store.get_or_create_bucket("v1/claims", None).await.unwrap();
+                let value = format!("value-{index}");
+                let outcome = bucket.insert(&key, value.clone().into(), 0).await.unwrap();
+                let stored = bucket.get(&key).await.unwrap().unwrap();
+                cancel_token.cancel();
+                (outcome, String::from_utf8(stored.to_vec()).unwrap(), value)
+            }));
+        }
+
+        let mut created_values = Vec::new();
+        let mut observed_values = HashSet::new();
+        for task in tasks {
+            let (outcome, stored, attempted) = task.await.unwrap();
+            observed_values.insert(stored);
+            if outcome == StoreOutcome::Created(0) {
+                created_values.push(attempted);
+            } else {
+                assert_eq!(outcome, StoreOutcome::Exists(0));
+            }
+        }
+
+        assert_eq!(created_values.len(), 1);
+        assert_eq!(observed_values.len(), 1);
+        assert_eq!(
+            observed_values.into_iter().next().unwrap(),
+            created_values.pop().unwrap()
+        );
     }
 }
