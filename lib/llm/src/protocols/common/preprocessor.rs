@@ -196,6 +196,11 @@ pub struct PreprocessedRequest {
     #[serde(default)]
     pub output_options: OutputOptions,
 
+    /// Resolved backend reasoning mode.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_reasoning: Option<bool>,
+
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.
     /// TODO - refactor this to a better location
@@ -438,5 +443,23 @@ mod tests {
         assert_eq!(req.token_ids, vec![1]);
         assert!(req.is_probe);
         assert_eq!(req.model, "");
+    }
+
+    #[test]
+    fn require_reasoning_serde_round_trip() {
+        let req: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "model": "t",
+            "token_ids": [1],
+            "require_reasoning": false,
+        }))
+        .unwrap();
+
+        assert_eq!(req.require_reasoning, Some(false));
+
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            out.get("require_reasoning"),
+            Some(&serde_json::json!(false))
+        );
     }
 }

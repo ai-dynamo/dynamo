@@ -167,6 +167,7 @@ def _preprocess_worker(
         exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
         template_force_reasoning=_w_template_force_reasoning,
     )
+    request = pre.request
 
     n = request.get("n", 1)
     if n != 1:
@@ -179,6 +180,7 @@ def _preprocess_worker(
         eos_token_id,
         pre.guided_decoding,
         pre.tool_call_parser,
+        require_reasoning=pre.force_reasoning,
     )
 
     effective_reasoning_parser_name = (
@@ -201,6 +203,7 @@ def _build_dynamo_preproc(
     eos_token_id: int | None,
     guided_decoding: dict[str, Any] | None = None,
     tool_call_parser: ToolCallParserType | None = None,
+    require_reasoning: bool | None = None,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
@@ -277,6 +280,8 @@ def _build_dynamo_preproc(
     }
     if nvext_passthrough:
         preproc["extra_args"] = {"nvext": nvext_passthrough}
+    if require_reasoning is not None:
+        preproc["require_reasoning"] = require_reasoning
 
     return preproc
 
@@ -373,6 +378,7 @@ class SglangProcessor:
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 template_force_reasoning=self.template_force_reasoning,
             )
+            request = pre.request
 
             if self.debug_perf:
                 t1 = time.monotonic()
@@ -396,6 +402,7 @@ class SglangProcessor:
                 self.eos_token_id,
                 pre.guided_decoding,
                 pre.tool_call_parser,
+                require_reasoning=pre.force_reasoning,
             )
         except InvalidArgument:
             raise
@@ -453,7 +460,7 @@ class SglangProcessor:
         # we mirror those choices to keep pool- and inline-path outputs
         # identical.
         tool_call_parser, reasoning_parser = create_parsers(
-            request,
+            preproc_result.request,
             tool_call_parser_name=self.tool_call_parser_name,
             reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
             force_reasoning=preproc_result.force_reasoning,
@@ -464,15 +471,15 @@ class SglangProcessor:
             tool_call_parser=tool_call_parser,
             reasoning_parser=reasoning_parser,
             history_tool_calls_count=_get_history_tool_calls_count(
-                request.get("messages", [])
+                preproc_result.request.get("messages", [])
             ),
-            sglang_tools=convert_tools(request.get("tools")),
+            sglang_tools=convert_tools(preproc_result.request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
         )
 
         async for item in self._generate_and_stream(
             request_id,
-            request,
+            preproc_result.request,
             preproc_result.dynamo_preproc,
             preproc_result.prompt_token_ids,
             post,

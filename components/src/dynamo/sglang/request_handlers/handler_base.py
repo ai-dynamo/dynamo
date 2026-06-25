@@ -987,6 +987,14 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         return {}
 
     @staticmethod
+    def _reasoning_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
+        """Forward Dynamo-resolved reasoning mode to SGLang generation."""
+        require_reasoning = request.get("require_reasoning")
+        if require_reasoning is None:
+            return {}
+        return {"require_reasoning": require_reasoning}
+
+    @staticmethod
     def _generate_bootstrap_room() -> int:
         """Generate a unique bootstrap room ID for disaggregated serving.
 

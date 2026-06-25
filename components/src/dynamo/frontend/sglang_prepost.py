@@ -30,6 +30,13 @@ from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from .utils import random_call_id
 
+try:
+    from sglang.srt.reasoning_utils import (
+        resolve_require_reasoning as _sglang_resolve_require_reasoning,
+    )
+except ImportError:
+    _sglang_resolve_require_reasoning = None
+
 logger = logging.getLogger(__name__)
 
 # Union of parser types used for tool call detection.
@@ -136,6 +143,34 @@ def resolve_request_force_reasoning(
         return kwargs.get(flag_key) is True
 
     return template_default
+
+
+def resolve_request_require_reasoning(
+    request: dict[str, Any],
+    reasoning_parser_name: str | None,
+    template_default: bool,
+) -> bool:
+    """Resolve reasoning mode, preferring SGLang's shared resolver when present."""
+    if _sglang_resolve_require_reasoning is not None:
+        try:
+            return _sglang_resolve_require_reasoning(
+                reasoning_parser_name,
+                chat_template_kwargs=request.get("chat_template_kwargs")
+                or request.get("chat_template_args"),
+                reasoning_effort=request.get("reasoning_effort"),
+            )
+        except TypeError:
+            logger.debug(
+                "Installed SGLang resolve_require_reasoning signature is not "
+                "compatible; falling back to Dynamo resolver.",
+                exc_info=True,
+            )
+
+    return resolve_request_force_reasoning(
+        request,
+        reasoning_parser_name,
+        template_default,
+    )
 
 
 def _client_wants_separate_reasoning(request: dict[str, Any]) -> bool:
@@ -624,7 +659,7 @@ def preprocess_chat_request(
     effective_reasoning_parser_name = (
         reasoning_parser_name if _client_wants_separate_reasoning(request) else None
     )
-    force_reasoning = resolve_request_force_reasoning(
+    force_reasoning = resolve_request_require_reasoning(
         request,
         effective_reasoning_parser_name,
         template_force_reasoning,
