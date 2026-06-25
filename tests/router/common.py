@@ -54,6 +54,18 @@ def min_initial_workers_env(min_initial_workers: int):
             os.environ[MIN_INITIAL_WORKERS_ENV] = previous
 
 
+def _zmq_event_plane_warmup() -> None:
+    """Give the event-plane ZMQ subscription time to connect before sending.
+
+    The router's SUB connects asynchronously after it starts. On the (default) ZMQ
+    plane a fast engine (e.g. the mocker) can publish KV events before the SUB has
+    attached (ZMQ slow-joiner), so the router would miss them. A brief warm-up
+    avoids this. NATS does not need it.
+    """
+    if os.environ.get("DYN_EVENT_PLANE", "") != "nats":
+        time.sleep(2)
+
+
 def _create_kv_router_with_timeout(
     router_factory: Callable[[], KvRouter],
     num_workers: int,
@@ -107,6 +119,10 @@ def _create_kv_router_with_timeout(
 
     if kv_router_error is not None:
         raise kv_router_error
+
+    # Let the router's ZMQ event-plane subscription connect before the test sends
+    # requests (no-op on NATS). See _zmq_event_plane_warmup.
+    _zmq_event_plane_warmup()
 
     return kv_router
 
@@ -1307,6 +1323,9 @@ def _test_router_overload_503(
             )
         )
 
+        # Warm up the frontend router's ZMQ event-plane subscription before probing
+        # (no-op on NATS). See _zmq_event_plane_warmup.
+        _zmq_event_plane_warmup()
         _probe_overload_503_and_assert(frontend_port, test_payload, max_tokens)
 
 
@@ -1384,6 +1403,9 @@ def _test_disagg_router_overload_503(
             )
         )
 
+        # Warm up the frontend router's ZMQ event-plane subscription before probing
+        # (no-op on NATS). See _zmq_event_plane_warmup.
+        _zmq_event_plane_warmup()
         _probe_overload_503_and_assert(frontend_port, test_payload, max_tokens)
 
 
