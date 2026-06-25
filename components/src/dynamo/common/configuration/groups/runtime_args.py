@@ -77,6 +77,8 @@ class DynamoRuntimeConfig(ConfigBase):
             os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = self.tcp_tls_ca_cert_path
         if self.tcp_tls_insecure:
             os.environ["DYN_TCP_TLS_INSECURE"] = "1"
+        else:
+            os.environ.pop("DYN_TCP_TLS_INSECURE", None)
         if self.tcp_tls_server_name:
             os.environ["DYN_TCP_TLS_SERVER_NAME"] = self.tcp_tls_server_name
         if self.tcp_tls_handshake_timeout_secs is not None:
