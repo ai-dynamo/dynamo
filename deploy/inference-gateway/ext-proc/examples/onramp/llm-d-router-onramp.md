@@ -143,14 +143,11 @@ Required alignment:
 Deploy llm-d Router in gateway mode with a precise-prefix config.
 
 llm-d provides NO guide how to upgrade existing vLLM workers. They need to consult many docs:
-Chart defaults (gateway chart):
-https://github.com/llm-d/llm-d-router/blob/main/config/charts/llm-d-router-gateway/values.yaml
-Shared routerlib defaults:
-https://github.com/llm-d/llm-d-router/blob/main/config/charts/routerlib/values.yaml
-Precise prefix plugin example:
-https://github.com/llm-d/llm-d-router/blob/main/deploy/config/epp-precise-prefix-cache-config.yaml
-Tokenizer + vLLM URL example:
-https://github.com/llm-d/llm-d-router/blob/main/deploy/config/sim-epp-tokenizer-vllm-http-config.yaml
+
+- [Chart defaults (gateway chart)](https://github.com/llm-d/llm-d-router/blob/main/config/charts/llm-d-router-gateway/values.yaml)
+- [Shared routerlib defaults](https://github.com/llm-d/llm-d-router/blob/main/config/charts/routerlib/values.yaml)
+- [Precise prefix plugin example](https://github.com/llm-d/llm-d-router/blob/main/deploy/config/epp-precise-prefix-cache-config.yaml)
+- [Tokenizer + vLLM URL example](https://github.com/llm-d/llm-d-router/blob/main/deploy/config/sim-epp-tokenizer-vllm-http-config.yaml)
 
 If I were to add this guide I would do the following:
 
