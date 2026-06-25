@@ -442,8 +442,6 @@ spec:
 
 Rendered `InferencePool`:
 
-Note: these names match the manual examples above because the Helm release name (`qwen-router`) is used for the `InferencePool`/`HTTPRoute` and `qwen-router-epp` for the EPP resources.
-
 ```yaml
 apiVersion: inference.networking.k8s.io/v1
 kind: InferencePool
