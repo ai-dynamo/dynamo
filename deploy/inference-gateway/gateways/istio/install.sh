@@ -47,7 +47,9 @@ kubectl apply \
 # Install istioctl if it is not already on PATH.
 if ! command -v istioctl >/dev/null 2>&1; then
   echo "istioctl not found on PATH; downloading Istio ${ISTIO_VERSION}..."
-  ISTIO_DOWNLOAD_DIR=${ISTIO_DOWNLOAD_DIR:-$(pwd)}
+  if [[ -z "${ISTIO_DOWNLOAD_DIR:-}" ]]; then
+    ISTIO_DOWNLOAD_DIR=$(mktemp -d)
+  fi
   (
     cd "${ISTIO_DOWNLOAD_DIR}"
     curl -fsSL https://istio.io/downloadIstio | ISTIO_VERSION="${ISTIO_VERSION}" sh -
