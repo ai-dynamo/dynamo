@@ -36,9 +36,9 @@ pub(crate) enum TraceSchema {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AgentContextFields {
-    pub(crate) trajectory_id: String,
+    pub(crate) session_id: String,
     #[serde(default)]
-    pub(crate) parent_trajectory_id: Option<String>,
+    pub(crate) parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,7 +92,7 @@ pub struct RequestEntry {
 
 #[derive(Debug, Clone)]
 pub struct ToolEntry {
-    pub(crate) trajectory_id: String,
+    pub(crate) session_id: String,
     pub(crate) start_ms: i64,
     pub(crate) end_ms: i64,
     pub(crate) tool_call_id: String,
@@ -275,7 +275,7 @@ fn tool_entry(record: RequestTraceRecord, terminal_event: String) -> Option<Tool
         }
     });
     Some(ToolEntry {
-        trajectory_id: context.trajectory_id,
+        session_id: context.session_id,
         start_ms,
         end_ms,
         tool_call_id: tool.tool_call_id,
@@ -443,12 +443,12 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
             file,
-            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"event_source":"dynamo","agent_context":{{"trajectory_id":"root"}},"request":{{"request_id":"req-1","model":"test","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}"#
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"event_source":"dynamo","agent_context":{{"session_id":"root"}},"request":{{"request_id":"req-1","model":"test","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}"#
         )
         .unwrap();
         writeln!(
             file,
-            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"trajectory_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
         )
         .unwrap();
 
@@ -460,7 +460,7 @@ mod tests {
                 .agent_context
                 .as_ref()
                 .expect("agent context")
-                .trajectory_id,
+                .session_id,
             "root"
         );
         assert_eq!(loaded.tools.len(), 1);

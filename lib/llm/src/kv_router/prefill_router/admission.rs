@@ -9,7 +9,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_runtime::{
-    pipeline::{ManyOut, PushRouter, SingleIn},
+    pipeline::{ManyOut, SingleIn},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
@@ -20,18 +20,18 @@ use crate::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::RequestTracker,
     },
+    session_affinity::SessionAffinityPushRouter,
 };
 
 pub(super) enum InnerPrefillRouter {
     KvRouter(Arc<KvPushRouter>),
-    SimpleRouter(Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>),
+    SimpleRouter(Arc<SessionAffinityPushRouter>),
 }
 
 impl InnerPrefillRouter {
     pub(super) async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
-        pinned_worker: Option<u64>,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>)>
     where
@@ -42,11 +42,7 @@ impl InnerPrefillRouter {
                 router.select_and_dispatch_prefill(request, prepare).await
             }
             InnerPrefillRouter::SimpleRouter(router) => {
-                router
-                    .select_and_dispatch_exact(request, pinned_worker, |request, worker_id| {
-                        prepare(request, worker_id, None)
-                    })
-                    .await
+                router.select_and_dispatch_prefill(request, prepare).await
             }
         }
     }

@@ -202,11 +202,22 @@ mod tests {
             header_name(format!("{}token", DYNAMO_METADATA_HEADER_PREFIX_DEFAULT)),
             "Bearer secret".parse().unwrap(),
         );
+        headers.insert(
+            header_name(format!(
+                "{}policy-class",
+                DYNAMO_METADATA_HEADER_PREFIX_DEFAULT
+            )),
+            " latency ".parse().unwrap(),
+        );
         headers.insert("x-request-id", "irrelevant".parse().unwrap());
 
         let meta = extract_metadata_from_http(&headers).unwrap();
         assert_eq!(meta.get("tenant").map(String::as_str), Some("acme"));
         assert_eq!(meta.get("user-id").map(String::as_str), Some("u42"));
+        assert_eq!(
+            meta.get("policy-class").map(String::as_str),
+            Some("latency")
+        );
         assert!(!meta.contains_key("x-request-id"));
         assert!(!meta.contains_key("authorization"));
         assert!(!meta.contains_key("token"));

@@ -42,7 +42,6 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
 | `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
-| `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
 Related root-level Dynamo output option:
 
@@ -61,14 +60,24 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 
 | Header | Overrides |
 |--------|-----------|
-| `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
-| `x-prefill-instance-id` | `prefill_worker_id` |
-| `x-dp-rank` / `x-data-parallel-rank` | `dp_rank` |
-| `x-prefill-dp-rank` | `prefill_dp_rank` |
+| `x-dynamo-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
+| `x-dynamo-prefill-instance-id` | `prefill_worker_id` |
+| `x-dynamo-dp-rank` | `dp_rank` |
+| `x-dynamo-prefill-dp-rank` | `prefill_dp_rank` |
 
-Trajectory identity is header-only. Use the coding-agent headers or Dynamo
-trajectory headers described in [Trajectory IDs](../../agents/trajectory-ids.md);
-`nvext` does not accept trajectory identity fields.
+> [!WARNING]
+> The unprefixed forms (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
+> `x-data-parallel-rank`, and `x-prefill-dp-rank`) are compatibility aliases planned for future
+> deprecation. Use the `x-dynamo-*` headers for new integrations.
+
+Session identity is header-only. Use the coding-agent headers or Dynamo
+session headers described in [Session IDs](../../agents/session-ids.md);
+`nvext` does not accept session identity fields.
+
+When session affinity is enabled with `--router-session-affinity-ttl-secs`, the
+router also uses `X-Dynamo-Session-ID` for router-local affinity. See
+[Configuration and Tuning](../router/router-configuration.md#session-affinity)
+for routing behavior and TTL settings.
 
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../agents/agent-tracing.md).
@@ -92,7 +101,7 @@ important" across Dynamo.
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
 For layer-by-layer behavior and backend requirements, see
-[Priority Scheduling](../../agents/priority-scheduling.md).
+[Priority Scheduling](../router/priority-scheduling.md).
 
 ```json
 {
@@ -179,31 +188,6 @@ Backend details:
 }
 ```
 
-## Session Control
-
-`session_control` enables sticky routing by `session_id`. Use `action: "bind"` for router-only sticky affinity without backend engine RPCs. Use `action: "open"` / `"close"` for backend streaming-session lifecycle when the engine supports it.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
-| `session_control.action` | `string` | omitted | Optional action: `"bind"`, `"open"`, or `"close"`. Omit on intermediate turns. |
-| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Used with `action: "bind"` and `action: "open"`. |
-
-```json
-{
-    "nvext": {
-        "session_control": {
-            "session_id": "subagent-1",
-            "action": "open",
-            "timeout": 300
-        }
-    }
-}
-```
-
-Requires `--router-mode=kv` on the frontend. Router-only sticky routing uses `action: "bind"` and does not require backend session support. Engine-backed session lifecycle requires backend support; see [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for SGLang streaming-session setup details.
-
-
 ## Response Extensions
 
 When the client requests response metadata via `extra_fields`, the response includes an `nvext` object with the requested fields:
@@ -242,7 +226,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
-| [Trajectory IDs](../../agents/trajectory-ids.md) | Passive trajectory identity |
+| [Session IDs](../../agents/session-ids.md) | Passive session identity |
 | [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
 | [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
-| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session-aware radix tagging |

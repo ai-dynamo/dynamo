@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DGDR Examples
+subtitle: Practical DynamoGraphDeploymentRequest examples covering AIC estimates, online profiling, and SLA-driven generation.
 ---
 
 Practical examples for deploying with `DynamoGraphDeploymentRequest` (DGDR).

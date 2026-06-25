@@ -5,7 +5,7 @@ use super::core::ReplayWorkerCore;
 use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::TraceCollector;
+use crate::replay::{ReplayTerminalStatus, TraceCollector};
 use anyhow::bail;
 use std::collections::VecDeque;
 use uuid::Uuid;
@@ -233,6 +233,14 @@ impl SingleRuntime {
             .iter()
             .filter(|signal| signal.completed)
             .count();
+        for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+            let status = if signal.rejected {
+                ReplayTerminalStatus::Rejected
+            } else {
+                ReplayTerminalStatus::Completed
+            };
+            self.collector.on_terminal(signal.uuid, status);
+        }
         for _ in 0..completed_requests {
             self.progress.inc_completed();
         }

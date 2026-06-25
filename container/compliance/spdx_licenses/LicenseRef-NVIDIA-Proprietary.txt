@@ -1,0 +1,34 @@
+NVIDIA Proprietary Software — License Reference
+===============================================
+
+The components attributed under this identifier are NVIDIA proprietary
+software. They are predominantly the CUDA Toolkit redistributable runtime
+libraries distributed as Python wheels (e.g. nvidia-cublas-cu*, nvidia-cudnn-cu*,
+nvidia-cufft-cu*, nvidia-curand-cu*, nvidia-cusolver-cu*, nvidia-cusparse-cu*,
+nvidia-cuda-runtime-cu*, nvidia-cuda-nvrtc-cu*, nvidia-nccl-cu*, nvidia-nvjitlink-cu*,
+nvidia-nvshmem-cu*, and the cuda-toolkit metapackage) and similarly-licensed
+NVIDIA components.
+
+These are not open-source and have no SPDX-listed license identifier, so they
+are recorded under the SPDX LicenseRef "LicenseRef-NVIDIA-Proprietary".
+
+Governing license
+-----------------
+Use and redistribution of these components is governed by the applicable NVIDIA
+software license agreement — for the CUDA Toolkit redistributable libraries,
+the NVIDIA CUDA Toolkit End User License Agreement (and, where applicable, the
+License Agreement for NVIDIA Software Development Kits). The redistributable
+runtime libraries are redistributed under the redistributable-software
+provisions of that agreement.
+
+The authoritative, full license text is published by NVIDIA at:
+
+    NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html
+
+Where an individual wheel bundles its own license file in its dist-info, the
+generator reproduces that bundled text instead of this reference notice.
+
+NOTE: This is a reference notice identifying the governing NVIDIA proprietary
+license and its canonical source. If an OSRB submission requires the verbatim
+EULA text in-tree, replace this file's body with the official EULA text from
+the URL above (sourced via NVIDIA Legal).

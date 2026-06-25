@@ -171,8 +171,8 @@ mod tests {
             schema: RequestTraceSchema::V1,
             event_type: RequestTraceEventType::ToolEnd,
             event_time_unix_ms: 1,
-            trajectory_id: "run-1:agent".to_string(),
-            parent_trajectory_id: None,
+            session_id: "run-1:agent".to_string(),
+            parent_session_id: None,
             tool: RequestTraceToolEvent {
                 tool_call_id: "tool-123".to_string(),
                 tool_class: "web_search".to_string(),
@@ -239,7 +239,7 @@ mod tests {
                 assert_eq!(record.event_type, RequestTraceEventType::ToolEnd);
                 assert_eq!(record.event_source, Some(RequestTraceEventSource::Harness));
                 assert_eq!(
-                    record.agent_context.expect("agent context").trajectory_id,
+                    record.agent_context.expect("agent context").session_id,
                     "run-1:agent"
                 );
                 assert_eq!(record.tool.unwrap().tool_call_id, "tool-123");
