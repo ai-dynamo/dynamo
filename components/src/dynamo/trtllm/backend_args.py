@@ -261,6 +261,19 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--benchmark-prefill-kv-read-granularity",
+            env_var="DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY",
+            default=None,
+            arg_type=int,
+            dest="benchmark_prefill_kv_read_granularity",
+            obsolete_flag="--self_benchmark_prefill_kv_read_granularity",
+            help=(
+                "Number of block-aligned KV-read sample points per ISL for "
+                "TRT-LLM prefill sweep."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--benchmark-decode-length-granularity",
             env_var="DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
             default=None,
@@ -530,6 +543,7 @@ class DynamoTrtllmConfig(ConfigBase):
     guided_decoding_backend: Optional[str] = None
     benchmark_mode: Optional[str] = None
     benchmark_prefill_isl_granularity: Optional[int] = None
+    benchmark_prefill_kv_read_granularity: Optional[int] = None
     benchmark_decode_context_granularity: Optional[int] = None
     benchmark_decode_batch_granularity: Optional[int] = None
     benchmark_warmup_iterations: Optional[int] = None

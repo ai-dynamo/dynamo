@@ -34,6 +34,7 @@ def _payload(*, timed_out: bool = False, include_skipped: bool = False) -> dict:
                 "point_type": "prefill",
                 "index": 5,
                 "isl": 1024,
+                "kv_read_tokens": 512,
                 "context_length": 0,
                 "batch_size": 1,
             },
@@ -44,14 +45,16 @@ def _payload(*, timed_out: bool = False, include_skipped: bool = False) -> dict:
                     "schedulerMode": "overlap",
                     "inflightBatchingStats": {
                         "numContextRequests": 1,
-                        "numCtxTokens": 1024,
-                        "numCtxKvTokens": 0,
+                        "numCtxTokens": 512,
+                        "numCtxKvTokens": 512,
                         "numGenRequests": 0,
                         "numGenKvTokens": 0,
                     },
                 }
             ],
             "skipped_reason": None,
+            "observed_kv_read_tokens": 512,
+            "cache_hit_validated": True,
         },
         {
             "point": {
@@ -103,6 +106,7 @@ def test_cli_args_and_engine_args_use_trtllm_native_surface():
     cfg = TrtllmSelfBenchmarkConfig(
         mode="agg",
         prefill_isl_granularity=2,
+        prefill_kv_read_granularity=5,
         decode_context_granularity=3,
         decode_batch_granularity=4,
         warmup_iterations=1,
@@ -115,6 +119,8 @@ def test_cli_args_and_engine_args_use_trtllm_native_surface():
         "agg",
         "--self_benchmark_prefill_granularity",
         "2",
+        "--self_benchmark_prefill_kv_read_granularity",
+        "5",
         "--self_benchmark_decode_length_granularity",
         "3",
         "--self_benchmark_decode_batch_granularity",
@@ -132,6 +138,7 @@ def test_cli_args_and_engine_args_use_trtllm_native_surface():
     assert engine_args == {
         "self_benchmark_mode": "agg",
         "self_benchmark_prefill_granularity": 2,
+        "self_benchmark_prefill_kv_read_granularity": 5,
         "self_benchmark_decode_length_granularity": 3,
         "self_benchmark_decode_batch_granularity": 4,
         "self_benchmark_warmup_iterations": 1,
@@ -150,15 +157,48 @@ async def test_wait_for_output_parses_and_normalizes_fpms(tmp_path):
 
     assert data["status"] == "ok"
     assert data["backend"] == "trtllm"
-    assert "1024" in data["profile"]["prefill"]
+    assert "1024,512" in data["profile"]["prefill"]
     assert "2048,4" in data["profile"]["decode"]
+    assert data["results"][0]["normalized_key"] == [1024, 512]
+    assert data["profile"]["prefill"]["1024,512"]["cache_hit_validated"] is True
+    assert (
+        data["profile"]["prefill"]["1024,512"]["observed_kv_read_tokens"] == 512
+    )
     prefill_fpm = data["results"][0]["fpms"][0]
     assert prefill_fpm["worker_id"] == "worker-1"
     assert prefill_fpm["wall_time"] == pytest.approx(0.0123)
-    assert prefill_fpm["scheduled_requests"]["sum_prefill_tokens"] == 1024
+    assert prefill_fpm["scheduled_requests"]["sum_prefill_tokens"] == 512
+    assert prefill_fpm["scheduled_requests"]["sum_prefill_kv_tokens"] == 512
     assert data["metadata"]["raw_trtllm_self_benchmark"]["limits"][
         "max_num_scheduled_tokens"
     ] == 8192
+
+
+def test_prefill_kv_read_fallback_uses_point_schema():
+    data = normalize_self_benchmark_payload(
+        {
+            "timed_out": False,
+            "results": [
+                {
+                    "point": {
+                        "point_type": "prefill",
+                        "index": 1,
+                        "isl": 1024,
+                        "kv_read_tokens": 256,
+                        "batch_size": 2,
+                    },
+                    "iteration_stats": [{"hostStepTimeMS": 1.0}],
+                    "skipped_reason": None,
+                }
+            ],
+        }
+    )
+
+    fpm = data["results"][0]["fpms"][0]
+    assert data["results"][0]["normalized_key"] == [1024, 256]
+    assert fpm["scheduled_requests"]["num_prefill_requests"] == 2
+    assert fpm["scheduled_requests"]["sum_prefill_tokens"] == 1536
+    assert fpm["scheduled_requests"]["sum_prefill_kv_tokens"] == 512
 
 
 @pytest.mark.asyncio
@@ -207,6 +247,7 @@ def test_benchmark_options_require_mode():
     config = SimpleNamespace(
         benchmark_mode=None,
         benchmark_prefill_isl_granularity=None,
+        benchmark_prefill_kv_read_granularity=None,
         benchmark_decode_context_granularity=None,
         benchmark_decode_batch_granularity=None,
         benchmark_warmup_iterations=None,
@@ -231,6 +272,8 @@ def test_native_trt_self_benchmark_aliases_parse():
             "agg",
             "--self_benchmark_prefill_granularity",
             "2",
+            "--self_benchmark_prefill_kv_read_granularity",
+            "5",
             "--self_benchmark_decode_length_granularity",
             "3",
             "--self_benchmark_decode_batch_granularity",
@@ -246,6 +289,7 @@ def test_native_trt_self_benchmark_aliases_parse():
 
     assert config.benchmark_mode == "agg"
     assert config.benchmark_prefill_isl_granularity == 2
+    assert config.benchmark_prefill_kv_read_granularity == 5
     assert config.benchmark_decode_context_granularity == 3
     assert config.benchmark_decode_batch_granularity == 4
     assert config.benchmark_warmup_iterations == 1
@@ -333,6 +377,7 @@ async def test_init_worker_waits_for_benchmark_before_registering(monkeypatch, t
         benchmark_mode="agg",
         benchmark_output_path=str(output_path),
         benchmark_prefill_isl_granularity=None,
+        benchmark_prefill_kv_read_granularity=None,
         benchmark_timeout_s=1,
         benchmark_warmup_iterations=None,
         component="backend",

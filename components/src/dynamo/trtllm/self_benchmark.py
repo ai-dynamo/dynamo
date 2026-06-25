@@ -27,6 +27,7 @@ from dynamo.common.forward_pass_metrics import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_PREFILL_ISL_GRANULARITY = 16
+DEFAULT_PREFILL_KV_READ_GRANULARITY = 4
 DEFAULT_DECODE_CONTEXT_GRANULARITY = 6
 DEFAULT_DECODE_BATCH_GRANULARITY = 6
 DEFAULT_WARMUP_ITERATIONS = 5
@@ -35,6 +36,9 @@ TRTLLM_SELF_BENCHMARK_RUNTIME_KEY = "trtllm_self_benchmark"
 
 _OPTION_ATTRS = {
     "benchmark_prefill_isl_granularity": "--benchmark-prefill-granularity",
+    "benchmark_prefill_kv_read_granularity": (
+        "--benchmark-prefill-kv-read-granularity"
+    ),
     "benchmark_decode_context_granularity": "--benchmark-decode-length-granularity",
     "benchmark_decode_batch_granularity": "--benchmark-decode-batch-granularity",
     "benchmark_warmup_iterations": "--benchmark-warmup-iterations",
@@ -49,6 +53,7 @@ class TrtllmSelfBenchmarkConfig:
 
     mode: str
     prefill_isl_granularity: int = DEFAULT_PREFILL_ISL_GRANULARITY
+    prefill_kv_read_granularity: int = DEFAULT_PREFILL_KV_READ_GRANULARITY
     decode_context_granularity: int = DEFAULT_DECODE_CONTEXT_GRANULARITY
     decode_batch_granularity: int = DEFAULT_DECODE_BATCH_GRANULARITY
     warmup_iterations: int = DEFAULT_WARMUP_ITERATIONS
@@ -91,6 +96,11 @@ def build_self_benchmark_config(config: Any) -> TrtllmSelfBenchmarkConfig | None
             getattr(config, "benchmark_prefill_isl_granularity", None),
             DEFAULT_PREFILL_ISL_GRANULARITY,
             "benchmark_prefill_isl_granularity",
+        ),
+        prefill_kv_read_granularity=_positive_int_or_default(
+            getattr(config, "benchmark_prefill_kv_read_granularity", None),
+            DEFAULT_PREFILL_KV_READ_GRANULARITY,
+            "benchmark_prefill_kv_read_granularity",
         ),
         decode_context_granularity=_positive_int_or_default(
             getattr(config, "benchmark_decode_context_granularity", None),
@@ -157,6 +167,9 @@ def apply_self_benchmark_engine_args(
         {
             "self_benchmark_mode": cfg.mode,
             "self_benchmark_prefill_granularity": cfg.prefill_isl_granularity,
+            "self_benchmark_prefill_kv_read_granularity": (
+                cfg.prefill_kv_read_granularity
+            ),
             "self_benchmark_decode_length_granularity": cfg.decode_context_granularity,
             "self_benchmark_decode_batch_granularity": cfg.decode_batch_granularity,
             "self_benchmark_warmup_iterations": cfg.warmup_iterations,
@@ -174,6 +187,8 @@ def trtllm_self_benchmark_cli_args(cfg: TrtllmSelfBenchmarkConfig) -> list[str]:
         cfg.mode,
         "--self_benchmark_prefill_granularity",
         str(cfg.prefill_isl_granularity),
+        "--self_benchmark_prefill_kv_read_granularity",
+        str(cfg.prefill_kv_read_granularity),
         "--self_benchmark_decode_length_granularity",
         str(cfg.decode_context_granularity),
         "--self_benchmark_decode_batch_granularity",
@@ -309,6 +324,8 @@ def normalize_self_benchmark_payload(
             "point": dict(point),
             "fpms": fpms,
             "iteration_stats": iteration_stats,
+            "observed_kv_read_tokens": raw_result.get("observed_kv_read_tokens"),
+            "cache_hit_validated": raw_result.get("cache_hit_validated"),
         }
 
     return {
@@ -332,6 +349,7 @@ def _fpm_from_iteration_stat(
     point_type = str(point.get("point_type", ""))
     batch_size = _int_or(point.get("batch_size"), 1)
     isl = _int_or(point.get("isl"), 0)
+    kv_read_tokens = _kv_read_tokens(point)
     context_length = _int_or(point.get("context_length"), 0)
     ibs = stat.get("inflightBatchingStats") or {}
     if not isinstance(ibs, dict):
@@ -350,11 +368,13 @@ def _fpm_from_iteration_stat(
         ),
         sum_prefill_tokens=_int_or(
             ibs.get("numCtxTokens"),
-            isl * batch_size if point_type == "prefill" else 0,
+            max(0, isl - kv_read_tokens) * batch_size
+            if point_type == "prefill"
+            else 0,
         ),
         sum_prefill_kv_tokens=_int_or(
             ibs.get("numCtxKvTokens"),
-            context_length * batch_size if point_type == "prefill" else 0,
+            kv_read_tokens * batch_size if point_type == "prefill" else 0,
         ),
         num_decode_requests=_int_or(
             ibs.get("numGenRequests"),
@@ -397,6 +417,8 @@ def _fpm_to_dict(fpm: ForwardPassMetrics) -> dict[str, Any]:
 def _normalized_key(point: dict[str, Any]) -> int | list[int] | None:
     point_type = str(point.get("point_type", ""))
     if point_type == "prefill":
+        if "kv_read_tokens" in point:
+            return [_int_or(point.get("isl"), 0), _kv_read_tokens(point)]
         return _int_or(point.get("isl"), 0)
     if point_type == "decode":
         return [
@@ -409,8 +431,17 @@ def _normalized_key(point: dict[str, Any]) -> int | list[int] | None:
 def _profile_key(point: dict[str, Any]) -> str:
     point_type = str(point.get("point_type", ""))
     if point_type == "prefill":
+        if "kv_read_tokens" in point:
+            return (
+                f"{_int_or(point.get('isl'), 0)},"
+                f"{_kv_read_tokens(point)}"
+            )
         return str(_int_or(point.get("isl"), 0))
     return f"{_int_or(point.get('context_length'), 0)},{_int_or(point.get('batch_size'), 1)}"
+
+
+def _kv_read_tokens(point: dict[str, Any]) -> int:
+    return max(0, _int_or(point.get("kv_read_tokens"), 0))
 
 
 def _int_or(value: Any, default: int) -> int:
