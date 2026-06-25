@@ -22,6 +22,7 @@ subjects:
 
 {{- if .Values.rbac.create }}
 {{- if .Values.rbac.namespaceRestricted }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -54,6 +55,7 @@ subjects:
     name: {{ include "snapshot.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- else }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
