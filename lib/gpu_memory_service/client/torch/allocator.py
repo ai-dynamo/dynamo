@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.vmm import VMMDeviceType
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
 
 if TYPE_CHECKING:
     import torch
@@ -78,12 +78,12 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
     logger.warning("[GMS] free: no manager owns va=0x%x, ignoring", va)
 
 
-def _ensure_callbacks_initialized(device_kind: VMMDeviceType) -> None:
+def _ensure_callbacks_initialized() -> None:
     global _callbacks_initialized, _pluggable_alloc
 
-    if device_kind != VMMDeviceType.CUDA:
+    if get_vmm_device_type() != VMMDeviceType.CUDA:
         raise NotImplementedError(
-            f"GMS torch mempool integration is CUDA-only; device_kind={device_kind.value} "
+            f"GMS torch mempool integration is CUDA-only; device_type={get_vmm_device_type().value} "
         )
 
     from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
@@ -97,10 +97,10 @@ def _ensure_callbacks_initialized(device_kind: VMMDeviceType) -> None:
     _callbacks_initialized = True
 
 
-def _create_mem_pool(device_kind: VMMDeviceType) -> "MemPool":
-    if device_kind != VMMDeviceType.CUDA:
+def _create_mem_pool() -> "MemPool":
+    if get_vmm_device_type() != VMMDeviceType.CUDA:
         raise NotImplementedError(
-            f"GMS torch mempool integration is CUDA-only; device_kind={device_kind.value} "
+            f"GMS torch mempool integration is CUDA-only; device_type={get_vmm_device_type().value} "
         )
 
     from torch.cuda.memory import MemPool
@@ -116,7 +116,6 @@ def get_or_create_gms_client_memory_manager(
     *,
     tag: str = "weights",
     timeout_ms: Optional[int] = None,
-    device_kind: VMMDeviceType = VMMDeviceType.CUDA,
 ) -> "GMSClientMemoryManager":
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
@@ -153,9 +152,7 @@ def get_or_create_gms_client_memory_manager(
             )
         return state.manager
 
-    manager = GMSClientMemoryManager(
-        socket_path, device=device, tag=tag, device_kind=device_kind
-    )
+    manager = GMSClientMemoryManager(socket_path, device=device, tag=tag)
     manager.connect(mode, timeout_ms=timeout_ms)
 
     # Mempool only when we have RW: the pluggable allocator routes torch
@@ -163,8 +160,8 @@ def get_or_create_gms_client_memory_manager(
     # RO clients consume preserved imports and don't use the mempool.
     mem_pool = None
     if manager.granted_lock_type == GrantedLockType.RW:
-        _ensure_callbacks_initialized(device_kind)
-        mem_pool = _create_mem_pool(device_kind)
+        _ensure_callbacks_initialized()
+        mem_pool = _create_mem_pool()
 
     _tag_states[tag] = _TagState(
         manager=manager,
@@ -187,7 +184,6 @@ def get_or_create_scratch_manager(
     *,
     tag: str = "kv_cache",
     scratch_size: int = 512 * 1024 * 1024,
-    device_kind: VMMDeviceType = VMMDeviceType.CUDA,
 ) -> "GMSClientMemoryManager":
     """Register an unconnected manager for client-local scratch allocation.
 
@@ -225,8 +221,8 @@ def get_or_create_scratch_manager(
         tag=tag,
         scratch_size=scratch_size,
     )
-    _ensure_callbacks_initialized(device_kind)
-    mem_pool = _create_mem_pool(device_kind)
+    _ensure_callbacks_initialized()
+    mem_pool = _create_mem_pool()
 
     _tag_states[tag] = _TagState(
         manager=manager,
@@ -343,10 +339,9 @@ def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
     if state.mem_pool is None:
         raise RuntimeError(f"GMS allocator tag={tag} does not have a mempool")
 
-    device_kind = state.manager.device_kind
-    if device_kind != VMMDeviceType.CUDA:
+    if get_vmm_device_type() != VMMDeviceType.CUDA:
         raise NotImplementedError(
-            f"gms_use_mem_pool is CUDA-only; device_kind={device_kind.value} "
+            f"gms_use_mem_pool is CUDA-only; device_type={get_vmm_device_type().value} "
         )
 
     token = _active_tag.set(tag)

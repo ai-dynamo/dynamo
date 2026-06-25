@@ -43,7 +43,6 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataPutRequest,
     MetadataPutResponse,
 )
-from gpu_memory_service.common.vmm import VMMDeviceType
 
 from .allocations import AllocationInfo, GMSAllocationManager
 from .fsm import Connection, ServerState, StateEvent
@@ -70,22 +69,19 @@ class GMS:
         *,
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = None,
-        device_kind: VMMDeviceType = VMMDeviceType.CUDA,
     ):
         self._allocations = GMSAllocationManager(
             device,
             allocation_retry_interval=allocation_retry_interval,
             allocation_retry_timeout=allocation_retry_timeout,
-            device_kind=device_kind,
         )
         self._sessions = GMSSessionManager()
         self._events: deque[GMSRuntimeEvent] = deque(maxlen=self._MAX_EVENTS)
         self._metadata: dict[str, MetadataEntry] = {}
         self._memory_layout_hash = ""
         logger.info(
-            "GMS initialized: device=%d, device_kind=%s",
+            "GMS initialized: device=%d",
             device,
-            device_kind.value,
         )
 
     @property

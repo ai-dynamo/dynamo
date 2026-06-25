@@ -21,7 +21,7 @@ from gpu_memory_service.common.locks import GrantedLockType
 class VMMDevice(ABC):
     """Per-vendor virtual-memory-management device contract.
 
-    A device instance is constructed via ``get_vmm_device(device_kind)``
+    A device instance is obtained via ``get_vmm()``
     and used by GMS to allocate physical memory, export/import shareable
     handles for cross-process sharing, reserve and map virtual addresses.
 

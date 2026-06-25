@@ -38,7 +38,7 @@ from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.common.utils import align_to_granularity
-from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, get_vmm_device_type
 
 logger = logging.getLogger(__name__)
 
@@ -153,14 +153,12 @@ class GMSClientMemoryManager:
         device: int = 0,
         tag: Optional[str] = None,
         scratch_size: int = 512 * 1024 * 1024,
-        device_kind: VMMDeviceType = VMMDeviceType.CUDA,
     ) -> None:
         self.socket_path = socket_path
         self.device = device
         self.tag = tag
         self.scratch_size = scratch_size
-        self._device_kind = device_kind
-        self._vmm = get_vmm_device(device_kind)
+        self._vmm = get_vmm()
 
         self._client: Optional[_GMSClientSession] = None
 
@@ -187,8 +185,8 @@ class GMSClientMemoryManager:
     # ==================== Properties ====================
 
     @property
-    def device_kind(self) -> VMMDeviceType:
-        return self._device_kind
+    def device_type(self) -> VMMDeviceType:
+        return get_vmm_device_type()
 
     @property
     def granted_lock_type(self) -> Optional[GrantedLockType]:
@@ -703,7 +701,7 @@ class GMSClientMemoryManager:
             raise RuntimeError(
                 f"VMM physical memory allocation failed "
                 f"({self.scratch_size // (1 << 20)} MiB) on "
-                f"{self._device_kind.value} device {self.device}"
+                f"{self.device_type.value} device {self.device}"
             )
 
         va = self._vmm.address_reserve(va_reserved_size, self.scratch_size)

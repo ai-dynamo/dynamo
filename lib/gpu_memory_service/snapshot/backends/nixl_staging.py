@@ -14,7 +14,7 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_co
 from dataclasses import dataclass
 from typing import Callable, List, Mapping, Optional, Sequence
 
-from gpu_memory_service.common.vmm import VMMDevice, get_vmm_device
+from gpu_memory_service.common.vmm import VMMDevice, get_vmm
 from gpu_memory_service.snapshot.backends.nixl_common import (
     DRAM_MEM_TYPE,
     FILE_MEM_TYPE,
@@ -76,7 +76,7 @@ class NixlPosixStagingTransferBackend:
     ) -> None:
         self._backend_name = backend_name
         self._device = config.device
-        self._vmm = get_vmm_device(config.device_kind)
+        self._vmm = get_vmm()
         self._max_workers = config.max_workers
         # These are NIXL POSIX backend custom-param keys. NIXL's POSIX default
         # preallocates a large I/O pool, while GMS staging workers issue one

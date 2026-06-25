@@ -4,7 +4,7 @@
 """Server-side VMM allocation store.
 
 Uses the ``VMMDevice`` abstraction from ``common.vmm`` so that future
-non-CUDA device kinds can plug in without touching this file.
+non-CUDA device types can plug in without touching this file.
 
 """
 
@@ -19,7 +19,7 @@ from typing import Callable, Optional
 from uuid import uuid4
 
 from gpu_memory_service.common.utils import align_to_granularity
-from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device
+from gpu_memory_service.common.vmm import get_vmm
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,6 @@ class GMSAllocationManager:
         *,
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = 60.0,
-        device_kind: VMMDeviceType = VMMDeviceType.CUDA,
     ):
         if allocation_retry_interval <= 0:
             raise ValueError(
@@ -61,8 +60,7 @@ class GMSAllocationManager:
             )
 
         self._device = device
-        self._device_kind = device_kind
-        self._vmm = get_vmm_device(device_kind)
+        self._vmm = get_vmm()
         self._allocations: dict[str, AllocationInfo] = {}
         self._next_layout_slot = 0
         self._vmm.ensure_initialized()
@@ -70,10 +68,9 @@ class GMSAllocationManager:
         self._allocation_retry_interval = allocation_retry_interval
         self._allocation_retry_timeout = allocation_retry_timeout
         logger.info(
-            "GMSAllocationManager initialized: device=%d, device_kind=%s, "
+            "GMSAllocationManager initialized: device=%d, "
             "granularity=%d, alloc_retry_interval=%.3f, alloc_retry_timeout=%s",
             device,
-            device_kind.value,
             self._granularity,
             self._allocation_retry_interval,
             (

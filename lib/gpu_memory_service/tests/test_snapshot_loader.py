@@ -48,7 +48,7 @@ def test_list_checkpoint_devices_requires_exact_visible_device_match(
     (tmp_path / "device-0-copy").mkdir()
     (tmp_path / "not-a-device").mkdir()
     (tmp_path / "device-1").write_text("not a directory", encoding="utf-8")
-    monkeypatch.setattr(loader, "get_vmm_device", lambda _kind: _FakeVMM([0, 2]))
+    monkeypatch.setattr(loader, "get_vmm", lambda: _FakeVMM([0, 2]))
 
     assert loader._list_checkpoint_devices(str(tmp_path), VMMDeviceType.CUDA) == [0, 2]
 
@@ -71,9 +71,7 @@ def test_list_checkpoint_devices_rejects_mismatched_checkpoints(
 ):
     for dirname in checkpoint_dirs:
         (tmp_path / dirname).mkdir()
-    monkeypatch.setattr(
-        loader, "get_vmm_device", lambda _kind: _FakeVMM(visible_devices)
-    )
+    monkeypatch.setattr(loader, "get_vmm", lambda: _FakeVMM(visible_devices))
 
     with pytest.raises(RuntimeError, match=expected):
         loader._list_checkpoint_devices(str(tmp_path), VMMDeviceType.CUDA)
@@ -102,7 +100,7 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
 
     monkeypatch.setattr(loader, "get_socket_path", lambda device: f"/tmp/gms-{device}")
     monkeypatch.setattr(loader, "GMSStorageClient", FakeStorageClient)
-    monkeypatch.setattr(loader, "get_vmm_device", lambda _kind: fake_vmm)
+    monkeypatch.setattr(loader, "get_vmm", lambda: fake_vmm)
 
     loader._load_device(
         "/checkpoints/run/versions/1",
@@ -111,7 +109,6 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
         "nixl",
         [],
         2,
-        VMMDeviceType.CUDA,
     )
 
     assert calls[0] == ("set_device", 3)

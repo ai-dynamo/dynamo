@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 from gpu_memory_service.snapshot.transfer import TransferBackendKind
@@ -38,7 +38,6 @@ def _load_device(
     transfer_backend: str,
     sharded_ssd_roots: list[str],
     sharded_ssd_queues_per_root: int,
-    device_kind: VMMDeviceType,
 ) -> None:
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info(
@@ -53,15 +52,14 @@ def _load_device(
     # GMSStorageClient still publishes the restored layout from this thread.
     # Ensure the loader's main per-device thread has a current CUDA context for
     # the final synchronize/unmap/commit path.
-    _vmm = get_vmm_device(device_kind)
-    _vmm.runtime_set_device(device)
+    vmm = get_vmm()
+    vmm.runtime_set_device(device)
     client = GMSStorageClient(
         socket_path=get_socket_path(device),
         device=device,
         transfer_backend=transfer_backend,
         sharded_ssd_roots=sharded_ssd_roots,
         sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
-        device_kind=device_kind,
     )
     client.load_to_gms(
         input_dir,
@@ -109,22 +107,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of independent sharded-ssd restore queues per SSD root.",
     )
     parser.add_argument(
-        "--device-kind",
+        "--device-type",
         type=str,
         default=VMMDeviceType.CUDA.value,
         choices=[d.value for d in VMMDeviceType],
-        help="VMM device kind (default: cuda).",
+        help="VMM device type (default: cuda).",
     )
     return parser
 
 
 def _list_checkpoint_devices(
     checkpoint_dir: str | None,
-    device_kind: VMMDeviceType,
+    device_type: VMMDeviceType,
 ) -> list[int]:
-    _vmm = get_vmm_device(device_kind)
-    _vmm.ensure_initialized()
-    devices = _vmm.list_devices()
+    vmm = get_vmm()
+    vmm.ensure_initialized()
+    devices = vmm.list_devices()
     if not checkpoint_dir:
         return devices
 
@@ -170,7 +168,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--sharded-ssd-queues-per-root must be a positive integer")
     checkpoint_dir = args.checkpoint_dir
     max_workers = args.max_workers
-    device_kind = VMMDeviceType.from_str(args.device_kind)
+    device_type = VMMDeviceType.from_str(args.device_type)
+    init_vmm(device_type)
     transfer_backend = args.transfer_backend
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
     sharded_ssd_queues_per_root = args.sharded_ssd_queues_per_root
@@ -182,7 +181,7 @@ def main(argv: list[str] | None = None) -> None:
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
     )
-    devices = _list_checkpoint_devices(checkpoint_dir, device_kind)
+    devices = _list_checkpoint_devices(checkpoint_dir, device_type)
 
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:
@@ -195,7 +194,6 @@ def main(argv: list[str] | None = None) -> None:
                 transfer_backend,
                 sharded_ssd_roots,
                 sharded_ssd_queues_per_root,
-                device_kind,
             ): dev
             for dev in devices
         }

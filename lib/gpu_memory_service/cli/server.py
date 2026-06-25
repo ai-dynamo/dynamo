@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,15 +55,16 @@ def main() -> None:
         description="GPU Memory Service supervisor (one server per (device, tag))."
     )
     parser.add_argument(
-        "--device-kind",
+        "--device-type",
         type=str,
         default=VMMDeviceType.CUDA.value,
         choices=[d.value for d in VMMDeviceType],
-        help="VMM device kind forwarded to server (default: cuda).",
+        help="VMM device type forwarded to server (default: cuda).",
     )
     args = parser.parse_args()
 
-    vmm = get_vmm_device(VMMDeviceType.from_str(args.device_kind))
+    init_vmm(VMMDeviceType.from_str(args.device_type))
+    vmm = get_vmm()
     vmm.ensure_initialized()
     devices = vmm.list_devices()
     processes = []
@@ -78,15 +79,15 @@ def main() -> None:
                     str(device),
                     "--tag",
                     tag,
-                    "--device-kind",
-                    args.device_kind,
+                    "--device-type",
+                    args.device_type,
                 ]
             )
             logger.info(
-                "Started GMS device=%d tag=%s device_kind=%s pid=%d",
+                "Started GMS device=%d tag=%s device_type=%s pid=%d",
                 device,
                 tag,
-                args.device_kind,
+                args.device_type,
                 proc.pid,
             )
             processes.append(proc)

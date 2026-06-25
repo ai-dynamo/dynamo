@@ -24,7 +24,7 @@ class Config:
     alloc_retry_interval: float
     alloc_retry_timeout: Optional[float]
     verbose: bool
-    device_kind: VMMDeviceType
+    device_type: VMMDeviceType
 
 
 def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
@@ -74,11 +74,11 @@ def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
         "Pass an explicit large value if you need essentially-unbounded retry.",
     )
     parser.add_argument(
-        "--device-kind",
+        "--device-type",
         type=str,
         default=VMMDeviceType.CUDA.value,
         choices=[d.value for d in VMMDeviceType],
-        help="VMM device kind (vendor driver) to use (default: cuda).",
+        help="VMM device type (vendor driver) to use (default: cuda).",
     )
 
     args = parser.parse_args(argv)
@@ -103,7 +103,7 @@ def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
             alloc_retry_interval=args.alloc_retry_interval,
             alloc_retry_timeout=args.alloc_retry_timeout,
             verbose=args.verbose,
-            device_kind=VMMDeviceType.from_str(args.device_kind),
+            device_type=VMMDeviceType.from_str(args.device_type),
         )
         for tag in tags
     ]
