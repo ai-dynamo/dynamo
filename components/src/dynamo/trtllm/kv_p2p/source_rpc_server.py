@@ -140,6 +140,13 @@ def _make_release_handler(req_router: _SourceIpcRouter):
         if lease_id is None:
             yield {"ok": False, "error": "missing 'lease_id' in request"}
             return
+        logging.info(
+            "remote_g2: release_lease endpoint forwarding lease_id=%s "
+            "source_dp_rank=%s reason=%s",
+            lease_id,
+            source_dp_rank,
+            reason,
+        )
         loop = asyncio.get_running_loop()
         try:
             response = await loop.run_in_executor(

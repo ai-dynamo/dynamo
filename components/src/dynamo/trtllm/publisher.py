@@ -22,6 +22,7 @@ Event Flow:
 import asyncio
 import concurrent.futures
 import logging
+import os
 import threading
 import time
 import traceback
@@ -448,6 +449,29 @@ class Publisher:
         # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
         # It is used to prevent sending remove event to kv router since partial blocks are not stored.
         self.partial_block_hashes: set[int] = set()
+        self.force_host_pinned_mirror = os.environ.get(
+            "KVP2P_FORCE_HOST_PINNED_MIRROR", ""
+        ).lower() in {"1", "true", "yes", "on"}
+        self.force_host_pinned_mirror_min_blocks = int(
+            os.environ.get("KVP2P_FORCE_HOST_PINNED_MIRROR_MIN_BLOCKS", "4")
+        )
+        self.force_host_pinned_mirror_remove_device = os.environ.get(
+            "KVP2P_FORCE_HOST_PINNED_MIRROR_REMOVE_DEVICE", "1"
+        ).lower() in {"1", "true", "yes", "on"}
+        if self.force_host_pinned_mirror:
+            logging.warning(
+                "KVP2P force HostPinned mirror enabled: "
+                "device stored batches with at least %d blocks will also be "
+                "published as host_pinned router events%s. This is a "
+                "test-only path for forcing remote-G2 plans; source resolve "
+                "remains authoritative for real force-offload.",
+                self.force_host_pinned_mirror_min_blocks,
+                (
+                    " and removed from the router device index"
+                    if self.force_host_pinned_mirror_remove_device
+                    else ""
+                ),
+            )
         # Per-block metadata cache (block_hash -> dict) so that `updated`
         # events (which only carry a hash + tier transition) can be turned
         # back into a tier-tagged store event for the router. Cleared on
@@ -1149,6 +1173,72 @@ class Publisher:
                 block_mm_infos,
                 lora_name=lora_name,
                 storage_tier=storage_tier,
+            )
+
+        self._maybe_mirror_device_stored_as_host_pinned(
+            token_ids=token_ids,
+            num_block_tokens=num_block_tokens,
+            block_hashes=block_hashes,
+            parent_hash=parent_hash,
+            block_mm_infos=block_mm_infos,
+            lora_name=lora_name,
+            attention_dp_rank=attention_dp_rank,
+            storage_tier=storage_tier,
+        )
+
+    def _maybe_mirror_device_stored_as_host_pinned(
+        self,
+        *,
+        token_ids: list[int],
+        num_block_tokens: list[int],
+        block_hashes: list[int],
+        parent_hash: Optional[int],
+        block_mm_infos: list[dict | None],
+        lora_name: Optional[str],
+        attention_dp_rank: int,
+        storage_tier: str,
+    ) -> None:
+        if not self.force_host_pinned_mirror:
+            return
+        if storage_tier != "device":
+            return
+        if len(block_hashes) < self.force_host_pinned_mirror_min_blocks:
+            return
+
+        publisher = None
+        if self.zmq_kv_event_publisher:
+            publisher = self.lower_tier_kv_event_publishers.get(attention_dp_rank)
+        elif self.kv_event_publishers:
+            publisher = self.kv_event_publishers.get(attention_dp_rank)
+        if publisher is None:
+            logging.warning(
+                "KVP2P force HostPinned mirror skipped: no publisher for "
+                "attention_dp_rank=%s",
+                attention_dp_rank,
+            )
+            return
+
+        logging.warning(
+            "KVP2P force HostPinned mirror publishing %d blocks for "
+            "attention_dp_rank=%s hashes=%s",
+            len(block_hashes),
+            attention_dp_rank,
+            block_hashes,
+        )
+        publisher.publish_stored(
+            token_ids,
+            num_block_tokens,
+            block_hashes,
+            parent_hash,
+            block_mm_infos,
+            lora_name=lora_name,
+            storage_tier="host_pinned",
+        )
+        if self.force_host_pinned_mirror_remove_device:
+            self._dispatch_removed(
+                block_hashes=block_hashes,
+                attention_dp_rank=attention_dp_rank,
+                storage_tier="device",
             )
 
     def _dispatch_removed(
