@@ -5,6 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../../../common/launch_utils.sh"
 
 export AWS_ENDPOINT=http://localhost:9000
@@ -27,6 +28,7 @@ export VLLM_TARGET_DEVICE=xpu
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-8081}"
 SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
@@ -86,6 +88,7 @@ ZE_AFFINITY_MASK=$GPU_WORKER1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+  ${GPU_MEM_ARGS:---gpu-memory-utilization 0.75} \
     --enable-lora \
     --max-lora-rank 64 \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENT_PORT1}\",\"enable_kv_cache_events\":true}" &
@@ -96,6 +99,7 @@ ZE_AFFINITY_MASK=$GPU_WORKER2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+  ${GPU_MEM_ARGS:---gpu-memory-utilization 0.75} \
     --enable-lora \
     --max-lora-rank 64 \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENT_PORT2}\",\"enable_kv_cache_events\":true}" &
