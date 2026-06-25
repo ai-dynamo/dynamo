@@ -46,7 +46,7 @@ request can be replayed by Dynamo mock workers. Pass the original JSONL or
 JSONL.GZ shards directly to the replay harness:
 
 ```bash
-.venv/bin/python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
+python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
   --trace-format dynamo \
   --replay-mode offline \
   --router-mode kv_router \

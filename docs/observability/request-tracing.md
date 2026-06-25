@@ -169,7 +169,7 @@ these shape checks or create an agent-only fallback row.
 Pass `dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly to replay:
 
 ```bash
-.venv/bin/python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
+python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
   --trace-format dynamo \
   --replay-mode offline \
   --router-mode kv_router \

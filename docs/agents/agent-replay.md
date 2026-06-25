@@ -37,7 +37,7 @@ when you want to inspect final finish reasons, backend stop signals, or complete
 tool-call metadata inside the trace.
 
 ```bash
-.venv/bin/python -m dynamo.replay "${DYN_REQUEST_TRACE_OUTPUT_PATH}".*.jsonl.gz \
+python -m dynamo.replay "${DYN_REQUEST_TRACE_OUTPUT_PATH}".*.jsonl.gz \
   --trace-format dynamo \
   --replay-mode offline \
   --router-mode kv_router \

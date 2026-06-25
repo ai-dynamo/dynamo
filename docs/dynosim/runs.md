@@ -170,7 +170,7 @@ size from the records and selects standard or agentic lowering based on
 `agent_context`.
 
 ```bash
-.venv/bin/python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
+python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
     --trace-format dynamo \
     --replay-mode offline \
     --router-mode kv_router \
@@ -207,7 +207,7 @@ child requests spawned by this row, and `prefix_reset` marks the first row in a 
 Run it with:
 
 ```bash
-.venv/bin/python -m dynamo.replay /tmp/dynamo-request-trace.agentic-mooncake.jsonl \
+python -m dynamo.replay /tmp/dynamo-request-trace.agentic-mooncake.jsonl \
     --trace-format agentic_mooncake \
     --trace-block-size 128 \
     --replay-mode offline \
