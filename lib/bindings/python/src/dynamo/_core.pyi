@@ -590,6 +590,28 @@ class Context:
         """
         ...
 
+    def start_engine_span(
+        self, attrs: Optional[dict[str, Any]] = None
+    ) -> "SpanProxy":
+        """
+        Open the worker-level ``engine.generate`` span for backends that do
+        NOT run through the Rust ``EngineAdapter`` (the legacy per-backend
+        workers). Call once, before invoking the engine, so that
+        ``trace_headers()`` returns the *bridged* traceparent (downstream
+        engine spans nest under ``engine.generate``) and
+        ``current_span()`` / ``start_span()`` become functional.
+
+        The span is parented to the inbound trace context when present and
+        ends when the ``Context`` is dropped at request completion.
+        Idempotent: reuses an already-attached span. Returns a no-op proxy
+        when the OTel bridge isn't installed. ``attrs`` are applied to the
+        span (e.g. ``{"disagg_role": "prefill"}``).
+
+        The unified backend gets this span from the framework and does NOT
+        call this.
+        """
+        ...
+
     def current_span(self) -> "SpanProxy":
         """
         Handle on the framework's ``engine.generate`` span. Use it to

@@ -1092,6 +1092,17 @@ class HandlerBase(BaseGenerativeHandler):
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
 
+        # Open the worker-level `engine.generate` span so downstream TRT-LLM
+        # spans nest under it, then build the (now bridged) trace headers.
+        # The legacy worker path doesn't run through the Rust EngineAdapter
+        # that opens this span for the unified backend, so we open it
+        # explicitly on the context. Held until the request completes.
+        context.start_engine_span(
+            {
+                "disagg_role": str(self.disaggregation_mode),
+                "request_id": request_id,
+            }
+        )
         # Build trace headers for distributed tracing
         trace_headers = context.trace_headers()
 
