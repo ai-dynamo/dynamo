@@ -20,12 +20,15 @@ from .flashinfer_snapshot import (
     pause_flashinfer_peer_resources,
     resume_flashinfer_peer_resources,
 )
+from .snapshot_compat import patch_vllm_quantized_kv_cache_wake_up
 from .snapshot_worker_config import (
     flashinfer_only_collectives_enabled,
     no_nccl_snapshot_mode_enabled,
 )
 
 logger = logging.getLogger("vllm.dynamo.snapshot_worker")
+
+patch_vllm_quantized_kv_cache_wake_up()
 
 
 class SnapshotWorker(Worker):

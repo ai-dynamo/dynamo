@@ -70,6 +70,10 @@ def configure_flashinfer_snapshot_worker(config: Any) -> bool:
     if os.environ.get(DYN_VLLM_FLASHINFER_SNAPSHOT_WORKER) != "1":
         return False
 
+    from .snapshot_compat import patch_vllm_quantized_kv_cache_wake_up
+
+    patch_vllm_quantized_kv_cache_wake_up()
+
     engine_args = getattr(config, "engine_args", None)
     if engine_args is None:
         raise ValueError(
