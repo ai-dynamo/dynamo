@@ -79,7 +79,7 @@ fn trace_accumulates_session_deltas(trace_format: TraceFileFormat) -> bool {
     trace_format == TraceFileFormat::MooncakeDelta
 }
 
-fn single_turn_mooncake_requests(
+fn single_turn_trace_requests(
     trace_format: TraceFileFormat,
     trace: &Trace,
 ) -> Result<Option<Vec<DirectRequest>>> {
@@ -117,7 +117,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options(
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
-    if let Some(requests) = single_turn_mooncake_requests(TraceFileFormat::Dynamo, &trace)? {
+    if let Some(requests) = single_turn_trace_requests(TraceFileFormat::Dynamo, &trace)? {
         return crate::replay::offline::simulate_trace(
             args,
             router_config,
@@ -161,7 +161,7 @@ pub fn simulate_loaded_trace_disagg_with_router_mode_and_options(
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
-    if let Some(requests) = single_turn_mooncake_requests(TraceFileFormat::Dynamo, &trace)? {
+    if let Some(requests) = single_turn_trace_requests(TraceFileFormat::Dynamo, &trace)? {
         return crate::replay::offline::simulate_trace_disagg(
             config,
             router_config,
@@ -201,7 +201,7 @@ pub fn simulate_loaded_trace_live_with_router_mode(
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
-    if let Some(requests) = single_turn_mooncake_requests(TraceFileFormat::Dynamo, &trace)? {
+    if let Some(requests) = single_turn_trace_requests(TraceFileFormat::Dynamo, &trace)? {
         return online::simulate_trace_requests(
             args,
             router_config,
@@ -338,7 +338,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
     )?
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
-    let report = if let Some(requests) = single_turn_mooncake_requests(trace_format, &trace)? {
+    let report = if let Some(requests) = single_turn_trace_requests(trace_format, &trace)? {
         crate::replay::offline::simulate_trace(
             args,
             router_config,
@@ -443,7 +443,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
     )?
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
-    let report = if let Some(requests) = single_turn_mooncake_requests(trace_format, &trace)? {
+    let report = if let Some(requests) = single_turn_trace_requests(trace_format, &trace)? {
         crate::replay::offline::simulate_trace_disagg(
             config,
             router_config,
@@ -551,7 +551,7 @@ pub fn simulate_trace_live_file_with_router_mode_and_format(
     )?
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
-    if let Some(requests) = single_turn_mooncake_requests(trace_format, &trace)? {
+    if let Some(requests) = single_turn_trace_requests(trace_format, &trace)? {
         online::simulate_trace_requests(
             args,
             router_config,
@@ -1511,7 +1511,7 @@ mod tests {
         };
 
         for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::Dynamo] {
-            let requests = single_turn_mooncake_requests(trace_format, &trace)
+            let requests = single_turn_trace_requests(trace_format, &trace)
                 .unwrap()
                 .expect("single-turn traces should become request traces");
 
@@ -1539,7 +1539,7 @@ mod tests {
         };
 
         for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::Dynamo] {
-            let err = single_turn_mooncake_requests(trace_format, &trace)
+            let err = single_turn_trace_requests(trace_format, &trace)
                 .expect_err("missing first_arrival_timestamp_ms must error before reaching the timestamped request path");
             assert!(
                 err.to_string().contains("first_arrival_timestamp_ms"),
@@ -1575,7 +1575,7 @@ mod tests {
         };
 
         assert!(
-            single_turn_mooncake_requests(TraceFileFormat::Mooncake, &trace)
+            single_turn_trace_requests(TraceFileFormat::Mooncake, &trace)
                 .unwrap()
                 .is_none()
         );

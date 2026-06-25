@@ -108,43 +108,62 @@ fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) ->
     Ok(())
 }
 
-impl TurnTrace {
-    fn validate_block_size_and_capacity(&self, trace_block_size: usize) -> Result<()> {
-        if trace_block_size == 0 {
-            bail!("trace_block_size must be greater than 0");
-        }
-        if self.hash_ids.len() * trace_block_size < self.input_length {
-            bail!(
-                "input_length {} exceeds synthesized capacity {}",
-                self.input_length,
-                self.hash_ids.len() * trace_block_size
-            );
-        }
-        Ok(())
+fn synthesize_trace_tokens(
+    input_length: usize,
+    hash_ids: &[u64],
+    trace_block_size: usize,
+) -> Result<Vec<u32>> {
+    if trace_block_size == 0 {
+        bail!("trace_block_size must be greater than 0");
+    }
+    if hash_ids.len() * trace_block_size < input_length {
+        bail!(
+            "input_length {} exceeds synthesized capacity {}",
+            input_length,
+            hash_ids.len() * trace_block_size
+        );
     }
 
+    let mut tokens = Vec::with_capacity(input_length);
+    for &hash_id in hash_ids {
+        let token_id = hash_id as u32;
+        tokens.extend((0..trace_block_size).map(|_| token_id));
+        if tokens.len() >= input_length {
+            tokens.truncate(input_length);
+            break;
+        }
+    }
+
+    if tokens.len() != input_length {
+        bail!(
+            "failed to synthesize {} tokens from {} hash_ids",
+            input_length,
+            hash_ids.len()
+        );
+    }
+
+    Ok(tokens)
+}
+
+fn trace_to_replay_hashes(
+    input_length: usize,
+    hash_ids: &[u64],
+    trace_block_size: usize,
+    engine_block_size: usize,
+) -> Result<ReplayRequestHashes> {
+    if engine_block_size == 0 {
+        bail!("engine_block_size must be greater than 0");
+    }
+
+    let tokens = synthesize_trace_tokens(input_length, hash_ids, trace_block_size)?;
+    let engine_block_size =
+        u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
+    Ok(ReplayRequestHashes::from_tokens(&tokens, engine_block_size))
+}
+
+impl TurnTrace {
     pub fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
-        self.validate_block_size_and_capacity(trace_block_size)?;
-
-        let mut tokens = Vec::with_capacity(self.input_length);
-        for &hash_id in &self.hash_ids {
-            let token_id = hash_id as u32;
-            tokens.extend((0..trace_block_size).map(|_| token_id));
-            if tokens.len() >= self.input_length {
-                tokens.truncate(self.input_length);
-                break;
-            }
-        }
-
-        if tokens.len() != self.input_length {
-            bail!(
-                "failed to synthesize {} tokens from {} hash_ids",
-                self.input_length,
-                self.hash_ids.len()
-            );
-        }
-
-        Ok(tokens)
+        synthesize_trace_tokens(self.input_length, &self.hash_ids, trace_block_size)
     }
 
     pub fn to_direct_request(
@@ -171,54 +190,18 @@ impl TurnTrace {
         trace_block_size: usize,
         engine_block_size: usize,
     ) -> Result<ReplayRequestHashes> {
-        if engine_block_size == 0 {
-            bail!("engine_block_size must be greater than 0");
-        }
-
-        let tokens = self.synthesize_tokens(trace_block_size)?;
-        let engine_block_size =
-            u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
-        Ok(ReplayRequestHashes::from_tokens(&tokens, engine_block_size))
+        trace_to_replay_hashes(
+            self.input_length,
+            &self.hash_ids,
+            trace_block_size,
+            engine_block_size,
+        )
     }
 }
 
 impl AgenticTurnTrace {
-    fn validate_block_size_and_capacity(&self, trace_block_size: usize) -> Result<()> {
-        if trace_block_size == 0 {
-            bail!("trace_block_size must be greater than 0");
-        }
-        if self.hash_ids.len() * trace_block_size < self.input_length {
-            bail!(
-                "input_length {} exceeds synthesized capacity {}",
-                self.input_length,
-                self.hash_ids.len() * trace_block_size
-            );
-        }
-        Ok(())
-    }
-
     pub fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
-        self.validate_block_size_and_capacity(trace_block_size)?;
-
-        let mut tokens = Vec::with_capacity(self.input_length);
-        for &hash_id in &self.hash_ids {
-            let token_id = hash_id as u32;
-            tokens.extend((0..trace_block_size).map(|_| token_id));
-            if tokens.len() >= self.input_length {
-                tokens.truncate(self.input_length);
-                break;
-            }
-        }
-
-        if tokens.len() != self.input_length {
-            bail!(
-                "failed to synthesize {} tokens from {} hash_ids",
-                self.input_length,
-                self.hash_ids.len()
-            );
-        }
-
-        Ok(tokens)
+        synthesize_trace_tokens(self.input_length, &self.hash_ids, trace_block_size)
     }
 
     pub fn to_replay_hashes(
@@ -226,14 +209,12 @@ impl AgenticTurnTrace {
         trace_block_size: usize,
         engine_block_size: usize,
     ) -> Result<ReplayRequestHashes> {
-        if engine_block_size == 0 {
-            bail!("engine_block_size must be greater than 0");
-        }
-
-        let tokens = self.synthesize_tokens(trace_block_size)?;
-        let engine_block_size =
-            u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
-        Ok(ReplayRequestHashes::from_tokens(&tokens, engine_block_size))
+        trace_to_replay_hashes(
+            self.input_length,
+            &self.hash_ids,
+            trace_block_size,
+            engine_block_size,
+        )
     }
 }
 

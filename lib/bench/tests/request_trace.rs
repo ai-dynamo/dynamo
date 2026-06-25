@@ -84,7 +84,7 @@ fn pi_direct_dynamo_lowering_matches_agentic_mooncake_reload() {
     writer.finish().unwrap();
     let reloaded = AgenticTrace::from_agentic_mooncake(&mooncake_path, block_size).unwrap();
 
-    assert_agentic_traces_equal(&direct, &reloaded);
+    assert_eq!(direct, reloaded);
 }
 
 #[test]
@@ -150,44 +150,4 @@ fn write_gzip_record(path: &Path, record: &str) {
     let mut writer = GzEncoder::new(file, Compression::default());
     writeln!(writer, "{record}").unwrap();
     writer.finish().unwrap();
-}
-
-fn assert_agentic_traces_equal(left: &AgenticTrace, right: &AgenticTrace) {
-    assert_eq!(left.block_size, right.block_size);
-    assert_eq!(left.turns.len(), right.turns.len());
-    for (index, (left, right)) in left.turns.iter().zip(&right.turns).enumerate() {
-        assert_eq!(left.request_id, right.request_id, "turn {index} request_id");
-        assert_eq!(left.session_id, right.session_id, "turn {index} session_id");
-        assert_eq!(
-            left.input_length, right.input_length,
-            "turn {index} input_length"
-        );
-        assert_eq!(
-            left.max_output_tokens, right.max_output_tokens,
-            "turn {index} max_output_tokens"
-        );
-        assert_eq!(left.hash_ids, right.hash_ids, "turn {index} hash_ids");
-        assert_eq!(
-            left.first_ready_timestamp_ms, right.first_ready_timestamp_ms,
-            "turn {index} first_ready_timestamp_ms"
-        );
-        assert_eq!(
-            left.delay_after_dependencies_ms, right.delay_after_dependencies_ms,
-            "turn {index} delay_after_dependencies_ms"
-        );
-        assert_eq!(left.priority, right.priority, "turn {index} priority");
-        assert_eq!(
-            left.strict_priority, right.strict_priority,
-            "turn {index} strict_priority"
-        );
-        assert_eq!(
-            left.policy_class, right.policy_class,
-            "turn {index} policy_class"
-        );
-        assert_eq!(left.wait_for, right.wait_for, "turn {index} wait_for");
-        assert_eq!(
-            left.prefix_reset, right.prefix_reset,
-            "turn {index} prefix_reset"
-        );
-    }
 }
