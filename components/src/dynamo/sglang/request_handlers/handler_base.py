@@ -36,6 +36,7 @@ from dynamo.llm import (
     ModelInput,
     ModelType,
     WorkerMetricsPublisher,
+    WorkerType,
     lora_name_to_id,
     register_llm,
     unregister_llm,
@@ -43,8 +44,8 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
-from dynamo.sglang.quiesce import SGLangEngineQuiesceController
 
 logger = logging.getLogger(__name__)
 
@@ -383,19 +384,32 @@ class LoraMixin:
 
                             # Match the base-model registration topology so the
                             # prefill router activates for the LoRA model name
-                            # the same way it does for the base model. Without
-                            # this, prefill workers register the LoRA as a
-                            # chat-completions target and the frontend routes
-                            # chat requests directly to prefill, which then
-                            # waits forever for a KV transfer. For non-prefill
-                            # workers, honor --endpoint-types so the LoRA is
-                            # exposed on the same endpoints as the base model.
+                            # the same way it does for the base model. The prefill
+                            # role is carried by `worker_type=Prefill`; we register
+                            # the legacy `ModelType.Prefill` marker bit (not a
+                            # surface) so an old frontend still detects it during
+                            # the cross-version rollout. Non-prefill workers honor
+                            # --endpoint-types so the LoRA is exposed on the same
+                            # endpoints as the base model.
                             if self.config.serving_mode == DisaggregationMode.PREFILL:
                                 lora_model_type = ModelType.Prefill
+                                lora_worker_type = WorkerType.Prefill
+                                lora_needs: list[list[WorkerType]] = [
+                                    [WorkerType.Decode]
+                                ]
                             else:
                                 lora_model_type = parse_endpoint_types(
                                     self.config.dynamo_args.endpoint_types
                                 )
+                                if (
+                                    self.config.serving_mode
+                                    == DisaggregationMode.DECODE
+                                ):
+                                    lora_worker_type = WorkerType.Decode
+                                    lora_needs = [[WorkerType.Prefill]]
+                                else:
+                                    lora_worker_type = WorkerType.Aggregated
+                                    lora_needs = []
                             await register_llm(
                                 model_input=ModelInput.Tokens,
                                 model_type=lora_model_type,
@@ -405,6 +419,8 @@ class LoraMixin:
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.server_args.model_path,
+                                worker_type=lora_worker_type,
+                                needs=lora_needs,
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
@@ -647,6 +663,9 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
+        self.enable_session_radix_cache = getattr(
+            config.server_args, "enable_session_radix_cache", False
+        )
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
@@ -662,10 +681,10 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
-        self._quiesce_controller = (
-            SGLangEngineQuiesceController(engine) if engine is not None else None
+        self._pause_controller = (
+            SGLangEnginePauseController(engine) if engine is not None else None
         )
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_lock = asyncio.Lock()
 
         # LoRA tracking (via LoraMixin)
         self._init_lora_tracking()
@@ -691,7 +710,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         2. Pause generation - drain in-flight requests
         3. Release memory - safe now that no requests are active
         """
-        if self._quiesce_controller is None:
+        if self._pause_controller is None:
             return {
                 "status": "error",
                 "message": "memory control not supported on this worker",
@@ -699,13 +718,13 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            if self._pause_controller.is_paused:
                 return {
                     "status": "ok",
                     "message": "Memory already released",
                 }
-            if self._quiesce_controller.needs_resume_recovery:
+            if self._pause_controller.needs_resume_recovery:
                 return {
                     "status": "error",
                     "message": "resume_memory_occupation required before retrying release",
@@ -718,7 +737,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                     await self.generate_endpoint.unregister_endpoint_instance()
                     unregistered = True
 
-                await self._quiesce_controller.quiesce(tags)
+                await self._pause_controller.pause(tags)
 
                 return {
                     "status": "ok",
@@ -730,13 +749,13 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
-                # If quiesce rolled back cleanly the engine is serving-safe again,
+                # If pause rolled back cleanly the engine is serving-safe again,
                 # but discovery still shows us unregistered and resume will
                 # early-return. Re-register so the worker rejoins the routing pool.
                 if (
                     unregistered
-                    and not self._quiesce_controller.is_quiesced
-                    and not self._quiesce_controller.needs_resume_recovery
+                    and not self._pause_controller.is_paused
+                    and not self._pause_controller.needs_resume_recovery
                     and self.generate_endpoint is not None
                 ):
                     try:
@@ -761,7 +780,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         2. Continue generation - ready to serve requests
         3. Re-register to discovery - allow frontend to route here
         """
-        if self._quiesce_controller is None:
+        if self._pause_controller is None:
             return {
                 "status": "error",
                 "message": "memory control not supported on this worker",
@@ -769,20 +788,20 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            needs_recovery = self._quiesce_controller.needs_resume_recovery
-            if not self._quiesce_controller.is_quiesced and not needs_recovery:
+        async with self._pause_lock:
+            needs_recovery = self._pause_controller.needs_resume_recovery
+            if not self._pause_controller.is_paused and not needs_recovery:
                 return {
                     "status": "ok",
                     "message": "Memory already resumed",
                 }
 
             try:
-                await self._quiesce_controller.resume(tags)
+                await self._pause_controller.resume(tags)
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
-                self._quiesce_controller.mark_resumed()
+                self._pause_controller.mark_resumed()
 
                 return {
                     "status": "ok",
@@ -881,106 +900,35 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "new_version": req.new_version,
         }
 
-    async def open_session(self, body: dict) -> dict:
-        """Open a streaming session for subagent KV isolation.
-
-        Args:
-            body: Dict with "session_id", optional "timeout" (default 120),
-                  and optional "capacity_of_str_len" (default 65536).
-        """
-        from sglang.srt.managers.io_struct import OpenSessionReqInput
-
-        session_id = body.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "session_id required"}
-        timeout = body.get("timeout", 120)
-        capacity = body.get("capacity_of_str_len", 65536)
-        try:
-            obj = OpenSessionReqInput(
-                capacity_of_str_len=capacity,
-                session_id=session_id,
-                streaming=True,
-                timeout=float(timeout),
-            )
-            result = await self.engine.tokenizer_manager.open_session(obj, None)
-            if result is None:
-                return {
-                    "status": "ok",
-                    "session_id": session_id,
-                    "message": "Session already exists",
-                }
-            return {"status": "ok", "session_id": result}
-        except Exception as e:
-            logging.error(f"Failed to open session {session_id}: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def close_session(self, body: dict) -> dict:
-        """Close a streaming session and release its KV resources.
-
-        Args:
-            body: Dict with "session_id".
-        """
-        from sglang.srt.managers.io_struct import CloseSessionReqInput
-
-        session_id = body.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "session_id required"}
-        try:
-            obj = CloseSessionReqInput(session_id=session_id)
-            await self.engine.tokenizer_manager.close_session(obj, None)
-            return {"status": "ok", "session_id": session_id}
-        except Exception as e:
-            logging.error(f"Failed to close session {session_id}: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def session_control(self, request, context=None):
-        """Service mesh endpoint for session lifecycle operations.
-
-        Args:
-            request: Dict with "action" key ("open_session" or "close_session")
-                     and action-specific parameters.
-            context: Optional Dynamo context (unused but required by protocol).
-
-        Yields:
-            Single dict with operation result.
-        """
-        action = request.get("action")
-        if action == "open_session":
-            result = await self.open_session(request)
-        elif action == "close_session":
-            result = await self.close_session(request)
-        else:
-            result = {"status": "error", "message": f"Unknown action: {action}"}
-        yield result
-
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        runtime.register_engine_route("start_profile", self.start_profile)
-        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route("control/start_profile", self.start_profile)
+        runtime.register_engine_route("control/stop_profile", self.stop_profile)
         runtime.register_engine_route(
-            "release_memory_occupation", self.release_memory_occupation
+            "control/release_memory_occupation", self.release_memory_occupation
         )
         runtime.register_engine_route(
-            "resume_memory_occupation", self.resume_memory_occupation
+            "control/resume_memory_occupation", self.resume_memory_occupation
         )
         runtime.register_engine_route(
-            "update_weights_from_disk", self.update_weights_from_disk
+            "control/update_weights_from_disk", self.update_weights_from_disk
         )
         runtime.register_engine_route(
-            "update_weights_from_tensor", self.update_weights_from_tensor
+            "control/update_weights_from_tensor", self.update_weights_from_tensor
         )
         runtime.register_engine_route(
-            "update_weights_from_distributed", self.update_weights_from_distributed
+            "control/update_weights_from_distributed",
+            self.update_weights_from_distributed,
         )
         runtime.register_engine_route(
-            "update_weights_from_ipc", self.update_weights_from_ipc
+            "control/update_weights_from_ipc", self.update_weights_from_ipc
         )
         runtime.register_engine_route(
-            "update_weight_version", self.update_weight_version
+            "control/update_weight_version", self.update_weight_version
         )
         if getattr(self.config, "dynamo_args", None) and getattr(
             self.config.dynamo_args, "enable_rl", False
@@ -1014,17 +962,15 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
 
-    def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        if not getattr(self.config.server_args, "enable_streaming_session", False):
-            return {}
-        routing = request.get("routing") or {}
-        session_control = routing.get("session_control") or {}
-        session_id = session_control.get("session_id")
-        if not session_id:
-            return {}
+    def _session_id(self, request: Dict[str, Any]) -> Optional[str]:
+        if not self.enable_session_radix_cache:
+            return None
+        session_id = (request.get("agent_context") or {}).get("session_id")
+        return session_id if isinstance(session_id, str) and session_id else None
 
-        # Streaming sessions only need the session identifier on each turn.
-        return {"session_params": {"id": session_id}}
+    def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        session_id = self._session_id(request)
+        return {"session_params": {"id": session_id}} if session_id else {}
 
     @staticmethod
     def _get_guided_decoding_params(

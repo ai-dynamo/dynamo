@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Shadow Engine Failover
+subtitle: Keeps a standby engine attached to GPU-resident model weights so process failures recover without reloading the model.
 ---
 
 > ⚠️ **Experimental Feature**: Shadow Engine Failover is an opt-in preview
@@ -93,7 +94,7 @@ active and standby engines share the same weight memory boundary instead of
 loading independent copies.
 
 Direct GMS enablement is useful for backend integration testing and
-sleep/wake-style lifecycle experiments. By itself, it does not configure
+pause/resume-style lifecycle experiments. By itself, it does not configure
 active/passive failover; use the `failover` field for the shadow engine flow.
 
 ## Prerequisites

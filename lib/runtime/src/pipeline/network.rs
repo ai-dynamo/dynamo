@@ -28,10 +28,12 @@ use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Respons
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
-    ServiceBackend, ServiceEngine, SingleIn, Source, context,
+    AsyncTransportEngine, Context, Data, Error, ManyIn, ManyOut, PipelineError, PipelineIO,
+    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
 use crate::metrics::MetricsHierarchy;
+use crate::metrics::prometheus_names::work_handler;
+use crate::protocols::maybe_error::MaybeError;
 use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
@@ -60,7 +62,7 @@ pub trait WorkQueueConsumer {
     async fn dequeue(&self) -> Result<Bytes, String>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     Request,
@@ -94,6 +96,11 @@ pub(crate) struct RequestControlMessage {
     /// Reliable for single-machine profiling; treat cross-host values as approximate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) frontend_send_ts_ns: Option<u64>,
+    /// For bidirectional dispatch (`request_type == ManyIn`): connection info the
+    /// worker dials back to in order to receive subsequent request frames. `None`
+    /// for the unary path, which is the wire-compatible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_stream_connection_info: Option<ConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -350,6 +357,11 @@ pub struct ConnectionInfo {
     pub info: String,
 }
 
+/// Default number of frames buffered between the data-plane socket task and the
+/// engine consumer/producer for a single stream. Preserves the historically
+/// hard-coded mpsc channel capacity used by the TCP transport.
+pub const DEFAULT_SEND_BUFFER_COUNT: usize = 64;
+
 /// When registering a new TransportStream on the server, the caller specifies if the
 /// stream is a sender, receiver or both.
 ///
@@ -362,17 +374,19 @@ pub struct StreamOptions {
     pub context: Arc<dyn AsyncEngineContext>,
 
     /// Register with the server that this connection will have a server-side Sender
-    /// that can be picked up by the Request/Forward pipeline
-    ///
-    /// TODO - note, this option is currently not implemented and will cause a panic
+    /// that can be picked up by the Request/Forward pipeline. The downstream side
+    /// dials in via [`crate::pipeline::network::tcp::client::TcpClient::create_request_stream`]
+    /// to receive the frames the server pushes.
     pub enable_request_stream: bool,
 
     /// Register with the server that this connection will have a server-side Receiver
     /// that can be picked up by the Response/Reverse pipeline
     pub enable_response_stream: bool,
 
-    /// The number of messages to buffer before blocking
-    #[builder(default = "8")]
+    /// The number of frames buffered between the data-plane socket task and the
+    /// engine consumer/producer before backpressure kicks in. Drives the mpsc
+    /// channel capacity for the per-stream buffer in the TCP transport.
+    #[builder(default = "DEFAULT_SEND_BUFFER_COUNT")]
     pub send_buffer_count: usize,
 
     /// The number of messages to buffer before blocking
@@ -392,7 +406,39 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestControlMessage, RequestType, ResponseType};
+    use super::{
+        DEFAULT_SEND_BUFFER_COUNT, RequestControlMessage, RequestType, ResponseType, StreamOptions,
+    };
+    use crate::engine::AsyncEngineContextProvider;
+    use crate::pipeline::Context;
+
+    #[test]
+    fn stream_options_send_buffer_count_defaults_to_64() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .build()
+            .expect("stream options should build");
+
+        assert_eq!(DEFAULT_SEND_BUFFER_COUNT, 64);
+        assert_eq!(options.send_buffer_count, DEFAULT_SEND_BUFFER_COUNT);
+    }
+
+    #[test]
+    fn stream_options_send_buffer_count_overrides_default() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(128)
+            .build()
+            .expect("stream options should build");
+
+        assert_eq!(options.send_buffer_count, 128);
+    }
 
     #[test]
     fn request_control_message_defaults_missing_metadata() {

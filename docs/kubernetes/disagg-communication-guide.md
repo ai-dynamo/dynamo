@@ -1,11 +1,10 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Disaggregated Inference Communication Guide
 sidebar-title: Disagg Communication
 subtitle: Best practices for prefill/decode worker communication on Kubernetes
 ---
-
-# Disaggregated Inference Communication Guide
 
 This guide explains how prefill and decode workers communicate in Dynamo's disaggregated inference architecture on Kubernetes. It answers the frequently asked question: **Why can't prefill and decode workers use NVLink to communicate on the same node?**
 
@@ -302,7 +301,7 @@ NIXL supports **libfabric** as the backend for AWS EFA deployments. This is the 
 - EFA installer version **1.47.0** or later
 - Libfabric (installed via EFA installer at `/opt/amazon/efa`)
 - GDRCopy for GPU Direct RDMA operations (GPU Operator v26.x installs this automatically)
-- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64`)
+- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-efa-amd64`)
 
 **Kernel Compatibility:**
 

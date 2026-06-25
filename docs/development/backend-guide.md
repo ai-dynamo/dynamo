@@ -6,22 +6,19 @@ sidebar-title: Writing Python Workers
 subtitle: Create custom Python workers and engines for Dynamo
 ---
 
-# Writing Python Workers in Dynamo
-
 > **Lower-level Python worker path.** This guide documents the
 > `@dynamo_worker()` + `register_model()` + `endpoint.serve_endpoint()`
 > entry point. For new engines, prefer Dynamo's
-> [unified Python backend](python-backend-guide.md) (or
-> [unified Rust backend](rust-backend-guide.md)) — those put the
+> [unified backend path](unified-backends.md) for Python or Rust — it puts the
 > framework in charge of lifecycle, signal handling, cancellation
-> monitoring, and model registration, and ship plumbing for Prometheus
+> monitoring, and model registration, and ships plumbing for Prometheus
 > metrics, KV event publishing, KV-aware routing, OpenTelemetry
 > tracing, health-check canaries, guided decoding, and custom Jinja
 > chat templates. Stay on this path for workloads that depend on
-> multimodal, LoRA, logprob extraction, engine routes (sleep/wake,
+> multimodal, LoRA, logprob extraction, engine routes (pause/resume,
 > profiling, weight updates), text-in-text-out, snapshot/CRIU, or
 > diffusion — features the unified backend does not yet cover. See
-> the [unified-path feature gaps](python-backend-guide.md#feature-gaps)
+> the [unified-path feature gaps](unified-backends.md#python-feature-gaps)
 > for the current matrix.
 
 This guide explains how to create your own Python worker in Dynamo.

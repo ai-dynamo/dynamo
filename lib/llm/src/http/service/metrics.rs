@@ -36,6 +36,13 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
+/// Check whether an error chain indicates that no backend worker is available.
+pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
+    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const AVAILABLE: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
+}
+
 /// Check whether an error chain indicates the request was cancelled.
 pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
@@ -252,7 +259,7 @@ struct MetricsHandlerState {
 pub struct Metrics {
     request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
-    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility until Phase 3.
+    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility.
     inflight_gauge: IntGaugeVec,
     active_requests_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,
@@ -378,8 +385,10 @@ pub enum ErrorType {
     Validation,
     /// Model or resource not found (404)
     NotFound,
-    /// Service overloaded, too many requests (503)
+    /// Service overloaded or rate limited (429 or 529)
     Overload,
+    /// Service unavailable because no backend worker can serve the request
+    Unavailable,
     /// Request cancelled by client or timeout
     Cancelled,
     /// Backend accepted the request but stopped responding (response inactivity timeout)
@@ -394,6 +403,16 @@ pub enum ErrorType {
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     model: String,
+    // Per-model metric handles resolved once at construction. The collector lives for a
+    // single request and `model` is fixed, so caching these avoids re-hashing the `model`
+    // label via `with_label_values` on every chunk (and, for ITL, on every output token —
+    // it was previously resolved inside a `for _ in 0..num_tokens` loop). Each handle
+    // shares the underlying metric with its vec, so observations are equivalent.
+    output_tokens_counter: prometheus::IntCounter,
+    time_to_first_token: prometheus::Histogram,
+    inter_token_latency: prometheus::Histogram,
+    input_sequence_length: prometheus::Histogram,
+    cached_tokens: prometheus::Histogram,
     start_time: Instant,
     // we use is_first_token to distinguish TTFT from ITL. It is true by default and
     // flipped to false when the first token is returned and TTFT is published.
@@ -423,6 +442,11 @@ pub struct ResponseMetricCollector {
     decode_dp_rank: Option<u32>,
     // Decode worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
     decode_worker_type: Option<String>,
+    // Cached per-worker ITL gauge handle. The decode-worker labels are latched once at
+    // routing time (`set_worker_info` only sets when unset), so this GaugeVec handle is
+    // resolved a single time and reused — the per-token observe path then does no label
+    // formatting (`worker_id.to_string()`) or label hashing, only `set`.
+    decode_itl_gauge: Option<prometheus::Gauge>,
 }
 
 impl Default for Metrics {
@@ -987,7 +1011,7 @@ impl Metrics {
 
         self.model_context_length
             .with_label_values(&[&card.display_name])
-            .set(card.context_length as i64);
+            .set(card.effective_context_length() as i64);
 
         self.model_kv_cache_block_size
             .with_label_values(&[&card.display_name])
@@ -1232,6 +1256,7 @@ impl Drop for InflightGuard {
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
                     ErrorType::Overload => "service overloaded or rate limited",
+                    ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
                     ErrorType::None => "unknown error",
                 };
@@ -1325,6 +1350,7 @@ impl ErrorType {
             ErrorType::Validation => frontend_service::error_type::VALIDATION,
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
+            ErrorType::Unavailable => frontend_service::error_type::UNAVAILABLE,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
             ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
@@ -1341,9 +1367,21 @@ impl std::fmt::Display for ErrorType {
 
 impl ResponseMetricCollector {
     fn new(metrics: Arc<Metrics>, model: String) -> Self {
+        // Resolve the per-model handles once (cheap clones of the vec entries) so the
+        // per-chunk / per-token hot path in `observe_response` does no label hashing.
+        let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
+        let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
+        let inter_token_latency = metrics.inter_token_latency.with_label_values(&[&model]);
+        let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
+        let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
             model,
+            output_tokens_counter,
+            time_to_first_token,
+            inter_token_latency,
+            input_sequence_length,
+            cached_tokens,
             is_first_token: true,
             last_response_time: None,
             start_time: Instant::now(),
@@ -1362,6 +1400,7 @@ impl ResponseMetricCollector {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
+            decode_itl_gauge: None,
         }
     }
 
@@ -1413,10 +1452,7 @@ impl ResponseMetricCollector {
             && !self.cached_tokens_observed
         {
             self.cached_tokens_observed = true;
-            self.metrics
-                .cached_tokens
-                .with_label_values(&[&self.model])
-                .observe(tokens as f64);
+            self.cached_tokens.observe(tokens as f64);
         }
     }
 
@@ -1456,10 +1492,7 @@ impl ResponseMetricCollector {
         self.isl = isl;
 
         // Increment the real-time output tokens counter
-        self.metrics
-            .output_tokens_counter
-            .with_label_values(&[&self.model])
-            .inc_by(num_tokens as u64);
+        self.output_tokens_counter.inc_by(num_tokens as u64);
 
         if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
@@ -1469,10 +1502,7 @@ impl ResponseMetricCollector {
             // Publish TTFT and store for span recording
             let ttft = self.start_time.elapsed().as_secs_f64();
             self.ttft_ms = Some(ttft * 1000.0);
-            self.metrics
-                .time_to_first_token
-                .with_label_values(&[&self.model])
-                .observe(ttft);
+            self.time_to_first_token.observe(ttft);
 
             // Update per-worker TTFT and input sequence tokens gauges - attributed to prefill worker.
             // Both gauges are updated atomically from the same request to correlate latency with input size.
@@ -1498,10 +1528,7 @@ impl ResponseMetricCollector {
 
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
-            self.metrics
-                .input_sequence_length
-                .with_label_values(&[&self.model])
-                .observe(isl as f64);
+            self.input_sequence_length.observe(isl as f64);
         }
 
         let current_duration = self.start_time.elapsed();
@@ -1511,17 +1538,23 @@ impl ResponseMetricCollector {
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
             self.itl_sum_secs += itl * num_tokens as f64;
             self.itl_count += num_tokens as u64;
+            // Handle resolved once at construction — the observe loop no longer re-hashes
+            // the `model` label on every output token.
             for _ in 0..num_tokens {
-                self.metrics
-                    .inter_token_latency
-                    .with_label_values(&[&self.model])
-                    .observe(itl);
+                self.inter_token_latency.observe(itl);
             }
 
             // Update per-worker ITL gauge - attributed to decode worker.
             // Use stored worker_type (from routing time) to avoid MDC lookup.
             // Falls back to WORKER_TYPE_DECODE if not available.
-            if let Some(worker_id) = self.decode_worker_id {
+            //
+            // The worker labels are fixed for the request's lifetime (latched in
+            // `set_worker_info`), so resolve the GaugeVec handle once and cache it.
+            // This keeps the per-token path free of `to_string()` allocations and
+            // label hashing; subsequent tokens only call `set`.
+            if self.decode_itl_gauge.is_none()
+                && let Some(worker_id) = self.decode_worker_id
+            {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
@@ -1530,9 +1563,15 @@ impl ResponseMetricCollector {
                     .decode_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_DECODE);
-                WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
-                    .set(itl);
+                self.decode_itl_gauge =
+                    Some(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
+                        worker_id_str.as_str(),
+                        dp_rank_str.as_str(),
+                        worker_type,
+                    ]));
+            }
+            if let Some(gauge) = &self.decode_itl_gauge {
+                gauge.set(itl);
             }
         }
 
@@ -1635,6 +1674,13 @@ impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
     }
 }
 
+fn sse_json_data<T: Serialize>(event: Event, data: &T) -> Result<Event, axum::Error> {
+    // serde_json escapes literal LF/CR in string content, so the resulting JSON
+    // is one SSE data line and can avoid Axum json_data's per-write filtering.
+    let json = serde_json::to_string(data).map_err(axum::Error::new)?;
+    Ok(event.data(json))
+}
+
 /// Process streaming response with event conversion for SSE
 ///
 /// This function handles metrics collection, http_queue_guard management, and converts
@@ -1689,7 +1735,7 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     let mut event = Event::default();
 
     if let Some(ref data) = annotated.data {
-        event = event.json_data(data)?;
+        event = sse_json_data(event, data)?;
     }
 
     if let Some(ref msg) = annotated.event {
@@ -2005,6 +2051,87 @@ mod tests {
             .with_label_values(&[model])
             .get();
         assert_eq!(counter_value, 22);
+    }
+
+    #[test]
+    fn test_cached_handles_record_through_vec() {
+        // The collector resolves per-model handles once at construction; observing
+        // through them must update the same metric the vec exposes. Regression guard
+        // for the handle cache (incl. the per-token ITL loop using the cached handle).
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "cached-handle-model";
+
+        let mut collector = metrics.clone().create_response_collector(model);
+        // First chunk (3 tokens): TTFT + ISL observed once; no ITL yet.
+        collector.observe_response(42, 3);
+        // Second chunk (4 tokens): ITL observed once per token via the cached handle.
+        collector.observe_response(42, 4);
+
+        let ttft = metrics.time_to_first_token.with_label_values(&[model]);
+        assert_eq!(ttft.get_sample_count(), 1, "TTFT observed once");
+
+        let isl = metrics.input_sequence_length.with_label_values(&[model]);
+        assert_eq!(isl.get_sample_count(), 1, "ISL observed once");
+        assert_eq!(isl.get_sample_sum(), 42.0);
+
+        let itl = metrics.inter_token_latency.with_label_values(&[model]);
+        assert_eq!(
+            itl.get_sample_count(),
+            4,
+            "ITL observed once per token of 2nd chunk"
+        );
+
+        let out = metrics
+            .output_tokens_counter
+            .with_label_values(&[model])
+            .get();
+        assert_eq!(out, 7, "output tokens = 3 + 4 via cached counter handle");
+    }
+
+    #[test]
+    fn test_cached_decode_itl_gauge_records_for_worker() {
+        // The per-worker ITL gauge handle is resolved once (worker labels are latched
+        // at routing time via `set_worker_info`) and reused on every output token.
+        // Verify observations through the cached handle land on the same GaugeVec
+        // series the labels address. Regression guard for the per-token handle cache.
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).ok();
+        let model = "itl-gauge-model";
+
+        // Distinctive worker id so this never collides with other tests on the
+        // process-global WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.
+        let worker_id: u64 = 9_876_543_210;
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.set_worker_info(
+            None,
+            None,
+            None,
+            Some(worker_id),
+            Some(0),
+            Some("decode".to_string()),
+        );
+
+        // First chunk: TTFT only, no ITL yet (no prior response time) -> gauge unset.
+        collector.observe_response(10, 1);
+        // Elapse measurable time so ITL > 0, then a second chunk drives the cached
+        // per-worker ITL gauge.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        collector.observe_response(10, 1);
+
+        let worker_id_str = worker_id.to_string();
+        let gauge = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
+            worker_id_str.as_str(),
+            "0",
+            "decode",
+        ]);
+        assert!(
+            gauge.get() > 0.0,
+            "cached per-worker ITL gauge must record a positive ITL through the vec, got {}",
+            gauge.get()
+        );
     }
 
     #[test]
@@ -2371,6 +2498,7 @@ mod tests {
         assert_eq!(ErrorType::Validation.as_str(), "validation");
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
         assert_eq!(ErrorType::Overload.as_str(), "overload");
+        assert_eq!(ErrorType::Unavailable.as_str(), "unavailable");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
         assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
@@ -2611,6 +2739,7 @@ mod tests {
             ErrorType::Validation,
             ErrorType::NotFound,
             ErrorType::Overload,
+            ErrorType::Unavailable,
             ErrorType::Cancelled,
             ErrorType::ResponseTimeout,
             ErrorType::Internal,
@@ -2735,6 +2864,96 @@ mod tests {
         )
     }
 
+    fn run_chat_stream_event_converter(
+        annotated: crate::types::Annotated<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        >,
+    ) -> Result<Option<Event>, axum::Error> {
+        let metrics = Arc::new(Metrics::new());
+        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut http_queue_guard: Option<HttpQueueGuard> = None;
+        process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+    }
+
+    fn make_chat_stream_annotated(
+        content: &str,
+    ) -> crate::types::Annotated<
+        crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    > {
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+            CreateChatCompletionStreamResponse,
+        };
+
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+                function_call: None,
+                tool_calls: None,
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+
+        crate::types::Annotated {
+            id: Some("test-id".to_string()),
+            data: Some(
+                crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+                    inner: CreateChatCompletionStreamResponse {
+                        id: "test-id".to_string(),
+                        choices: vec![choice],
+                        created: 0,
+                        model: "test-model".to_string(),
+                        system_fingerprint: None,
+                        object: "chat.completion.chunk".to_string(),
+                        usage: None,
+                        service_tier: None,
+                    },
+                    nvext: None,
+                },
+            ),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    fn extract_sse_data_json(event: Event) -> serde_json::Value {
+        let body = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(async move {
+                use axum::{
+                    body::to_bytes,
+                    response::{IntoResponse, Sse},
+                };
+                let stream = futures::stream::iter(vec![Ok::<Event, axum::Error>(event)]);
+                let response = Sse::new(stream).into_response();
+                let bytes = to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .expect("body bytes");
+                String::from_utf8(bytes.to_vec()).expect("utf8 body")
+            });
+
+        let data = body
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE data line");
+        serde_json::from_str(data).unwrap_or_else(|e| {
+            panic!("failed to parse JSON from SSE data: {e}\nbody: {body}\ndata: {data}")
+        })
+    }
+
     fn error_annotated(
         error: Option<dynamo_runtime::error::DynamoError>,
         comment: Option<Vec<String>>,
@@ -2782,6 +3001,29 @@ mod tests {
     }
 
     #[test]
+    fn test_event_converter_serializes_chat_stream_response_as_json_data() {
+        let event = run_chat_stream_event_converter(make_chat_stream_annotated("hello"))
+            .unwrap()
+            .expect("chat stream response should produce an SSE event");
+
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["id"], "test-id");
+        assert_eq!(json["object"], "chat.completion.chunk");
+        assert_eq!(json["choices"][0]["delta"]["content"], "hello");
+    }
+
+    #[test]
+    fn test_event_converter_json_data_round_trips_escaped_content() {
+        let content = "line1\nline2\r\"quoted\" \\\\ slash 你好 🚀";
+        let event = run_chat_stream_event_converter(make_chat_stream_annotated(content))
+            .unwrap()
+            .expect("chat stream response should produce an SSE event");
+
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["choices"][0]["delta"]["content"], content);
+    }
+
+    #[test]
     fn test_comment_newlines_sanitized() {
         let annotated = crate::types::Annotated::<String> {
             data: Some("test".to_string()),
@@ -2790,7 +3032,14 @@ mod tests {
             comment: Some(vec!["line1\nline2\r\nline3".into()]),
             error: None,
         };
-        assert!(run_event_converter(annotated).is_ok());
+        let event = run_event_converter(annotated)
+            .unwrap()
+            .expect("data event with comment should be returned");
+        let debug = format!("{:?}", event);
+        assert!(
+            debug.contains(": line1 line2  line3\\n"),
+            "comment newlines should be replaced before Event::comment: {debug}"
+        );
     }
 
     #[test]

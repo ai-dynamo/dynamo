@@ -111,6 +111,7 @@ func TestDGD_RoundTrip_Empty(t *testing.T) {
 
 func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(2)
+	minAvailable := int32(1)
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -119,7 +120,9 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 				{
 					ComponentName: "worker",
 					ComponentType: v1beta1.ComponentTypeWorker,
-					Replicas:      &replicas},
+					Replicas:      &replicas,
+					MinAvailable:  &minAvailable,
+				},
 			},
 		},
 	}
@@ -446,9 +449,10 @@ func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "spec", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Annotations:      map[string]string{"a": "1"},
-			Labels:           map[string]string{"l": "v"},
-			BackendFramework: backendFrameworkSGLang,
+			Annotations:       map[string]string{"a": "1"},
+			Labels:            map[string]string{"l": "v"},
+			PriorityClassName: "high-priority",
+			BackendFramework:  backendFrameworkSGLang,
 			Env: []corev1.EnvVar{
 				{Name: "FOO", Value: "bar"},
 			},
@@ -590,7 +594,6 @@ func TestDGD_RoundTrip_MultipleServicesOrderStable(t *testing.T) {
 }
 
 func TestDGD_RoundTrip_Experimental(t *testing.T) {
-	ref := "my-checkpoint"
 	clientPodTemplate := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "loader"}},
 		Spec: corev1.PodSpec{
@@ -622,8 +625,10 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 							NumShadows: 1,
 						},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
+							Enabled:             true,
 							Mode:                v1beta1.CheckpointModeAuto,
-							CheckpointRef:       &ref,
+							StartupPolicy:       v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+							DeletionPolicy:      v1beta1.CheckpointDeletionPolicyRetain,
 							TargetContainerName: "worker",
 							Job: &v1beta1.ComponentCheckpointJobConfig{
 								GMSClientContainers: []string{"gms-saver"},
@@ -661,7 +666,9 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 						ExtraClientContainers: []string{"gms-loader"},
 					},
 					Checkpoint: &ServiceCheckpointConfig{
-						Enabled: true,
+						Enabled:        true,
+						StartupPolicy:  CheckpointStartupPolicyWaitForCheckpoint,
+						DeletionPolicy: CheckpointDeletionPolicyRetain,
 						Identity: &DynamoCheckpointIdentity{
 							Model:            "model",
 							BackendFramework: "vllm",
@@ -820,9 +827,9 @@ func TestDGD_FromV1alpha1_PVCsPreserved(t *testing.T) {
 	}
 }
 
-// TestDGD_FromV1alpha1_DisabledExperimental verifies that v1alpha1
-// GMS/Failover/Checkpoint with Enabled=false and payloads survive the
-// round-trip via sparse spec preservation.
+// TestDGD_FromV1alpha1_DisabledExperimental verifies that v1alpha1 disabled
+// GMS/Failover payloads survive via sparse spec preservation, and disabled
+// Checkpoint survives via v1beta1 checkpoint.enabled=false.
 func TestDGD_FromV1alpha1_DisabledExperimental(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "disabled", Namespace: "ns"},
@@ -913,6 +920,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 			Checkpoints: map[string]v1beta1.ComponentCheckpointStatus{
 				"worker": {
 					CheckpointName: "ckpt-abc",
+					CheckpointID:   "ckpt-deadbeef",
 					IdentityHash:   "sha256:deadbeef",
 					Ready:          true,
 				},
@@ -1190,7 +1198,7 @@ func TestDGD_FromV1alpha1_ScalingAdapterDisabled(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_CheckpointDisabled checks that Checkpoint{Enabled:false}
-// with a non-trivial payload survives via sparse spec preservation.
+// with a non-trivial payload round-trips via v1beta1 checkpoint.enabled=false.
 func TestDGD_FromV1alpha1_CheckpointDisabled(t *testing.T) {
 	ref := "my-ckpt"
 	src := &DynamoGraphDeployment{
@@ -1624,9 +1632,9 @@ func TestDGD_FromV1alpha1_FailoverEnabledFalseEmptyPayload(t *testing.T) {
 	}
 }
 
-// TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload covers the same
-// "Enabled=false with zero-valued payload -> sparse save" branch for the
-// Checkpoint sibling in convertExperimentalTo.
+// TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload verifies that
+// disabled checkpoint configs round-trip through v1beta1's explicit enabled
+// field.
 func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "ckpt-empty", Namespace: "ns"},
@@ -1644,9 +1652,9 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 		t.Fatalf("ConvertTo: %v", err)
 	}
 	assertOnlyKnownDGDAnnotations(t, b.Annotations)
-	saved := mustRestoreDGDSpokeServiceSave(t, b, "worker")
-	if saved.Checkpoint == nil || saved.Checkpoint.Enabled {
-		t.Fatalf("expected disabled Checkpoint in sparse save, got %#v", saved.Checkpoint)
+	hub := b.GetComponentByName("worker")
+	if hub == nil || hub.Experimental == nil || hub.Experimental.Checkpoint == nil || hub.Experimental.Checkpoint.Enabled {
+		t.Fatalf("expected disabled Checkpoint in hub spec, got %#v", hub)
 	}
 
 	got := roundTripFromV1alpha1(t, src)
@@ -1986,6 +1994,29 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("v1beta1_roundtrip_cluster_topology_policy", func(t *testing.T) {
+		src := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "topo-cluster", Namespace: "ns"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						ClusterTopologyName: "grove-topology",
+						Domain:              v1beta1.TopologyDomain("rack"),
+						Enforcement:         v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		got := roundTripFromV1beta1(t, src)
+		if diff := cmp.Diff(src, got); diff != "" {
+			t.Errorf("v1beta1 round-trip mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("v1alpha1_roundtrip", func(t *testing.T) {
 		src := &DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "topo-alpha", Namespace: "ns"},
@@ -1999,6 +2030,29 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 						LabelKey:    "topology.kubernetes.io/zone",
 						Domain:      TopologyDomain("zone"),
 						Enforcement: KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		got := roundTripFromV1alpha1(t, src)
+		if diff := cmp.Diff(src.Spec.Experimental, got.Spec.Experimental); diff != "" {
+			t.Errorf("v1alpha1 round-trip Experimental mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("v1alpha1_roundtrip_cluster_topology_policy", func(t *testing.T) {
+		src := &DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "topo-alpha-cluster", Namespace: "ns"},
+			Spec: DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*DynamoComponentDeploymentSharedSpec{
+					"worker": {ComponentType: "worker"},
+				},
+				Experimental: &DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &KvTransferPolicy{
+						ClusterTopologyName: "grove-topology",
+						Domain:              TopologyDomain("rack"),
+						Enforcement:         KvTransferEnforcementRequired,
 					},
 				},
 			},

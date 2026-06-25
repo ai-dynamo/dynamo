@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# TODO(DIS-2240): Remove deprecated multimodal flags across engine
+
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
+import logging
 import warnings
 from typing import Optional, Union
 
@@ -15,6 +18,14 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 
 from . import __version__
 from .constants import DisaggregationMode, EmbeddingTransferMode
+
+logger = logging.getLogger(__name__)
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+
+
+def _warn_deprecated(message: str) -> None:
+    logger.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoVllmArgGroup(ArgGroup):
@@ -36,8 +47,11 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_DISAGGREGATION_MODE",
             default=None,
             help="Worker disaggregation mode: 'agg' (default, aggregated), "
-            "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
-            choices=[m.value for m in DisaggregationMode],
+            "'pd' (combined prefill+decode worker), 'prefill' "
+            "(prefill-only worker), 'decode' (decode-only worker), "
+            "or 'encode' (multimodal encode worker).",
+            choices=[PREFILL_DECODE_DISAGGREGATION_MODE]
+            + [m.value for m in DisaggregationMode],
         )
 
         add_negatable_bool_argument(
@@ -102,6 +116,18 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
         )
+        # Select defaults used by RL-style token-in/token-out deployments.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl",
+            env_var="DYN_ENABLE_RL",
+            default=False,
+            help=(
+                "Enable RL training support. Mirrors --enable-rl on the SGLang "
+                "backend and selects RL-friendly vLLM defaults for TITO and "
+                "per-token logprob parity."
+            ),
+        )
         add_argument(
             g,
             flag_name="--mm-prompt-template",
@@ -156,8 +182,8 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--model-express-url",
             env_var="MODEL_EXPRESS_URL",
             default=None,
-            help="ModelExpress P2P server URL (e.g., http://mx-server:8080). "
-            "Required when using --load-format=mx-source or --load-format=mx-target.",
+            help="DEPRECATED: accepted for compatibility with older ModelExpress "
+            "manifests. The vLLM ModelExpress plugin reads its own configuration.",
         )
 
         # GMS (GPU Memory Service) shadow mode
@@ -168,8 +194,8 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help=(
                 "Enable GMS shadow/standby mode. Shadow engines skip KV cache "
-                "allocation at startup, automatically sleep after initialization, "
-                "and wake on demand when the active engine dies. "
+                "allocation at startup, automatically pause after initialization, "
+                "and resume on demand when the active engine dies. "
                 "Requires --load-format=gms."
             ),
         )
@@ -264,6 +290,8 @@ class DynamoVllmConfig(ConfigBase):
     multimodal_worker: bool
     multimodal_decode_worker: bool
     enable_multimodal: bool
+    # Enables RL-style token-in/token-out defaults.
+    enable_rl: bool = False
     mm_prompt_template: str
     frontend_decoding: bool
     embedding_transfer_mode: Union[
@@ -321,7 +349,10 @@ class DynamoVllmConfig(ConfigBase):
         # Convert string to enum (non-None means explicitly provided)
         explicit_mode = self.disaggregation_mode is not None
         if isinstance(self.disaggregation_mode, str):
-            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+            if self.disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE:
+                self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            else:
+                self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
 
         # Check for legacy boolean flags
         has_legacy = self.is_prefill_worker or self.is_decode_worker
@@ -380,10 +411,10 @@ class DynamoVllmConfig(ConfigBase):
            --disaggregation-mode is set.
         """
         if self.multimodal_decode_worker:
-            warnings.warn(
-                "--multimodal-decode-worker is deprecated, use --disaggregation-mode=decode and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-decode-worker is deprecated; use "
+                "--enable-multimodal --disaggregation-mode=decode. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -393,11 +424,12 @@ class DynamoVllmConfig(ConfigBase):
                     f"Cannot set --multimodal-decode-worker while --disaggregation-mode is not '{DisaggregationMode.DECODE.value}'"
                 )
             self.disaggregation_mode = DisaggregationMode.DECODE
+            self.enable_multimodal = True
         if self.multimodal_encode_worker:
-            warnings.warn(
-                "--multimodal-encode-worker is deprecated, use --disaggregation-mode=encode and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-encode-worker is deprecated; use "
+                "--enable-multimodal --disaggregation-mode=encode. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -407,11 +439,12 @@ class DynamoVllmConfig(ConfigBase):
                     f"Cannot set --multimodal-encode-worker while --disaggregation-mode is not '{DisaggregationMode.ENCODE.value}'"
                 )
             self.disaggregation_mode = DisaggregationMode.ENCODE
+            self.enable_multimodal = True
         if self.multimodal_worker:
-            warnings.warn(
-                "--multimodal-worker is deprecated, use --disaggregation-mode=agg or --disaggregation-mode=prefill and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-worker is deprecated; use --enable-multimodal "
+                "with --disaggregation-mode=pd or --disaggregation-mode=prefill. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -425,6 +458,7 @@ class DynamoVllmConfig(ConfigBase):
             # '--disaggregation-mode=prefill' as prefill workers in P/D disaggregation or without for aggregation.
             if self.disaggregation_mode is None:
                 self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            self.enable_multimodal = True
 
     def _count_multimodal_roles(self) -> int:
         """Return the number of multimodal worker roles set (0 or 1 allowed).

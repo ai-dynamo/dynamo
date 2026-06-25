@@ -354,23 +354,18 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			errMsg:              "spec.services[worker].checkpoint.job cannot be set when checkpointRef is specified",
 		},
 		{
-			name: "checkpoint job with Manual mode is rejected",
+			name: "deprecated checkpoint mode with checkpointRef is valid",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
-					Enabled: true,
-					Mode:    nvidiacomv1alpha1.CheckpointModeManual,
-					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-						Model:            "model",
-						BackendFramework: "vllm",
-					},
-					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{},
+					Enabled:       true,
+					Mode:          nvidiacomv1alpha1.CheckpointModeManual,
+					CheckpointRef: ptr("existing-checkpoint"),
 				},
 			},
 			fieldPath:           "spec.services[worker]",
 			calculatedNamespace: "default-my-dgd",
-			wantErr:             true,
-			errMsg:              "spec.services[worker].checkpoint.job can only be set in Auto mode",
+			wantErr:             false,
 		},
 		{
 			name: "checkpoint job GMS clients require gpuMemoryService",
@@ -468,7 +463,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
@@ -536,7 +531,7 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
 			warnings, err := validator.Validate(context.Background())
 
 			if err != nil {
@@ -734,7 +729,7 @@ func TestSharedSpecValidator_Failover_ModeConstraints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := NewSharedSpecValidator(tt.spec, "spec", "default-my-dgd")
+			v := NewSharedSpecValidator(tt.spec, "spec", "default-my-dgd", false)
 			_, err := v.Validate(context.Background())
 
 			if tt.wantErr {

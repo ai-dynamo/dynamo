@@ -165,7 +165,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 | Topology | Workers | How It Works |
 |----------|---------|--------------|
 | **Aggregated** | Single pool (prefill + decode in one process) | All workers handle the full request lifecycle |
-| **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `ModelType.Prefill` |
+| **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `WorkerType.Prefill` |
 
 Disaggregated mode is activated automatically when prefill workers register alongside decode workers. See [Disaggregated Serving](router-disaggregated-serving.md) for details.
 
@@ -179,4 +179,6 @@ Disaggregated mode is activated automatically when prefill workers register alon
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Testing](router-testing.md)**: Recommended test layers for non-trivial router changes
 - **[Standalone Indexer](standalone-indexer.md)**: Run the KV indexer as a separate service
+- **[Standalone Selection Service](standalone-selection.md)**: Select workers and account for reservations without forwarding requests
+- **[Standalone Slot Tracker](standalone-slot-tracker.md)**: Run active-request accounting as a separate service
 - **[KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md)**: Gap detection and replay behavior

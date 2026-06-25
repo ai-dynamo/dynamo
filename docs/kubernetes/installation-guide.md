@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Installation Guide
+subtitle: Installs the GPU Operator and Dynamo Platform Helm charts along with optional Grove, RDMA, and Prometheus add-ons.
 ---
 
 This guide walks you through installing everything needed to deploy models with Dynamo on Kubernetes. Follow the steps in order — each builds on the previous one.
@@ -228,7 +229,7 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 
 ## Next Steps
 
-Your cluster is ready. Follow the **[Model Deployment Guide](model-deployment-guide.md)** to deploy a model using DGDR.
+Your cluster is ready. Follow the **[Deployment Overview](model-deployment-guide.md)** to choose between applying a tuned DGD recipe, creating a DGD directly, or using DGDR to generate one.
 
 ## Troubleshooting
 

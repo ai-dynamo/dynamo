@@ -57,11 +57,20 @@ impl AuditHandle {
 
 pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> Option<AuditHandle> {
     let policy = config::policy();
-    if !policy.enabled {
+    create_handle_with_config(req, request_id, policy.enabled, policy.force_logging)
+}
+
+fn create_handle_with_config(
+    req: &NvCreateChatCompletionRequest,
+    request_id: &str,
+    enabled: bool,
+    force_logging: bool,
+) -> Option<AuditHandle> {
+    if !enabled {
         return None;
     }
     // If force_logging is enabled, ignore the store flag
-    if !policy.force_logging && !req.inner.store.unwrap_or(false) {
+    if !force_logging && !req.inner.store.unwrap_or(false) {
         return None;
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
@@ -80,7 +89,6 @@ pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> O
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use temp_env::with_vars;
 
     fn create_test_request(model: &str, store: bool) -> NvCreateChatCompletionRequest {
         let json = serde_json::json!({
@@ -91,17 +99,14 @@ mod tests {
         serde_json::from_value(json).expect("Failed to create test request")
     }
 
-    fn create_test_request_with_agent_context() -> NvCreateChatCompletionRequest {
+    fn create_test_request_with_nvext() -> NvCreateChatCompletionRequest {
         let json = serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "test"}],
             "store": true,
             "nvext": {
-                "agent_context": {
-                    "session_type_id": "deep_research",
-                    "session_id": "run-123",
-                    "trajectory_id": "run-123:researcher",
-                    "parent_trajectory_id": "run-123:planner"
+                "agent_hints": {
+                    "priority": 5
                 }
             }
         });
@@ -130,45 +135,29 @@ mod tests {
     /// When force logging is enabled, audit handle should be created even when store=false
     #[test]
     fn test_force_logging_bypasses_store() {
-        with_vars(
-            [
-                ("DYN_AUDIT_SINKS", Some("stderr")),
-                ("DYN_AUDIT_FORCE_LOGGING", Some("true")),
-            ],
-            || {
-                // Create request with store=false
-                let request = create_test_request("test-model", false);
-                let handle = create_handle(&request, "test-id");
+        let request = create_test_request("test-model", false);
+        let handle = create_handle_with_config(&request, "test-id", true, true);
 
-                assert!(
-                    handle.is_some(),
-                    "When DYN_AUDIT_FORCE_LOGGING=true, handle should be created even with store=false"
-                );
-            },
+        assert!(
+            handle.is_some(),
+            "force logging should create a handle even with store=false"
         );
     }
 
     #[test]
-    fn audit_record_serializes_agent_context_and_response_content() {
+    fn audit_record_serializes_nvext_and_response_content() {
         let record = AuditRecord {
             schema_version: 1,
             request_id: "req-123".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
-            request: Some(Arc::new(create_test_request_with_agent_context())),
+            request: Some(Arc::new(create_test_request_with_nvext())),
             response: Some(Arc::new(create_test_response("final answer"))),
         };
 
         let value = serde_json::to_value(record).unwrap();
 
-        assert_eq!(
-            value["request"]["nvext"]["agent_context"]["session_id"],
-            "run-123"
-        );
-        assert_eq!(
-            value["request"]["nvext"]["agent_context"]["trajectory_id"],
-            "run-123:researcher"
-        );
+        assert_eq!(value["request"]["nvext"]["agent_hints"]["priority"], 5);
         assert_eq!(
             value["response"]["choices"][0]["message"]["content"],
             "final answer"

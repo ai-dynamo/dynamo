@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+from pathlib import Path
 
 import pytest
 
-from dynamo.llm import MockEngineArgs
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -172,6 +173,24 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
             num_workers=2,
             replay_mode="offline",
             trace_format="applied_compute_agentic",
+        )
+
+
+def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
+    trace_path = (
+        Path(__file__).resolve().parents[5]
+        / "lib"
+        / "bench"
+        / "testdata"
+        / "pi_request_trace.jsonl.gz"
+    )
+
+    with pytest.raises(Exception, match="not supported with replay_concurrency"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            replay_concurrency=2,
+            trace_format="dynamo",
         )
 
 
@@ -431,10 +450,12 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
 
 def test_run_trace_replay_materializes_kv_bytes_from_aic_model(monkeypatch, tmp_path):
     kv_cache = importlib.import_module("dynamo.mocker.utils.kv_cache")
+
+    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
+        return 1 if model_path == "test/model" else None
+
     monkeypatch.setattr(
-        kv_cache,
-        "compute_kv_bytes_per_token",
-        lambda model_path: 1 if model_path == "test/model" else None,
+        kv_cache, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
     )
     trace_path = _write_trace_and_args(tmp_path)
 

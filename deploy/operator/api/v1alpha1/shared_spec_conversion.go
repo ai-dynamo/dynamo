@@ -152,6 +152,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &v1beta1.MultinodeSpec{}
@@ -354,10 +355,6 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		save.Failover = src.Failover.DeepCopy()
 		hasSave = true
 	}
-	if src.Checkpoint != nil && !src.Checkpoint.Enabled {
-		save.Checkpoint = src.Checkpoint.DeepCopy()
-		hasSave = true
-	}
 	if includeOriginSplits || hasSave || sharedMainContainerFieldOriginsNeedSave(src) {
 		saveSharedMainContainerOrigins(src, save)
 	}
@@ -503,6 +500,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &MultinodeSpec{}
@@ -1054,6 +1052,50 @@ func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
 	}
 }
 
+func checkpointStartupPolicyToV1beta1(policy CheckpointStartupPolicy) v1beta1.CheckpointStartupPolicy {
+	switch policy {
+	case CheckpointStartupPolicyImmediate:
+		return v1beta1.CheckpointStartupPolicyImmediate
+	case CheckpointStartupPolicyWaitForCheckpoint:
+		return v1beta1.CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return v1beta1.CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointStartupPolicyFromV1beta1(policy v1beta1.CheckpointStartupPolicy) CheckpointStartupPolicy {
+	switch policy {
+	case v1beta1.CheckpointStartupPolicyImmediate:
+		return CheckpointStartupPolicyImmediate
+	case v1beta1.CheckpointStartupPolicyWaitForCheckpoint:
+		return CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyToV1beta1(policy CheckpointDeletionPolicy) v1beta1.CheckpointDeletionPolicy {
+	switch policy {
+	case CheckpointDeletionPolicyDelete:
+		return v1beta1.CheckpointDeletionPolicyDelete
+	case CheckpointDeletionPolicyRetain:
+		return v1beta1.CheckpointDeletionPolicyRetain
+	default:
+		return v1beta1.CheckpointDeletionPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyFromV1beta1(policy v1beta1.CheckpointDeletionPolicy) CheckpointDeletionPolicy {
+	switch policy {
+	case v1beta1.CheckpointDeletionPolicyDelete:
+		return CheckpointDeletionPolicyDelete
+	case v1beta1.CheckpointDeletionPolicyRetain:
+		return CheckpointDeletionPolicyRetain
+	default:
+		return CheckpointDeletionPolicy(policy)
+	}
+}
+
 // ConvertFromGPUMemoryServiceSpec converts an enabled GMS config into the
 // v1beta1 experimental GMS config. Disabled configs are represented by absence
 // in v1beta1 and are skipped by the caller.
@@ -1114,12 +1156,14 @@ func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
 	}
 }
 
-// ConvertFromServiceCheckpointConfig converts an enabled checkpoint config into
-// the v1beta1 experimental checkpoint config. Disabled configs are represented
-// by absence in v1beta1 and are skipped by the caller.
+// ConvertFromServiceCheckpointConfig converts a checkpoint config into the
+// v1beta1 experimental checkpoint config.
 func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1beta1.ComponentCheckpointConfig) {
 	*dst = v1beta1.ComponentCheckpointConfig{
+		Enabled:             src.Enabled,
 		Mode:                checkpointModeToV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyToV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyToV1beta1(src.DeletionPolicy),
 		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
@@ -1143,8 +1187,10 @@ func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1bet
 // config into the checkpoint config.
 func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, dst *ServiceCheckpointConfig) {
 	*dst = ServiceCheckpointConfig{
-		Enabled:             true,
+		Enabled:             src.Enabled,
 		Mode:                checkpointModeFromV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyFromV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyFromV1beta1(src.DeletionPolicy),
 		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
@@ -1213,7 +1259,7 @@ func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1b
 		ConvertFromFailoverSpec(src.Failover, exp.Failover)
 	}
 
-	if src.Checkpoint != nil && src.Checkpoint.Enabled {
+	if src.Checkpoint != nil {
 		ensureExp().Checkpoint = &v1beta1.ComponentCheckpointConfig{}
 		ConvertFromServiceCheckpointConfig(src.Checkpoint, exp.Checkpoint)
 	}
