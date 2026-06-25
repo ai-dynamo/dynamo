@@ -13,6 +13,18 @@ import (
 const (
 	CheckpointSourceLabel = "nvidia.com/snapshot-is-checkpoint-source"
 
+	// CaptureEligibleLabel is the gate-applied promotion label. The operator stamps
+	// CheckpointSourceLabel on the checkpoint Job pod at creation; the node agent's pre-bind gate adds
+	// CaptureEligibleLabel only after the source pod passes validation. The source-pod capture
+	// informer keys on CaptureEligibleLabel so only gate-validated pods drive the capture path.
+	CaptureEligibleLabel = "nvidia.com/snapshot-capture-eligible"
+
+	// SnapshotContentLabel is a back-reference the node agent stamps on the source pod at
+	// capture-begin, naming the cluster-scoped PodSnapshotContent work order capturing it. It is only
+	// set when the content name is a valid label value (it is under the podsnapshotcontent-<uid>
+	// convention, ~55 chars).
+	SnapshotContentLabel = "nvidia.com/snapshot-content"
+
 	// Restore pods carry CheckpointIDLabel without CheckpointSourceLabel.
 	CheckpointIDLabel  = "nvidia.com/snapshot-checkpoint-id"
 	RestoreTargetLabel = "nvidia.com/snapshot-is-restore-target"

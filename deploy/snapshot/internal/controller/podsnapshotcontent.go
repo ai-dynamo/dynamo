@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -48,10 +49,11 @@ type CheckpointParams struct {
 }
 
 // reconcilePodSnapshotContent is the pre-bind gate for a PodSnapshotContent work order. It validates the
-// source pod (existence and provenance) and, when the pod is valid, hands off to reconcileSourcePod
-// — the single capture path. It never runs the capture flow itself. Driven by the content informer
-// (Add/Update) and its 10s resync; the resync is the backstop that eventually writes a terminal
-// failure for a work order whose source pod is gone.
+// source pod (existence and provenance) and, when the pod is valid, promotes it by adding
+// CaptureEligibleLabel — it never runs the capture flow itself. The source-pod informer (keyed on that
+// label) then drives the capture path. Driven by the content informer (Add/Update) and its 10s resync;
+// the resync is the backstop that eventually writes a terminal failure for a work order whose source
+// pod is gone.
 func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name string) {
 	logger := w.log.WithValues("content", name)
 
@@ -64,11 +66,9 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 		return
 	}
 
-	// Defense in depth: the informer label filter already scopes to this node.
 	if content.Spec.Source.NodeName != w.config.NodeName {
 		return
 	}
-	// Idempotency: terminal status means the work is done.
 	if isContentTerminal(content) {
 		return
 	}
@@ -91,20 +91,20 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 		return
 	}
 
-	// Pod is valid: hand off to the single capture path.
-	w.reconcileSourcePod(ctx, pod)
+	// The source-pod informer keys on CaptureEligibleLabel, so this patch is the hand-off that drives
+	// the capture path — the gate never calls reconcileSourcePod directly.
+	if err := w.labelCaptureEligible(ctx, pod); err != nil {
+		logger.Error(err, "Failed to mark source pod capture-eligible", "pod", pod.Name)
+	}
 }
 
-// reconcileSourcePod is the single capture path. It is driven by source-pod events and by
-// reconcilePodSnapshotContent once the pod is validated. It selects the oldest active work order for
+// reconcileSourcePod is the single capture path. It is driven by source-pod informer events for pods
+// the gate promoted with CaptureEligibleLabel. It selects the oldest active work order for
 // the pod and drives the unstick + dump. Capture parameters come from the source pod, which is the
 // single source of truth; it never mutates spec and writes status via Status().Patch only. The
 // triggering content event (if any) may name a different work order than the one chosen here — the
 // event is only a trigger; chooseActiveContent picks the oldest active PodSnapshotContent for the pod.
 func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod) {
-	if pod.Spec.NodeName != w.config.NodeName {
-		return
-	}
 	if w.contentIndexer == nil {
 		return
 	}
@@ -141,20 +141,24 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		}
 	}()
 
-	// Active unstick first: a non-zero container exit must SIGKILL the pod's still-running
-	// containers and fail the work order even when the pod is already Phase==Failed (which the
-	// gone-guard below would otherwise short-circuit). This runs while we hold the in-flight key,
-	// so it can never race a live dump (a dump in flight means tryAcquire above would have returned).
+	// No node re-check: pod.Spec.NodeName is immutable, so a same-UID pod is pinned to this node; a
+	// recreation (new UID) is caught by classifySourcePod, and the content informer is node-scoped.
+
+	// Run before the gone-guard so a non-zero container exit still SIGKILLs siblings and fails the
+	// order even when the pod is already Phase==Failed.
 	if w.failCheckpointOnContainerExit(ctx, content, pod) {
 		return
 	}
-	// Provenance/liveness guard. The terminal writeFailed for these is owned by
-	// reconcilePodSnapshotContent (pre-bind); here we only skip capture and let the content resync
-	// write the failure.
-	if reason, _ := classifySourcePod(content, pod); reason != "" {
-		logger.V(1).Info("Skipping capture; source pod not usable", "reason", reason, "pod", pod.Name)
+	// Detection-only cancellation: an invalidating change after promotion fails the order and drops
+	// the label. An in-flight dump is never interrupted — tryAcquire above short-circuited re-entry.
+	if reason, msg := classifySourcePod(content, pod); reason != "" {
+		w.writeFailed(ctx, content, reason, errors.New(msg))
+		w.removeCaptureEligibleLabel(ctx, pod)
 		return
 	}
+
+	// Record the back-reference to the work order on the source pod (best-effort).
+	w.setSnapshotContentRef(ctx, pod, content.Name)
 
 	// Capture parameters come from the source pod, which is the single source of truth. The
 	// checkpoint ID is the pod label; the work order name is treated as opaque (never parsed).
@@ -175,8 +179,6 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return
 	}
 
-	// Resolve the running container ID and host PID, then compute the destination from the
-	// pod's storage annotations.
 	containerID := containerIDForName(pod, containerName[0])
 	if containerID == "" {
 		w.writeFailed(ctx, content, "ContainerNotResolved",
@@ -332,6 +334,59 @@ func (w *NodeController) killRunningContainers(ctx context.Context, logger logr.
 		if err := snapshotruntime.SendSignalToPID(logger, pid, syscall.SIGKILL, reason); err != nil {
 			logger.Error(err, "Failed to signal running checkpoint container", "container", cs.Name)
 		}
+	}
+}
+
+// labelCaptureEligible promotes a gate-validated source pod by adding CaptureEligibleLabel, which the
+// source-pod informer keys on. Idempotent. It patches a copy so the informer-cached pod is not
+// mutated.
+func (w *NodeController) labelCaptureEligible(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Labels[snapshotprotocol.CaptureEligibleLabel] == "true" {
+		return nil
+	}
+	updated := pod.DeepCopy()
+	if updated.Labels == nil {
+		updated.Labels = map[string]string{}
+	}
+	updated.Labels[snapshotprotocol.CaptureEligibleLabel] = "true"
+	return w.client.Patch(ctx, updated, client.MergeFrom(pod))
+}
+
+// setSnapshotContentRef stamps SnapshotContentLabel=<contentName> on the source pod as a back-ref to
+// the work order capturing it. Idempotent and best-effort: the idempotent check reads the
+// informer-cached pod (may be one reconcile cycle stale — fine for a back-ref), and a contentName that
+// is not a valid label value is logged and skipped (it is valid under the podsnapshotcontent-<uid>
+// convention). It patches a copy so the informer-cached pod is not mutated.
+func (w *NodeController) setSnapshotContentRef(ctx context.Context, pod *corev1.Pod, contentName string) {
+	if pod.Labels[snapshotprotocol.SnapshotContentLabel] == contentName {
+		return
+	}
+	if errs := validation.IsValidLabelValue(contentName); len(errs) > 0 {
+		w.log.Error(fmt.Errorf("invalid label value: %s", strings.Join(errs, "; ")),
+			"Skipping snapshot-content back-ref", "pod", pod.Name, "content", contentName)
+		return
+	}
+	updated := pod.DeepCopy()
+	if updated.Labels == nil {
+		updated.Labels = map[string]string{}
+	}
+	updated.Labels[snapshotprotocol.SnapshotContentLabel] = contentName
+	if err := w.client.Patch(ctx, updated, client.MergeFrom(pod)); err != nil {
+		w.log.Error(err, "Failed to set snapshot-content back-ref", "pod", pod.Name, "content", contentName)
+	}
+}
+
+// removeCaptureEligibleLabel drops CaptureEligibleLabel so the source-pod informer stops driving the
+// pod after a terminal cancellation (node move, provenance/liveness failure). Best-effort: a failure
+// is logged, not surfaced. It patches a copy so the informer-cached pod is not mutated.
+func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *corev1.Pod) {
+	if _, ok := pod.Labels[snapshotprotocol.CaptureEligibleLabel]; !ok {
+		return
+	}
+	updated := pod.DeepCopy()
+	delete(updated.Labels, snapshotprotocol.CaptureEligibleLabel)
+	if err := w.client.Patch(ctx, updated, client.MergeFrom(pod)); err != nil {
+		w.log.Error(err, "Failed to remove capture-eligible label", "pod", pod.Name)
 	}
 }
 

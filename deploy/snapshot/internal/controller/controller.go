@@ -218,11 +218,14 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go dynFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, contentInformer.HasSynced)
 
-	// Source-pod informer: capture-source pods carry CheckpointSourceLabel=true. A pod status
-	// change (a checkpoint container crashing, or the target becoming ready) does not touch the
-	// PodSnapshotContent, so without this trigger it would only be acted on at the content informer's
-	// resync. It needs its own factory: its selector is disjoint from the restore informer's.
-	sourceSelector := labels.SelectorFromSet(labels.Set{snapshotprotocol.CheckpointSourceLabel: "true"}).String()
+	// Source-pod informer: keyed on CaptureEligibleLabel, the promotion label the pre-bind gate
+	// (reconcilePodSnapshotContent) adds only after a source pod passes validation. Keying on the
+	// gate-applied label (not CheckpointSourceLabel) means only gate-validated pods drive the capture
+	// path. A pod status change (a checkpoint container crashing, or the target becoming ready) does
+	// not touch the PodSnapshotContent, so without this trigger it would only be acted on at the
+	// content informer's resync. It needs its own factory: its selector is disjoint from the restore
+	// informer's.
+	sourceSelector := labels.SelectorFromSet(labels.Set{snapshotprotocol.CaptureEligibleLabel: "true"}).String()
 	sourceFactoryOpts := append([]informers.SharedInformerOption{
 		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
 			opts.LabelSelector = sourceSelector

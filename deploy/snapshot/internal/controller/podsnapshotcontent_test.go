@@ -148,6 +148,14 @@ func getContent(t *testing.T, w *NodeController, name string) *nvidiacomv1alpha1
 	return c
 }
 
+// getPod reads a Pod back from the fake client (used to assert CaptureEligibleLabel changes).
+func getPod(t *testing.T, w *NodeController, namespace, name string) *corev1.Pod {
+	t.Helper()
+	p := &corev1.Pod{}
+	require.NoError(t, w.client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, p))
+	return p
+}
+
 func TestReconcileSnapshotContent_IgnoresOtherNode(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-b", "x")
 	fc := &fakeCheckpointer{}
@@ -159,7 +167,21 @@ func TestReconcileSnapshotContent_IgnoresOtherNode(t *testing.T) {
 	assert.Empty(t, got.Status.Conditions)
 }
 
-func TestReconcileSnapshotContent_InFlightGuard(t *testing.T) {
+func TestReconcileSnapshotContent_GateLabelsPodOnSuccess(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod("x")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+
+	// The gate promotes a valid pod by labeling it; it must NOT run the capture flow itself.
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	assert.False(t, fc.wasCalled(), "gate must not invoke the dump directly")
+	assert.Equal(t, "true", getPod(t, w, "inference", "worker-0").Labels[snapshotprotocol.CaptureEligibleLabel])
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
+func TestReconcileSourcePod_InFlightGuard(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")},
@@ -167,25 +189,76 @@ func TestReconcileSnapshotContent_InFlightGuard(t *testing.T) {
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	// Pre-mark the work order in-flight; the reconcile must short-circuit.
+	// Pre-mark the work order in-flight; the capture path must short-circuit.
 	w.inFlight["podsnapshotcontent-x"] = struct{}{}
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	w.reconcileSourcePod(context.Background(), pod)
 	got := getContent(t, w, content.Name)
 	assert.Empty(t, got.Status.Conditions)
 }
 
-func TestReconcileSnapshotContent_MissingCheckpointIDFails(t *testing.T) {
+func TestReconcileSourcePod_MissingCheckpointIDFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod("x")
 	delete(pod.Labels, snapshotprotocol.CheckpointIDLabel)
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	w.reconcileSourcePod(context.Background(), pod)
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "MissingCheckpointID", cond.Reason)
+}
+
+func TestReconcileSourcePod_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod("x")
+	pod.UID = types.UID("stale-uid") // UID mismatch vs the work order's pinned source UID
+	pod.Labels[snapshotprotocol.CaptureEligibleLabel] = "true"
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+	w.reconcileSourcePod(context.Background(), pod)
+
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "StalePodReference", cond.Reason)
+	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotprotocol.CaptureEligibleLabel]
+	assert.False(t, labeled, "eligible label must be removed on cancellation")
+}
+
+func TestReconcileSourcePod_InFlightShortCircuits(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod("x")
+	pod.Labels[snapshotprotocol.CaptureEligibleLabel] = "true"
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	// A dump is already in flight: tryAcquire short-circuits before any further work, so a second
+	// reconcile does nothing — no status write, no relabel, no content-ref stamp.
+	w.inFlight["podsnapshotcontent-x"] = struct{}{}
+
+	w.reconcileSourcePod(context.Background(), pod)
+
+	got := getPod(t, w, "inference", "worker-0")
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions, "in-flight dump must not be touched")
+	assert.Equal(t, "true", got.Labels[snapshotprotocol.CaptureEligibleLabel], "in-flight dump must not be unlabeled")
+	_, stamped := got.Labels[snapshotprotocol.SnapshotContentLabel]
+	assert.False(t, stamped, "tryAcquire short-circuits before the content-ref stamp")
+}
+
+func TestReconcileSourcePod_StampsSnapshotContentRef(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod("x")
+	pod.Status.ContainerStatuses[0].Ready = false // quiesce-return after the stamp; no async dump
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+	w.reconcileSourcePod(context.Background(), pod)
+
+	// The stamp precedes the go runCheckpoint(...) launch, so assert synchronously (no Eventually).
+	got := getPod(t, w, "inference", "worker-0")
+	assert.Equal(t, content.Name, got.Labels[snapshotprotocol.SnapshotContentLabel])
+
+	// Idempotent: re-reconciling the now-labeled pod leaves the value unchanged.
+	w.reconcileSourcePod(context.Background(), got)
+	assert.Equal(t, content.Name, getPod(t, w, "inference", "worker-0").Labels[snapshotprotocol.SnapshotContentLabel])
 }
 
 func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) {
@@ -212,7 +285,7 @@ func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) 
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = rt
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	w.reconcileSourcePod(context.Background(), pod)
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
@@ -246,7 +319,7 @@ func TestReconcileSnapshotContent_OpaqueNameUsesPodLabel(t *testing.T) {
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	w.reconcileSourcePod(context.Background(), pod)
 	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
 
 	// The checkpoint id and destination come from the pod label, not the work order name.
@@ -268,7 +341,7 @@ func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
 	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 	require.NoError(t, os.MkdirAll(dest, 0o755))
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	w.reconcileSourcePod(context.Background(), pod)
 	assert.False(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
@@ -284,7 +357,7 @@ func TestReconcileSnapshotContent_PodMountResolvesContainerPID(t *testing.T) {
 	rt := &fakeRuntime{resolveContainerPID: 4242}
 	w.runtime = rt
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	w.reconcileSourcePod(context.Background(), pod)
 
 	// podMount mode resolves the container PID and feeds it through checkpointLocationsFromPod
 	// (a zero PID would fail there with a different reason). The subsequent live-PID validation
@@ -377,7 +450,7 @@ func TestReconcileSnapshotContent_NotReadyQuiesceNoOp(t *testing.T) {
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	w.reconcileSourcePod(context.Background(), pod)
 	assert.False(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)
 	assert.Empty(t, got.Status.Conditions)
@@ -390,7 +463,7 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	w.reconcileSourcePod(context.Background(), pod)
 	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
 
 	// Capture parameters are read from the source pod, not from PodSnapshotContent metadata.
@@ -580,16 +653,6 @@ func TestReconcileSourcePod_PodNotIndexedNoOp(t *testing.T) {
 	pod := podWithFailedSibling()
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 	w.contentIndexer = seedIndex(t) // override: empty index
-
-	w.reconcileSourcePod(context.Background(), pod)
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
-}
-
-func TestReconcileSourcePod_OtherNodeNoOp(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := podWithFailedSibling()
-	pod.Spec.NodeName = "node-b"
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
 	w.reconcileSourcePod(context.Background(), pod)
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
