@@ -35,11 +35,11 @@ import (
 const (
 	// DynamoGraphDeploymentWebhookName is the name of the validating webhook handler for DynamoGraphDeployment.
 	DynamoGraphDeploymentWebhookName = "dynamographdeployment-validating-webhook"
-	dynamoGraphDeploymentWebhookPath = "/validate-nvidia-com-v1beta1-dynamographdeployment"
+	dynamoGraphDeploymentWebhookPath = "/validate/nvidia.com/v1beta1/dynamographdeployments"
 )
 
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
-// It is a thin wrapper around DynamoGraphDeploymentBetaValidator.
+// It is a thin wrapper around DynamoGraphDeploymentValidator.
 type DynamoGraphDeploymentHandler struct {
 	mgr               manager.Manager
 	operatorPrincipal string
@@ -74,8 +74,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentBetaValidator(deployment, h.mgr, h.groveEnabled)
-	return validator.Validate(ctx)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.groveEnabled)
+	return validator.Validate(ctx, deployment)
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
@@ -105,8 +105,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentBetaValidator(newDeployment, h.mgr, h.groveEnabled)
-	warnings, err := validator.Validate(ctx)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.groveEnabled)
+	warnings, err := validator.Validate(ctx, newDeployment)
 	if err != nil {
 		return warnings, err
 	}
@@ -122,7 +122,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Validate stateful rules (immutability + replicas protection)
-	updateWarnings, err := validator.ValidateUpdate(oldDeployment, userInfo, h.operatorPrincipal)
+	updateWarnings, err := validator.ValidateUpdate(oldDeployment, newDeployment, userInfo, h.operatorPrincipal)
 	if err != nil {
 		username := "<unknown>"
 		if userInfo != nil {

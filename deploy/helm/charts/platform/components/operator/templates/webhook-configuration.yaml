@@ -78,9 +78,8 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /validate-nvidia-com-v1beta1-dynamographdeployment
+      path: /validate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
-  matchPolicy: Equivalent
   name: vdynamographdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
   namespaceSelector:
@@ -235,9 +234,8 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /mutate-nvidia-com-v1beta1-dynamographdeployment
+      path: /mutate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
-  matchPolicy: Equivalent
   name: mdynamographdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
   namespaceSelector:

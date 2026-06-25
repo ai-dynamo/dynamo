@@ -45,28 +45,59 @@ import (
 
 var betaTopologyDomainRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-// DynamoGraphDeploymentBetaValidator validates v1beta1 DynamoGraphDeployment resources.
-type DynamoGraphDeploymentBetaValidator struct {
-	deployment   *nvidiacomv1beta1.DynamoGraphDeployment
+// DynamoGraphDeploymentValidator validates v1beta1 DynamoGraphDeployment resources.
+type DynamoGraphDeploymentValidator struct {
 	mgr          ctrl.Manager
 	groveEnabled bool
 }
 
-// NewDynamoGraphDeploymentBetaValidator creates a validator for v1beta1 DynamoGraphDeployment.
-func NewDynamoGraphDeploymentBetaValidator(
-	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+// NewDynamoGraphDeploymentValidator creates a validator for v1beta1 DynamoGraphDeployment.
+func NewDynamoGraphDeploymentValidator(
 	mgr ctrl.Manager,
 	groveEnabled bool,
-) *DynamoGraphDeploymentBetaValidator {
-	return &DynamoGraphDeploymentBetaValidator{
-		deployment:   deployment,
+) *DynamoGraphDeploymentValidator {
+	return &DynamoGraphDeploymentValidator{
 		mgr:          mgr,
 		groveEnabled: groveEnabled,
 	}
 }
 
+type dynamoGraphDeploymentValidation struct {
+	deployment   *nvidiacomv1beta1.DynamoGraphDeployment
+	mgr          ctrl.Manager
+	groveEnabled bool
+}
+
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
-func (v *DynamoGraphDeploymentBetaValidator) Validate(ctx context.Context) (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentValidator) Validate(
+	ctx context.Context,
+	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+) (admission.Warnings, error) {
+	return (&dynamoGraphDeploymentValidation{
+		deployment:   deployment,
+		mgr:          v.mgr,
+		groveEnabled: v.groveEnabled,
+	}).validate(ctx)
+}
+
+// ValidateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
+// userInfo is used for identity-based validation (replica protection).
+// If userInfo is nil, replica changes for DGDSA-enabled components are rejected (fail closed).
+// operatorPrincipal is the full Kubernetes SA username of the operator for authorization.
+func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
+	old *nvidiacomv1beta1.DynamoGraphDeployment,
+	new *nvidiacomv1beta1.DynamoGraphDeployment,
+	userInfo *authenticationv1.UserInfo,
+	operatorPrincipal string,
+) (admission.Warnings, error) {
+	return (&dynamoGraphDeploymentValidation{
+		deployment:   new,
+		mgr:          v.mgr,
+		groveEnabled: v.groveEnabled,
+	}).validateUpdate(old, userInfo, operatorPrincipal)
+}
+
+func (v *dynamoGraphDeploymentValidation) validate(ctx context.Context) (admission.Warnings, error) {
 	components, err := betaComponentsByName(v.deployment)
 	if err != nil {
 		return nil, err
@@ -107,8 +138,8 @@ func (v *DynamoGraphDeploymentBetaValidator) Validate(ctx context.Context) (admi
 	return allWarnings, nil
 }
 
-// ValidateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
-func (v *DynamoGraphDeploymentBetaValidator) ValidateUpdate(
+// validateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
+func (v *dynamoGraphDeploymentValidation) validateUpdate(
 	old *nvidiacomv1beta1.DynamoGraphDeployment,
 	userInfo *authenticationv1.UserInfo,
 	operatorPrincipal string,
@@ -140,7 +171,7 @@ func (v *DynamoGraphDeploymentBetaValidator) ValidateUpdate(
 	return warnings, nil
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateImmutableFields(
+func (v *dynamoGraphDeploymentValidation) validateImmutableFields(
 	old *nvidiacomv1beta1.DynamoGraphDeployment,
 	oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	newComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -175,6 +206,12 @@ func (v *DynamoGraphDeploymentBetaValidator) validateImmutableFields(
 			}
 		}
 
+		// Validate inter-pod GMS layout and failover immutability.
+		//
+		// Flipping the inter-pod GMS layout or toggling failover within an
+		// inter-pod layout both change the PodClique topology (weight-server PCLQ,
+		// per-rank engine PCLQs, shadow PCLQs, DRA ResourceClaimTemplates), which
+		// Grove cannot transform in place. Force the user to delete and recreate.
 		oldInterPodGMS := oldComponent.IsInterPodGMSEnabled()
 		newInterPodGMS := newComponent.IsInterPodGMSEnabled()
 		if oldInterPodGMS != newInterPodGMS {
@@ -212,7 +249,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateImmutableFields(
 	return errors.Join(errs...)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateComponentTopology(
+func (v *dynamoGraphDeploymentValidation) validateComponentTopology(
 	oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	newComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
@@ -238,7 +275,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateComponentTopology(
 	}
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateReplicasChanges(
+func (v *dynamoGraphDeploymentValidation) validateReplicasChanges(
 	oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	newComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	userInfo *authenticationv1.UserInfo,
@@ -279,19 +316,30 @@ func (v *DynamoGraphDeploymentBetaValidator) validateReplicasChanges(
 	return errors.Join(errs...)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateComponent(
+func (v *dynamoGraphDeploymentValidation) validateComponent(
 	ctx context.Context,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (admission.Warnings, error) {
 	componentName := component.ComponentName
 	fieldPath := fmt.Sprintf("spec.components[%s]", componentName)
 
+	// The inter-pod GMS layout (with or without failover) requires the Grove
+	// pathway: the weight-server pod, per-rank PCLQs, and DRA ResourceClaim
+	// templates are all wired at the PodCliqueScalingGroup level, which only
+	// the Grove renderer produces.
 	if component.IsInterPodGMSEnabled() && !v.isGrovePathway() {
 		return nil, v.grovePathwayRequiredError(fmt.Sprintf(
 			"%s: experimental.gpuMemoryService.mode=%q",
 			fieldPath, nvidiacomv1beta1.GMSModeInterPod))
 	}
 
+	// The inter-pod GMS layout is currently implemented only for vLLM (the
+	// engine relies on vLLM-specific runtime hooks like --load-format gms; the
+	// failover variant additionally enables vLLM shadow mode). Fail fast at
+	// admission rather than producing a broken deployment when another or no
+	// backend is configured; an empty BackendFramework means the operator cannot
+	// confirm the engine speaks vLLM, which is a hard prerequisite for inter-pod
+	// GMS (both standalone and with failover).
 	if component.IsInterPodGMSEnabled() &&
 		v.deployment.Spec.BackendFramework != backendFrameworkVLLM {
 		detected := v.deployment.Spec.BackendFramework
@@ -310,11 +358,25 @@ func (v *DynamoGraphDeploymentBetaValidator) validateComponent(
 		}
 	}
 
-	sharedValidator := NewBetaSharedSpecValidator(component, fieldPath, v.isGrovePathway(), v.mgr)
+	sharedValidator := NewDynamoGraphDeploymentSharedSpecValidator(component, fieldPath, v.isGrovePathway(), v.mgr)
 	return sharedValidator.Validate(ctx)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateComponentNameLength(
+// validateComponentNameLength ensures Grove-rendered resource names stay within
+// the pod-name budget after the PCS, PCSG, and PodClique names are combined.
+//
+// Grove builds pod names from these generated pieces:
+//   - PCS name: derived from the DynamoGraphDeployment name
+//
+// For multi-node and inter-pod GMS components:
+//   - PCSG name: lowercase(componentName)
+//   - PodClique names: rendered role names for the component
+//
+// For single-node components:
+//   - PodClique name: lowercase(componentName)
+//
+// The combined length of these names must not exceed maxCombinedResourceNameLength.
+func (v *dynamoGraphDeploymentValidation) validateComponentNameLength(
 	componentName string,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
@@ -353,7 +415,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateComponentNameLength(
 	return nil
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) isGrovePathway() bool {
+func (v *dynamoGraphDeploymentValidation) isGrovePathway() bool {
 	if !v.groveEnabled {
 		return false
 	}
@@ -361,7 +423,7 @@ func (v *DynamoGraphDeploymentBetaValidator) isGrovePathway() bool {
 		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) grovePathwayRequiredError(subject string) error {
+func (v *dynamoGraphDeploymentValidation) grovePathwayRequiredError(subject string) error {
 	if !v.groveEnabled {
 		return fmt.Errorf("%s requires the Grove pathway, but Grove is disabled in the operator configuration", subject)
 	}
@@ -369,7 +431,7 @@ func (v *DynamoGraphDeploymentBetaValidator) grovePathwayRequiredError(subject s
 		subject, consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateRestart(
+func (v *dynamoGraphDeploymentValidation) validateRestart(
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
 	if v.deployment.Spec.Restart == nil {
@@ -384,7 +446,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateRestart(
 	return errors.Join(err, v.validateRestartStrategyOrder(components))
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateRestartStrategyOrder(
+func (v *dynamoGraphDeploymentValidation) validateRestartStrategyOrder(
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
 	restart := v.deployment.Spec.Restart
@@ -411,14 +473,14 @@ func (v *DynamoGraphDeploymentBetaValidator) validateRestartStrategyOrder(
 	return err
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validatePriorityClassName() error {
+func (v *dynamoGraphDeploymentValidation) validatePriorityClassName() error {
 	if v.deployment.Spec.PriorityClassName == "" || v.isGrovePathway() {
 		return nil
 	}
 	return v.grovePathwayRequiredError("spec.priorityClassName")
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateAnnotations() error {
+func (v *dynamoGraphDeploymentValidation) validateAnnotations() error {
 	annotations := v.deployment.GetAnnotations()
 	if annotations == nil {
 		return nil
@@ -450,7 +512,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateAnnotations() error {
 	return errors.Join(errs...)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateTopologyConstraints(
+func (v *dynamoGraphDeploymentValidation) validateTopologyConstraints(
 	ctx context.Context,
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
@@ -516,7 +578,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateTopologyConstraints(
 	return errors.Join(errs...)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) shouldValidateGroveClusterTopology(errs []error, hasClusterTopologyRef bool) bool {
+func (v *dynamoGraphDeploymentValidation) shouldValidateGroveClusterTopology(errs []error, hasClusterTopologyRef bool) bool {
 	return len(errs) == 0 &&
 		hasClusterTopologyRef &&
 		v.mgr != nil &&
@@ -524,7 +586,7 @@ func (v *DynamoGraphDeploymentBetaValidator) shouldValidateGroveClusterTopology(
 		v.isGrovePathway()
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) readGroveClusterTopology(ctx context.Context, name string) (*clusterTopologyInfo, error) {
+func (v *dynamoGraphDeploymentValidation) readGroveClusterTopology(ctx context.Context, name string) (*clusterTopologyInfo, error) {
 	ct := &grovev1alpha1.ClusterTopology{}
 	if err := v.mgr.GetClient().Get(ctx, types.NamespacedName{Name: name}, ct); err != nil {
 		return nil, err
@@ -543,7 +605,7 @@ func (v *DynamoGraphDeploymentBetaValidator) readGroveClusterTopology(ctx contex
 	return info, nil
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateTopologyDomainsAgainstGroveClusterTopology(
+func (v *dynamoGraphDeploymentValidation) validateTopologyDomainsAgainstGroveClusterTopology(
 	ctx context.Context,
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
@@ -616,7 +678,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateTopologyDomainsAgainstGrove
 	return errors.Join(errs...)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateTopologyConstraintImmutability(
+func (v *dynamoGraphDeploymentValidation) validateTopologyConstraintImmutability(
 	old *nvidiacomv1beta1.DynamoGraphDeployment,
 	oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	newComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -643,7 +705,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateTopologyConstraintImmutabil
 	return errors.Join(errs...)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateKvTransferPolicyImmutability(
+func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyImmutability(
 	old *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
 	if betaKvTransferPoliciesEqual(betaKvTransferPolicyFor(old), betaKvTransferPolicyFor(v.deployment)) {
@@ -653,7 +715,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateKvTransferPolicyImmutabilit
 		"delete and recreate the DynamoGraphDeployment to change the KV transfer policy")
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateNoRestartDuringRollingUpdate(
+func (v *dynamoGraphDeploymentValidation) validateNoRestartDuringRollingUpdate(
 	old *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
 	if old.Status.RollingUpdate == nil {
@@ -678,7 +740,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateNoRestartDuringRollingUpdat
 	return nil
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateKvTransferPolicy(ctx context.Context) error {
+func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicy(ctx context.Context) error {
 	if v.deployment.Spec.Experimental == nil {
 		return nil
 	}
@@ -749,7 +811,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateKvTransferPolicy(ctx contex
 	return errors.Join(errs...)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateKvTransferPolicyAgainstGroveClusterTopology(
+func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyAgainstGroveClusterTopology(
 	ctx context.Context,
 	kvt *nvidiacomv1beta1.KvTransferPolicy,
 ) error {
@@ -771,7 +833,7 @@ func (v *DynamoGraphDeploymentBetaValidator) validateKvTransferPolicyAgainstGrov
 		kvt.Domain, kvt.ClusterTopologyName, info.domains)
 }
 
-func (v *DynamoGraphDeploymentBetaValidator) validateFailoverRequiresDiscoveryMode() error {
+func (v *dynamoGraphDeploymentValidation) validateFailoverRequiresDiscoveryMode() error {
 	hasIntraPodFailover := false
 	for i := range v.deployment.Spec.Components {
 		component := &v.deployment.Spec.Components[i]
@@ -797,21 +859,21 @@ func (v *DynamoGraphDeploymentBetaValidator) validateFailoverRequiresDiscoveryMo
 	return nil
 }
 
-// BetaSharedSpecValidator validates v1beta1 component fields embedded in a DGD.
-type BetaSharedSpecValidator struct {
+// DynamoGraphDeploymentSharedSpecValidator validates component fields embedded in a v1beta1 DGD.
+type DynamoGraphDeploymentSharedSpecValidator struct {
 	spec         *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	fieldPath    string
 	grovePathway bool
 	mgr          ctrl.Manager
 }
 
-func NewBetaSharedSpecValidator(
+func NewDynamoGraphDeploymentSharedSpecValidator(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fieldPath string,
 	grovePathway bool,
 	mgr ctrl.Manager,
-) *BetaSharedSpecValidator {
-	return &BetaSharedSpecValidator{
+) *DynamoGraphDeploymentSharedSpecValidator {
+	return &DynamoGraphDeploymentSharedSpecValidator{
 		spec:         spec,
 		fieldPath:    fieldPath,
 		grovePathway: grovePathway,
@@ -819,7 +881,7 @@ func NewBetaSharedSpecValidator(
 	}
 }
 
-func (v *BetaSharedSpecValidator) Validate(ctx context.Context) (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentSharedSpecValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
 		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
 	}
@@ -859,7 +921,7 @@ func (v *BetaSharedSpecValidator) Validate(ctx context.Context) (admission.Warni
 	return nil, nil
 }
 
-func (v *BetaSharedSpecValidator) validateMinAvailable() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateMinAvailable() error {
 	if v.spec.MinAvailable == nil {
 		return nil
 	}
@@ -879,7 +941,7 @@ func (v *BetaSharedSpecValidator) validateMinAvailable() error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validatePodTemplate() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validatePodTemplate() error {
 	if v.spec.PodTemplate == nil {
 		if v.spec.FrontendSidecar != nil {
 			return fmt.Errorf("%s.frontendSidecar requires podTemplate.spec.containers", v.fieldPath)
@@ -923,7 +985,7 @@ func (v *BetaSharedSpecValidator) validatePodTemplate() error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validateCompilationCache() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateCompilationCache() error {
 	if v.spec.CompilationCache == nil {
 		return nil
 	}
@@ -933,7 +995,7 @@ func (v *BetaSharedSpecValidator) validateCompilationCache() error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validateSharedMemorySize() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateSharedMemorySize() error {
 	if v.spec.SharedMemorySize == nil {
 		return nil
 	}
@@ -943,7 +1005,7 @@ func (v *BetaSharedSpecValidator) validateSharedMemorySize() error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validateCheckpointConfig() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateCheckpointConfig() error {
 	checkpoint := betaCheckpoint(v.spec)
 	if checkpoint == nil {
 		return nil
@@ -987,7 +1049,7 @@ func (v *BetaSharedSpecValidator) validateCheckpointConfig() error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validateGMSClientContainerNames() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateGMSClientContainerNames() error {
 	gms := betaGPUMemoryService(v.spec)
 	if gms == nil {
 		return nil
@@ -1012,7 +1074,7 @@ func (v *BetaSharedSpecValidator) validateGMSClientContainerNames() error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validatePodTemplateAnnotations() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validatePodTemplateAnnotations() error {
 	annotations := dynamo.GetPodTemplateAnnotations(v.spec)
 	if annotations == nil {
 		return nil
@@ -1028,14 +1090,12 @@ func (v *BetaSharedSpecValidator) validatePodTemplateAnnotations() error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validateEPPConfig(ctx context.Context) error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateEPPConfig(ctx context.Context) error {
 	if v.spec.ComponentType != nvidiacomv1beta1.ComponentTypeEPP {
 		return nil
 	}
-	if v.mgr != nil {
-		if err := v.checkInferencePoolAPIAvailability(ctx); err != nil {
-			return fmt.Errorf("%s: cannot deploy EPP component: %w", v.fieldPath, err)
-		}
+	if err := v.checkInferencePoolAPIAvailability(ctx); err != nil {
+		return fmt.Errorf("%s: cannot deploy EPP component: %w", v.fieldPath, err)
 	}
 	if v.spec.IsMultinode() {
 		return fmt.Errorf("%s: EPP component cannot be multinode (multinode field must be nil or nodeCount must be 1)", v.fieldPath)
@@ -1058,9 +1118,9 @@ func (v *BetaSharedSpecValidator) validateEPPConfig(ctx context.Context) error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) checkInferencePoolAPIAvailability(ctx context.Context) error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) checkInferencePoolAPIAvailability(ctx context.Context) error {
 	if v.mgr == nil {
-		return nil
+		return fmt.Errorf("manager is required to detect InferencePool API availability")
 	}
 	if !controllercommon.DetectInferencePoolAvailability(ctx, v.mgr) {
 		return fmt.Errorf(
@@ -1072,7 +1132,7 @@ func (v *BetaSharedSpecValidator) checkInferencePoolAPIAvailability(ctx context.
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validateGPUMemoryService() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateGPUMemoryService() error {
 	gms := betaGPUMemoryService(v.spec)
 	if gms == nil {
 		return nil
@@ -1097,7 +1157,7 @@ func (v *BetaSharedSpecValidator) validateGPUMemoryService() error {
 	return nil
 }
 
-func (v *BetaSharedSpecValidator) validateFailover() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateFailover() error {
 	failover := betaFailover(v.spec)
 	if failover == nil {
 		return nil
@@ -1162,7 +1222,7 @@ func (v *BetaSharedSpecValidator) validateFailover() error {
 	return errors.Join(errs...)
 }
 
-func (v *BetaSharedSpecValidator) validateSnapshotWithGPUMemoryService() error {
+func (v *DynamoGraphDeploymentSharedSpecValidator) validateSnapshotWithGPUMemoryService() error {
 	checkpoint := betaCheckpoint(v.spec)
 	gms := betaGPUMemoryService(v.spec)
 	if checkpoint == nil || !checkpoint.Enabled || gms == nil {

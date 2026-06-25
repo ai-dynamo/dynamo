@@ -31,7 +31,7 @@ import (
 	k8sptr "k8s.io/utils/ptr"
 )
 
-func TestDynamoGraphDeploymentBetaValidator_Validate(t *testing.T) {
+func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	tests := []struct {
 		name         string
 		deployment   *nvidiacomv1beta1.DynamoGraphDeployment
@@ -186,14 +186,14 @@ func TestDynamoGraphDeploymentBetaValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentBetaValidator(tt.deployment, nil, tt.groveEnabled)
-			_, err := validator.Validate(context.Background())
+			validator := NewDynamoGraphDeploymentValidator(nil, tt.groveEnabled)
+			_, err := validator.Validate(context.Background(), tt.deployment)
 			assertBetaValidationError(t, err, tt.wantErr)
 		})
 	}
 }
 
-func TestDynamoGraphDeploymentBetaValidator_ValidateUpdate(t *testing.T) {
+func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 	const operatorPrincipal = "system:serviceaccount:dynamo-system:dynamo-operator"
 
 	tests := []struct {
@@ -287,8 +287,8 @@ func TestDynamoGraphDeploymentBetaValidator_ValidateUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentBetaValidator(tt.newDGD, nil, true)
-			warnings, err := validator.ValidateUpdate(tt.oldDGD, tt.userInfo, tt.principal)
+			validator := NewDynamoGraphDeploymentValidator(nil, true)
+			warnings, err := validator.ValidateUpdate(tt.oldDGD, tt.newDGD, tt.userInfo, tt.principal)
 			assertBetaValidationError(t, err, tt.wantErr)
 			if tt.wantWarns && len(warnings) == 0 {
 				t.Fatal("ValidateUpdate() expected warnings but got none")

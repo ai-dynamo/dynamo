@@ -35,7 +35,7 @@ import (
 
 const (
 	dgdDefaultingWebhookName = "dynamographdeployment-defaulting-webhook"
-	dgdDefaultingWebhookPath = "/mutate-nvidia-com-v1beta1-dynamographdeployment"
+	dgdDefaultingWebhookPath = "/mutate/nvidia.com/v1beta1/dynamographdeployments"
 )
 
 // DGDDefaulter is a mutating webhook handler that stamps DynamoGraphDeployments
