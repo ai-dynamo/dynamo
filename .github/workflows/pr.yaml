@@ -965,8 +965,7 @@ jobs:
             --set "controlPlane.distro.k8s.version=${VCLUSTER_K8S_VERSION}" \
             --set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}"
 
-          kubectl wait --for=condition=ready pod \
-            -l "app=vcluster,release=${VCLUSTER_NAME}" \
+          kubectl rollout status "statefulset/${VCLUSTER_NAME}" \
             -n "${VCLUSTER_NAMESPACE}" \
             --timeout=900s
           kubectl get pods -n "${VCLUSTER_NAMESPACE}" -o wide
@@ -1225,8 +1224,7 @@ jobs:
             --set "controlPlane.distro.k8s.version=${VCLUSTER_K8S_VERSION}" \
             --set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}"
 
-          kubectl wait --for=condition=ready pod \
-            -l "app=vcluster,release=${VCLUSTER_NAME}" \
+          kubectl rollout status "statefulset/${VCLUSTER_NAME}" \
             -n "${VCLUSTER_NAMESPACE}" \
             --timeout=900s
           kubectl get pods -n "${VCLUSTER_NAMESPACE}" -o wide
