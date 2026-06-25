@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -122,6 +123,9 @@ func (v *dynamoGraphDeploymentValidation) validate(ctx context.Context) (admissi
 		return nil, err
 	}
 	if err := v.validateFailoverRequiresDiscoveryMode(); err != nil {
+		return nil, err
+	}
+	if err := v.validateAlphaCompatibility(); err != nil {
 		return nil, err
 	}
 
@@ -857,6 +861,168 @@ func (v *dynamoGraphDeploymentValidation) validateFailoverRequiresDiscoveryMode(
 			consts.KubeAnnotationDynamoKubeDiscoveryMode, "container")
 	}
 	return nil
+}
+
+func (v *dynamoGraphDeploymentValidation) validateAlphaCompatibility() error {
+	// Reconstruct the v1alpha1 view so alpha-only fields preserved by
+	// conversion still get the webhook validation they had before the DGD
+	// webhook moved to v1beta1.
+	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+	if err := alpha.ConvertFrom(v.deployment); err != nil {
+		return fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: failed to reconstruct compatibility view: %w", err)
+	}
+	if !hasAlphaCompatibilityFields(alpha) {
+		return nil
+	}
+
+	return validateAlphaCompatibility(alpha)
+}
+
+func hasAlphaCompatibilityFields(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
+	if len(dgd.Spec.PVCs) > 0 {
+		return true
+	}
+	for _, service := range dgd.Spec.Services {
+		if service == nil {
+			return true
+		}
+		if service.Ingress != nil ||
+			len(service.Annotations) > 0 ||
+			service.SharedMemory != nil ||
+			service.FrontendSidecar != nil ||
+			(service.GPUMemoryService != nil && !service.GPUMemoryService.Enabled) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateAlphaCompatibility(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	var errs []error
+
+	if err := validateAlphaCompatibilityPVCs(dgd.Spec.PVCs); err != nil {
+		errs = append(errs, err)
+	}
+	for serviceName, service := range dgd.Spec.Services {
+		fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
+		if service == nil {
+			errs = append(errs, fmt.Errorf("%s must not be null", fieldPath))
+			continue
+		}
+		if err := validateAlphaCompatibilityService(fieldPath, service); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateAlphaCompatibilityPVCs(pvcs []nvidiacomv1alpha1.PVC) error {
+	var errs []error
+	for i := range pvcs {
+		if err := validateAlphaCompatibilityPVC(i, &pvcs[i]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func validateAlphaCompatibilityPVC(index int, pvc *nvidiacomv1alpha1.PVC) error {
+	var err error
+	if pvc.Name == nil || *pvc.Name == "" {
+		err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].name is required", index))
+	}
+	if pvc.Create != nil && *pvc.Create {
+		if pvc.StorageClass == "" {
+			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].storageClass is required when create is true", index))
+		}
+		if pvc.Size.IsZero() {
+			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].size is required when create is true", index))
+		}
+		if pvc.VolumeAccessMode == "" {
+			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].volumeAccessMode is required when create is true", index))
+		}
+	}
+	return err
+}
+
+func validateAlphaCompatibilityService(
+	fieldPath string,
+	service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+) error {
+	var errs []error
+	if service.Ingress != nil && service.Ingress.Enabled && service.Ingress.Host == "" {
+		errs = append(errs, fmt.Errorf("%s.ingress.host is required when ingress is enabled", fieldPath))
+	}
+	if err := validateAlphaCompatibilityServiceAnnotations(fieldPath, service.Annotations); err != nil {
+		errs = append(errs, err)
+	}
+	if service.SharedMemory != nil && !service.SharedMemory.Disabled && service.SharedMemory.Size.IsZero() {
+		errs = append(errs, fmt.Errorf("%s.sharedMemory.size is required when disabled is false", fieldPath))
+	}
+	if err := validateAlphaCompatibilityFrontendSidecar(fieldPath, service); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateAlphaCompatibilityGMSClientContainerNames(fieldPath, service.GPUMemoryService); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func validateAlphaCompatibilityServiceAnnotations(fieldPath string, annotations map[string]string) error {
+	if annotations == nil {
+		return nil
+	}
+	if value, exists := annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]; exists {
+		switch strings.ToLower(value) {
+		case vllmDistributedExecutorBackendMP, vllmDistributedExecutorBackendRay:
+		default:
+			return fmt.Errorf("%s.annotations[%s] has invalid value %q: must be \"mp\" or \"ray\"",
+				fieldPath, consts.KubeAnnotationVLLMDistributedExecutorBackend, value)
+		}
+	}
+	return nil
+}
+
+func validateAlphaCompatibilityFrontendSidecar(
+	fieldPath string,
+	service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+) error {
+	if service.FrontendSidecar == nil ||
+		service.ExtraPodSpec == nil ||
+		service.ExtraPodSpec.PodSpec == nil {
+		return nil
+	}
+	for _, container := range service.ExtraPodSpec.PodSpec.Containers {
+		if container.Name == consts.FrontendSidecarContainerName {
+			return fmt.Errorf(
+				"%s: cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers",
+				fieldPath, consts.FrontendSidecarContainerName)
+		}
+	}
+	return nil
+}
+
+func validateAlphaCompatibilityGMSClientContainerNames(
+	fieldPath string,
+	gms *nvidiacomv1alpha1.GPUMemoryServiceSpec,
+) error {
+	if gms == nil {
+		return nil
+	}
+	var errs []error
+	for i, name := range gms.ExtraClientContainers {
+		if validationErrs := k8svalidation.IsDNS1123Label(name); len(validationErrs) > 0 {
+			errs = append(errs, fmt.Errorf(
+				"%s.gpuMemoryService.extraClientContainers[%d] %q is not a valid Kubernetes container name: %s",
+				fieldPath,
+				i,
+				name,
+				strings.Join(validationErrs, "; "),
+			))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // DynamoGraphDeploymentSharedSpecValidator validates component fields embedded in a v1beta1 DGD.

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -193,6 +194,107 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	}
 }
 
+func TestDynamoGraphDeploymentValidator_ValidateAlphaCompatibility(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*nvidiacomv1alpha1.DynamoGraphDeployment)
+		wantErr string
+	}{
+		{
+			name: "alpha PVC create requires storage fields",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{
+					{
+						Name:   k8sptr.To("cache"),
+						Create: k8sptr.To(true),
+					},
+				}
+			},
+			wantErr: "spec.pvcs[0].storageClass is required when create is true",
+		},
+		{
+			name: "alpha ingress requires host",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				className := "nginx"
+				dgd.Spec.Services["frontend"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeFrontend,
+					Ingress: &nvidiacomv1alpha1.IngressSpec{
+						Enabled:                    true,
+						IngressControllerClassName: &className,
+					},
+				}
+			},
+			wantErr: "spec.services[frontend].ingress.host is required when ingress is enabled",
+		},
+		{
+			name: "alpha service annotations are validated",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["worker"].Annotations = map[string]string{
+					consts.KubeAnnotationVLLMDistributedExecutorBackend: "typo",
+				}
+			},
+			wantErr: `spec.services[worker].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "typo"`,
+		},
+		{
+			name: "alpha sharedMemory requires size when enabled",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["worker"].SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{
+					Disabled: false,
+				}
+			},
+			wantErr: "spec.services[worker].sharedMemory.size is required when disabled is false",
+		},
+		{
+			name: "alpha frontend sidecar rejects generated container name conflict",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["frontend"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeFrontend,
+					FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{
+						Image: "custom/frontend:latest",
+					},
+					ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+						PodSpec: &corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  consts.FrontendSidecarContainerName,
+									Image: "custom/frontend:latest",
+								},
+							},
+						},
+					},
+				}
+			},
+			wantErr: `spec.services[frontend]: cannot inject frontend sidecar: a container named "sidecar-frontend" already exists in extraPodSpec.containers`,
+		},
+		{
+			name: "disabled alpha GMS still validates extra client container names",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["worker"].GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled:               false,
+					ExtraClientContainers: []string{"Bad_Name"},
+				}
+			},
+			wantErr: `spec.services[worker].gpuMemoryService.extraClientContainers[0] "Bad_Name" is not a valid Kubernetes container name`,
+		},
+		{
+			name: "nil alpha service entry is rejected",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["ghost"] = nil
+			},
+			wantErr: "spec.services[ghost] must not be null",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deployment := betaDGDFromAlpha(t, tt.mutate)
+			validator := NewDynamoGraphDeploymentValidator(nil, true)
+			_, err := validator.Validate(context.Background(), deployment)
+			assertBetaValidationError(t, err, tt.wantErr)
+		})
+	}
+}
+
 func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 	const operatorPrincipal = "system:serviceaccount:dynamo-system:dynamo-operator"
 
@@ -318,6 +420,40 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 					ComponentName: "worker",
 					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
 					Replicas:      k8sptr.To(int32(2)),
+				},
+			},
+		},
+	}
+}
+
+func betaDGDFromAlpha(
+	t *testing.T,
+	mutate func(*nvidiacomv1alpha1.DynamoGraphDeployment),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	t.Helper()
+
+	alpha := newAlphaDGDForCompatibilityValidation()
+	mutate(alpha)
+
+	beta := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := alpha.ConvertTo(beta); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	return beta
+}
+
+func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeployment {
+	return &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-graph",
+			Namespace: "default",
+		},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      k8sptr.To(int32(1)),
 				},
 			},
 		},
