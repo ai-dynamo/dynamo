@@ -15,7 +15,7 @@ enforces shared scaling policy across multiple DGDs.
 | `global-planner-gpu-budget.yaml` | Multi-model, GPU budget | vLLM | 2 independent model DGDs + 1 control DGD with `--max-total-gpus` |
 | `global-planner-vllm-test.yaml` | Single-endpoint, multi-pool | vLLM | 1 Frontend + GlobalRouter + GlobalPlanner, 2 prefill pools (TP1, TP2) + 1 decode pool |
 | `global-planner-mocker-test.yaml` | Single-endpoint, multi-pool | Mocker | Same as above with Mocker workers; GlobalPlanner in `--no-operation` mode |
-| `global-planner-vllm-test-xpu-dra.yaml` | Single-endpoint, multi-pool | vLLM (Intel XPU) | Same as `global-planner-vllm-test.yaml` but for Intel XPU using DRA (Dynamic Resource Allocation) |
+| `global-planner-vllm-test-xpu-dra.yaml` | Single-endpoint, multi-pool | vLLM (Intel XPU) | XPU/DRA variant with 2 TP1 prefill pools and 1 TP1 decode pool |
 
 ## Deployment Patterns
 
@@ -118,13 +118,14 @@ envsubst < global-planner-vllm-test-xpu-dra.yaml | kubectl apply -n ${K8S_NAMESP
 ```
 
 **Prerequisites for XPU deployment:**
-- Intel XPU GPU driver and [Intel Resource Drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed
+- Intel XPU GPU driver and [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed
 - DRA enabled on the cluster
 - Container images built for Intel XPU (with `VLLM_TARGET_DEVICE=xpu`)
 
 **Key differences from GPU deployment:**
 - Uses DRA `ResourceClaimTemplate` instead of `resources.limits.gpu`
 - Sets `VLLM_TARGET_DEVICE=xpu` environment variable
+- Uses TP1 for both prefill pools because the DRA template requests one XPU per worker
 
 ## Verifying
 
