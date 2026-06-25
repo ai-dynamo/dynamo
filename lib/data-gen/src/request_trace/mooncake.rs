@@ -6,18 +6,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::load::RequestEntry;
 
-/// Each request becomes one independent row whose `timestamp` is its offset
-/// from the earliest request. See [`super::agentic`] for the DAG-aware lowering.
-pub fn build_mooncake_rows(requests: Vec<RequestEntry>) -> Result<(usize, Vec<MooncakeRow>)> {
-    let mut rows = Vec::with_capacity(requests.len());
-    let trace_block_size = lower_mooncake_rows(requests, |_, row| {
-        rows.push(row);
-        Ok(())
-    })?;
-    Ok((trace_block_size, rows))
-}
-
-/// Emits standard Mooncake rows in converter order without retaining them.
+/// Emits each request as an independent Mooncake row in replay order.
 pub fn lower_mooncake_rows<F>(mut requests: Vec<RequestEntry>, mut emit: F) -> Result<usize>
 where
     F: FnMut(usize, MooncakeRow) -> Result<()>,
@@ -108,42 +97,29 @@ mod tests {
     }
 
     #[test]
-    fn converter_preserves_absolute_timestamps_per_request() {
+    fn lowering_preserves_timestamp_offsets_and_parallel_requests() {
         let requests = vec![
             request("req-a", 1_000, 1_100, vec![11, 22]),
-            request("req-b", 1_500, 1_600, vec![11, 33]),
-        ];
-
-        let (_, entries) = build_mooncake_rows(requests).unwrap();
-
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].timestamp, Some(0.0));
-        assert_eq!(entries[0].delay, None);
-        assert_eq!(entries[1].timestamp, Some(500.0));
-        assert_eq!(entries[1].delay, None);
-        assert_eq!(entries[0].session_id, None);
-        assert_eq!(entries[1].session_id, None);
-        assert_eq!(
-            entries[0].hash_ids.as_ref().unwrap()[0],
-            entries[1].hash_ids.as_ref().unwrap()[0]
-        );
-    }
-
-    #[test]
-    fn converter_preserves_parallel_start_times_as_independent_rows() {
-        let requests = vec![
-            request("req-a", 1_000, 1_500, vec![11]),
             request("req-b", 1_000, 1_700, vec![22]),
+            request("req-c", 1_500, 1_600, vec![11, 33]),
         ];
 
-        let (_, entries) = build_mooncake_rows(requests).unwrap();
+        let mut entries = Vec::new();
+        lower_mooncake_rows(requests, |_, row| {
+            entries.push(row);
+            Ok(())
+        })
+        .unwrap();
 
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].timestamp, Some(0.0));
         assert_eq!(entries[1].timestamp, Some(0.0));
-        assert_eq!(entries[0].delay, None);
-        assert_eq!(entries[1].delay, None);
-        assert_eq!(entries[0].session_id, None);
-        assert_eq!(entries[1].session_id, None);
+        assert_eq!(entries[2].timestamp, Some(500.0));
+        assert!(entries.iter().all(|entry| entry.delay.is_none()));
+        assert!(entries.iter().all(|entry| entry.session_id.is_none()));
+        assert_eq!(
+            entries[0].hash_ids.as_ref().unwrap()[0],
+            entries[2].hash_ids.as_ref().unwrap()[0]
+        );
     }
 }

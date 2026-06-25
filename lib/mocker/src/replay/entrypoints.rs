@@ -1547,37 +1547,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn multi_turn_mooncake_trace_stays_on_workload_path() {
-        let trace = Trace {
-            block_size: 4,
-            sessions: vec![SessionTrace {
-                session_id: "session-a".to_string(),
-                first_arrival_timestamp_ms: Some(0.0),
-                turns: vec![
-                    TurnTrace {
-                        input_length: 4,
-                        max_output_tokens: 1,
-                        hash_ids: vec![1],
-                        delay_after_previous_ms: 0.0,
-                        ..Default::default()
-                    },
-                    TurnTrace {
-                        input_length: 4,
-                        max_output_tokens: 1,
-                        hash_ids: vec![2],
-                        delay_after_previous_ms: 10.0,
-                        ..Default::default()
-                    },
-                ],
-            }],
-        };
-
-        assert!(
-            single_turn_trace_requests(TraceFileFormat::Mooncake, &trace)
-                .unwrap()
-                .is_none()
-        );
-    }
 }

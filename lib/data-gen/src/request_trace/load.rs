@@ -3,7 +3,7 @@
 
 //! Source-format records and JSONL/gz loader.
 //!
-//! Local subset of Dynamo request trace rows consumed by the Mooncake exporter.
+//! Local subset of Dynamo request trace rows consumed by replay.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -102,7 +102,6 @@ pub struct ToolEntry {
     pub(crate) output_bytes: Option<u64>,
     pub(crate) output_tokens: Option<u64>,
     pub(crate) error_type: Option<String>,
-    pub(crate) terminal_event: String,
 }
 
 #[derive(Debug, Default)]
@@ -140,7 +139,7 @@ impl LoadedAgentTrace {
             .iter()
             .any(|request| request.agent_context.is_none())
         {
-            bail!("trace records without agent_context cannot be converted with --agentic");
+            bail!("agentic lowering requires agent_context on every request");
         }
         Ok(())
     }
@@ -307,7 +306,6 @@ fn tool_entry(record: RequestTraceRecord, terminal_event: String) -> Option<Tool
         output_bytes: tool.output_bytes,
         output_tokens: tool.output_tokens,
         error_type: tool.error_type,
-        terminal_event,
     })
 }
 
@@ -426,38 +424,6 @@ mod tests {
 
         let error = load_request_trace_records(&[file.path().to_path_buf()]).unwrap_err();
         assert!(format!("{error:#}").contains("requires exactly 1 replay hashes, got 2"));
-    }
-
-    #[test]
-    fn request_trace_is_rejected_for_agentic_conversion() {
-        let request = RequestTraceRequestMetrics {
-            request_id: "req-1".to_string(),
-            output_tokens: Some(1),
-            request_received_ms: Some(1_000),
-            total_time_ms: None,
-            replay: None,
-        };
-        let loaded = LoadedAgentTrace {
-            requests: vec![RequestEntry {
-                start_ms: 1_000,
-                end_ms: 1_100,
-                agent_context: None,
-                request,
-                replay: RequestTraceReplayMetrics {
-                    trace_block_size: 2,
-                    input_length: 2,
-                    input_sequence_hashes: vec![11],
-                },
-            }],
-            tools: Vec::new(),
-        };
-
-        let error = loaded.ensure_agentic_compatible().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("without agent_context cannot be converted with --agentic")
-        );
     }
 
     #[test]

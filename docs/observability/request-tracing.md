@@ -180,8 +180,7 @@ Pass `dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly to replay:
 Replay derives and validates the trace block size across all shards.
 Context-free rows use standard replay. If every request has `agent_context`,
 replay preserves session dependencies and tool waits. Mixed traces are
-rejected. Use `request_trace_to_mooncake` only when you need a standalone
-Mooncake export.
+rejected.
 
 `DYN_REQUEST_TRACE` is the switch for replay and agent-aware capture. Agent
 context does not require a separate trace flag; if session headers are

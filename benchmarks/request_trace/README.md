@@ -63,44 +63,6 @@ rejected.
 `kv_router` requires more than one mock worker. For a single aggregated-worker
 sanity check, use `--router-mode round_robin --num-workers 1`.
 
-## Optional Mooncake Workload Export
-
-Direct Dynamo replay does not require conversion. Export a Mooncake workload
-only for:
-
-- Mooncake-only tooling
-- planner and replay-optimization workflows that currently consume Mooncake
-- custom workload transformation or synthesis based on Mooncake rows
-
-Mooncake is a replay workload format, not an observability format. Export drops
-non-replay metadata such as finish reasons and tool-call metadata.
-
-Run the converter to create the workload:
-
-```bash
-cargo run -p dynamo-bench --bin request_trace_to_mooncake -- \
-  --input-path /tmp/dynamo-request-trace.*.jsonl.gz \
-  --output-file /tmp/dynamo-request-trace.mooncake.jsonl
-```
-
-## Existing Text Traces To Mooncake
-
-There is no generic "arbitrary text trace to Mooncake" CLI today. Current
-helpers are specialized:
-
-- `request_trace_to_mooncake` converts Dynamo request traces that already contain
-  replay hashes.
-- `claude_trace_export` converts local Claude traces into privacy-preserving
-  Mooncake JSONL plus a sidecar.
-- `dynamo-data-gen` owns the shared `MooncakeRow`, `MooncakeJsonlWriter`,
-  `RollingHashIdMapper`, and token-block hashing primitives used by exporters.
-- AIPerf has related hash/trace helpers for benchmark workloads.
-
-A generic converter should be a follow-up: parse JSONL/CSV/text logs, select the
-text/timestamp/session/output-length fields, tokenize with a configured model,
-hash token blocks, write Mooncake JSONL, and report the trace block size needed
-for replay.
-
 ## Validate Converter
 
 The converter has a local self-check that is intentionally not wired into the

@@ -204,15 +204,6 @@ Rows with no `wait_for` use `timestamp` as their start time. Rows with dependenc
 listed request to complete, then wait `delay + tool_wait_ms` before dispatch. `branches` records
 child requests spawned by this row, and `prefix_reset` marks the first row in a session.
 
-To use agentic Mooncake with Mooncake-only tooling, export it from Dynamo request traces:
-
-```bash
-cargo run -p dynamo-bench --bin request_trace_to_mooncake -- \
-  --agentic \
-  --input-path /tmp/dynamo-request-trace.jsonl \
-  --output-file /tmp/dynamo-request-trace.agentic-mooncake.jsonl
-```
-
 Run it with:
 
 ```bash
