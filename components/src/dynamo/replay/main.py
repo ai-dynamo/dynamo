@@ -631,7 +631,7 @@ def _run_planner_replay(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
-    parser.add_argument("trace_file", nargs="?")
+    parser.add_argument("trace_files", nargs="*")
     parser.add_argument("--extra-engine-args")
     parser.add_argument("--prefill-engine-args")
     parser.add_argument("--decode-engine-args")
@@ -692,10 +692,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "mooncake-delta",
             "agentic_mooncake",
             "applied_compute_agentic",
+            "dynamo",
         ),
         default="mooncake",
         help=(
-            "format of trace_file when replaying from a file; mooncake-delta "
+            "format of trace files when replaying from files; mooncake-delta "
             "accumulates per-session input deltas into cumulative prompts and "
             "can use substantially more memory than mooncake; agentic_mooncake "
             "replays request-level workflow dependencies"
@@ -704,8 +705,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--trace-block-size",
         type=int,
-        default=512,
-        help="tokens represented by each hash_id in the trace file; only used for file replay",
+        help="tokens represented by each hash_id; defaults to 512 for existing formats and is derived from Dynamo request traces",
     )
     parser.add_argument(
         "--trace-shared-prefix-ratio",
@@ -775,7 +775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
-    using_trace_file = args.trace_file is not None
+    using_trace_file = bool(args.trace_files)
     synthetic_args = (args.input_tokens, args.output_tokens, args.request_count)
     using_synthetic = any(value is not None for value in synthetic_args) or any(
         (
@@ -785,6 +785,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.inter_turn_delay_ms != 0.0,
         )
     )
+
+    if args.trace_format == "dynamo" and not using_trace_file:
+        parser.error("--trace-format=dynamo requires at least one trace file")
+    if args.trace_format != "dynamo" and len(args.trace_files) > 1:
+        parser.error(
+            f"--trace-format={args.trace_format} requires exactly one trace file"
+        )
 
     if using_trace_file == using_synthetic:
         parser.error(
@@ -860,7 +867,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         planner_report = _run_planner_replay(
-            trace_file=args.trace_file if using_trace_file else None,
+            trace_file=args.trace_files[0] if using_trace_file else None,
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -870,7 +877,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_decode_workers=args.num_decode_workers,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
-            trace_block_size=args.trace_block_size,
+            trace_block_size=(
+                args.trace_block_size if args.trace_block_size is not None else 512
+            ),
             planner_config_arg=args.planner_config,
             model_name=args.model_name,
             benchmark_granularity=args.benchmark_granularity,
@@ -907,7 +916,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else None
         )
         report = run_trace_replay(
-            args.trace_file,
+            args.trace_files,
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,

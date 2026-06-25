@@ -4,9 +4,14 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use dynamo_data_gen::request_trace::{
+    agentic::build_agentic_mooncake_rows,
+    load::{RequestTraceMode, load_request_trace_records},
+    mooncake::build_mooncake_rows,
+};
 use dynamo_data_gen::{AgenticMooncakeRow, MooncakeRow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
@@ -20,9 +25,9 @@ use uuid::Uuid;
 
 use super::driver::WorkloadDriver;
 use super::types::{
-    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, LengthSpec, ReplayRequestHashes,
-    RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec,
-    Trace, TurnTrace,
+    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,
+    ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
+    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace,
 };
 use crate::common::protocols::DirectRequest;
 
@@ -34,6 +39,57 @@ struct RawAppliedComputeAgenticRecord {
     tool_call_output_length: Vec<usize>,
     tool_call_latency: Vec<f64>,
     final_assistant_response_length: usize,
+}
+
+impl DynamoRequestTrace {
+    pub fn from_request_trace_files(
+        paths: &[PathBuf],
+        expected_block_size: Option<usize>,
+    ) -> Result<Self> {
+        validate_trace_files(TraceFileFormat::Dynamo, paths)?;
+
+        let loaded = load_request_trace_records(paths)?;
+        match loaded.mode()? {
+            RequestTraceMode::Standard => {
+                let (block_size, rows) = build_mooncake_rows(loaded.requests)?;
+                validate_dynamo_trace_block_size(expected_block_size, block_size)?;
+                Ok(Self::Standard(Trace::from_mooncake_rows(rows, block_size)?))
+            }
+            RequestTraceMode::Agentic => {
+                let (block_size, rows) = build_agentic_mooncake_rows(loaded)?;
+                validate_dynamo_trace_block_size(expected_block_size, block_size)?;
+                Ok(Self::Agentic(AgenticTrace::from_agentic_mooncake_rows(
+                    rows, block_size,
+                )?))
+            }
+        }
+    }
+}
+
+pub fn validate_trace_files(format: TraceFileFormat, paths: &[PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        bail!("trace replay requires at least one trace file");
+    }
+    if format != TraceFileFormat::Dynamo && paths.len() != 1 {
+        bail!(
+            "trace_format='{}' requires exactly one trace file, got {}",
+            format.as_str(),
+            paths.len()
+        );
+    }
+    Ok(())
+}
+
+fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if expected != embedded {
+        bail!(
+            "trace_block_size {expected} does not match embedded Dynamo request trace block size {embedded}"
+        );
+    }
+    Ok(())
 }
 
 impl TurnTrace {
@@ -174,9 +230,7 @@ impl Trace {
         let file = File::open(path)
             .with_context(|| format!("failed to open trace file {}", path.display()))?;
         let reader = BufReader::new(file);
-        let mut sessions = Vec::new();
-        let mut session_indices = HashMap::new();
-        let mut last_timestamps: Vec<Option<f64>> = Vec::new();
+        let mut rows = Vec::new();
 
         for (line_idx, line) in reader.lines().enumerate() {
             let line = line.with_context(|| {
@@ -190,14 +244,45 @@ impl Trace {
                 continue;
             }
 
-            let raw: MooncakeRow = serde_json::from_str(&line).with_context(|| {
-                format!(
-                    "failed to parse line {} from {} as JSON",
-                    line_idx + 1,
-                    path.display()
-                )
-            })?;
+            rows.push((
+                line_idx,
+                serde_json::from_str(&line).with_context(|| {
+                    format!(
+                        "failed to parse line {} from {} as JSON",
+                        line_idx + 1,
+                        path.display()
+                    )
+                })?,
+            ));
+        }
 
+        if rows.is_empty() {
+            bail!("trace file {} did not contain any requests", path.display());
+        }
+
+        Self::from_indexed_mooncake_rows(rows, trace_block_size)
+    }
+
+    pub fn from_mooncake_rows(rows: Vec<MooncakeRow>, trace_block_size: usize) -> Result<Self> {
+        if trace_block_size == 0 {
+            bail!("trace_block_size must be greater than 0");
+        }
+        if rows.is_empty() {
+            bail!("Mooncake rows did not contain any requests");
+        }
+
+        Self::from_indexed_mooncake_rows(rows.into_iter().enumerate().collect(), trace_block_size)
+    }
+
+    fn from_indexed_mooncake_rows(
+        rows: Vec<(usize, MooncakeRow)>,
+        trace_block_size: usize,
+    ) -> Result<Self> {
+        let mut sessions = Vec::new();
+        let mut session_indices = HashMap::new();
+        let mut last_timestamps: Vec<Option<f64>> = Vec::new();
+
+        for (line_idx, raw) in rows {
             let session_id = raw
                 .session_id
                 .unwrap_or_else(|| format!("request_{}", line_idx + 1));
@@ -298,10 +383,6 @@ impl Trace {
             if let Some(timestamp_ms) = timestamp_ms {
                 last_timestamps[session_index] = Some(timestamp_ms);
             }
-        }
-
-        if sessions.is_empty() {
-            bail!("trace file {} did not contain any requests", path.display());
         }
 
         Ok(Self {
@@ -959,8 +1040,7 @@ impl AgenticTrace {
         let file = File::open(path)
             .with_context(|| format!("failed to open trace file {}", path.display()))?;
         let reader = BufReader::new(file);
-        let mut turns = Vec::new();
-        let mut request_ids = std::collections::HashSet::new();
+        let mut rows = Vec::new();
 
         for (line_idx, line) in reader.lines().enumerate() {
             let line = line.with_context(|| {
@@ -974,13 +1054,53 @@ impl AgenticTrace {
                 continue;
             }
 
-            let raw: AgenticMooncakeRow = serde_json::from_str(&line).with_context(|| {
-                format!(
-                    "failed to parse line {} from {} as agentic Mooncake JSON",
-                    line_idx + 1,
-                    path.display()
-                )
-            })?;
+            rows.push((
+                line_idx,
+                serde_json::from_str(&line).with_context(|| {
+                    format!(
+                        "failed to parse line {} from {} as agentic Mooncake JSON",
+                        line_idx + 1,
+                        path.display()
+                    )
+                })?,
+            ));
+        }
+
+        if rows.is_empty() {
+            bail!(
+                "agentic trace file {} did not contain any requests",
+                path.display()
+            );
+        }
+
+        Self::from_indexed_agentic_mooncake_rows(rows, trace_block_size)
+    }
+
+    pub fn from_agentic_mooncake_rows(
+        rows: Vec<AgenticMooncakeRow>,
+        trace_block_size: usize,
+    ) -> Result<Self> {
+        if trace_block_size == 0 {
+            bail!("trace_block_size must be greater than 0");
+        }
+        if rows.is_empty() {
+            bail!("agentic Mooncake rows did not contain any requests");
+        }
+
+        Self::from_indexed_agentic_mooncake_rows(
+            rows.into_iter().enumerate().collect(),
+            trace_block_size,
+        )
+    }
+
+    fn from_indexed_agentic_mooncake_rows(
+        rows: Vec<(usize, AgenticMooncakeRow)>,
+        trace_block_size: usize,
+    ) -> Result<Self> {
+        let mut turns = Vec::new();
+        let mut request_ids = std::collections::HashSet::new();
+
+        for (line_idx, raw) in rows {
             if raw.request_id.trim().is_empty() {
                 bail!("trace line {} has empty request_id", line_idx + 1);
             }
@@ -1053,13 +1173,6 @@ impl AgenticTrace {
                 wait_for: raw.wait_for,
                 prefix_reset: raw.prefix_reset.unwrap_or(false),
             });
-        }
-
-        if turns.is_empty() {
-            bail!(
-                "agentic trace file {} did not contain any requests",
-                path.display()
-            );
         }
 
         for turn in &turns {

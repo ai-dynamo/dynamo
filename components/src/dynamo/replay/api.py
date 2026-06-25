@@ -1,14 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 
 
+def _normalize_trace_files(trace_files):
+    if isinstance(trace_files, (str, os.PathLike)):
+        return [trace_files]
+    return list(trace_files)
+
+
 def run_trace_replay(
-    trace_file,
+    trace_files,
     *,
     extra_engine_args=None,
     prefill_engine_args=None,
@@ -22,7 +30,7 @@ def run_trace_replay(
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
-    trace_block_size=512,
+    trace_block_size=None,
     trace_format="mooncake",
     trace_shared_prefix_ratio=0.0,
     trace_num_prefix_groups=0,
@@ -34,7 +42,7 @@ def run_trace_replay(
     sla_e2e_ms=None,
 ):
     return _run_mocker_trace_replay(
-        trace_file,
+        _normalize_trace_files(trace_files),
         extra_engine_args=extra_engine_args,
         prefill_engine_args=prefill_engine_args,
         decode_engine_args=decode_engine_args,

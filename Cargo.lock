@@ -2433,6 +2433,7 @@ version = "1.3.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
+ "flate2",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",

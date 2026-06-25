@@ -2,7 +2,8 @@
 
 Shared schemas and primitives for Dynamo data generation. Currently hosts the
 Mooncake replay JSONL row, the rolling block-hash-to-id mapper, the token-block
-hashing helper, and the JSONL writer.
+hashing helper, the JSONL writer, and the shared Dynamo request-trace loader and
+Mooncake lowering used by the converter and replay harness.
 
 The crate is producer- and consumer-agnostic on purpose: it owns the schema
 once so that producers (`dynamo-bench`'s Claude exporter and

@@ -1,4 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub use dynamo_data_gen::request_trace::{agentic, load, mooncake};
+pub mod agentic;
+pub mod load;
+pub mod mooncake;

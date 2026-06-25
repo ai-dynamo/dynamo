@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::{MooncakeRow, RollingHashIdMapper};
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_data_gen::{MooncakeRow, RollingHashIdMapper};
 
 use super::load::RequestEntry;
 

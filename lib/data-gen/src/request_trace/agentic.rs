@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::{AgenticMooncakeRow, AgenticToolEvent, RollingHashIdMapper};
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_data_gen::{AgenticMooncakeRow, AgenticToolEvent, RollingHashIdMapper};
 
 use super::load::{LoadedAgentTrace, RequestEntry, ToolEntry};
 

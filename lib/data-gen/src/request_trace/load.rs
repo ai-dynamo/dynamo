@@ -111,7 +111,26 @@ pub struct LoadedAgentTrace {
     pub tools: Vec<ToolEntry>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestTraceMode {
+    Standard,
+    Agentic,
+}
+
 impl LoadedAgentTrace {
+    pub fn mode(&self) -> Result<RequestTraceMode> {
+        let contextual_requests = self
+            .requests
+            .iter()
+            .filter(|request| request.agent_context.is_some())
+            .count();
+        match contextual_requests {
+            0 => Ok(RequestTraceMode::Standard),
+            count if count == self.requests.len() => Ok(RequestTraceMode::Agentic),
+            _ => bail!("Dynamo request trace cannot mix requests with and without agent_context"),
+        }
+    }
+
     pub fn ensure_agentic_compatible(&self) -> Result<()> {
         if self
             .requests

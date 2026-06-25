@@ -11,7 +11,7 @@ use dynamo_mocker::common::protocols::{
     SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs, WorkerType as RsWorkerType,
 };
 use dynamo_mocker::loadgen::{
-    ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
+    ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
 use dynamo_mocker::replay::ReplayArgsMode;
 use pyo3::{
@@ -734,11 +734,11 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
-    trace_file: PathBuf,
+    trace_files: Vec<PathBuf>,
     extra_engine_args: Option<MockEngineArgs>,
     prefill_engine_args: Option<MockEngineArgs>,
     decode_engine_args: Option<MockEngineArgs>,
@@ -751,7 +751,7 @@ pub fn run_mocker_trace_replay(
     replay_mode: &str,
     router_mode: &str,
     arrival_speedup_ratio: f64,
-    trace_block_size: usize,
+    trace_block_size: Option<usize>,
     trace_format: &str,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
@@ -773,6 +773,7 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
+    dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
     let prefill_load_estimator = load_replay_prefill_load_estimator(
         py,
         router_mode,
@@ -822,6 +823,29 @@ pub fn run_mocker_trace_replay(
     };
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        if trace_format == dynamo_mocker::loadgen::TraceFileFormat::Dynamo {
+            let trace = DynamoRequestTrace::from_request_trace_files(
+                &trace_files,
+                trace_block_size,
+            )?;
+            return run_loaded_dynamo_request_trace(
+                args_selection,
+                trace,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+                replay_concurrency,
+                &replay_mode,
+                arrival_speedup_ratio,
+                router_mode,
+                record_per_request,
+                max_sim_time_ms,
+                sla,
+            );
+        }
+
+        let trace_block_size = trace_block_size.unwrap_or(512);
+        let trace_file = &trace_files[0];
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
             && replay_concurrency.is_none()
         {
@@ -838,7 +862,7 @@ pub fn run_mocker_trace_replay(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
-                            &trace_file,
+                            trace_file,
                             trace_block_size,
                             max_in_flight,
                             num_workers,
@@ -855,7 +879,7 @@ pub fn run_mocker_trace_replay(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
-                            &trace_file,
+                            trace_file,
                             trace_block_size,
                             num_workers,
                             arrival_speedup_ratio,
@@ -872,7 +896,7 @@ pub fn run_mocker_trace_replay(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
-                            &trace_file,
+                            trace_file,
                             trace_block_size,
                             max_in_flight,
                             num_workers,
@@ -887,7 +911,7 @@ pub fn run_mocker_trace_replay(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
-                            &trace_file,
+                            trace_file,
                             trace_block_size,
                             num_workers,
                             arrival_speedup_ratio,
@@ -910,7 +934,7 @@ pub fn run_mocker_trace_replay(
                         *config,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
-                        &trace_file,
+                        trace_file,
                         trace_block_size,
                         max_in_flight,
                         router_mode,
@@ -926,7 +950,7 @@ pub fn run_mocker_trace_replay(
                         *config,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
-                        &trace_file,
+                        trace_file,
                         trace_block_size,
                         arrival_speedup_ratio,
                         router_mode,
@@ -956,6 +980,141 @@ pub fn run_mocker_trace_replay(
     pythonize(py, &report)
         .map_err(to_pyerr)
         .map(|obj| obj.unbind())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loaded_dynamo_request_trace(
+    args_selection: ReplayArgsSelection,
+    trace: DynamoRequestTrace,
+    router_config: Option<dynamo_kv_router::config::KvRouterConfig>,
+    prefill_load_estimator: Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>,
+    num_workers: usize,
+    replay_concurrency: Option<usize>,
+    replay_mode: &str,
+    arrival_speedup_ratio: f64,
+    router_mode: dynamo_mocker::replay::ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: dynamo_mocker::replay::SlaThresholds,
+) -> anyhow::Result<dynamo_mocker::replay::TraceSimulationReport> {
+    match trace {
+        DynamoRequestTrace::Standard(trace) => match args_selection {
+            ReplayArgsSelection::Aggregated(args) => match (replay_mode, replay_concurrency) {
+                ("offline", Some(max_in_flight)) => {
+                    dynamo_mocker::replay::simulate_concurrency_workload_with_router_mode_and_options(
+                        *args,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        max_in_flight,
+                        num_workers,
+                        router_mode,
+                        record_per_request,
+                        max_sim_time_ms,
+                        sla,
+                    )
+                }
+                ("offline", None) => {
+                    dynamo_mocker::replay::simulate_loaded_trace_with_router_mode_and_options(
+                        *args,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        num_workers,
+                        arrival_speedup_ratio,
+                        router_mode,
+                        record_per_request,
+                        max_sim_time_ms,
+                        sla,
+                    )
+                }
+                ("online", Some(max_in_flight)) => {
+                    dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
+                        *args,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        max_in_flight,
+                        num_workers,
+                        router_mode,
+                    )
+                }
+                ("online", None) => {
+                    dynamo_mocker::replay::simulate_loaded_trace_live_with_router_mode(
+                        *args,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        num_workers,
+                        arrival_speedup_ratio,
+                        router_mode,
+                    )
+                }
+                (other, _) => anyhow::bail!(
+                    "replay_mode must be either 'offline' or 'online', got '{other}'"
+                ),
+            },
+            ReplayArgsSelection::Disagg(config) => match (replay_mode, replay_concurrency) {
+                ("offline", Some(max_in_flight)) => {
+                    dynamo_mocker::replay::simulate_concurrency_workload_disagg_with_router_mode_and_options(
+                        *config,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        max_in_flight,
+                        router_mode,
+                        record_per_request,
+                        max_sim_time_ms,
+                        sla,
+                    )
+                }
+                ("offline", None) => {
+                    dynamo_mocker::replay::simulate_loaded_trace_disagg_with_router_mode_and_options(
+                        *config,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        arrival_speedup_ratio,
+                        router_mode,
+                        record_per_request,
+                        max_sim_time_ms,
+                        sla,
+                    )
+                }
+                ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
+                (other, _) => anyhow::bail!(
+                    "replay_mode must be either 'offline' or 'online', got '{other}'"
+                ),
+            },
+        },
+        DynamoRequestTrace::Agentic(trace) => {
+            if replay_concurrency.is_some() {
+                anyhow::bail!(
+                    "agentic Dynamo request traces are not supported with replay_concurrency"
+                );
+            }
+            if replay_mode != "offline" {
+                anyhow::bail!("agentic Dynamo request traces are not supported for online replay");
+            }
+            let ReplayArgsSelection::Aggregated(args) = args_selection else {
+                anyhow::bail!(
+                    "agentic Dynamo request traces are not supported for disaggregated replay"
+                );
+            };
+            let trace = trace
+                .normalize_starts()
+                .speed_up_timing(arrival_speedup_ratio)?;
+            dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
+                *args,
+                router_config,
+                prefill_load_estimator,
+                trace,
+                num_workers,
+                router_mode,
+                sla,
+            )
+        }
+    }
 }
 
 /// Write per-request records to a JSONL file. One JSON object per line, no
@@ -1483,8 +1642,9 @@ fn parse_trace_file_format(
         "applied_compute_agentic" => {
             Ok(dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic)
         }
+        "dynamo" => Ok(dynamo_mocker::loadgen::TraceFileFormat::Dynamo),
         other => Err(PyException::new_err(format!(
-            "trace_format must be 'mooncake', 'mooncake-delta', 'agentic_mooncake'/'agentic-mooncake', or 'applied_compute_agentic', got '{}'",
+            "trace_format must be 'mooncake', 'mooncake-delta', 'agentic_mooncake'/'agentic-mooncake', 'applied_compute_agentic', or 'dynamo', got '{}'",
             other
         ))),
     }
