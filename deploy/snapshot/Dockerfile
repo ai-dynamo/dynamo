@@ -43,6 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 
 WORKDIR /workspace
 
+# The snapshot module depends on the operator module via `replace => ../operator`, so the operator
+# module must sit at /operator (a sibling of /workspace) for `go mod download` and the Go build to
+# resolve it. Provided via the `operator` named build context (see build-deploy-component action).
+COPY --from=operator . /operator/
+
 COPY go.mod go.sum ./
 RUN go mod download
 
