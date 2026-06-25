@@ -470,7 +470,8 @@ impl Context {
                 && let (Ok(trace_id), Ok(span_id)) = (
                     TraceId::from_hex(&tc.trace_id),
                     SpanId::from_hex(&tc.span_id),
-                )            {
+                )
+            {
                 let parent = OtelContext::new().with_remote_span_context(SpanContext::new(
                     trace_id,
                     span_id,
