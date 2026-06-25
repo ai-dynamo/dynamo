@@ -60,12 +60,6 @@ impl EventTransportKind {
         }
     }
 
-    /// Parse from environment variable, defaulting to ZMQ when the variable is unset.
-    ///
-    /// ZMQ is the default event plane for all backends; NATS is an explicit opt-in.
-    /// When you have access to a runtime, prefer
-    /// [`DistributedRuntime::default_event_transport_kind`].
-    ///
     /// Logs a warning if an invalid value is encountered.
     pub fn from_env_or_default() -> Self {
         Self::from_env().unwrap_or_else(|e| {

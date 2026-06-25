@@ -366,7 +366,7 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="Determines how events are published [nats|zmq]. If unset, "
             "defaults to 'zmq' for all discovery backends. Set to 'nats' to use a "
-            "NATS-based event bus (required for durable/JetStream KV events).",
+            "NATS-based event plane.",
             choices=["nats", "zmq"],
         )
         add_negatable_bool_argument(

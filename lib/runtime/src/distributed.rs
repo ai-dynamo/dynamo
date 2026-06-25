@@ -433,8 +433,7 @@ impl DistributedRuntime {
     /// Returns the event transport kind this runtime was configured with.
     ///
     /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
-    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is
-    /// ZMQ for every discovery backend (NATS is an explicit opt-in).
+    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is ZMQ.
     ///
     /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
     /// access to a `DistributedRuntime`.

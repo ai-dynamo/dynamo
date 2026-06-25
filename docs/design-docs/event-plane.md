@@ -24,7 +24,6 @@ The event plane supports two transports:
 |---|---|---|
 | **External infrastructure** | None (peer-to-peer) | Requires a NATS server |
 | **Setup complexity** | Automatic -- workers bind sockets and register via discovery | Simple -- point at a NATS server |
-| **Best for** | Default; low operational overhead, no extra services | Existing NATS-based deployments |
 
 ## Configuration
 
