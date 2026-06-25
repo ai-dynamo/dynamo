@@ -41,9 +41,7 @@ type Key = (String, String, String, String, String, String);
 
 /// Registration collided with a different owner — programmer error.
 #[derive(Debug, Error)]
-#[error(
-    "metadata-registry collision on key {key:?}: prior_owner={prior:?}, new_owner={new:?}"
-)]
+#[error("metadata-registry collision on key {key:?}: prior_owner={prior:?}, new_owner={new:?}")]
 pub struct CollisionError {
     pub key: Key,
     pub prior: Owner,
@@ -74,7 +72,7 @@ impl MetadataArtifactRegistry {
         suffix: &str,
         filename: &str,
         path: PathBuf,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), Box<CollisionError>> {
         let key = (
             namespace.to_string(),
             component.to_string(),
@@ -84,14 +82,14 @@ impl MetadataArtifactRegistry {
             filename.to_string(),
         );
         let mut entries = self.entries.write();
-        if let Some((_, prior)) = entries.get(&key) {
-            if prior != owner {
-                return Err(CollisionError {
-                    key,
-                    prior: prior.clone(),
-                    new: owner.clone(),
-                });
-            }
+        if let Some((_, prior)) = entries.get(&key)
+            && prior != owner
+        {
+            return Err(Box::new(CollisionError {
+                key,
+                prior: prior.clone(),
+                new: owner.clone(),
+            }));
         }
         entries.insert(key, (path, owner.clone()));
         tracing::debug!(
@@ -179,8 +177,15 @@ mod tests {
                 .is_none()
         );
         assert!(
-            reg.get("ns", "comp", "ep", "llama-3-8b", "lora-v1", "tokenizer.json")
-                .is_none()
+            reg.get(
+                "ns",
+                "comp",
+                "ep",
+                "llama-3-8b",
+                "lora-v1",
+                "tokenizer.json"
+            )
+            .is_none()
         );
     }
 
