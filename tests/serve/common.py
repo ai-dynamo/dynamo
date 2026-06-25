@@ -36,6 +36,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 DEFAULT_TIMEOUT = 10
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
+logger = logging.getLogger(__name__)
 
 
 def _tail_logs(content: str, *, lines: int = 80) -> str:
@@ -166,6 +167,7 @@ class _PreparedDeployment:
     frontend_port: int
     system_ports: list
     disagg_bootstrap_port: Optional[int]
+    extra_allocated_ports: list[int]
 
 
 def _prepare_deployment(
@@ -227,7 +229,7 @@ def _prepare_deployment(
             time.sleep(stagger_s)
 
     # Track additional ports allocated for multi-GPU tests (for cleanup in finally)
-    _extra_allocated_ports: list[int] = []
+    extra_allocated_ports: list[int] = []
 
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
@@ -268,7 +270,7 @@ def _prepare_deployment(
             if len(dynamic_system_ports) >= 2:
                 kv_port1 = ports.kv_event_port
                 kv_port2 = allocate_port(ports.kv_event_port + 1)
-                _extra_allocated_ports.append(kv_port2)
+                extra_allocated_ports.append(kv_port2)
                 merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
                 merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
 
@@ -308,6 +310,7 @@ def _prepare_deployment(
         frontend_port=dynamic_frontend_port,
         system_ports=dynamic_system_ports,
         disagg_bootstrap_port=disagg_bootstrap_port,
+        extra_allocated_ports=extra_allocated_ports,
     )
 
 
@@ -446,6 +449,8 @@ def run_prefill_drain_deployment(
     finally:
         if prep.disagg_bootstrap_port is not None:
             deallocate_port(prep.disagg_bootstrap_port)
+        for p in prep.extra_allocated_ports:
+            deallocate_port(p)
 
 
 def run_serve_deployment(
@@ -478,6 +483,7 @@ def run_serve_deployment(
     dynamic_frontend_port = prep.frontend_port
     dynamic_system_ports = prep.system_ports
     disagg_bootstrap_port = prep.disagg_bootstrap_port
+    extra_allocated_ports = prep.extra_allocated_ports
 
     try:
         with EngineProcess.from_script(
@@ -594,7 +600,7 @@ def run_serve_deployment(
     finally:
         if disagg_bootstrap_port is not None:
             deallocate_port(disagg_bootstrap_port)
-        for p in _extra_allocated_ports:
+        for p in extra_allocated_ports:
             deallocate_port(p)
 
 
