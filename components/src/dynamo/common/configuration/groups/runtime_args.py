@@ -86,7 +86,9 @@ class DynamoRuntimeConfig(ConfigBase):
                 raise ValueError(
                     f"--tcp-tls-handshake-timeout must be a positive integer, got {self.tcp_tls_handshake_timeout_secs}"
                 )
-            os.environ["DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS"] = str(self.tcp_tls_handshake_timeout_secs)
+            os.environ["DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS"] = str(
+                self.tcp_tls_handshake_timeout_secs
+            )
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
