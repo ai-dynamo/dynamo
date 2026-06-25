@@ -14,11 +14,16 @@ use dynamo_kv_router::{
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint,
-        RouterBackpressureReason, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
-        TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
+        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
-    scheduling::OverloadedWorkerProvider,
+    scheduling::{
+        CacheHitEstimates, OverloadedWorkerProvider, effective_prefill_tokens,
+        overlap::{
+            cache_hit_estimates_from_tiered_matches, tier_overlap_blocks_from_tiered_matches,
+        },
+    },
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -52,19 +57,16 @@ pub mod scheduler;
 mod scheduler_inputs;
 pub mod sequence;
 pub mod shared_cache;
-pub mod sticky;
 
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 pub use scheduler_inputs::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-pub use sticky::{SessionLifecycleController, StickySessionRouter};
 
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
 use scheduler_inputs::{
-    CacheHitEstimates, KvRouterOverlapRefresher, WorkerCacheHitEstimate,
-    cache_hit_estimates_from_tiered_matches, cache_hit_for_worker, shared_cache_overlap_score,
-    tier_overlap_blocks_from_tiered_matches,
+    KvRouterOverlapRefresher, WorkerCacheHitEstimate, cache_hit_for_worker,
+    shared_cache_overlap_score,
 };
 
 use crate::{
@@ -84,10 +86,8 @@ pub enum FindBestMatchOutcome {
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
     },
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        max_queued_isl_tokens: Option<usize>,
+    QueueRejected {
+        rejection: scheduling::QueueRejection,
     },
 }
 
@@ -99,6 +99,7 @@ pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
+pub const MULTIMODAL_EMBEDDING_CACHE_SUBJECT: &str = "multimodal_embedding_cache";
 
 // for inter-router comms
 pub const PREFILL_SUBJECT: &str = "prefill_events";
@@ -268,6 +269,7 @@ where
             prefill_load_estimator.clone(),
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
+            model_name.as_deref(),
             worker_type,
         )
         .await?;
@@ -393,6 +395,44 @@ where
         return_routing_hashes: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            priority_jump,
+            strict_priority,
+            None,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_details_with_policy_class(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -468,18 +508,23 @@ where
 
         let response = match self
             .scheduler
-            .schedule_with_block_hashes(
+            .schedule_with_policy_class_and_block_hashes(
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
                 block_hashes_for_refresh,
                 tier_overlap_blocks,
-                cache_hit_estimates.effective_overlap_blocks,
-                cache_hit_estimates.cached_tokens,
+                cache_hit_estimates
+                    .effective_overlap_blocks
+                    .into_iter()
+                    .collect(),
+                cache_hit_estimates.cached_tokens.into_iter().collect(),
                 router_config_override,
                 update_states,
                 lora_name,
                 priority_jump,
+                strict_priority,
+                policy_class,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -490,16 +535,8 @@ where
             .await
         {
             Ok(response) => response,
-            Err(KvSchedulerError::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            }) => {
-                return Ok(FindBestMatchOutcome::Backpressure {
-                    reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens,
-                });
+            Err(KvSchedulerError::QueueRejected(rejection)) => {
+                return Ok(FindBestMatchOutcome::QueueRejected { rejection });
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
@@ -561,6 +598,7 @@ where
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
@@ -575,6 +613,7 @@ where
                 false,
                 lora_name,
                 priority_jump,
+                strict_priority,
                 expected_output_tokens,
                 None,
                 allowed_worker_ids,
@@ -587,13 +626,7 @@ where
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            FindBestMatchOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => Err(anyhow::anyhow!(
-                "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
-            )),
+            FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
     }
 
@@ -679,11 +712,11 @@ where
             return None;
         }
 
-        let prefix = cached_tokens.min(isl_tokens);
-        let effective_isl = isl_tokens.saturating_sub(prefix);
+        let effective_isl = effective_prefill_tokens(isl_tokens, cached_tokens);
         if effective_isl == 0 {
             return None;
         }
+        let prefix = isl_tokens - effective_isl;
 
         let expected_prefill_duration = match &self.prefill_load_estimator {
             Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
@@ -823,7 +856,7 @@ where
         Ok(self.scheduler.get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            cache_hit_estimates.cached_tokens,
+            cache_hit_estimates.cached_tokens.into_iter().collect(),
             track_prefill_tokens,
         ))
     }
@@ -979,6 +1012,7 @@ where
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
         let context_id = ctx.context().id().to_string();
+        let policy_class = ctx.metadata().get("policy-class").cloned();
         // Handle different request types
         let response = match request {
             RouterRequest::New {
@@ -986,10 +1020,11 @@ where
                 block_mm_infos,
                 routing_constraints,
                 priority_jump,
+                strict_priority,
                 lora_name,
             } => {
                 match self
-                    .find_best_match_details(
+                    .find_best_match_details_with_policy_class(
                         Some(&context_id),
                         &tokens,
                         block_mm_infos.as_deref(),
@@ -998,6 +1033,8 @@ where
                         false,
                         lora_name,
                         priority_jump,
+                        strict_priority,
+                        policy_class,
                         None,
                         None,
                         None,
@@ -1014,15 +1051,9 @@ where
                         dp_rank: worker.dp_rank,
                         overlap_blocks,
                     },
-                    Ok(FindBestMatchOutcome::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    }) => RouterResponse::Backpressure {
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens,
-                    },
+                    Ok(FindBestMatchOutcome::QueueRejected { rejection }) => {
+                        RouterResponse::QueueRejected { rejection }
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -1279,6 +1310,7 @@ mod tests {
                 false,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 RoutingConstraints::default(),
@@ -1313,6 +1345,7 @@ mod tests {
                 false,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 RoutingConstraints::default(),
@@ -1337,6 +1370,7 @@ mod tests {
                 false,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 RoutingConstraints::default(),
@@ -1377,6 +1411,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,
@@ -1428,6 +1463,7 @@ mod tests {
                 false,
                 None,
                 0.0,
+                0,
                 None,
                 None,
                 None,

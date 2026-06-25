@@ -62,7 +62,6 @@ spec:
                 --extra-inputs ignore_eos:true \
                 --extra-inputs repetition_penalty:1.0 \
                 --extra-inputs temperature:0.0 \
-                --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
                 --concurrency $concurrency \
                 --request-count $((10*concurrency)) \
                 --warmup-request-count $concurrency \

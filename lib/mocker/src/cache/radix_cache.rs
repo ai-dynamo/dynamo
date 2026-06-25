@@ -283,15 +283,8 @@ impl RadixCache {
             self.nodes[parent_id].children.insert(original_ck, inter_id);
         }
 
-        // Size tracking: intermediate inherits child's lock_ref, so
-        // protected_size is unchanged (split_pos + remainder = original).
-        // For evictable: intermediate is NOT a leaf (has child), so only
-        // the child's contribution changes.
-        if self.evictable_leaves.contains(&child_id) {
-            let old_tokens = child_key.len();
-            let new_tokens = child_key.len() - split_pos;
-            self.evictable_size = self.evictable_size - old_tokens + new_tokens;
-        }
+        // Both size totals are unchanged: the intermediate and suffix split
+        // the original edge without changing its lock state or token count.
 
         inter_id
     }
@@ -308,10 +301,7 @@ impl RadixCache {
         let ck = self.child_key(key);
         let new_id = self.nodes.insert(new_node);
 
-        if self.evictable_leaves.remove(&parent_id) {
-            let parent_tokens = self.nodes[parent_id].key.len();
-            self.evictable_size -= parent_tokens;
-        }
+        self.evictable_leaves.remove(&parent_id);
 
         self.nodes[parent_id].children.insert(ck, new_id);
 
@@ -333,9 +323,8 @@ impl RadixCache {
             let tokens = node.key.len();
             node.lock_ref += 1;
             if node.lock_ref == 1 {
-                if self.evictable_leaves.remove(&id) {
-                    self.evictable_size -= tokens;
-                }
+                self.evictable_leaves.remove(&id);
+                self.evictable_size -= tokens;
                 self.protected_size += tokens;
             }
             current = self.nodes[id].parent;
@@ -357,9 +346,9 @@ impl RadixCache {
             if node.lock_ref == 0 {
                 let tokens = node.key.len();
                 self.protected_size -= tokens;
+                self.evictable_size += tokens;
                 if self.is_leaf(id) {
                     self.evictable_leaves.insert(id);
-                    self.evictable_size += tokens;
                 }
             }
             current = self.nodes[id].parent;
@@ -403,9 +392,7 @@ impl RadixCache {
                     && self.nodes[pid].children.is_empty()
                     && self.nodes[pid].lock_ref == 0
                 {
-                    let parent_tokens = self.nodes[pid].key.len();
                     self.evictable_leaves.insert(pid);
-                    self.evictable_size += parent_tokens;
                 }
             }
 
@@ -591,6 +578,20 @@ mod tests {
             "should evict unlocked [4,5,6] indices"
         );
         assert_eq!(cache.match_prefix(&[1, 2, 3]).0, 3);
+    }
+
+    #[test]
+    fn test_evictable_size_includes_unlocked_internal_prefix() {
+        let mut cache = RadixCache::new(16, 4);
+        let first = cache.token_pool.allocate(8).unwrap();
+        cache.insert(&[1; 8], &first);
+        let mut branch = first[..4].to_vec();
+        branch.extend(cache.token_pool.allocate(4).unwrap());
+        cache.insert(&[1, 1, 1, 1, 2, 2, 2, 2], &branch);
+
+        assert_eq!(cache.evictable_size, 12);
+        assert_eq!(cache.evict(12).0, 12);
+        assert_eq!(cache.available_tokens(), 16);
     }
 
     #[test]

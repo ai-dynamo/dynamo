@@ -440,6 +440,8 @@ pub enum RouterRequest {
         routing_constraints: RoutingConstraints,
         #[serde(default)]
         priority_jump: f64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        strict_priority: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
     },
@@ -471,16 +473,14 @@ impl Default for RouterRequest {
             block_mm_infos: None,
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
+            strict_priority: 0,
             lora_name: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RouterBackpressureReason {
-    /// The configured cap on total queued ISL tokens has been reached.
-    MaxQueuedIslTokensExceeded,
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -502,11 +502,8 @@ pub enum RouterResponse {
         dp_rank: DpRank,
         overlap_blocks: u32,
     },
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_queued_isl_tokens: Option<usize>,
+    QueueRejected {
+        rejection: crate::scheduling::QueueRejection,
     },
     PrefillMarked {
         success: bool,
@@ -634,6 +631,8 @@ pub enum ActiveSequenceEventData {
         #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
+    // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
+    // at high frequency, and broadcasting it would consume disproportionate network bandwidth.
     Free,
     MarkPrefillCompleted,
 }
@@ -1665,6 +1664,7 @@ mod tests {
             block_mm_infos: None,
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 5.0,
+            strict_priority: 0,
             lora_name: None,
         };
 
@@ -1691,6 +1691,7 @@ mod tests {
             block_mm_infos: None,
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
+            strict_priority: 0,
             lora_name: Some("adapter-a".to_string()),
         };
 
@@ -1724,6 +1725,47 @@ mod tests {
                 ..
             } if tokens == vec![1, 2, 3]
         ));
+    }
+
+    #[test]
+    fn test_router_request_new_strict_priority_compatibility() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 4,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"strict_priority":4}"#
+        );
+
+        let missing: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+        assert!(matches!(
+            missing,
+            RouterRequest::New {
+                strict_priority: 0,
+                ..
+            }
+        ));
+
+        let zero = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&zero).unwrap(),
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0}"#
+        );
     }
 
     #[test]

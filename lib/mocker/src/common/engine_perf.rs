@@ -14,7 +14,7 @@ use std::time::Duration;
 use aiconfigurator_core::{
     BackendKind, DataType, ENGINE_CONFIG_SCHEMA_VERSION, EngineConfig, FPM_VERSION,
     ForwardPassMetrics, ForwardPassPerfDiagnostics, ForwardPassPerfModel, ForwardPassPerfOptions,
-    QueuedRequestMetrics, ScheduledRequestMetrics,
+    ParallelMapping, QuantizationConfig, QueuedRequestMetrics, ScheduledRequestMetrics,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -66,35 +66,43 @@ pub struct AicEngineConfig {
 
 impl AicEngineConfig {
     pub fn into_aic_config(self) -> Result<EngineConfig> {
+        // `model_arch` is intentionally not forwarded: aiconfigurator main
+        // dropped it from `EngineConfig` (architecture is inferred from the HF
+        // model_path) and its deserializer ignores a stray `model_arch` key.
         Ok(EngineConfig {
             schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
             model_name: self.model_name,
-            model_arch: self.model_arch,
             system_name: self.system_name,
+            systems_path: None,
             backend: parse_backend_kind(&self.backend)?,
             backend_version: self.backend_version,
-            tp_size: self.tp_size,
-            pp_size: self.pp_size,
-            moe_tp_size: self.moe_tp_size,
-            moe_ep_size: self.moe_ep_size,
-            attention_dp_size: self.attention_dp_size,
-            weight_dtype: self
-                .weight_dtype
-                .as_deref()
-                .map(parse_data_type)
-                .transpose()?,
-            moe_dtype: self.moe_dtype.as_deref().map(parse_data_type).transpose()?,
-            activation_dtype: self
-                .activation_dtype
-                .as_deref()
-                .map(parse_data_type)
-                .transpose()?,
-            kv_cache_dtype: self
-                .kv_cache_dtype
-                .as_deref()
-                .map(parse_data_type)
-                .transpose()?,
             kv_block_size: self.kv_block_size,
+            parallel: ParallelMapping {
+                tp_size: self.tp_size,
+                pp_size: self.pp_size,
+                attention_dp_size: self.attention_dp_size,
+                moe_tp_size: self.moe_tp_size,
+                moe_ep_size: self.moe_ep_size,
+            },
+            quantization: QuantizationConfig {
+                weight_dtype: self
+                    .weight_dtype
+                    .as_deref()
+                    .map(parse_data_type)
+                    .transpose()?,
+                moe_dtype: self.moe_dtype.as_deref().map(parse_data_type).transpose()?,
+                activation_dtype: self
+                    .activation_dtype
+                    .as_deref()
+                    .map(parse_data_type)
+                    .transpose()?,
+                kv_cache_dtype: self
+                    .kv_cache_dtype
+                    .as_deref()
+                    .map(parse_data_type)
+                    .transpose()?,
+            },
+            speculative: None,
             extra: self.extra,
         })
     }
@@ -364,7 +372,7 @@ impl EnginePerfModel {
         };
         let attention_dp_size = if let Some(size) = aic_config
             .as_ref()
-            .and_then(|config| config.attention_dp_size)
+            .and_then(|config| config.parallel.attention_dp_size)
         {
             size
         } else {
@@ -409,7 +417,7 @@ impl EnginePerfModel {
         options: Option<ForwardPassPerfOptions>,
     ) -> Result<Self> {
         let aic_config = aic_engine_config_for_raw_iteration_time(aic_config)?;
-        let attention_dp_size = aic_config.attention_dp_size.unwrap_or(1).max(1) as usize;
+        let attention_dp_size = aic_config.parallel.attention_dp_size.unwrap_or(1).max(1) as usize;
         limits.validate().context("invalid engine perf limits")?;
         let resolved_options = resolve_options(options, &limits);
         let load_averages = AggLoadAverages::new(resolved_options.max_observations);
@@ -1036,32 +1044,60 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
     Ok(Some(aic_config_for_raw_iteration_time(EngineConfig {
         schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
         model_name,
-        model_arch: None,
         system_name: args
             .aic_system
             .clone()
             .unwrap_or_else(|| DEFAULT_AIC_SYSTEM.to_string()),
+        systems_path: None,
         backend: parse_backend_kind(backend)?,
         backend_version: args.aic_backend_version.clone(),
-        tp_size: to_u32(args.aic_tp_size.unwrap_or(1), "aic_tp_size")?,
-        pp_size: 1,
-        moe_tp_size: args
-            .aic_moe_tp_size
-            .map(|value| to_u32(value, "aic_moe_tp_size"))
-            .transpose()?,
-        moe_ep_size: args
-            .aic_moe_ep_size
-            .map(|value| to_u32(value, "aic_moe_ep_size"))
-            .transpose()?,
-        attention_dp_size: args
-            .aic_attention_dp_size
-            .map(|value| to_u32(value, "aic_attention_dp_size"))
-            .transpose()?,
-        weight_dtype: None,
-        moe_dtype: None,
-        activation_dtype: None,
-        kv_cache_dtype: None,
         kv_block_size: Some(to_u32(args.block_size, "block_size")?),
+        parallel: ParallelMapping {
+            tp_size: to_u32(args.aic_tp_size.unwrap_or(1), "aic_tp_size")?,
+            pp_size: 1,
+            attention_dp_size: args
+                .aic_attention_dp_size
+                .map(|value| to_u32(value, "aic_attention_dp_size"))
+                .transpose()?,
+            moe_tp_size: args
+                .aic_moe_tp_size
+                .map(|value| to_u32(value, "aic_moe_tp_size"))
+                .transpose()?,
+            moe_ep_size: args
+                .aic_moe_ep_size
+                .map(|value| to_u32(value, "aic_moe_ep_size"))
+                .transpose()?,
+        },
+        // Native analytics path: quant dtypes are parsed by `parse_data_type`
+        // into `aiconfigurator_core::DataType` (accepted: bfloat16, float16,
+        // fp8, fp8_static, fp8_block, nvfp4, int8, int4, w4afp8, w4a16_mxfp4,
+        // w4a8_mxfp4_mxfp8) -- a separate vocabulary from the Python callback
+        // path's per-field AIC quant-mode names. This path also does not model
+        // communication dtype (`QuantizationConfig` has no comm field), so
+        // `aic_comm_dtype` is intentionally not applied here.
+        quantization: QuantizationConfig {
+            weight_dtype: args
+                .aic_gemm_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            moe_dtype: args
+                .aic_moe_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            activation_dtype: args
+                .aic_fmha_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            kv_cache_dtype: args
+                .aic_kv_cache_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+        },
+        speculative: None,
         extra,
     })))
 }
@@ -1576,6 +1612,32 @@ mod tests {
             config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
             Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
         );
+    }
+
+    #[test]
+    fn mock_engine_args_json_forwards_aic_quantization() {
+        let args = MockEngineArgs::from_json_str(
+            &serde_json::json!({
+                "aic_backend": "vllm",
+                "aic_model_path": "model",
+                "aic_gemm_dtype": "fp8_block",
+                "aic_moe_dtype": "w4a16_mxfp4",
+                "aic_fmha_dtype": "bfloat16",
+                "aic_kv_cache_dtype": "fp8",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
+
+        assert_eq!(config.quantization.weight_dtype, Some(DataType::Fp8Block));
+        assert_eq!(config.quantization.moe_dtype, Some(DataType::W4a16Mxfp4));
+        assert_eq!(
+            config.quantization.activation_dtype,
+            Some(DataType::Bfloat16)
+        );
+        assert_eq!(config.quantization.kv_cache_dtype, Some(DataType::Fp8));
     }
 
     #[test]
