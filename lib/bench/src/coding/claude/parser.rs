@@ -17,6 +17,7 @@ use std::path::PathBuf;
 #[derive(Clone, Debug)]
 pub struct TraceRecord {
     pub session_id: String,
+    pub parent_session_id: Option<String>,
     pub row_type: String,
     pub timestamp_ms: i64,
     pub source_order: u64,
@@ -31,9 +32,11 @@ struct ConversationEntry {
 
 #[derive(Clone, Debug)]
 struct ToolCallSummary {
+    raw_id: Option<String>,
     name: String,
     normalized_id: Option<String>,
     arg_size_chars: usize,
+    started_at_ms: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -51,14 +54,27 @@ struct CachedProgressMetrics {
 
 #[derive(Debug)]
 struct AssistantGroupSummary {
-    entries: Vec<ConversationEntry>,
+    entries_by_record: BTreeMap<usize, Vec<ConversationEntry>>,
     model: String,
     output_length: usize,
     assistant_text_blocks: usize,
     top_level_tool_calls: Vec<ToolCallSummary>,
     raw_task_tool_ids: Vec<String>,
+    input_length: Option<usize>,
+    cache_read_input_tokens: Option<usize>,
+    cache_creation_input_tokens: Option<usize>,
     start_ms: i64,
     end_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolDraft {
+    pub tool_call_id: String,
+    pub tool_class: String,
+    pub started_at_ms: i64,
+    pub ended_at_ms: i64,
+    pub is_error: bool,
+    pub output_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -70,9 +86,13 @@ pub struct TurnDraft {
     pub model: String,
     pub input_text: String,
     pub output_length: usize,
+    pub observed_input_length: Option<usize>,
+    pub cache_read_input_tokens: Option<usize>,
+    pub request_start_ms: i64,
     pub assistant_start_ms: i64,
     pub assistant_end_ms: i64,
     pub delay_ms: Option<i64>,
+    pub tools: Vec<ToolDraft>,
     pub sidecar: Value,
 }
 
@@ -107,6 +127,7 @@ pub struct SessionTurnBuilder {
     normalizer: ToolIdNormalizer,
     conversation_entries: Vec<ConversationEntry>,
     prompt_text: String,
+    pending_request_start_ms: Option<i64>,
     previous_assistant_end_ms: Option<i64>,
     turn_index: usize,
     pending_compact_reset: bool,
@@ -119,6 +140,10 @@ impl SessionTurnBuilder {
             .map(|record| record.session_id.clone())
             .unwrap_or_else(|| trace_id.clone());
         let is_subagent = trace_id != root_session_id;
+        let parent_session_id = records
+            .iter()
+            .find_map(|record| record.parent_session_id.clone())
+            .unwrap_or_else(|| root_session_id.clone());
         let export_session_id = if preserve_session_ids {
             trace_id.clone()
         } else {
@@ -126,9 +151,9 @@ impl SessionTurnBuilder {
         };
         let export_parent_session_id = is_subagent.then(|| {
             if preserve_session_ids {
-                root_session_id
+                parent_session_id
             } else {
-                anonymized_session_id(&root_session_id)
+                anonymized_session_id(&parent_session_id)
             }
         });
 
@@ -161,6 +186,7 @@ impl SessionTurnBuilder {
             normalizer: ToolIdNormalizer::default(),
             conversation_entries: Vec::new(),
             prompt_text: String::new(),
+            pending_request_start_ms: None,
             previous_assistant_end_ms: None,
             turn_index: 0,
             pending_compact_reset: false,
@@ -185,6 +211,7 @@ impl SessionTurnBuilder {
                     continue;
                 }
 
+                let request_start_ms = record.timestamp_ms;
                 let message = object_field(&record.raw, "message");
                 let rendered_entries = render_user_entries(message, &mut self.normalizer)?;
                 if self.pending_compact_reset && is_compact_summary(record) {
@@ -192,6 +219,7 @@ impl SessionTurnBuilder {
                 } else {
                     self.extend_conversation_entries(rendered_entries);
                 }
+                self.pending_request_start_ms = Some(request_start_ms);
                 self.pending_compact_reset = false;
                 self.top_level_cursor += 1;
                 continue;
@@ -200,27 +228,41 @@ impl SessionTurnBuilder {
             self.pending_compact_reset = false;
             let group_key = assistant_group_key(record);
             let mut group_indices = vec![record_index];
+            let mut interleaved_user_indices = Vec::new();
             self.top_level_cursor += 1;
             while self.top_level_cursor < self.top_level_indices.len() {
                 let next_index = self.top_level_indices[self.top_level_cursor];
                 let next_record = &self.records[next_index];
-                if next_record.row_type != "assistant" {
-                    break;
+                if next_record.row_type == "user" && is_tool_result_user_record(next_record) {
+                    interleaved_user_indices.push(next_index);
+                    self.top_level_cursor += 1;
+                    continue;
                 }
-                if assistant_group_key(next_record) != group_key {
+                if next_record.row_type != "assistant"
+                    || assistant_group_key(next_record) != group_key
+                {
                     break;
                 }
                 group_indices.push(next_index);
                 self.top_level_cursor += 1;
             }
 
-            let group_summary = summarize_assistant_group(
+            let mut group_summary = summarize_assistant_group(
                 &self.records,
                 &group_indices,
                 &mut self.normalizer,
                 tokenizer,
             )?;
             let input_text = self.prompt_text.clone();
+            let request_start_ms = self
+                .pending_request_start_ms
+                .take()
+                .unwrap_or(group_summary.start_ms);
+            let tools = pair_tool_results(
+                &group_summary.top_level_tool_calls,
+                &interleaved_user_indices,
+                &self.records,
+            )?;
 
             let top_level_tool_names = group_summary
                 .top_level_tool_calls
@@ -252,6 +294,7 @@ impl SessionTurnBuilder {
                 );
             }
             sidecar.insert("turn_index".to_string(), json!(self.turn_index));
+            sidecar.insert("source_request_id".to_string(), Value::String(group_key));
             sidecar.insert(
                 "num_messages_in_context".to_string(),
                 json!(self.conversation_entries.len()),
@@ -292,6 +335,43 @@ impl SessionTurnBuilder {
                 "top_level_tool_calls".to_string(),
                 Value::Array(top_level_tool_calls),
             );
+            sidecar.insert(
+                "input_fidelity".to_string(),
+                Value::String(
+                    if group_summary.input_length.is_some() {
+                        "claude_usage_cache_prefix"
+                    } else {
+                        "rendered_transcript"
+                    }
+                    .to_string(),
+                ),
+            );
+            sidecar.insert(
+                "replay_hash_fidelity".to_string(),
+                Value::String(
+                    if group_summary.input_length.is_some() {
+                        "synthetic_usage_shaped"
+                    } else {
+                        "rendered_transcript"
+                    }
+                    .to_string(),
+                ),
+            );
+            if let Some(input_length) = group_summary.input_length {
+                sidecar.insert("observed_input_tokens".to_string(), json!(input_length));
+            }
+            if let Some(cache_read) = group_summary.cache_read_input_tokens {
+                sidecar.insert(
+                    "observed_cache_read_input_tokens".to_string(),
+                    json!(cache_read),
+                );
+            }
+            if let Some(cache_creation) = group_summary.cache_creation_input_tokens {
+                sidecar.insert(
+                    "observed_cache_creation_input_tokens".to_string(),
+                    json!(cache_creation),
+                );
+            }
 
             let progress_metrics = aggregate_progress_metrics(
                 &group_summary.raw_task_tool_ids,
@@ -312,15 +392,36 @@ impl SessionTurnBuilder {
                 model: group_summary.model,
                 input_text,
                 output_length: group_summary.output_length,
+                observed_input_length: group_summary.input_length,
+                cache_read_input_tokens: group_summary.cache_read_input_tokens,
+                request_start_ms,
                 assistant_start_ms: group_summary.start_ms,
                 assistant_end_ms: group_summary.end_ms,
                 delay_ms: self
                     .previous_assistant_end_ms
-                    .map(|previous_end| (group_summary.start_ms - previous_end).max(0)),
+                    .map(|previous_end| (request_start_ms - previous_end).max(0)),
+                tools,
                 sidecar: Value::Object(sidecar),
             };
 
-            self.extend_conversation_entries(group_summary.entries);
+            let mut ordered_indices = group_indices;
+            ordered_indices.extend(interleaved_user_indices.iter().copied());
+            ordered_indices.sort_unstable();
+            let mut ordered_entries = Vec::new();
+            for index in ordered_indices {
+                if let Some(entries) = group_summary.entries_by_record.remove(&index) {
+                    ordered_entries.extend(entries);
+                } else {
+                    ordered_entries.extend(render_user_entries(
+                        object_field(&self.records[index].raw, "message"),
+                        &mut self.normalizer,
+                    )?);
+                }
+            }
+            self.extend_conversation_entries(ordered_entries);
+            self.pending_request_start_ms = interleaved_user_indices
+                .last()
+                .map(|index| self.records[*index].timestamp_ms);
             self.previous_assistant_end_ms = Some(group_summary.end_ms);
             self.turn_index += 1;
             return Ok(Some(turn));
@@ -390,6 +491,7 @@ pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<FxHashMap<String, V
             let trace_id = agent_id.clone().unwrap_or_else(|| session_id.clone());
             sessions.entry(trace_id).or_default().push(TraceRecord {
                 session_id,
+                parent_session_id: None,
                 row_type,
                 timestamp_ms,
                 source_order,
@@ -399,8 +501,29 @@ pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<FxHashMap<String, V
         }
     }
 
-    for records in sessions.values_mut() {
-        records.sort_by_key(|record| (record.timestamp_ms, record.source_order));
+    let mut parent_by_session = FxHashMap::default();
+    for (parent_session_id, records) in &sessions {
+        for record in records {
+            if let Some(child_session_id) = record
+                .raw
+                .get("toolUseResult")
+                .and_then(Value::as_object)
+                .and_then(|result| result.get("agentId"))
+                .and_then(Value::as_str)
+            {
+                parent_by_session
+                    .entry(child_session_id.to_string())
+                    .or_insert_with(|| parent_session_id.clone());
+            }
+        }
+    }
+
+    for (session_id, records) in &mut sessions {
+        let parent_session_id = parent_by_session.get(session_id).cloned();
+        for record in records.iter_mut() {
+            record.parent_session_id.clone_from(&parent_session_id);
+        }
+        records.sort_by_key(|record| record.source_order);
     }
 
     Ok(sessions)
@@ -493,6 +616,67 @@ fn should_skip_user_record(record: &TraceRecord) -> Result<bool> {
         })
         .collect::<Vec<_>>();
     Ok(!texts.is_empty() && texts.iter().all(|text| is_local_command_wrapper_text(text)))
+}
+
+fn is_tool_result_user_record(record: &TraceRecord) -> bool {
+    if record.row_type != "user" {
+        return false;
+    }
+    let Some(message) = object_field(&record.raw, "message") else {
+        return false;
+    };
+    let blocks = content_blocks(message.get("content"));
+    !blocks.is_empty()
+        && blocks
+            .iter()
+            .all(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+}
+
+fn pair_tool_results(
+    calls: &[ToolCallSummary],
+    user_indices: &[usize],
+    records: &[TraceRecord],
+) -> Result<Vec<ToolDraft>> {
+    let calls_by_id = calls
+        .iter()
+        .filter_map(|call| call.raw_id.as_deref().map(|id| (id, call)))
+        .collect::<FxHashMap<_, _>>();
+    let mut tools = Vec::new();
+
+    for index in user_indices {
+        let record = &records[*index];
+        let Some(message) = object_field(&record.raw, "message") else {
+            continue;
+        };
+        for block in content_blocks(message.get("content")) {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let Some(raw_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(call) = calls_by_id.get(raw_id) else {
+                continue;
+            };
+            let content = flatten_block_content_text(block.get("content").unwrap_or(&Value::Null))?;
+            tools.push(ToolDraft {
+                tool_call_id: call
+                    .normalized_id
+                    .clone()
+                    .unwrap_or_else(|| "tool_unknown".to_string()),
+                tool_class: call.name.clone(),
+                started_at_ms: call.started_at_ms,
+                ended_at_ms: record.timestamp_ms,
+                is_error: block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                output_bytes: content.len(),
+            });
+        }
+    }
+
+    Ok(tools)
 }
 
 fn sanitize_structure(value: &Value, normalizer: &mut ToolIdNormalizer) -> Value {
@@ -622,14 +806,19 @@ fn summarize_assistant_group(
     tokenizer: &mut impl TokenizerWorker,
 ) -> Result<AssistantGroupSummary> {
     let mut entries = Vec::new();
+    let mut entries_by_record = BTreeMap::new();
     let mut tool_calls = Vec::new();
     let mut raw_task_tool_ids = Vec::new();
     let mut assistant_text_blocks = 0;
     let mut output_lengths = Vec::new();
+    let mut input_lengths = Vec::new();
+    let mut cache_read_lengths = Vec::new();
+    let mut cache_creation_lengths = Vec::new();
     let mut model = None;
 
     for index in group_indices {
         let record = &records[*index];
+        let mut record_entries = Vec::new();
         let Some(message) = object_field(&record.raw, "message") else {
             continue;
         };
@@ -639,11 +828,29 @@ fn summarize_assistant_group(
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
-        if let Some(output_tokens) = object_field(&Value::Object(message.clone()), "usage")
-            .and_then(|usage| usage.get("output_tokens"))
-            .and_then(Value::as_u64)
-        {
-            output_lengths.push(output_tokens as usize);
+        if let Some(usage) = object_field(&Value::Object(message.clone()), "usage") {
+            let input_tokens = usage
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let cache_read = usage
+                .get("cache_read_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let cache_creation = usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            input_lengths.push(
+                input_tokens
+                    .saturating_add(cache_read)
+                    .saturating_add(cache_creation),
+            );
+            cache_read_lengths.push(cache_read);
+            cache_creation_lengths.push(cache_creation);
+            if let Some(output_tokens) = usage.get("output_tokens").and_then(Value::as_u64) {
+                output_lengths.push(output_tokens as usize);
+            }
         }
 
         for block in content_blocks(message.get("content")) {
@@ -661,7 +868,7 @@ fn summarize_assistant_group(
                     .unwrap_or_default();
                 if !text.is_empty() {
                     assistant_text_blocks += 1;
-                    entries.push(ConversationEntry {
+                    record_entries.push(ConversationEntry {
                         kind: "assistant_text".to_string(),
                         rendered: format!("[assistant] {text}"),
                     });
@@ -680,7 +887,7 @@ fn summarize_assistant_group(
                     block.get("input").unwrap_or(&Value::Null),
                     normalizer,
                 ))?;
-                entries.push(ConversationEntry {
+                record_entries.push(ConversationEntry {
                     kind: "assistant_tool_use".to_string(),
                     rendered: format!(
                         "[assistant_tool_use id={} name={} args={}]",
@@ -692,11 +899,13 @@ fn summarize_assistant_group(
                     ),
                 });
                 tool_calls.push(ToolCallSummary {
+                    raw_id: raw_id.map(str::to_string),
                     name: tool_name.clone(),
                     normalized_id,
                     arg_size_chars: args_json.len(),
+                    started_at_ms: record.timestamp_ms,
                 });
-                if tool_name == "Task"
+                if matches!(tool_name.as_str(), "Agent" | "Task")
                     && let Some(raw_id) = raw_id
                 {
                     raw_task_tool_ids.push(raw_id.to_string());
@@ -705,7 +914,7 @@ fn summarize_assistant_group(
             }
 
             let sanitized = sanitize_structure(&block, normalizer);
-            entries.push(ConversationEntry {
+            record_entries.push(ConversationEntry {
                 kind: "assistant_block".to_string(),
                 rendered: format!(
                     "[assistant_block type={block_type}] {}",
@@ -713,6 +922,8 @@ fn summarize_assistant_group(
                 ),
             });
         }
+        entries.extend(record_entries.iter().cloned());
+        entries_by_record.insert(*index, record_entries);
     }
 
     let output_length = if let Some(max_length) = output_lengths.into_iter().max() {
@@ -732,12 +943,15 @@ fn summarize_assistant_group(
         .unwrap_or(start_ms);
 
     Ok(AssistantGroupSummary {
-        entries,
+        entries_by_record,
         model: model.unwrap_or_else(|| "unknown".to_string()),
         output_length,
         assistant_text_blocks,
         top_level_tool_calls: tool_calls,
         raw_task_tool_ids,
+        input_length: input_lengths.into_iter().max(),
+        cache_read_input_tokens: cache_read_lengths.into_iter().max(),
+        cache_creation_input_tokens: cache_creation_lengths.into_iter().max(),
         start_ms,
         end_ms,
     })
@@ -1009,11 +1223,12 @@ fn summarize_progress_indices(indices: &[usize], records: &[TraceRecord]) -> Cac
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionTurnBuilder, TraceRecord};
+    use super::{SessionTurnBuilder, TraceRecord, load_trace_records};
     use crate::coding::common::anonymized_session_id;
     use crate::coding::tokenizer::TokenizerWorker;
     use anyhow::Result;
     use serde_json::{Value, json};
+    use tempfile::TempDir;
 
     struct StubTokenizer;
 
@@ -1031,11 +1246,123 @@ mod tests {
     ) -> TraceRecord {
         TraceRecord {
             session_id: "session-1".to_string(),
+            parent_session_id: None,
             row_type: row_type.to_string(),
             timestamp_ms,
             source_order,
             raw,
         }
+    }
+
+    #[test]
+    fn groups_interleaved_fragments_and_pairs_tool_results() {
+        let records = vec![
+            make_record(
+                "user",
+                1_000,
+                0,
+                json!({"type":"user","message":{"role":"user","content":"start"}}),
+            ),
+            make_record(
+                "assistant",
+                1_100,
+                1,
+                json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
+            ),
+            make_record(
+                "assistant",
+                1_200,
+                2,
+                json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"tool_use","id":"raw-1","name":"Read","input":{}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
+            ),
+            make_record(
+                "user",
+                1_300,
+                3,
+                json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"raw-1","content":"ok"}]}}),
+            ),
+            make_record(
+                "assistant",
+                1_400,
+                4,
+                json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"tool_use","id":"raw-2","name":"Bash","input":{}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
+            ),
+            make_record(
+                "user",
+                1_500,
+                5,
+                json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"raw-2","content":"failed","is_error":true}]}}),
+            ),
+            make_record(
+                "assistant",
+                1_600,
+                6,
+                json!({"type":"assistant","requestId":"req-2","message":{"id":"msg-2","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":10,"output_tokens":2}}}),
+            ),
+        ];
+
+        let mut builder = SessionTurnBuilder::new("session-1".to_string(), records, true);
+        let first = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+        let second = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+
+        assert_eq!(first.request_start_ms, 1_000);
+        assert_eq!(first.assistant_end_ms, 1_400);
+        assert_eq!(first.observed_input_length, Some(10));
+        assert_eq!(first.output_length, 7);
+        assert_eq!(first.tools.len(), 2);
+        assert_eq!(first.tools[0].tool_class, "Read");
+        assert_eq!(first.tools[0].started_at_ms, 1_200);
+        assert_eq!(first.tools[0].ended_at_ms, 1_300);
+        assert!(first.tools[1].is_error);
+        assert_eq!(second.request_start_ms, 1_500);
+        assert!(builder.next_turn(&mut StubTokenizer).unwrap().is_none());
+    }
+
+    #[test]
+    fn loader_preserves_source_order_for_compaction_markers() {
+        let temp = TempDir::new().unwrap();
+        let trace = temp.path().join("session.jsonl");
+        std::fs::write(
+            &trace,
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.002Z\"}\n",
+                "{\"type\":\"user\",\"isCompactSummary\":true,\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.001Z\",\"message\":{\"content\":\"summary\"}}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.003Z\",\"message\":{\"id\":\"msg-1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":{\"output_tokens\":1}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let sessions = load_trace_records(&[trace]).unwrap();
+        let records = sessions.get("session-1").unwrap();
+        assert_eq!(records[0].row_type, "system");
+        assert_eq!(records[1].row_type, "user");
+
+        let mut builder = SessionTurnBuilder::new("session-1".to_string(), records.clone(), true);
+        let turn = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+        assert_eq!(turn.input_text, "[user] summary");
+    }
+
+    #[test]
+    fn loader_infers_immediate_parent_from_agent_result() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().join("parent.jsonl");
+        let child = temp.path().join("child.jsonl");
+        std::fs::write(
+            &parent,
+            "{\"type\":\"user\",\"sessionId\":\"root\",\"agentId\":\"parent\",\"timestamp\":\"2026-01-01T00:00:00.001Z\",\"toolUseResult\":{\"agentId\":\"child\"},\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"agent-call\",\"content\":\"done\"}]}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &child,
+            "{\"type\":\"assistant\",\"sessionId\":\"root\",\"agentId\":\"child\",\"timestamp\":\"2026-01-01T00:00:00.002Z\",\"message\":{\"id\":\"msg-1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":{\"output_tokens\":1}}}\n",
+        )
+        .unwrap();
+
+        let sessions = load_trace_records(&[parent, child]).unwrap();
+        assert_eq!(
+            sessions["child"][0].parent_session_id.as_deref(),
+            Some("parent")
+        );
     }
 
     #[test]

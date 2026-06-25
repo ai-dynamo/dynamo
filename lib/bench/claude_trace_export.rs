@@ -80,8 +80,9 @@ fn main() -> Result<()> {
     }
 
     println!(
-        "Wrote {} Dynamo request-trace rows to {}",
+        "Wrote {} request and {} tool rows to {}",
         stats.row_count,
+        stats.tool_row_count,
         output_path.display()
     );
     println!(

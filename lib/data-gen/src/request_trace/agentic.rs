@@ -95,13 +95,16 @@ where
     let mut wait_for: Vec<Vec<String>> = vec![Vec::new(); loaded.requests.len()];
     let mut branches: Vec<Vec<String>> = vec![Vec::new(); loaded.requests.len()];
     let mut prefix_reset = vec![false; loaded.requests.len()];
+    let mut previous_request_start_ms = vec![None; loaded.requests.len()];
 
     for indices in session_to_indices.values() {
         for (pos, idx) in indices.iter().copied().enumerate() {
             prefix_reset[idx] = pos == 0;
             if pos > 0 {
-                let previous = &loaded.requests[indices[pos - 1]].request.request_id;
+                let previous_request = &loaded.requests[indices[pos - 1]];
+                let previous = &previous_request.request.request_id;
                 push_unique(&mut wait_for[idx], previous.clone());
+                previous_request_start_ms[idx] = Some(previous_request.start_ms);
             }
         }
     }
@@ -135,7 +138,7 @@ where
         let child_end_ms = loaded.requests[last_finishing_child_idx].end_ms;
 
         if let Some(parent_spawn_idx) =
-            latest_request_ending_before(&loaded.requests, parent_indices, child_start_ms)
+            latest_request_starting_before(&loaded.requests, parent_indices, child_start_ms)
         {
             let parent_request_id = loaded.requests[parent_spawn_idx].request.request_id.clone();
             push_unique(&mut wait_for[first_child_idx], parent_request_id);
@@ -182,9 +185,17 @@ where
             .max();
         let (delay, tool_wait_ms, tool_events) = if let Some(dep_end_ms) = dep_end_ms {
             let observed_gap_ms = request.start_ms.saturating_sub(dep_end_ms).max(0) as f64;
+            let tool_event_start_ms = previous_request_start_ms[idx].unwrap_or(dep_end_ms);
             let (raw_tool_wait_ms, contributing) = tools_by_session
                 .get(&session_id)
-                .map(|tools| collect_tools_in_window(tools, dep_end_ms, request.start_ms))
+                .map(|tools| {
+                    collect_tools_in_window(
+                        tools,
+                        tool_event_start_ms,
+                        dep_end_ms,
+                        request.start_ms,
+                    )
+                })
                 .unwrap_or_else(|| (0.0, Vec::new()));
             let tool_wait_ms = raw_tool_wait_ms.min(observed_gap_ms);
             let non_tool_wait_ms = (observed_gap_ms - tool_wait_ms).max(0.0);
@@ -235,7 +246,7 @@ fn session_id_for(request: &RequestEntry) -> String {
         .unwrap_or_else(|| request.request.request_id.clone())
 }
 
-fn latest_request_ending_before(
+fn latest_request_starting_before(
     requests: &[RequestEntry],
     indices: &[usize],
     timestamp_ms: i64,
@@ -243,8 +254,8 @@ fn latest_request_ending_before(
     indices
         .iter()
         .copied()
-        .filter(|idx| requests[*idx].end_ms <= timestamp_ms)
-        .max_by_key(|idx| requests[*idx].end_ms)
+        .filter(|idx| requests[*idx].start_ms <= timestamp_ms)
+        .max_by_key(|idx| requests[*idx].start_ms)
 }
 
 fn first_request_starting_after(
@@ -259,25 +270,28 @@ fn first_request_starting_after(
         .min_by_key(|idx| requests[*idx].start_ms)
 }
 
-/// Sweep-merge tool spans clipped to `[start_ms, end_ms]`. Wall-time is the
-/// union (concurrent tools contribute once, not twice); the returned entries
-/// are the unclipped originals so callers retain per-tool metadata.
+/// Return tools completed since the previous request started, while computing
+/// wait time only from their overlap with `[wait_start_ms, end_ms]`.
 fn collect_tools_in_window(
     tools: &[ToolEntry],
-    start_ms: i64,
+    event_start_ms: i64,
+    wait_start_ms: i64,
     end_ms: i64,
 ) -> (f64, Vec<&ToolEntry>) {
-    if end_ms <= start_ms {
+    if end_ms <= event_start_ms {
         return (0.0, Vec::new());
     }
 
     let mut contributing: Vec<&ToolEntry> = Vec::new();
     let mut intervals = Vec::new();
     for tool in tools {
-        let clipped_start = tool.start_ms.max(start_ms);
+        if tool.end_ms <= event_start_ms || tool.end_ms > end_ms {
+            continue;
+        }
+        contributing.push(tool);
+        let clipped_start = tool.start_ms.max(wait_start_ms);
         let clipped_end = tool.end_ms.min(end_ms);
         if clipped_end > clipped_start {
-            contributing.push(tool);
             intervals.push((clipped_start, clipped_end));
         }
     }
