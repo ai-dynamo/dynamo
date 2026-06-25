@@ -218,7 +218,7 @@ vllm_configs = {
             pytest.mark.timeout(
                 420
             ),  # 2 workers + router startup; bumped for GPU-parallel headroom
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
