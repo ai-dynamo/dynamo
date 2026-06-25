@@ -583,10 +583,12 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 # Mount cargo registry + git caches so re-runs don't re-download the
 # ~750 crates from crates.io every build. `sharing=shared` lets parallel
 # builds (e.g. multiple frameworks in CI) read the same cache concurrently.
+# mkdir runs unconditionally so the dir always exists for wheel_builder to COPY,
+# even on non-archival builds (empty then); cargo vendor only runs when enabled.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    mkdir -p /tmp/dynamo-vendor-full && \
     if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
-        mkdir -p /tmp/dynamo-vendor-full && \
         cd /opt/dynamo && \
         cargo vendor --locked /tmp/dynamo-vendor-full > /dev/null && \
         cp Cargo.toml Cargo.lock /tmp/dynamo-vendor-full/ ; \
@@ -761,6 +763,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
+# cargo vendor runs in runtime_wheel_builder, but compliance's sources_collect
+# copies the vendor tree from wheel_builder (the complete final wheel stage).
+# Bring it up so this stage carries it too. Empty on non-archival builds.
+COPY --from=runtime_wheel_builder /tmp/dynamo-vendor-full/ /tmp/dynamo-vendor-full/
 
 # Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
 # stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
