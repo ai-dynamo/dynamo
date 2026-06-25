@@ -60,7 +60,7 @@ Queue limits are configured per discovered worker endpoint with
 configured value multiplied by the current number of discovered endpoints.
 Limits are checked against current usage before adding the incoming request,
 so the request that crosses a limit is accepted and the next queued request is
-rejected with HTTP 503 and the effective total. Worker removal does not evict
+rejected with HTTP 529 and the effective total. Worker removal does not evict
 queued requests; new arrivals reject until usage drains or capacity returns.
 DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
 and uncached snapshots remain unchanged for limits, WSPT, counters, and later
@@ -94,7 +94,7 @@ no separate first-stage admission queue or global cross-class cap.
 
 This is intentionally not behavior preserving. Class limits are worker-scaled
 and class-local rather than global; rejection returns the structured
-policy-class HTTP 503 response rather than the previous overload 429 path; and
+policy-class HTTP 529 response rather than the previous overload 429 path; and
 it does not exclude the entire router instance. The previous flat
 `default_policy_class` and `uncached_isl_policy_class_tiers` schema is not
 accepted, and ordinary physical classes are no longer direct header
