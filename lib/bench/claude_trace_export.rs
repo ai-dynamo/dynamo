@@ -91,6 +91,7 @@ fn main() -> Result<()> {
         sidecar_path.display()
     );
     println!("Discovered {} trace files", trace_files.len());
+    println!("{}", stats.fidelity.render());
     Ok(())
 }
 

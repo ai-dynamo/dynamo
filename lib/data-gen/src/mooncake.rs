@@ -93,6 +93,8 @@ pub struct AgenticMooncakeRow {
     pub strict_priority: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -118,6 +120,14 @@ impl AgenticMooncakeRow {
 pub struct AgenticToolEvent {
     pub tool_call_id: String,
     pub tool_class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<String>,
     pub started_at_unix_ms: u64,
     pub ended_at_unix_ms: u64,
     pub duration_ms: f64,
@@ -746,6 +756,10 @@ mod tests {
             tool_events: vec![AgenticToolEvent {
                 tool_call_id: "call-1".to_string(),
                 tool_class: "web_search".to_string(),
+                source_request_id: None,
+                consumer_request_id: None,
+                child_session_id: None,
+                execution_mode: None,
                 started_at_unix_ms: 1_000,
                 ended_at_unix_ms: 1_008,
                 duration_ms: 8.0,

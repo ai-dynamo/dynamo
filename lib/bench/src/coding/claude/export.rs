@@ -6,7 +6,9 @@
 //! Handles session scheduling, parallel tokenization with text-overlap reuse,
 //! and global ordering across sessions.
 
-use crate::coding::claude::parser::{SessionTurnBuilder, TraceRecord, TurnDraft};
+use crate::coding::claude::parser::{
+    SessionTurnBuilder, SourceFidelityOracle, TraceRecord, TurnDraft, build_source_fidelity_oracle,
+};
 use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker, last_word_overlap_start};
 use anyhow::{Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -15,7 +17,7 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -28,12 +30,68 @@ pub struct ExportConfig {
     pub tokenizer_workers: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExportStats {
     pub row_count: usize,
     pub tool_row_count: usize,
     pub sidecar_count: usize,
     pub max_heap_len: usize,
+    pub fidelity: FidelityReport,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FidelityReport {
+    pub requests_verified: usize,
+    pub usage_requests_verified: usize,
+    pub tools_verified: usize,
+    pub child_links_verified: usize,
+    pub background_tools: usize,
+    pub background_agents: usize,
+    pub background_completions_missing: usize,
+    pub background_titles_unreplayable: usize,
+    pub cache_prefix_blocks_verified: usize,
+    pub unmatched_tool_calls: usize,
+    pub unmatched_tool_results: usize,
+    pub unresolved_child_sessions: usize,
+}
+
+impl FidelityReport {
+    pub fn render(&self) -> String {
+        format!(
+            "Fidelity: requests={0}/{0} usage={1}/{0} tools={2}/{2} child_links={3}/{3} cache_prefix_blocks={4}\nBackground: tools={5} agents={6} missing_completions={7} title_requests_unreplayable={8}\nLimitations: synthetic_kv_hashes={1} unmatched_tool_calls={9} unmatched_tool_results={10} unresolved_child_sessions={11}",
+            self.requests_verified,
+            self.usage_requests_verified,
+            self.tools_verified,
+            self.child_links_verified,
+            self.cache_prefix_blocks_verified,
+            self.background_tools,
+            self.background_agents,
+            self.background_completions_missing,
+            self.background_titles_unreplayable,
+            self.unmatched_tool_calls,
+            self.unmatched_tool_results,
+            self.unresolved_child_sessions,
+        )
+    }
+}
+
+struct FidelityVerifier {
+    oracle: SourceFidelityOracle,
+    seen_requests: BTreeSet<(String, String)>,
+    tools_by_class: BTreeMap<String, usize>,
+    tool_count: usize,
+    tool_errors: usize,
+    child_links: usize,
+    background_tools: usize,
+    background_agents: usize,
+    usage_requests: usize,
+    cache_prefix_blocks_verified: usize,
+    next_turn_by_session: FxHashMap<String, usize>,
+    previous_hashes_by_session: FxHashMap<String, Vec<u64>>,
+    previous_input_length_by_session: FxHashMap<String, usize>,
+    export_sessions: BTreeSet<String>,
+    causal_references: Vec<(String, usize, String)>,
+    child_session_references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -91,6 +149,274 @@ struct TokenizeResponse {
     outcome: Result<ReadyTurn, String>,
 }
 
+impl FidelityVerifier {
+    fn new(oracle: SourceFidelityOracle) -> Self {
+        Self {
+            oracle,
+            seen_requests: BTreeSet::new(),
+            tools_by_class: BTreeMap::new(),
+            tool_count: 0,
+            tool_errors: 0,
+            child_links: 0,
+            background_tools: 0,
+            background_agents: 0,
+            usage_requests: 0,
+            cache_prefix_blocks_verified: 0,
+            next_turn_by_session: FxHashMap::default(),
+            previous_hashes_by_session: FxHashMap::default(),
+            previous_input_length_by_session: FxHashMap::default(),
+            export_sessions: BTreeSet::new(),
+            causal_references: Vec::new(),
+            child_session_references: Vec::new(),
+        }
+    }
+
+    fn observe(
+        &mut self,
+        turn: &TurnDraft,
+        replay_tokens: &[u32],
+        input_sequence_hashes: &[u64],
+        block_size: usize,
+    ) -> Result<()> {
+        let key = (turn.session_id.clone(), turn.source_request_id.clone());
+        let expected = self.oracle.requests.get(&key).ok_or_else(|| {
+            anyhow!(
+                "fidelity verification found unexpected request {} in session {}",
+                turn.source_request_id,
+                turn.session_id
+            )
+        })?;
+        if !self.seen_requests.insert(key) {
+            bail!(
+                "fidelity verification found duplicate request {} in session {}",
+                turn.source_request_id,
+                turn.session_id
+            );
+        }
+        let expected_turn = self
+            .next_turn_by_session
+            .entry(turn.session_id.clone())
+            .or_default();
+        if turn.turn_index != *expected_turn {
+            bail!(
+                "fidelity verification expected turn {} for session {}, got {}",
+                *expected_turn,
+                turn.session_id,
+                turn.turn_index
+            );
+        }
+        *expected_turn += 1;
+        self.export_sessions.insert(turn.export_session_id.clone());
+        if turn.request_start_ms != expected.request_start_ms
+            || turn.assistant_end_ms != expected.assistant_end_ms
+        {
+            bail!(
+                "fidelity verification timing mismatch for session {} turn {}: expected {}..{}, got {}..{}",
+                turn.session_id,
+                turn.turn_index,
+                expected.request_start_ms,
+                expected.assistant_end_ms,
+                turn.request_start_ms,
+                turn.assistant_end_ms
+            );
+        }
+        if turn.request_start_ms > turn.assistant_start_ms
+            || turn.assistant_start_ms > turn.assistant_end_ms
+        {
+            bail!(
+                "invalid request timing for session {} turn {}",
+                turn.session_id,
+                turn.turn_index
+            );
+        }
+        if let Some(output_length) = expected.output_length
+            && turn.output_length != output_length
+        {
+            bail!(
+                "fidelity verification output mismatch for session {} turn {}: expected {}, got {}",
+                turn.session_id,
+                turn.turn_index,
+                output_length,
+                turn.output_length
+            );
+        }
+        if let Some(input_length) = expected.input_length {
+            self.usage_requests += 1;
+            if replay_tokens.len() != input_length
+                || turn.cache_read_input_tokens != expected.cache_read_input_tokens
+            {
+                bail!(
+                    "fidelity verification input/cache mismatch for session {} turn {}",
+                    turn.session_id,
+                    turn.turn_index
+                );
+            }
+        }
+        let expected_hashes = replay_tokens.len().div_ceil(block_size);
+        if input_sequence_hashes.len() != expected_hashes {
+            bail!(
+                "fidelity verification expected {} hashes for session {} turn {}, got {}",
+                expected_hashes,
+                turn.session_id,
+                turn.turn_index,
+                input_sequence_hashes.len()
+            );
+        }
+        if let Some(previous_hashes) = self.previous_hashes_by_session.get(&turn.session_id) {
+            let cached_blocks = turn.cache_read_input_tokens.unwrap_or(0) / block_size;
+            let previous_complete_blocks = self
+                .previous_input_length_by_session
+                .get(&turn.session_id)
+                .copied()
+                .unwrap_or_default()
+                / block_size;
+            let verifiable_blocks = cached_blocks
+                .min(previous_complete_blocks)
+                .min(previous_hashes.len())
+                .min(input_sequence_hashes.len());
+            if previous_hashes[..verifiable_blocks] != input_sequence_hashes[..verifiable_blocks] {
+                bail!(
+                    "fidelity verification cached prefix mismatch for session {} turn {}",
+                    turn.session_id,
+                    turn.turn_index
+                );
+            }
+            self.cache_prefix_blocks_verified += verifiable_blocks;
+        }
+        self.previous_hashes_by_session
+            .insert(turn.session_id.clone(), input_sequence_hashes.to_vec());
+        self.previous_input_length_by_session
+            .insert(turn.session_id.clone(), replay_tokens.len());
+
+        for tool in &turn.tools {
+            if tool.started_at_ms > tool.ended_at_ms {
+                bail!(
+                    "invalid tool timing for {} in session {}",
+                    tool.tool_call_id,
+                    turn.session_id
+                );
+            }
+            self.tool_count += 1;
+            *self
+                .tools_by_class
+                .entry(tool.tool_class.clone())
+                .or_insert(0) += 1;
+            self.tool_errors += usize::from(tool.is_error);
+            self.child_links += usize::from(tool.child_session_id.is_some());
+            if let Some(child_session_id) = &tool.child_session_id {
+                self.child_session_references.push(child_session_id.clone());
+            }
+            self.background_tools += usize::from(tool.execution_mode == "background");
+            self.background_agents +=
+                usize::from(tool.execution_mode == "background" && tool.child_session_id.is_some());
+            if !matches!(tool.execution_mode.as_str(), "blocking" | "background") {
+                bail!(
+                    "fidelity verification found invalid execution mode {} for {}",
+                    tool.execution_mode,
+                    tool.tool_call_id
+                );
+            }
+            if tool.child_session_id.as_deref() == Some(turn.export_session_id.as_str()) {
+                bail!(
+                    "fidelity verification found self-referential child session for {}",
+                    tool.tool_call_id
+                );
+            }
+            if let Some(consumer_turn_index) = tool.consumer_turn_index {
+                if consumer_turn_index <= turn.turn_index {
+                    bail!(
+                        "fidelity verification found non-forward consumer for {}",
+                        tool.tool_call_id
+                    );
+                }
+                self.causal_references.push((
+                    turn.export_session_id.clone(),
+                    consumer_turn_index,
+                    tool.tool_call_id.clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        request_rows: usize,
+        tool_rows: usize,
+        sidecar_rows: usize,
+    ) -> Result<FidelityReport> {
+        for (session_id, consumer_turn_index, tool_call_id) in &self.causal_references {
+            let turn_count = self
+                .next_turn_by_session
+                .get(session_id)
+                .copied()
+                .unwrap_or(0);
+            if *consumer_turn_index >= turn_count {
+                bail!(
+                    "fidelity verification found missing consumer turn {} for {}",
+                    consumer_turn_index,
+                    tool_call_id
+                );
+            }
+        }
+        let unresolved_child_sessions = self
+            .child_session_references
+            .iter()
+            .filter(|session_id| !self.export_sessions.contains(*session_id))
+            .count();
+        if request_rows != self.oracle.requests.len()
+            || request_rows != self.seen_requests.len()
+            || sidecar_rows != request_rows
+        {
+            bail!(
+                "fidelity verification request mismatch: source={}, emitted={}, sidecar={}",
+                self.oracle.requests.len(),
+                request_rows,
+                sidecar_rows
+            );
+        }
+        if tool_rows != self.oracle.paired_tools
+            || self.tool_count != self.oracle.paired_tools
+            || self.tool_errors != self.oracle.tool_errors
+            || self.tools_by_class != self.oracle.tools_by_class
+        {
+            bail!(
+                "fidelity verification tool mismatch: source={}, emitted={}",
+                self.oracle.paired_tools,
+                tool_rows
+            );
+        }
+        if self.child_links != self.oracle.child_links
+            || self.background_tools != self.oracle.background_tools
+            || self.background_agents != self.oracle.background_agents
+        {
+            bail!(
+                "fidelity verification agent mismatch: child_links={}/{}, background_tools={}/{}, background_agents={}/{}",
+                self.oracle.child_links,
+                self.child_links,
+                self.oracle.background_tools,
+                self.background_tools,
+                self.oracle.background_agents,
+                self.background_agents
+            );
+        }
+        Ok(FidelityReport {
+            requests_verified: request_rows,
+            usage_requests_verified: self.usage_requests,
+            tools_verified: tool_rows,
+            child_links_verified: self.child_links,
+            background_tools: self.background_tools,
+            background_agents: self.background_agents,
+            background_completions_missing: self.oracle.background_completions_missing,
+            background_titles_unreplayable: self.oracle.background_titles,
+            cache_prefix_blocks_verified: self.cache_prefix_blocks_verified,
+            unmatched_tool_calls: self.oracle.unmatched_tool_calls,
+            unmatched_tool_results: self.oracle.unmatched_tool_results,
+            unresolved_child_sessions,
+        })
+    }
+}
+
 pub fn write_streamed_request_trace_rows<F>(
     output_path: &Path,
     sidecar_path: &Path,
@@ -109,6 +435,7 @@ where
         bail!("tokenizer_workers must be greater than 0");
     }
 
+    let mut verifier = FidelityVerifier::new(build_source_fidelity_oracle(&sessions)?);
     let mut parser_tokenizer = tokenizer_factory.create_worker()?;
     let mut states = FxHashMap::default();
     let mut heap = BinaryHeap::new();
@@ -144,6 +471,7 @@ where
 
     if states.is_empty() {
         write_empty_files(output_path, Some(sidecar_path))?;
+        stats.fidelity = verifier.finish(0, 0, 0)?;
         return Ok(stats);
     }
 
@@ -224,6 +552,13 @@ where
             materialize_replay_tokens(&turn, &ready_turn.tokens, state.replay_base.as_deref())
         };
         let input_sequence_hashes = sequence_hashes_for_tokens(&replay_tokens, config.block_size)?;
+        verifier.observe(
+            &turn,
+            &replay_tokens,
+            &input_sequence_hashes,
+            config.block_size,
+        )?;
+        let request_id = canonical_request_id(&turn.export_session_id, turn.turn_index);
         let mut agent_context = Map::from_iter([(
             "session_id".to_string(),
             Value::String(turn.export_session_id.clone()),
@@ -241,7 +576,7 @@ where
             "event_source": "harness",
             "agent_context": agent_context,
             "request": {
-                "request_id": format!("claude:{}:{}", turn.export_session_id, turn.turn_index),
+                "request_id": request_id,
                 "model": turn.model,
                 "input_tokens": replay_tokens.len(),
                 "output_tokens": turn.output_length,
@@ -278,6 +613,10 @@ where
                     "tool": {
                         "tool_call_id": tool.tool_call_id,
                         "tool_class": tool.tool_class,
+                        "source_request_id": request_id,
+                        "consumer_request_id": tool.consumer_turn_index.map(|turn_index| canonical_request_id(&turn.export_session_id, turn_index)),
+                        "child_session_id": tool.child_session_id,
+                        "execution_mode": tool.execution_mode,
                         "started_at_unix_ms": nonnegative_ms(tool.started_at_ms),
                         "ended_at_unix_ms": nonnegative_ms(tool.ended_at_ms),
                         "duration_ms": (tool.ended_at_ms - tool.started_at_ms).max(0) as f64,
@@ -327,6 +666,7 @@ where
             .join()
             .map_err(|_| anyhow!("tokenizer worker panicked"))?;
     }
+    stats.fidelity = verifier.finish(stats.row_count, stats.tool_row_count, stats.sidecar_count)?;
     output.flush()?;
     sidecar.flush()?;
     Ok(stats)
@@ -347,6 +687,10 @@ fn write_json_line(writer: &mut impl Write, value: &impl Serialize) -> Result<()
 
 fn nonnegative_ms(value: i64) -> u64 {
     value.max(0) as u64
+}
+
+fn canonical_request_id(session_id: &str, turn_index: usize) -> String {
+    format!("claude:{session_id}:{turn_index}")
 }
 
 fn materialize_replay_tokens(
@@ -654,6 +998,7 @@ mod tests {
                 head: Some(HeadTurn {
                     turn: TurnDraft {
                         session_id: "session-a".to_string(),
+                        source_request_id: "req-1".to_string(),
                         export_session_id: "session-a".to_string(),
                         export_parent_session_id: None,
                         turn_index: 1,
@@ -844,6 +1189,13 @@ mod tests {
                     2,
                     json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"raw-1","content":"bad","is_error":true}]}}),
                 ),
+                make_record(
+                    "session-a",
+                    "ai-title",
+                    0,
+                    3,
+                    json!({"type":"ai-title","aiTitle":"Background title"}),
+                ),
             ],
         );
 
@@ -863,6 +1215,9 @@ mod tests {
 
         assert_eq!(stats.row_count, 1);
         assert_eq!(stats.tool_row_count, 1);
+        assert_eq!(stats.fidelity.requests_verified, 1);
+        assert_eq!(stats.fidelity.tools_verified, 1);
+        assert_eq!(stats.fidelity.background_titles_unreplayable, 1);
         let rows = std::fs::read_to_string(&output_path).unwrap();
         assert!(rows.lines().any(|line| {
             let row: Value = serde_json::from_str(line).unwrap();
@@ -898,21 +1253,49 @@ mod tests {
                     "assistant",
                     1_100,
                     1,
-                    json!({"type":"assistant","message":{"id":"root-1","content":[{"type":"text","text":"spawning"}],"usage":{"output_tokens":2}}}),
+                    json!({"type":"assistant","requestId":"root-1","message":{"id":"root-1","content":[{"type":"tool_use","id":"agent-call","name":"Agent","input":{"run_in_background":true}}],"usage":{"output_tokens":2}}}),
                 ),
                 make_record(
                     "root-session",
                     "user",
-                    2_000,
+                    1_150,
+                    2,
+                    json!({"type":"user","toolUseResult":{"isAsync":true,"agentId":"child-agent","status":"async_launched"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"agent-call","content":"launched"}]}}),
+                ),
+                make_record(
+                    "root-session",
+                    "user",
+                    1_300,
                     4,
+                    json!({"type":"user","message":{"role":"user","content":"continue parent work"}}),
+                ),
+                make_record(
+                    "root-session",
+                    "assistant",
+                    1_400,
+                    5,
+                    json!({"type":"assistant","requestId":"root-2","message":{"id":"root-2","content":[{"type":"text","text":"working"}],"usage":{"output_tokens":1}}}),
+                ),
+                make_record(
+                    "root-session",
+                    "queue-operation",
+                    1_800,
+                    6,
+                    json!({"type":"queue-operation","operation":"enqueue","content":"<tool-use-id>agent-call</tool-use-id><status>completed</status>done"}),
+                ),
+                make_record(
+                    "root-session",
+                    "user",
+                    1_850,
+                    7,
                     json!({"type":"user","message":{"role":"user","content":"child done"}}),
                 ),
                 make_record(
                     "root-session",
                     "assistant",
-                    2_100,
-                    5,
-                    json!({"type":"assistant","message":{"id":"root-2","content":[{"type":"text","text":"finished"}],"usage":{"output_tokens":1}}}),
+                    1_950,
+                    8,
+                    json!({"type":"assistant","requestId":"root-3","message":{"id":"root-3","content":[{"type":"text","text":"finished"}],"usage":{"output_tokens":1}}}),
                 ),
             ],
         );
@@ -923,20 +1306,20 @@ mod tests {
                     "root-session",
                     "user",
                     1_200,
-                    2,
+                    3,
                     json!({"type":"user","isSidechain":true,"agentId":"child-agent","message":{"role":"user","content":"investigate"}}),
                 ),
                 make_record(
                     "root-session",
                     "assistant",
-                    1_300,
-                    3,
+                    1_700,
+                    9,
                     json!({"type":"assistant","isSidechain":true,"agentId":"child-agent","message":{"id":"child-1","content":[{"type":"text","text":"result"}],"usage":{"output_tokens":1}}}),
                 ),
             ],
         );
 
-        write_streamed_request_trace_rows(
+        let stats = write_streamed_request_trace_rows(
             &output_path,
             &sidecar_path,
             sessions,
@@ -949,6 +1332,12 @@ mod tests {
             },
         )
         .unwrap();
+
+        assert_eq!(stats.fidelity.requests_verified, 4);
+        assert_eq!(stats.fidelity.tools_verified, 1);
+        assert_eq!(stats.fidelity.child_links_verified, 1);
+        assert_eq!(stats.fidelity.background_tools, 1);
+        assert_eq!(stats.fidelity.background_agents, 1);
 
         let rows = std::fs::read_to_string(&output_path)
             .unwrap()
@@ -976,7 +1365,28 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(agentic_rows.len(), 3);
-        assert!(agentic_rows.iter().any(|row| !row.branches.is_empty()));
+        assert_eq!(agentic_rows.len(), 4);
+        let by_id = agentic_rows
+            .iter()
+            .map(|row| (row.request_id.as_str(), row))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            by_id["claude:root-session:0"].branches,
+            vec!["claude:child-agent:0"]
+        );
+        assert_eq!(
+            by_id["claude:child-agent:0"].request_kind.as_deref(),
+            Some("background_agent")
+        );
+        assert_eq!(
+            by_id["claude:root-session:1"].wait_for,
+            vec!["claude:root-session:0"]
+        );
+        assert!(
+            by_id["claude:root-session:2"]
+                .wait_for
+                .contains(&"claude:child-agent:0".to_string())
+        );
+        assert_eq!(by_id["claude:root-session:2"].tool_wait_ms, Some(100.0));
     }
 }

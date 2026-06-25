@@ -80,6 +80,8 @@ The exporter:
 - skips local command wrapper noise such as `<local-command-caveat>`, `<local-command-stdout>`, and command wrapper rows
 - preserves top-level tool-use and tool-result structure in hashed text form
 - emits matched `tool_end` / `tool_error` events with Claude-observed timing
+- records each tool's source request, consuming request, child session, and blocking/background execution mode when Claude provides that evidence
+- treats an asynchronous Agent launch result as an acknowledgement; the tool completes at its matching queued completion notification and joins the first later parent request
 - mines `progress` rows for text-free sidecar metrics only
 
 ## Output Semantics
@@ -91,3 +93,5 @@ The exporter:
 - When Claude usage is present, input length and cached-prefix shape come from `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. The sequence hashes are deterministic synthetic hashes because local Claude JSONL omits the system prompt and complete tool schemas needed to reproduce wire-exact token IDs. The sidecar records this as `replay_hash_fidelity=synthetic_usage_shaped`.
 - After compaction, future rows are built from the compact summary forward, not from pre-compact raw history.
 - Rows are written incrementally as turns are merged across sessions.
+- Every export runs a source-to-output fidelity verifier. Request cardinality/order/timing, usage, tool classes/errors, child links, cached-prefix hashes, and forward causal references fail the export on mismatch.
+- The verifier always prints non-fatal source limitations: synthetic KV hashes, unmatched tools, missing background completions, unresolved child sessions, and `ai-title` rows that lack enough timing/usage data to replay as requests.

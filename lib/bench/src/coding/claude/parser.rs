@@ -75,11 +75,15 @@ pub struct ToolDraft {
     pub ended_at_ms: i64,
     pub is_error: bool,
     pub output_bytes: usize,
+    pub child_session_id: Option<String>,
+    pub consumer_turn_index: Option<usize>,
+    pub execution_mode: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct TurnDraft {
     pub session_id: String,
+    pub source_request_id: String,
     pub export_session_id: String,
     pub export_parent_session_id: Option<String>,
     pub turn_index: usize,
@@ -94,6 +98,30 @@ pub struct TurnDraft {
     pub delay_ms: Option<i64>,
     pub tools: Vec<ToolDraft>,
     pub sidecar: Value,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SourceRequestExpectation {
+    pub input_length: Option<usize>,
+    pub cache_read_input_tokens: Option<usize>,
+    pub output_length: Option<usize>,
+    pub request_start_ms: i64,
+    pub assistant_end_ms: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SourceFidelityOracle {
+    pub requests: BTreeMap<(String, String), SourceRequestExpectation>,
+    pub tools_by_class: BTreeMap<String, usize>,
+    pub paired_tools: usize,
+    pub tool_errors: usize,
+    pub child_links: usize,
+    pub background_tools: usize,
+    pub background_agents: usize,
+    pub background_completions_missing: usize,
+    pub background_titles: usize,
+    pub unmatched_tool_calls: usize,
+    pub unmatched_tool_results: usize,
 }
 
 #[derive(Debug, Default)]
@@ -123,6 +151,7 @@ pub struct SessionTurnBuilder {
     records: Vec<TraceRecord>,
     top_level_indices: Vec<usize>,
     progress_metrics_index: FxHashMap<String, CachedProgressMetrics>,
+    request_index_by_group_key: FxHashMap<String, usize>,
     top_level_cursor: usize,
     normalizer: ToolIdNormalizer,
     conversation_entries: Vec<ConversationEntry>,
@@ -131,6 +160,7 @@ pub struct SessionTurnBuilder {
     previous_assistant_end_ms: Option<i64>,
     turn_index: usize,
     pending_compact_reset: bool,
+    preserve_session_ids: bool,
 }
 
 impl SessionTurnBuilder {
@@ -159,7 +189,7 @@ impl SessionTurnBuilder {
 
         let progress_index = build_progress_index(&records);
         let progress_metrics_index = build_progress_metrics_index(&progress_index, &records);
-        let top_level_indices = records
+        let top_level_indices: Vec<usize> = records
             .iter()
             .enumerate()
             .filter_map(|(index, record)| {
@@ -174,6 +204,18 @@ impl SessionTurnBuilder {
                 is_top_level.then_some(index)
             })
             .collect();
+        let mut request_index_by_group_key = FxHashMap::default();
+        for index in &top_level_indices {
+            let record = &records[*index];
+            if record.row_type != "assistant" {
+                continue;
+            }
+            let group_key = assistant_group_key(record);
+            let next_index = request_index_by_group_key.len();
+            request_index_by_group_key
+                .entry(group_key)
+                .or_insert(next_index);
+        }
 
         Self {
             session_id: trace_id,
@@ -182,6 +224,7 @@ impl SessionTurnBuilder {
             records,
             top_level_indices,
             progress_metrics_index,
+            request_index_by_group_key,
             top_level_cursor: 0,
             normalizer: ToolIdNormalizer::default(),
             conversation_entries: Vec::new(),
@@ -190,6 +233,7 @@ impl SessionTurnBuilder {
             previous_assistant_end_ms: None,
             turn_index: 0,
             pending_compact_reset: false,
+            preserve_session_ids,
         }
     }
 
@@ -233,6 +277,10 @@ impl SessionTurnBuilder {
             while self.top_level_cursor < self.top_level_indices.len() {
                 let next_index = self.top_level_indices[self.top_level_cursor];
                 let next_record = &self.records[next_index];
+                if next_record.row_type == "system" && !is_compact_boundary(next_record) {
+                    self.top_level_cursor += 1;
+                    continue;
+                }
                 if next_record.row_type == "user" && is_tool_result_user_record(next_record) {
                     interleaved_user_indices.push(next_index);
                     self.top_level_cursor += 1;
@@ -262,6 +310,9 @@ impl SessionTurnBuilder {
                 &group_summary.top_level_tool_calls,
                 &interleaved_user_indices,
                 &self.records,
+                &self.request_index_by_group_key,
+                &group_key,
+                self.preserve_session_ids,
             )?;
 
             let top_level_tool_names = group_summary
@@ -294,7 +345,10 @@ impl SessionTurnBuilder {
                 );
             }
             sidecar.insert("turn_index".to_string(), json!(self.turn_index));
-            sidecar.insert("source_request_id".to_string(), Value::String(group_key));
+            sidecar.insert(
+                "source_request_id".to_string(),
+                Value::String(group_key.clone()),
+            );
             sidecar.insert(
                 "num_messages_in_context".to_string(),
                 json!(self.conversation_entries.len()),
@@ -386,6 +440,7 @@ impl SessionTurnBuilder {
 
             let turn = TurnDraft {
                 session_id: self.session_id.clone(),
+                source_request_id: group_key,
                 export_session_id: self.export_session_id.clone(),
                 export_parent_session_id: self.export_parent_session_id.clone(),
                 turn_index: self.turn_index,
@@ -474,18 +529,23 @@ pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<FxHashMap<String, V
                 .get("type")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let timestamp_raw = payload.get("timestamp").and_then(Value::as_str);
-
-            let (Some(session_id), Some(row_type), Some(timestamp_raw)) =
-                (session_id, row_type, timestamp_raw)
-            else {
+            let (Some(session_id), Some(row_type)) = (session_id, row_type) else {
                 source_order += 1;
                 continue;
             };
-
-            let Ok(timestamp_ms) = parse_utc_timestamp_ms(timestamp_raw) else {
-                source_order += 1;
-                continue;
+            let timestamp_ms = match payload.get("timestamp").and_then(Value::as_str) {
+                Some(timestamp) => match parse_utc_timestamp_ms(timestamp) {
+                    Ok(timestamp_ms) => timestamp_ms,
+                    Err(_) => {
+                        source_order += 1;
+                        continue;
+                    }
+                },
+                None if row_type == "ai-title" => 0,
+                None => {
+                    source_order += 1;
+                    continue;
+                }
             };
 
             let trace_id = agent_id.clone().unwrap_or_else(|| session_id.clone());
@@ -529,7 +589,189 @@ pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<FxHashMap<String, V
     Ok(sessions)
 }
 
-fn assistant_group_key(record: &TraceRecord) -> String {
+pub fn build_source_fidelity_oracle(
+    sessions: &FxHashMap<String, Vec<TraceRecord>>,
+) -> Result<SourceFidelityOracle> {
+    let mut oracle = SourceFidelityOracle::default();
+    let mut tool_calls: FxHashMap<(String, String), String> = FxHashMap::default();
+    let mut background_titles = BTreeSet::new();
+    let mut background_tool_ids = BTreeSet::new();
+    let mut completed_background_tool_ids = BTreeSet::new();
+
+    for (trace_id, records) in sessions {
+        let root_session_id = records
+            .first()
+            .map(|record| record.session_id.as_str())
+            .unwrap_or(trace_id);
+        let is_subagent = trace_id != root_session_id;
+        let mut pending_request_start_ms = None;
+
+        for record in records {
+            if record.row_type == "ai-title" {
+                let title = record
+                    .raw
+                    .get("aiTitle")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                background_titles.insert((record.session_id.clone(), title.to_string()));
+                continue;
+            }
+            if record.row_type == "queue-operation"
+                && record.raw.get("operation").and_then(Value::as_str) == Some("enqueue")
+                && let Some(raw_id) = record
+                    .raw
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .and_then(queued_tool_id)
+            {
+                completed_background_tool_ids.insert((trace_id.clone(), raw_id.to_string()));
+                continue;
+            }
+            let is_top_level = matches!(record.row_type.as_str(), "user" | "assistant")
+                && (is_subagent
+                    || !record
+                        .raw
+                        .get("isSidechain")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false));
+            if !is_top_level {
+                continue;
+            }
+
+            if record.row_type == "user" {
+                if should_skip_user_record(record)? {
+                    continue;
+                }
+                pending_request_start_ms = Some(record.timestamp_ms);
+                let message = object_field(&record.raw, "message");
+                for block in content_blocks(message.and_then(|message| message.get("content"))) {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                        continue;
+                    }
+                    let Some(raw_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let key = (trace_id.clone(), raw_id.to_string());
+                    let Some(tool_class) = tool_calls.remove(&key) else {
+                        oracle.unmatched_tool_results += 1;
+                        continue;
+                    };
+                    oracle.paired_tools += 1;
+                    *oracle.tools_by_class.entry(tool_class).or_insert(0) += 1;
+                    if block
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        oracle.tool_errors += 1;
+                    }
+                    if let Some(result) = record.raw.get("toolUseResult").and_then(Value::as_object)
+                    {
+                        let is_async = result
+                            .get("isAsync")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        if result.get("agentId").and_then(Value::as_str).is_some() {
+                            oracle.child_links += 1;
+                            oracle.background_agents += usize::from(is_async);
+                        }
+                        if is_async {
+                            oracle.background_tools += 1;
+                            background_tool_ids.insert(key);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let group_key = assistant_group_key(record);
+            let request_key = (trace_id.clone(), group_key);
+            if !oracle.requests.contains_key(&request_key) {
+                oracle.requests.insert(
+                    request_key.clone(),
+                    SourceRequestExpectation {
+                        request_start_ms: pending_request_start_ms
+                            .take()
+                            .unwrap_or(record.timestamp_ms),
+                        assistant_end_ms: record.timestamp_ms,
+                        ..Default::default()
+                    },
+                );
+            }
+            let expectation = oracle
+                .requests
+                .get_mut(&request_key)
+                .expect("request expectation was inserted");
+            expectation.assistant_end_ms = expectation.assistant_end_ms.max(record.timestamp_ms);
+            let Some(message) = object_field(&record.raw, "message") else {
+                continue;
+            };
+            if let Some(usage) = object_field(&Value::Object(message.clone()), "usage") {
+                let input_length = [
+                    "input_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ]
+                .into_iter()
+                .filter_map(|key| usage.get(key).and_then(Value::as_u64))
+                .fold(0_usize, |total, value| total.saturating_add(value as usize));
+                expectation.input_length = Some(
+                    expectation
+                        .input_length
+                        .unwrap_or_default()
+                        .max(input_length),
+                );
+                let cache_read = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                expectation.cache_read_input_tokens = Some(
+                    expectation
+                        .cache_read_input_tokens
+                        .unwrap_or_default()
+                        .max(cache_read),
+                );
+                if let Some(output_length) = usage.get("output_tokens").and_then(Value::as_u64) {
+                    expectation.output_length = Some(
+                        expectation
+                            .output_length
+                            .unwrap_or_default()
+                            .max(output_length as usize),
+                    );
+                }
+            }
+            for block in content_blocks(message.get("content")) {
+                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                    continue;
+                }
+                let Some(raw_id) = block.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let tool_class = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                tool_calls.insert((trace_id.clone(), raw_id.to_string()), tool_class);
+            }
+        }
+    }
+
+    oracle.background_titles = background_titles.len();
+    oracle.background_completions_missing = background_tool_ids
+        .difference(&completed_background_tool_ids)
+        .count();
+    oracle.unmatched_tool_calls = tool_calls.len();
+    Ok(oracle)
+}
+
+fn queued_tool_id(content: &str) -> Option<&str> {
+    let start = content.find("<tool-use-id>")? + "<tool-use-id>".len();
+    let end = content[start..].find("</tool-use-id>")? + start;
+    Some(&content[start..end])
+}
+
+pub(crate) fn assistant_group_key(record: &TraceRecord) -> String {
     if let Some(request_id) = record.raw.get("requestId").and_then(Value::as_str) {
         return request_id.to_string();
     }
@@ -636,6 +878,9 @@ fn pair_tool_results(
     calls: &[ToolCallSummary],
     user_indices: &[usize],
     records: &[TraceRecord],
+    request_index_by_group_key: &FxHashMap<String, usize>,
+    current_group_key: &str,
+    preserve_session_ids: bool,
 ) -> Result<Vec<ToolDraft>> {
     let calls_by_id = calls
         .iter()
@@ -659,6 +904,45 @@ fn pair_tool_results(
                 continue;
             };
             let content = flatten_block_content_text(block.get("content").unwrap_or(&Value::Null))?;
+            let tool_result = record.raw.get("toolUseResult").and_then(Value::as_object);
+            let is_async = tool_result
+                .and_then(|result| result.get("isAsync"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let child_session_id = tool_result
+                .and_then(|result| result.get("agentId"))
+                .and_then(Value::as_str)
+                .map(|id| {
+                    if preserve_session_ids {
+                        id.to_string()
+                    } else {
+                        anonymized_session_id(id)
+                    }
+                });
+            let (ended_at_ms, output_bytes, is_error, consumer_turn_index) = if is_async {
+                async_tool_completion(
+                    records,
+                    raw_id,
+                    record.source_order,
+                    request_index_by_group_key,
+                )
+                .unwrap_or((record.timestamp_ms, content.len(), false, None))
+            } else {
+                (
+                    record.timestamp_ms,
+                    content.len(),
+                    block
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    next_consumer_turn(
+                        records,
+                        record.source_order,
+                        current_group_key,
+                        request_index_by_group_key,
+                    ),
+                )
+            };
             tools.push(ToolDraft {
                 tool_call_id: call
                     .normalized_id
@@ -666,17 +950,78 @@ fn pair_tool_results(
                     .unwrap_or_else(|| "tool_unknown".to_string()),
                 tool_class: call.name.clone(),
                 started_at_ms: call.started_at_ms,
-                ended_at_ms: record.timestamp_ms,
-                is_error: block
-                    .get("is_error")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                output_bytes: content.len(),
+                ended_at_ms,
+                is_error,
+                output_bytes,
+                child_session_id,
+                consumer_turn_index,
+                execution_mode: if is_async {
+                    "background".to_string()
+                } else {
+                    "blocking".to_string()
+                },
             });
         }
     }
 
     Ok(tools)
+}
+
+fn next_consumer_turn(
+    records: &[TraceRecord],
+    after_source_order: u64,
+    current_group_key: &str,
+    request_index_by_group_key: &FxHashMap<String, usize>,
+) -> Option<usize> {
+    records
+        .iter()
+        .filter(|record| record.source_order > after_source_order && record.row_type == "assistant")
+        .find_map(|record| {
+            let group_key = assistant_group_key(record);
+            (group_key != current_group_key)
+                .then(|| request_index_by_group_key.get(&group_key).copied())
+                .flatten()
+        })
+}
+
+fn async_tool_completion(
+    records: &[TraceRecord],
+    raw_tool_id: &str,
+    after_source_order: u64,
+    request_index_by_group_key: &FxHashMap<String, usize>,
+) -> Option<(i64, usize, bool, Option<usize>)> {
+    let tool_marker = format!("<tool-use-id>{raw_tool_id}</tool-use-id>");
+    let completion = records.iter().find(|record| {
+        record.source_order > after_source_order
+            && record.row_type == "queue-operation"
+            && record.raw.get("operation").and_then(Value::as_str) == Some("enqueue")
+            && record
+                .raw
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains(&tool_marker))
+    })?;
+    let content = completion
+        .raw
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let consumer_turn_index = records
+        .iter()
+        .filter(|record| {
+            record.source_order > completion.source_order && record.row_type == "assistant"
+        })
+        .find_map(|record| {
+            request_index_by_group_key
+                .get(&assistant_group_key(record))
+                .copied()
+        });
+    Some((
+        completion.timestamp_ms,
+        content.len(),
+        !content.contains("<status>completed</status>"),
+        consumer_turn_index,
+    ))
 }
 
 fn sanitize_structure(value: &Value, normalizer: &mut ToolIdNormalizer) -> Value {
@@ -1276,27 +1621,33 @@ mod tests {
                 json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"tool_use","id":"raw-1","name":"Read","input":{}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
             ),
             make_record(
+                "system",
+                1_250,
+                3,
+                json!({"type":"system","subtype":"turn_duration"}),
+            ),
+            make_record(
                 "user",
                 1_300,
-                3,
+                4,
                 json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"raw-1","content":"ok"}]}}),
             ),
             make_record(
                 "assistant",
                 1_400,
-                4,
+                5,
                 json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"tool_use","id":"raw-2","name":"Bash","input":{}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
             ),
             make_record(
                 "user",
                 1_500,
-                5,
+                6,
                 json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"raw-2","content":"failed","is_error":true}]}}),
             ),
             make_record(
                 "assistant",
                 1_600,
-                6,
+                7,
                 json!({"type":"assistant","requestId":"req-2","message":{"id":"msg-2","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":10,"output_tokens":2}}}),
             ),
         ];
@@ -1483,6 +1834,73 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["[user] before compact", "[user] compacted summary"]
         );
+    }
+
+    #[test]
+    fn background_agent_joins_only_after_completion_notification() {
+        let records = vec![
+            make_record(
+                "user",
+                1_000,
+                0,
+                json!({"type":"user","message":{"role":"user","content":"start agent"}}),
+            ),
+            make_record(
+                "assistant",
+                1_100,
+                1,
+                json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"tool_use","id":"agent-call","name":"Agent","input":{"run_in_background":true}}],"usage":{"output_tokens":2}}}),
+            ),
+            make_record(
+                "user",
+                1_150,
+                2,
+                json!({"type":"user","toolUseResult":{"isAsync":true,"agentId":"child-agent","status":"async_launched"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"agent-call","content":"launched"}]}}),
+            ),
+            make_record(
+                "user",
+                1_300,
+                3,
+                json!({"type":"user","message":{"role":"user","content":"keep working"}}),
+            ),
+            make_record(
+                "assistant",
+                1_400,
+                4,
+                json!({"type":"assistant","requestId":"req-2","message":{"id":"msg-2","content":[{"type":"text","text":"still working"}],"usage":{"output_tokens":2}}}),
+            ),
+            make_record(
+                "queue-operation",
+                1_800,
+                5,
+                json!({"type":"queue-operation","operation":"enqueue","content":"<tool-use-id>agent-call</tool-use-id><status>completed</status>done"}),
+            ),
+            make_record(
+                "user",
+                1_850,
+                6,
+                json!({"type":"user","message":{"role":"user","content":"use result"}}),
+            ),
+            make_record(
+                "assistant",
+                1_900,
+                7,
+                json!({"type":"assistant","requestId":"req-3","message":{"id":"msg-3","content":[{"type":"text","text":"finished"}],"usage":{"output_tokens":1}}}),
+            ),
+        ];
+
+        let mut builder = SessionTurnBuilder::new("session-1".to_string(), records, true);
+        let turns = std::iter::from_fn(|| builder.next_turn(&mut StubTokenizer).transpose())
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].tools.len(), 1);
+        let tool = &turns[0].tools[0];
+        assert_eq!(tool.ended_at_ms, 1_800);
+        assert_eq!(tool.consumer_turn_index, Some(2));
+        assert_eq!(tool.child_session_id.as_deref(), Some("child-agent"));
+        assert_eq!(tool.execution_mode, "background");
     }
 
     #[test]

@@ -218,6 +218,10 @@ mod tests {
             tool: Some(RequestTraceToolEvent {
                 tool_call_id: "tool-1".to_string(),
                 tool_class: "web_search".to_string(),
+                source_request_id: None,
+                consumer_request_id: None,
+                child_session_id: None,
+                execution_mode: None,
                 started_at_unix_ms: None,
                 ended_at_unix_ms: None,
                 duration_ms: Some(f64::NAN),
