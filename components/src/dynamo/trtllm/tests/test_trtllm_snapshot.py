@@ -7,6 +7,7 @@ import pytest
 
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.snapshot import (
+    _should_prefetch_model_for_snapshot,
     _SnapshotRuntimeProxy,
     _validate_supported_snapshot_config,
 )
@@ -56,8 +57,40 @@ def _runtime_config(**overrides):
     return SimpleNamespace(**values)
 
 
+def _prefetch_config(**overrides):
+    values = {
+        "model": "Qwen/Qwen3-0.6B",
+        "load_format": "auto",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_snapshot_config_accepts_single_gpu_aggregated_text_path():
     _validate_supported_snapshot_config(_snapshot_config())
+
+
+def test_snapshot_prefetches_remote_hf_model_before_forcing_offline_mode():
+    assert _should_prefetch_model_for_snapshot(_prefetch_config()) is True
+
+
+def test_snapshot_prefetch_skips_local_model_path(tmp_path):
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+
+    assert (
+        _should_prefetch_model_for_snapshot(
+            _prefetch_config(model=str(model_path)),
+        )
+        is False
+    )
+
+
+def test_snapshot_prefetch_skips_external_model_loader():
+    assert (
+        _should_prefetch_model_for_snapshot(_prefetch_config(load_format="gms"))
+        is False
+    )
 
 
 @pytest.mark.parametrize(

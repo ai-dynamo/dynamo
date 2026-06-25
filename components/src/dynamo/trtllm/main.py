@@ -10,6 +10,7 @@ from typing import Any
 
 import uvloop
 
+from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.lifecycle import (
     SnapshotConfig,
     configure_snapshot_capture_env,
@@ -20,6 +21,7 @@ from dynamo.runtime.logging import configure_dynamo_logging, get_bool_env_var
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.snapshot import (
+    _should_prefetch_model_for_snapshot,
     _SnapshotRuntimeProxy,
     _validate_supported_snapshot_config,
 )
@@ -113,6 +115,12 @@ async def worker(argv: list[str] | None = None):
         )
     else:
         _validate_supported_snapshot_config(config)
+        # Snapshot mode forces HF_HUB_OFFLINE=1 before TRT-LLM engine creation
+        # so Hugging Face sockets are not captured. Warm the cache first when
+        # TRT-LLM will load a normal HF model ID; external loaders such as GMS
+        # own model acquisition themselves.
+        if _should_prefetch_model_for_snapshot(config):
+            await fetch_model(config.model)
         configure_snapshot_capture_env()
         # vLLM/SGLang snapshot paths build the engine before creating a runtime.
         # TRT-LLM's engine is built inside init_worker(), so pass a guarded

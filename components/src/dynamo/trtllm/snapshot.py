@@ -10,6 +10,14 @@ from typing import Any
 
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 
+_EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
+
+
+def _should_prefetch_model_for_snapshot(config: Any) -> bool:
+    if os.path.exists(config.model):
+        return False
+    return config.load_format not in _EXTERNAL_MODEL_LOAD_FORMATS
+
 
 def _create_runtime(
     discovery_backend: str,

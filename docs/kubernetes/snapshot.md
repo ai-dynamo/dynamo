@@ -633,7 +633,7 @@ If the manifest already carries snapshot target metadata, it must agree with the
 ## Planned Features
 
 - Stable multi-GPU and multinode support
-- TensorRT-LLM support
+- Broader TensorRT-LLM coverage beyond the current single-GPU aggregated text path
 
 ## Related Documentation
 
