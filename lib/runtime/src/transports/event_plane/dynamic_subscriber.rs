@@ -103,7 +103,14 @@ impl DynamicSubscriber {
                 match event_result {
                     Ok(DiscoveryEvent::Added(instance)) => {
                         tracing::info!(instance = ?instance, "Discovery Added event received");
-                        let instance_id = instance.instance_id().to_string();
+                        // Track by the full instance ID path, not the bare u64
+                        // instance_id: a single worker process can register
+                        // multiple EventChannels for the same (namespace,
+                        // component, topic) — one ZMQ-direct publisher per
+                        // dp_rank — that all share the process-level instance_id.
+                        // Keying on instance_id alone would collapse them and
+                        // connect to only one endpoint per worker.
+                        let instance_id = Self::tracking_key(&instance.id());
 
                         // Extract ZMQ endpoint from the instance
                         if let Some(endpoint) = Self::extract_zmq_endpoint(&instance) {
@@ -158,7 +165,7 @@ impl DynamicSubscriber {
                         }
                     }
                     Ok(DiscoveryEvent::Removed(instance_id)) => {
-                        let id_str = instance_id.instance_id().to_string();
+                        let id_str = Self::tracking_key(&instance_id);
                         tracing::info!(
                             instance_id = %id_str,
                             "ZMQ publisher removed from discovery, cancelling endpoint stream"
@@ -198,6 +205,20 @@ impl DynamicSubscriber {
         };
 
         Ok(Box::pin(stream))
+    }
+
+    /// Build the per-publisher tracking key used for `active_endpoints`.
+    ///
+    /// Uses the full discovery path (which, for EventChannels, includes the
+    /// optional per-publisher discriminator) so that multiple publishers from
+    /// the same process — sharing one `instance_id` — are tracked and torn down
+    /// independently. The same key is derived from both `Added` and `Removed`
+    /// events, so cancellation-on-removal still targets the correct stream.
+    fn tracking_key(id: &DiscoveryInstanceId) -> String {
+        match id {
+            DiscoveryInstanceId::EventChannel(ecid) => ecid.to_path(),
+            other => other.instance_id().to_string(),
+        }
     }
 
     /// Extract ZMQ endpoint from a discovery instance.

@@ -503,6 +503,7 @@ mod tests {
                 topic: "test-topic".to_string(),
                 instance_id: i,
                 transport: EventTransport::zmq(format!("tcp://localhost:{}", 5000 + i)),
+                discriminator: None,
             };
             metadata.register_event_channel(instance).unwrap();
         }
@@ -536,9 +537,117 @@ mod tests {
             topic: "test-topic".to_string(),
             instance_id: 0,
             transport: EventTransport::zmq("tcp://localhost:5000"),
+            discriminator: None,
         };
         metadata.unregister_event_channel(&instance).unwrap();
         assert_eq!(metadata.get_all_event_channels().len(), 2);
+    }
+
+    /// Reproduces the multi-publisher-per-process collision: several ZMQ-direct
+    /// publishers for the same (namespace, component, topic) share one
+    /// process-level `instance_id`. Without the per-publisher discriminator they
+    /// collapse onto a single `event_channels` key and overwrite each other
+    /// (only the last survives). With the discriminator (the bound port) each
+    /// gets a distinct key, and the component-scoped query still returns them
+    /// all — exactly what the router needs to connect to every dp_rank.
+    #[tokio::test]
+    async fn test_event_channel_per_publisher_discriminator() {
+        use crate::discovery::EventTransport;
+
+        let instance_id = 0xABCDu64; // single shared process instance_id
+
+        // Without a discriminator: 4 publishers, one shared key -> collapse to 1.
+        let mut collapsed = DiscoveryMetadata::new();
+        for port in [5001u16, 5002, 5003, 5004] {
+            collapsed
+                .register_event_channel(DiscoveryInstance::EventChannel {
+                    namespace: "test".to_string(),
+                    component: "mocker".to_string(),
+                    topic: "kv-events".to_string(),
+                    instance_id,
+                    transport: EventTransport::zmq(format!("tcp://10.0.0.1:{port}")),
+                    discriminator: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            collapsed.get_all_event_channels().len(),
+            1,
+            "shared instance_id with no discriminator must collide to a single key"
+        );
+
+        // With a per-publisher discriminator (the bound port): 4 distinct keys.
+        let mut distinct = DiscoveryMetadata::new();
+        for port in [5001u16, 5002, 5003, 5004] {
+            distinct
+                .register_event_channel(DiscoveryInstance::EventChannel {
+                    namespace: "test".to_string(),
+                    component: "mocker".to_string(),
+                    topic: "kv-events".to_string(),
+                    instance_id,
+                    transport: EventTransport::zmq(format!("tcp://10.0.0.1:{port}")),
+                    discriminator: Some(u64::from(port)),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            distinct.get_all_event_channels().len(),
+            4,
+            "distinct discriminators must produce one key per publisher"
+        );
+
+        // The router's component-scoped query must still match all of them.
+        let filtered = distinct.filter(&DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+            "test",
+            "mocker",
+            "kv-events",
+        )));
+        assert_eq!(filtered.len(), 4);
+
+        // Unregister targets exactly one publisher's key (its own discriminator).
+        distinct
+            .unregister_event_channel(&DiscoveryInstance::EventChannel {
+                namespace: "test".to_string(),
+                component: "mocker".to_string(),
+                topic: "kv-events".to_string(),
+                instance_id,
+                transport: EventTransport::zmq("tcp://10.0.0.1:5002"),
+                discriminator: Some(5002),
+            })
+            .unwrap();
+        assert_eq!(distinct.get_all_event_channels().len(), 3);
+    }
+
+    /// EventChannelInstanceId::to_path / from_path round-trips for both the
+    /// no-discriminator (NATS/broker) and with-discriminator (ZMQ direct) forms,
+    /// and the two forms never produce the same path for a shared instance_id.
+    #[test]
+    fn test_event_channel_instance_id_path_roundtrip() {
+        use crate::discovery::EventChannelInstanceId;
+
+        let no_disc = EventChannelInstanceId {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            topic: "kv-events".to_string(),
+            instance_id: 0x1234,
+            discriminator: None,
+        };
+        let path = no_disc.to_path();
+        assert_eq!(path, "ns/comp/kv-events/1234");
+        assert_eq!(EventChannelInstanceId::from_path(&path).unwrap(), no_disc);
+
+        let with_disc = EventChannelInstanceId {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            topic: "kv-events".to_string(),
+            instance_id: 0x1234,
+            discriminator: Some(0x162a),
+        };
+        let path = with_disc.to_path();
+        assert_eq!(path, "ns/comp/kv-events/1234/162a");
+        assert_eq!(EventChannelInstanceId::from_path(&path).unwrap(), with_disc);
+
+        assert_ne!(no_disc.to_path(), with_disc.to_path());
     }
 
     #[tokio::test]
@@ -574,6 +683,7 @@ mod tests {
             topic: "test-topic".to_string(),
             instance_id: 3,
             transport: EventTransport::zmq("tcp://localhost:5000"),
+            discriminator: None,
         };
         metadata.register_event_channel(event_channel).unwrap();
 
