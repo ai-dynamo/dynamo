@@ -91,7 +91,7 @@ logger = logging.getLogger(__name__)
 _CORPUS_DIR = Path(__file__).resolve().parent
 _MANIFEST_PATH = _CORPUS_DIR / "manifest.json"
 _POLICY_PATH = _CORPUS_DIR.parent / "policy" / "licenses.toml"
-_SIZE_CAP_BYTES = 4 * 1024 * 1024  # 4 MB; 1 MB headroom under GitLab's 5 MB pain point
+_SIZE_CAP_BYTES = 5 * 1024 * 1024  # 5 MB cap for large XPU baselines; keep aligned with CI artifact constraints
 _DEFAULT_FROM_SBOM_CACHE_DIR = (
     Path(os.environ.get("TMPDIR", "/tmp")) / "dynamo-compliance-syft-cache"
 )
