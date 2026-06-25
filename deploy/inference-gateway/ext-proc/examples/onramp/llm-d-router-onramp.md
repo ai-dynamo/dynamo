@@ -137,7 +137,6 @@ Required alignment:
 - vLLM `--block-size` must match `tokenProcessorConfig.blockSize`.
 - vLLM KV topic should match `kvEventsConfig.topicFilter` (default prefix `kv@`).
 
-
 ### 4. Add llm-d EPP to your deployment
 
 Deploy llm-d Router in gateway mode with a precise-prefix config.
@@ -260,7 +259,7 @@ Install (local chart path):
 
 ```bash
 helm upgrade -i qwen-router \
-  /home/atchernych/code/gaie/llm-d-router/config/charts/llm-d-router-gateway \
+  llm-d-router/config/charts/llm-d-router-gateway \
   -n <ns> \
   -f values-llmd-gateway.yaml
 ```
@@ -273,6 +272,167 @@ helm upgrade -i qwen-router \
   -n <ns> \
   -f values-llmd-gateway.yaml \
   --version <router-chart-version>
+```
+
+Rendered YAMLs from the Helm chart:
+
+```bash
+helm template qwen-router \
+  llm-d-router/config/charts/llm-d-router-gateway \
+  --namespace default \
+  --set router.modelServers.matchLabels.app=vllm-qwen \
+  --set httpRoute.create=true \
+  --set httpRoute.inferenceGatewayName=inference-gateway \
+  -s templates/epp.yaml \
+  -s templates/httproute.yaml
+```
+
+Rendered `ConfigMap` (default plugin config):
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qwen-router-epp
+  namespace: default
+data:
+  default-plugins.yaml: |
+    apiVersion: llm-d.ai/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: queue-scorer
+    - type: kv-cache-utilization-scorer
+    - type: prefix-cache-scorer
+    - type: metrics-data-source
+      parameters:
+        scheme: "http"
+        path: "/metrics"
+        insecureSkipVerify: true
+    - type: core-metrics-extractor
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - pluginRef: queue-scorer
+        weight: 2
+      - pluginRef: kv-cache-utilization-scorer
+        weight: 2
+      - pluginRef: prefix-cache-scorer
+        weight: 3
+```
+
+Rendered `Service`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-router-epp
+  namespace: default
+  labels:
+    app.kubernetes.io/name: qwen-router-epp
+    app.kubernetes.io/version: "0.0.0"
+spec:
+  selector:
+    llm-d-router-gateway: qwen-router-epp
+  ports:
+    - name: grpc-ext-proc
+      protocol: TCP
+      port: 9002
+    - name: http-metrics
+      protocol: TCP
+      port: 9090
+  type: ClusterIP
+```
+
+Rendered `Deployment`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-router-epp
+  namespace: default
+  labels:
+    app.kubernetes.io/name: qwen-router-epp
+    app.kubernetes.io/version: "0.0.0"
+    llm-d.ai/igw-mode: llm-d-router-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      llm-d-router-gateway: qwen-router-epp
+  template:
+    metadata:
+      labels:
+        llm-d-router-gateway: qwen-router-epp
+        llm-d.ai/igw-mode: llm-d-router-gateway
+    spec:
+      serviceAccountName: qwen-router-epp
+      containers:
+        - name: epp
+          image: ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main
+          args:
+            - --pool-name
+            - qwen-router
+            - --pool-namespace
+            - default
+            - --pool-group
+            - "inference.networking.k8s.io"
+            - --zap-encoder
+            - "json"
+            - --config-file
+            - "/config/default-plugins.yaml"
+            - --grpc-health-port
+            - "9003"
+            - --tracing=false
+```
+
+Rendered `InferencePool`:
+
+```yaml
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: qwen-router
+  namespace: default
+spec:
+  targetPorts:
+    - number: 8000
+  appProtocol: "http"
+  selector:
+    matchLabels:
+      app: "vllm-qwen"
+  endpointPickerRef:
+    name: qwen-router-epp
+    port:
+      number: 9002
+    failureMode: FailOpen
+```
+
+Rendered `HTTPRoute`:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen-router
+  namespace: default
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+  rules:
+    - backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: qwen-router
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 300s
 ```
 
 If `InferencePool` and `HTTPRoute` are already managed separately, set:
