@@ -95,8 +95,6 @@ async def test_trtllm_engine_all(started_engine):
     await _check_generate_streams_chunks_with_coherent_final_usage(started_engine)
     await _check_abort_and_cleanup_are_safe_before_start()
     await _check_abort_unknown_request_on_running_engine(started_engine)
-    await _check_drain_is_noop_for_aggregated_workers()
-    await _check_drain_returns_when_engine_idle()
 
 
 async def _check_start_populates_registration_metadata(started_engine):
@@ -104,9 +102,10 @@ async def _check_start_populates_registration_metadata(started_engine):
     from ``from_args``'s parsed config through to ``EngineConfig`` —
     mismatches here surface as incorrect Rust-side routing decisions."""
     _engine, cfg = started_engine
-    assert cfg.context_length == 1024
-    assert cfg.kv_cache_block_size > 0
-    assert cfg.max_num_seqs == 4
+    assert cfg.llm is not None
+    assert cfg.llm.context_length == 1024
+    assert cfg.llm.kv_cache_block_size > 0
+    assert cfg.llm.max_num_seqs == 4
 
 
 async def _check_generate_streams_chunks_with_coherent_final_usage(started_engine):
@@ -151,69 +150,8 @@ async def _check_abort_unknown_request_on_running_engine(started_engine):
     engine, _ = started_engine
     await engine.abort(cast(object, _FakeContext("never-submitted")))  # type: ignore[arg-type]
 
-
-# ----------------------------------------------------------------------
-# Drain unit tests — exercised on the engine instance directly without
-# starting a real engine. The fixture stubs `engine.llm.get_stats_async`
-# so we don't need a GPU to assert the drain contract.
-# ----------------------------------------------------------------------
-
-
-class _StubLLM:
-    """Minimal ``engine.llm`` stand-in. Each ``get_stats_async()`` call
-    returns the next pre-canned stat dict from a queue."""
-
-    def __init__(self, stats_sequence: list[dict]) -> None:
-        self._stats = list(stats_sequence)
-
-    def get_stats_async(self, timeout: float):  # noqa: ARG002
-        async def _gen():
-            if not self._stats:
-                # No more stats: pretend the engine timed out the poll.
-                # The drain loop swallows this and re-polls.
-                raise RuntimeError("no stats")
-            yield self._stats.pop(0)
-
-        return _gen()
-
-
-class _StubInner:
-    """Stand-in for the wrapped TensorRTLLMEngine — exposes only `llm`."""
-
-    def __init__(self, llm: _StubLLM) -> None:
-        self.llm = llm
-
-
-def _engine_with_stub(disagg_mode, stats_sequence: list[dict]):
-    """Bypass __init__ so we don't need real TRT-LLM state."""
-    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-
-    engine = TrtllmLLMEngine.__new__(TrtllmLLMEngine)
-    engine.disaggregation_mode = disagg_mode
-    engine._engine = _StubInner(_StubLLM(stats_sequence))
-    return engine
-
-
-async def _check_drain_is_noop_for_aggregated_workers():
-    """Drain only matters on prefill workers (in-flight NIXL transfers).
-    Aggregated/decode workers exit immediately so shutdown isn't gated
-    on an unnecessary stats poll."""
-    from dynamo.trtllm.constants import DisaggregationMode as TrtDisagg
-
-    engine = _engine_with_stub(TrtDisagg.AGGREGATED, [{"numActiveRequests": 5}])
-    await engine.drain()  # must return without consuming a stat
-
-
-async def _check_drain_returns_when_engine_idle():
-    """Polls until active+queued == 0, then returns. The drain loop must
-    not hang once the engine reports idle."""
-    from dynamo.trtllm.constants import DisaggregationMode as TrtDisagg
-
-    engine = _engine_with_stub(
-        TrtDisagg.PREFILL,
-        [
-            {"numActiveRequests": 2, "numQueuedRequests": 1},
-            {"numActiveRequests": 0, "numQueuedRequests": 0},
-        ],
-    )
-    await engine.drain()
+    # NOTE: TRT-LLM deliberately has no `is_quiescent` override (it inherits the
+    # base `None`), so there is nothing to unit-test here. See the rationale in
+    # `TrtllmLLMEngine` — there's no reliable prefill-transfer quiescence signal,
+    # so the framework drains for the full budget. SGLang's counter-based
+    # override is covered by its own engine tests.

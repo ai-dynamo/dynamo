@@ -14,6 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::common::handoff::HandoffId;
 #[cfg(feature = "kvbm-offload")]
 use crate::common::protocols::G1;
 use crate::common::protocols::{
@@ -22,20 +23,24 @@ use crate::common::protocols::{
 };
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
-use crate::common::utils::compute_prefill_handoff_delay_ms;
+use crate::common::utils::{compute_prefill_handoff_delay_ms, prefill_handoff_transfer_timing};
 use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
+use crate::kv_manager::kvbm_backend::VllmDestinationReservation;
 use crate::replay::TraceCollector;
 use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
-    AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
-    MockerMetrics, RouterEventVisibility, accept_length_sample, build_fpm_snapshot,
-    capture_router_event_sink,
+    ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
+    CapturedRouterEventBuffer, DestinationHolds, EnginePassResult, ForwardPassSnapshot,
+    MockerMetrics, PendingDestinations, RemovedSource, RouterEventVisibility, SchedulerCommand,
+    SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent, SourceCompletion,
+    SourceHolds, accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestStatus {
+    WaitingForRemoteKv,
     Waiting,
     Running,
     Preempted,
@@ -49,6 +54,11 @@ pub(crate) struct VllmRequestState {
 }
 
 impl VllmRequestState {
+    fn prompt_is_prebuilt(&self) -> bool {
+        self.num_computed_tokens >= self.sequence.num_input_tokens()
+            && self.sequence.num_allocated_tokens() >= self.sequence.num_input_tokens()
+    }
+
     fn debug_assert_invariants(&self, _uuid: Uuid) {
         #[cfg(debug_assertions)]
         {
@@ -138,6 +148,12 @@ impl SchedulerState {
         self.waiting.push_back(uuid);
     }
 
+    fn insert_waiting(&mut self, uuid: Uuid, request: VllmRequestState) {
+        debug_assert!(!self.requests.contains_key(&uuid));
+        self.requests.insert(uuid, request);
+        self.push_waiting(uuid);
+    }
+
     fn prepend_waiting(&mut self, uuid: Uuid) {
         if !self.waiting_members.insert(uuid) {
             return;
@@ -145,32 +161,43 @@ impl SchedulerState {
         self.waiting.push_front(uuid);
     }
 
-    /// Remove `uuid` from the waiting queue (front-only) and from the
+    /// Remove `uuid` from the waiting queue and from the
     /// `waiting_members` set. Shared between `transition_to_running`
     /// (which then promotes to running) and the offload admission
     /// hook's parking path (which keeps the request in `Waiting`
     /// status while parked on a swap-in).
     fn remove_from_waiting(&mut self, uuid: Uuid) {
-        if self.waiting.front().copied() == Some(uuid) {
-            self.waiting.pop_front();
+        if let Some(position) = self.waiting.iter().position(|waiting| *waiting == uuid) {
+            self.waiting.remove(position);
         }
         self.waiting_members.remove(&uuid);
     }
 
-    fn next_waiting_uuid(&mut self) -> Option<Uuid> {
+    fn next_waiting_uuid(&mut self, prefer_materialized: bool) -> Option<Uuid> {
         loop {
             let uuid = *self.waiting.front()?;
-            let Some(request) = self.requests.get(&uuid) else {
-                self.waiting.pop_front();
-                self.waiting_members.remove(&uuid);
-                continue;
-            };
-            if self.waiting_members.contains(&uuid) && request.status != RequestStatus::Running {
-                return Some(uuid);
+            if self.waiting_members.contains(&uuid)
+                && self
+                    .requests
+                    .get(&uuid)
+                    .is_some_and(|request| request.status != RequestStatus::Running)
+            {
+                break;
             }
             self.waiting.pop_front();
             self.waiting_members.remove(&uuid);
         }
+
+        if prefer_materialized {
+            return self.waiting.iter().copied().find(|uuid| {
+                self.waiting_members.contains(uuid)
+                    && self
+                        .requests
+                        .get(uuid)
+                        .is_some_and(VllmRequestState::prompt_is_prebuilt)
+            });
+        }
+        self.waiting.front().copied()
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
@@ -202,9 +229,13 @@ impl SchedulerState {
     }
 
     pub(crate) fn complete(&mut self, uuid: &Uuid) {
+        self.take_completed(uuid);
+    }
+
+    pub(crate) fn take_completed(&mut self, uuid: &Uuid) -> Option<VllmRequestState> {
         self.waiting_members.remove(uuid);
         self.running_members.remove(uuid);
-        self.requests.remove(uuid);
+        self.requests.remove(uuid)
     }
 
     pub(crate) fn running_sequence_mut(&mut self, uuid: Uuid) -> Option<&mut ActiveSequence> {
@@ -359,6 +390,14 @@ pub(crate) struct VllmCore {
     pub(super) kv_manager: KvManager,
     speculative_sampler: Option<SpeculativeDecodeSampler>,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
+    source_holds: SourceHolds<HeldVllmPrefill>,
+    pending_destinations: PendingDestinations<VllmRequestState>,
+    destination_holds: DestinationHolds<ReservedVllmDecode>,
+    active_destination_handoffs: ActiveHandoffRequests,
+    capacity_generation: u64,
+    #[cfg(test)]
+    destination_reservation_attempts: usize,
+    lifecycle_events: Vec<SchedulerLifecycleEvent>,
 
     /// Requests parked on pending G2→G1 swap-ins. Populated by the
     /// admission path when a request's remaining prefix matches G2 only
@@ -370,6 +409,38 @@ pub(crate) struct VllmCore {
     /// uuid↔handle mapping.
     #[cfg(feature = "kvbm-offload")]
     pub(super) requests_awaiting_swap_in: Vec<AwaitingSwapIn>,
+}
+
+struct HeldVllmPrefill {
+    request: VllmRequestState,
+    deferred_deref: Vec<MoveBlock>,
+}
+
+struct ReservedVllmDecode {
+    request: VllmRequestState,
+    kv: VllmDestinationReservation,
+}
+
+impl ReservedVllmDecode {
+    fn activate(self, kv_manager: &mut KvManager) -> VllmRequestState {
+        let Self { mut request, kv } = self;
+        kv_manager.activate_destination(kv);
+        let prompt_len = request.sequence.num_input_tokens();
+        request.sequence.commit_allocation(prompt_len);
+        request.num_computed_tokens = prompt_len;
+        request.status = RequestStatus::Waiting;
+        request
+    }
+
+    fn cancel(self, _kv_manager: &mut KvManager) {
+        let Self { request: _, kv } = self;
+        drop(kv);
+    }
+}
+
+struct VllmTerminalEffects {
+    immediate: Vec<MoveBlock>,
+    cleanup: Vec<MoveBlock>,
 }
 
 impl VllmCore {
@@ -408,6 +479,11 @@ impl VllmCore {
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
+        let kv_event_publishers = if args.enable_prefix_caching {
+            kv_event_publishers
+        } else {
+            KvEventPublishers::default()
+        };
         let speculative_sampler = args.aic_nextn.map(|nextn| {
             let rates =
                 normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
@@ -426,6 +502,14 @@ impl VllmCore {
             state: SchedulerState::default(),
             speculative_sampler,
             kv_event_buffer,
+            source_holds: SourceHolds::default(),
+            pending_destinations: PendingDestinations::default(),
+            destination_holds: DestinationHolds::default(),
+            active_destination_handoffs: ActiveHandoffRequests::default(),
+            capacity_generation: 0,
+            #[cfg(test)]
+            destination_reservation_attempts: 0,
+            lifecycle_events: Vec::new(),
             #[cfg(feature = "kvbm-offload")]
             requests_awaiting_swap_in: Vec::new(),
         }
@@ -451,6 +535,262 @@ impl VllmCore {
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
+        match self
+            .apply_command(SchedulerCommand::Submit(request))
+            .expect("ordinary request ID must be unique")
+        {
+            SchedulerCommandResult::Submitted(uuid) => uuid,
+            _ => unreachable!("submit command must return a request ID"),
+        }
+    }
+
+    pub(crate) fn apply_command(
+        &mut self,
+        command: SchedulerCommand,
+    ) -> anyhow::Result<SchedulerCommandResult> {
+        Ok(self.apply_command_effects(command, true)?.result)
+    }
+
+    pub(crate) fn apply_command_effects(
+        &mut self,
+        command: SchedulerCommand,
+        allow_destination_admission: bool,
+    ) -> anyhow::Result<SchedulerCommandEffects> {
+        self.apply_command_effects_at(command, allow_destination_admission, None)
+    }
+
+    pub(super) fn apply_command_effects_at(
+        &mut self,
+        command: SchedulerCommand,
+        allow_destination_admission: bool,
+        reservation_now_ms: Option<f64>,
+    ) -> anyhow::Result<SchedulerCommandEffects> {
+        match command {
+            SchedulerCommand::Submit(mut request) => {
+                let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+                request.uuid = Some(uuid);
+                self.validate_request_id(uuid)?;
+                Ok(SchedulerCommandEffects::new(
+                    SchedulerCommandResult::Submitted(self.submit(request)?),
+                ))
+            }
+            SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                mut request,
+            } => {
+                let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+                request.uuid = Some(uuid);
+                self.validate_request_id(uuid)?;
+                self.source_holds.register(uuid, handoff_id)?;
+                let submitted = self
+                    .submit(request)
+                    .expect("prevalidated handoff request must submit");
+                Ok(SchedulerCommandEffects::new(
+                    SchedulerCommandResult::Submitted(submitted),
+                ))
+            }
+            SchedulerCommand::ReleaseSource { handoff_id } => {
+                let result = if self.release_source(handoff_id) {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                Ok(self.effects_after_capacity_change(result, reservation_now_ms))
+            }
+            SchedulerCommand::CancelSource { handoff_id } => {
+                let result = if self.cancel_source(handoff_id) {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                Ok(self.effects_after_capacity_change(result, reservation_now_ms))
+            }
+            SchedulerCommand::ReserveDestination {
+                handoff_id,
+                mut request,
+            } => {
+                if !policy::supports_destination_reservation(self.args.scheduling_policy()) {
+                    anyhow::bail!("destination reservation is not supported for TRT-LLM");
+                }
+                let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+                request.uuid = Some(uuid);
+                self.validate_request_id(uuid)?;
+                self.pending_destinations.validate(uuid, handoff_id)?;
+                self.destination_holds.validate(uuid, handoff_id)?;
+                if self
+                    .active_destination_handoffs
+                    .contains_handoff(handoff_id)
+                {
+                    anyhow::bail!("destination handoff {handoff_id:?} is already active");
+                }
+                let request = self.make_request_state(request, RequestStatus::WaitingForRemoteKv);
+                if request.sequence.current_known_blocks() > self.args.num_gpu_blocks {
+                    anyhow::bail!("destination prompt exceeds the KV pool capacity");
+                }
+                self.pending_destinations.insert(uuid, handoff_id, request);
+                let mut effects =
+                    SchedulerCommandEffects::new(SchedulerCommandResult::DestinationAccepted {
+                        request_id: uuid,
+                    });
+                if allow_destination_admission {
+                    effects
+                        .lifecycle_events
+                        .extend(self.retry_pending_destinations_at(reservation_now_ms));
+                }
+                Ok(effects)
+            }
+            SchedulerCommand::ActivateDestination { handoff_id } => {
+                let Some((uuid, reservation)) = self.destination_holds.remove(handoff_id) else {
+                    return Ok(SchedulerCommandEffects::new(SchedulerCommandResult::Noop));
+                };
+                let active_before = self.kv_manager.num_active_blocks();
+                let request = reservation.activate(&mut self.kv_manager);
+                self.active_destination_handoffs.insert(handoff_id, uuid);
+                self.state.insert_waiting(uuid, request);
+                if self.kv_manager.num_active_blocks() < active_before {
+                    self.bump_capacity_generation();
+                }
+                Ok(self.effects_after_capacity_change(
+                    SchedulerCommandResult::Applied,
+                    reservation_now_ms,
+                ))
+            }
+            SchedulerCommand::CancelDestination { handoff_id } => {
+                if self.pending_destinations.remove(handoff_id).is_some() {
+                    self.bump_capacity_generation();
+                    return Ok(self.effects_after_capacity_change(
+                        SchedulerCommandResult::Applied,
+                        reservation_now_ms,
+                    ));
+                }
+                if let Some((_, reservation)) = self.destination_holds.remove(handoff_id) {
+                    reservation.cancel(&mut self.kv_manager);
+                    self.bump_capacity_generation();
+                    return Ok(self.effects_after_capacity_change(
+                        SchedulerCommandResult::Applied,
+                        reservation_now_ms,
+                    ));
+                }
+                let Some(request_id) = self.active_destination_handoffs.remove_handoff(handoff_id)
+                else {
+                    return Ok(SchedulerCommandEffects::new(SchedulerCommandResult::Noop));
+                };
+                self.drop_request(request_id);
+                Ok(self.effects_after_capacity_change(
+                    SchedulerCommandResult::Applied,
+                    reservation_now_ms,
+                ))
+            }
+        }
+    }
+
+    fn effects_after_capacity_change(
+        &mut self,
+        result: SchedulerCommandResult,
+        reservation_now_ms: Option<f64>,
+    ) -> SchedulerCommandEffects {
+        let mut effects = SchedulerCommandEffects::new(result);
+        if result == SchedulerCommandResult::Applied {
+            effects
+                .lifecycle_events
+                .extend(self.retry_pending_destinations_at(reservation_now_ms));
+        }
+        effects
+    }
+
+    pub(crate) fn retry_pending_destinations(&mut self) -> Vec<SchedulerLifecycleEvent> {
+        self.retry_pending_destinations_at(None)
+    }
+
+    pub(super) fn retry_pending_destinations_at(
+        &mut self,
+        reservation_now_ms: Option<f64>,
+    ) -> Vec<SchedulerLifecycleEvent> {
+        let generation = self.capacity_generation;
+        let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
+        if self.state.running_members.len() >= max_num_running {
+            self.pending_destinations.mark_front_attempted(generation);
+            return Vec::new();
+        }
+
+        let Some((_, _, request)) = self.pending_destinations.front_due(generation) else {
+            return Vec::new();
+        };
+        #[cfg(test)]
+        {
+            self.destination_reservation_attempts += 1;
+        }
+        let reservation = self
+            .kv_manager
+            .reserve_destination_at(&request.sequence, reservation_now_ms);
+        #[cfg(feature = "kvbm-offload")]
+        let reservation =
+            if reservation.is_none() && self.kv_manager.earliest_offload_deadline().is_none() {
+                // Presence-filtered evictions can release G1 capacity without a
+                // DMA completion that would otherwise trigger another retry.
+                self.kv_manager
+                    .reserve_destination_at(&request.sequence, reservation_now_ms)
+            } else {
+                reservation
+            };
+        self.pending_destinations.mark_front_attempted(generation);
+        let Some(kv) = reservation else {
+            return Vec::new();
+        };
+        let transferable_prompt_tokens = kv.transferable_prompt_tokens(self.args.block_size);
+        let (handoff_id, request_id, request) = self
+            .pending_destinations
+            .pop_front()
+            .expect("attempted pending destination must remain at the head");
+        self.destination_holds
+            .insert(request_id, handoff_id, ReservedVllmDecode { request, kv });
+        vec![SchedulerLifecycleEvent::DestinationReserved {
+            handoff_id,
+            request_id,
+            transferable_prompt_tokens,
+        }]
+    }
+
+    fn validate_request_id(&self, uuid: Uuid) -> anyhow::Result<()> {
+        #[cfg(feature = "kvbm-offload")]
+        let awaiting_swap_in = self
+            .requests_awaiting_swap_in
+            .iter()
+            .any(|request| request.uuid == uuid);
+        #[cfg(not(feature = "kvbm-offload"))]
+        let awaiting_swap_in = false;
+
+        if self.state.requests.contains_key(&uuid)
+            || self.source_holds.contains_request(uuid)
+            || self.pending_destinations.contains_request(uuid)
+            || self.destination_holds.contains_request(uuid)
+            || self.active_destination_handoffs.contains_request(uuid)
+            || awaiting_swap_in
+        {
+            anyhow::bail!("request {uuid} is already active");
+        }
+        Ok(())
+    }
+
+    fn submit(&mut self, mut request: DirectRequest) -> anyhow::Result<Uuid> {
+        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        request.uuid = Some(uuid);
+        if self.state.requests.contains_key(&uuid) {
+            anyhow::bail!("request {uuid} is already active");
+        }
+        let request = self.make_request_state(request, RequestStatus::Waiting);
+        self.state.insert_waiting(uuid, request);
+        if let Some(request) = self.state.requests.get(&uuid) {
+            request.debug_assert_progress(uuid);
+        }
+        Ok(uuid)
+    }
+
+    fn make_request_state(
+        &self,
+        request: DirectRequest,
+        status: RequestStatus,
+    ) -> VllmRequestState {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let mut max_output_tokens = request.max_output_tokens;
         if let Some(clamped) = policy::normalize_max_output_tokens(
@@ -476,28 +816,168 @@ impl VllmCore {
             self.args.enable_prefix_caching,
             self.args.zmq_kv_events_port.is_some(),
         );
-        self.state.requests.insert(
-            uuid,
-            VllmRequestState {
-                sequence,
-                status: RequestStatus::Waiting,
-                num_computed_tokens: 0,
-                num_preemptions: 0,
-            },
-        );
-        self.state.push_waiting(uuid);
-        if let Some(request) = self.state.requests.get(&uuid) {
-            request.debug_assert_progress(uuid);
+        VllmRequestState {
+            sequence,
+            status,
+            num_computed_tokens: 0,
+            num_preemptions: 0,
         }
-        uuid
+    }
+
+    fn release_source(&mut self, handoff_id: HandoffId) -> bool {
+        match self.source_holds.remove(handoff_id) {
+            RemovedSource::Held(payload) => {
+                self.cleanup_completed_prefill(payload);
+                self.bump_capacity_generation();
+                true
+            }
+            RemovedSource::Pending { .. } => true,
+            RemovedSource::Missing => false,
+        }
+    }
+
+    fn cancel_source(&mut self, handoff_id: HandoffId) -> bool {
+        match self.source_holds.remove(handoff_id) {
+            RemovedSource::Held(payload) => {
+                self.cleanup_completed_prefill(payload);
+                self.bump_capacity_generation();
+                true
+            }
+            RemovedSource::Pending { request_id } => {
+                self.drop_request(request_id);
+                true
+            }
+            RemovedSource::Missing => false,
+        }
+    }
+
+    fn complete_source(&mut self, uuid: Uuid, deferred_deref: Vec<MoveBlock>) {
+        let transfer_timing = self.state.requests.get(&uuid).map(|request| {
+            prefill_handoff_transfer_timing(
+                request.sequence.num_input_tokens(),
+                self.args.kv_transfer_bandwidth,
+                self.args.kv_bytes_per_token,
+                self.args.kv_transfer_timing_mode,
+            )
+        });
+        let request = self
+            .state
+            .take_completed(&uuid)
+            .expect("completed request must remain scheduler-owned");
+        let payload = HeldVllmPrefill {
+            request,
+            deferred_deref,
+        };
+        match self.source_holds.complete_source(uuid, payload) {
+            SourceCompletion::Release(payload) => {
+                self.cleanup_completed_prefill(payload);
+            }
+            SourceCompletion::Held { handoff_id } => {
+                self.lifecycle_events
+                    .push(SchedulerLifecycleEvent::SourceHeld {
+                        handoff_id,
+                        request_id: uuid,
+                        transfer_timing: transfer_timing
+                            .expect("completed source request must retain transfer timing"),
+                    });
+            }
+        }
+        self.active_destination_handoffs.remove_request(uuid);
+        // Completion always releases a vLLM runnable slot, even when source KV
+        // remains held for handoff.
+        self.bump_capacity_generation();
+    }
+
+    fn cleanup_completed_prefill(&mut self, payload: HeldVllmPrefill) {
+        let HeldVllmPrefill {
+            request,
+            deferred_deref,
+        } = payload;
+        for signal in deferred_deref {
+            self.kv_manager.process(&signal);
+        }
+        drop(request);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_is_held(&self, handoff_id: HandoffId) -> bool {
+        self.source_holds.is_held(handoff_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_is_registered(&self, handoff_id: HandoffId) -> bool {
+        self.source_holds.is_registered(handoff_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn destination_reservation_attempts(&self) -> usize {
+        self.destination_reservation_attempts
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.state.is_empty()
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn is_drained(&self) -> bool {
+        if !self.is_empty()
+            || !self.source_holds.is_empty()
+            || !self.pending_destinations.is_empty()
+            || !self.destination_holds.is_empty()
+            || !self.active_destination_handoffs.is_empty()
+        {
+            return false;
+        }
+        #[cfg(feature = "kvbm-offload")]
+        {
+            self.requests_awaiting_swap_in.is_empty()
+                && self.kv_manager.earliest_offload_deadline().is_none()
+        }
+        #[cfg(not(feature = "kvbm-offload"))]
+        {
+            true
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn destination_is_held(&self, handoff_id: HandoffId) -> bool {
+        self.destination_holds.contains(handoff_id)
+            || self.pending_destinations.contains_handoff(handoff_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn destination_block_ids(&self, handoff_id: HandoffId) -> Vec<usize> {
+        self.destination_holds
+            .get(handoff_id)
+            .map(|reservation| reservation.kv.block_ids())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_block_ids(&self, uuid: Uuid) -> Vec<usize> {
+        self.state
+            .requests
+            .get(&uuid)
+            .map(|request| self.kv_manager.active_block_ids(&request.sequence))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn drain_kv_events(&self) -> Vec<dynamo_kv_router::protocols::RouterEvent> {
+        self.kv_event_buffer
+            .as_ref()
+            .map(CapturedRouterEventBuffer::drain)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn num_requests(&self) -> usize {
         self.state.requests.len()
+    }
+
+    fn bump_capacity_generation(&mut self) {
+        self.capacity_generation = self
+            .capacity_generation
+            .checked_add(1)
+            .expect("destination capacity generation overflow");
     }
 
     /// Read-only view of the scheduler state for policy tests that assert on
@@ -507,13 +987,15 @@ impl VllmCore {
         &self.state
     }
 
-    pub(super) fn mocker_metrics(&self) -> MockerMetrics {
+    pub(crate) fn mocker_metrics(&self) -> MockerMetrics {
+        let preactivation_destinations =
+            self.pending_destinations.len() + self.destination_holds.len();
         MockerMetrics::from_parts(
             self.dp_rank,
             self.kv_manager.num_active_blocks() as u64,
             self.args.num_gpu_blocks as u64,
             self.state.running_members.len() as u64,
-            self.state.waiting_members.len() as u64,
+            (self.state.waiting_members.len() + preactivation_destinations) as u64,
             self.state.preemptions_total,
             0,
             0,
@@ -536,6 +1018,7 @@ impl VllmCore {
     /// parked swap-ins whose transfers just completed.
     #[cfg(feature = "kvbm-offload")]
     fn tick_and_promote_swap_ins(&mut self, now_ms: f64) {
+        let active_before = self.kv_manager.num_active_blocks();
         self.kv_manager.tick_offload_engine(now_ms);
         let awaiting = std::mem::take(&mut self.requests_awaiting_swap_in);
         let mut completed = Vec::new();
@@ -557,15 +1040,48 @@ impl VllmCore {
         for aws in completed.into_iter().rev() {
             self.complete_swap_in(aws);
         }
+        if self.kv_manager.num_active_blocks() < active_before {
+            self.bump_capacity_generation();
+        }
     }
 
     #[cfg(feature = "kvbm-offload")]
-    pub(crate) fn tick_offload_only(&mut self, now_ms: f64) -> Vec<RouterEvent> {
+    pub(crate) fn tick_offload_only(
+        &mut self,
+        now_ms: f64,
+    ) -> crate::scheduler::OffloadTickEffects {
+        self.tick_offload(now_ms, true)
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn tick_offload_transport_only(
+        &mut self,
+        now_ms: f64,
+    ) -> crate::scheduler::OffloadTickEffects {
+        self.tick_offload(now_ms, false)
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn tick_offload(
+        &mut self,
+        now_ms: f64,
+        allow_destination_admission: bool,
+    ) -> crate::scheduler::OffloadTickEffects {
         self.tick_and_promote_swap_ins(now_ms);
-        self.kv_event_buffer
+        let lifecycle_events = if allow_destination_admission {
+            self.retry_pending_destinations()
+        } else {
+            Vec::new()
+        };
+        let kv_events = self
+            .kv_event_buffer
             .as_ref()
             .map(CapturedRouterEventBuffer::drain)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        crate::scheduler::OffloadTickEffects {
+            kv_events,
+            lifecycle_events,
+        }
     }
 
     #[cfg(feature = "kvbm-offload")]
@@ -599,16 +1115,15 @@ impl VllmCore {
             unique
                 .iter()
                 .zip(plhs.iter())
-                .zip(local_hashes.iter())
-                .zip(token_ids.iter())
+                .enumerate()
                 .skip(skip)
                 .take(count)
-                .filter_map(|(((block, plh), local), token_ids)| match block {
+                .filter_map(|(idx, (block, plh))| match block {
                     UniqueBlock::FullBlock(seq_hash) => Some(SwapInRegistrationBlock {
                         seq_hash: *seq_hash,
                         plh: *plh,
-                        local_hash: *local,
-                        token_ids: Some(token_ids.clone()),
+                        local_hash: local_hashes.get(idx).copied(),
+                        token_ids: token_ids.get(idx).cloned(),
                     }),
                     UniqueBlock::PartialBlock(_) => None,
                 })
@@ -815,9 +1330,14 @@ impl VllmCore {
 
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
         let scheduling_policy = self.args.scheduling_policy();
+        let admission = AdmissionInvariant::new(self.pending_destinations.has_pending());
         let mut rejected_uuids: Vec<Uuid> = Vec::new();
         while !preempted_any && self.state.running.len() < max_num_running {
-            let Some(uuid) = self.state.next_waiting_uuid() else {
+            let prefer_materialized = matches!(
+                admission.stage_for(false),
+                AdmissionStage::PendingDestinationHead
+            );
+            let Some(uuid) = self.state.next_waiting_uuid(prefer_materialized) else {
                 break;
             };
             let decision = {
@@ -832,15 +1352,27 @@ impl VllmCore {
                     .iter()
                     .filter_map(|running_uuid| self.state.requests.get(running_uuid))
                     .map(|request| &request.sequence);
-                policy::decide_waiting_admission(
-                    scheduling_policy,
-                    &request.sequence,
-                    request.status == RequestStatus::Waiting,
-                    running_seqs,
-                    self.args.num_gpu_blocks,
-                    self.args.block_size,
-                    &self.kv_manager,
-                )
+                let prompt_is_prebuilt = request.prompt_is_prebuilt();
+                match admission.stage_for(prompt_is_prebuilt) {
+                    AdmissionStage::Materialized => AdmissionDecision::Admit {
+                        prefill_cost: PrefillCost {
+                            new_blocks: 0,
+                            new_tokens: 0,
+                            cached_tokens: request.sequence.num_input_tokens(),
+                            active_cached_tokens: request.sequence.num_input_tokens(),
+                        },
+                    },
+                    AdmissionStage::PendingDestinationHead => break,
+                    AdmissionStage::FreshKv => policy::decide_waiting_admission(
+                        scheduling_policy,
+                        &request.sequence,
+                        request.status == RequestStatus::Waiting,
+                        running_seqs,
+                        self.args.num_gpu_blocks,
+                        self.args.block_size,
+                        &self.kv_manager,
+                    ),
+                }
             };
             let prefill_cost = match decision {
                 AdmissionDecision::Admit { prefill_cost } => prefill_cost,
@@ -942,6 +1474,7 @@ impl VllmCore {
             completed_requests: requests_before.saturating_sub(self.state.requests.len()),
             output_signals,
             admissions,
+            lifecycle_events: std::mem::take(&mut self.lifecycle_events),
             mocker_metrics: self.mocker_metrics(),
             router_event_visibility: RouterEventVisibility::PassStart,
             kv_events: self
@@ -956,13 +1489,29 @@ impl VllmCore {
     }
 
     pub(super) fn drop_request(&mut self, uuid: Uuid) {
+        let active_blocks_before = self.kv_manager.num_active_blocks();
+        #[cfg(feature = "kvbm-offload")]
+        self.requests_awaiting_swap_in
+            .retain(|request| request.uuid != uuid);
+
         let Some(request) = self.state.requests.get(&uuid) else {
+            if self.kv_manager.num_active_blocks() < active_blocks_before {
+                self.bump_capacity_generation();
+            }
             return;
         };
+        let capacity_improved = request.sequence.num_allocated_tokens() > 0
+            || self.state.running_members.contains(&uuid)
+            || self.kv_manager.num_active_blocks() < active_blocks_before;
         for signal in request.sequence.free_signal() {
             self.kv_manager.process(&signal);
         }
+        self.source_holds.remove_request(uuid);
+        self.active_destination_handoffs.remove_request(uuid);
         self.state.complete(&uuid);
+        if capacity_improved {
+            self.bump_capacity_generation();
+        }
     }
 
     /// Preempt a running request under the active scheduling policy.
@@ -976,7 +1525,11 @@ impl VllmCore {
             policy::report_no_preemption_violation();
             return None;
         }
-        self.state.preempt(self.args.preemption_mode)
+        let preempted = self.state.preempt(self.args.preemption_mode);
+        if preempted.is_some() {
+            self.bump_capacity_generation();
+        }
+        preempted
     }
 
     /// Compute a forward pass metrics snapshot from the just-completed pass.
@@ -1006,16 +1559,30 @@ impl VllmCore {
 
         let queued_prefills = self.state.waiting.iter().filter_map(|uuid| {
             let request = self.state.requests.get(uuid)?;
-            matches!(request.status, RequestStatus::Waiting)
-                .then_some(request.sequence.num_input_tokens() as u64)
+            (matches!(request.status, RequestStatus::Waiting)
+                && !self.active_destination_handoffs.contains_request(*uuid))
+            .then_some(request.sequence.num_input_tokens() as u64)
         });
 
-        let queued_decodes = self.state.waiting.iter().filter_map(|uuid| {
+        let ordinary_queued_decodes = self.state.waiting.iter().filter_map(|uuid| {
             let request = self.state.requests.get(uuid)?;
+            if self.active_destination_handoffs.contains_request(*uuid) {
+                return Some(request.sequence.num_input_tokens() as u64);
+            }
             matches!(request.status, RequestStatus::Preempted).then_some(
                 (request.sequence.num_input_tokens() + request.sequence.generated_tokens()) as u64,
             )
         });
+        let preactivation_decodes = self
+            .pending_destinations
+            .payloads()
+            .map(|request| request.sequence.num_input_tokens() as u64)
+            .chain(
+                self.destination_holds
+                    .payloads()
+                    .map(|reservation| reservation.request.sequence.num_input_tokens() as u64),
+            );
+        let queued_decodes = ordinary_queued_decodes.chain(preactivation_decodes);
 
         build_fpm_snapshot(
             scheduled_prefills,
@@ -1258,20 +1825,30 @@ impl VllmCore {
         for uuid in ready {
             let mut emitted = false;
             let mut completed = false;
+            let mut deferred_deref = Vec::new();
             loop {
                 self.state.debug_assert_ready_to_decode(uuid);
                 let Some(sequence) = self.state.running_sequence_mut(uuid) else {
                     break;
                 };
                 let signals = sequence.generate();
-                if signals.is_empty() || process_signals(&mut self.kv_manager, &signals) {
-                    if !signals.is_empty()
-                        && sequence.generated_tokens() < sequence.max_output_tokens()
-                    {
+                completed = sequence.generated_tokens() >= sequence.max_output_tokens();
+                let effects = if completed {
+                    split_terminal_effects(signals)
+                } else {
+                    VllmTerminalEffects {
+                        immediate: signals,
+                        cleanup: Vec::new(),
+                    }
+                };
+                if effects.immediate.is_empty()
+                    || process_signals(&mut self.kv_manager, &effects.immediate)
+                {
+                    if !effects.immediate.is_empty() && !completed {
                         sequence.commit_allocation(sequence.len());
                     }
                     emitted = true;
-                    completed = sequence.generated_tokens() >= sequence.max_output_tokens();
+                    deferred_deref = effects.cleanup;
                     break;
                 }
                 sequence.pop();
@@ -1291,9 +1868,6 @@ impl VllmCore {
                 continue;
             }
 
-            if let Some(collector) = collector.as_deref_mut() {
-                collector.on_token(uuid, decode_end_ms);
-            }
             let handoff_delay_ms = self.state.requests.get(&uuid).and_then(|request| {
                 request.debug_assert_progress(uuid);
                 compute_prefill_handoff_delay_ms(
@@ -1304,16 +1878,20 @@ impl VllmCore {
                     self.args.kv_bytes_per_token,
                 )
             });
-            output_signals.push(OutputSignal {
+            let output_signal = OutputSignal {
                 uuid,
                 completed,
                 rejected: false,
                 handoff_delay_ms,
-            });
+            };
             if completed {
-                self.state.complete(&uuid);
+                self.complete_source(uuid, deferred_deref);
                 running_changed = true;
             }
+            if let Some(collector) = collector.as_deref_mut() {
+                collector.on_token(uuid, decode_end_ms);
+            }
+            output_signals.push(output_signal);
         }
 
         if output_signals.is_empty() {
@@ -1449,16 +2027,28 @@ impl VllmCore {
             Vec::with_capacity(sampled_bursts.iter().map(|(_, burst)| *burst).sum());
         for (uuid, burst) in sampled_bursts {
             let mut completed = false;
+            let mut deferred_deref = Vec::new();
             for _ in 0..burst {
-                let signals = {
+                let (signals, is_complete) = {
                     let request = self
                         .state
                         .requests
                         .get_mut(&uuid)
                         .expect("sampled request must remain active");
-                    request.sequence.generate()
+                    let signals = request.sequence.generate();
+                    let is_complete =
+                        request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
+                    (signals, is_complete)
                 };
-                for signal in &signals {
+                let effects = if is_complete {
+                    split_terminal_effects(signals)
+                } else {
+                    VllmTerminalEffects {
+                        immediate: signals,
+                        cleanup: Vec::new(),
+                    }
+                };
+                for signal in &effects.immediate {
                     self.kv_manager
                         .process_decode_signal(signal, &mut reservation);
                 }
@@ -1490,12 +2080,13 @@ impl VllmCore {
                 });
                 if is_complete {
                     completed = true;
+                    deferred_deref = effects.cleanup;
                     break;
                 }
             }
 
             if completed {
-                self.state.complete(&uuid);
+                self.complete_source(uuid, deferred_deref);
                 running_changed = true;
                 continue;
             }
@@ -1556,6 +2147,13 @@ fn scale_decode_time(decode_ms: f64, args: &MockEngineArgs) -> Duration {
         return unscaled;
     }
     Duration::from_secs_f64(unscaled.as_secs_f64() / effective_ratio)
+}
+
+fn split_terminal_effects(signals: Vec<MoveBlock>) -> VllmTerminalEffects {
+    let (cleanup, immediate) = signals
+        .into_iter()
+        .partition(|signal| matches!(signal, MoveBlock::Deref(_)));
+    VllmTerminalEffects { immediate, cleanup }
 }
 
 fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {

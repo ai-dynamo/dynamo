@@ -18,6 +18,7 @@ use dynamo_kv_router::{
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::extensions::routing_constraints_to_kv;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
@@ -454,9 +455,9 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
-        update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>), QueryRouterResult> {
@@ -469,9 +470,9 @@ impl RouterHandles {
             .query_prefill_worker(
                 tokens,
                 block_mm_infos,
-                update_states,
                 lora_name,
                 priority_jump,
+                strict_priority,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -481,17 +482,15 @@ impl RouterHandles {
                 QueryRouterResult::ErrQueryFailed
             })?;
         match outcome {
+            // Advisory only: the external caller owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            PrefillQueryOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => {
+            PrefillQueryOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
-                    reason = ?reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens = ?max_queued_isl_tokens,
-                    "Prefill query rejected due to router backpressure"
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill query rejected by policy-class queue limit"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
@@ -502,9 +501,8 @@ impl RouterHandles {
     /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_credit=0
     /// (since KV cache is being transferred from prefill, not reused).
     ///
-    /// `priority_jump` is forwarded to the decode scheduler queue so that
-    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
-    /// arrivals when the router queue is active.
+    /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
+    /// adjusts the policy score, while `strict_priority` selects the primary tier.
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// This does NOT overwrite the router's internal worker state — it only filters this decision.
@@ -518,6 +516,7 @@ impl RouterHandles {
         tokens: &[u32],
         is_disaggregated: bool,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
@@ -549,6 +548,7 @@ impl RouterHandles {
                 false,
                 None,
                 priority_jump,
+                strict_priority,
                 None,
                 None,
                 allowed_worker_ids,
@@ -565,16 +565,13 @@ impl RouterHandles {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => {
+            dynamo_llm::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
-                    reason = ?reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens = ?max_queued_isl_tokens,
-                    "Decode query rejected due to router backpressure"
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Decode query rejected by policy-class queue limit"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
@@ -599,6 +596,17 @@ fn extract_priority_jump(
         .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
         .map(|v| v.max(0.0))
         .unwrap_or(0.0)
+}
+
+fn extract_strict_priority(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> u32 {
+    request
+        .nvext
+        .as_ref()
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.strict_priority)
+        .unwrap_or(0)
 }
 
 /// Opaque handle for the router pair
@@ -805,9 +813,13 @@ pub unsafe extern "C" fn create_routers(
             Some(prefill_config),
             None,
             enforce_disagg,
+            None,
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,
+            // C bindings construct no KvWorkerMonitor; overload publishing is
+            // unused on this path (matches the prior namespace-lookup miss).
+            None,
         );
 
         // Spawn background discovery watcher for prefill workers.
@@ -1094,17 +1106,17 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 }
 
 /// Parse a JSON request string, apply the chat template, tokenize, and lift
-/// the router-relevant `priority_jump` out of `nvext.agent_hints.priority`.
+/// router queue priorities out of `nvext.agent_hints`.
 ///
-/// Returns `(token_ids, priority_jump, routing_constraints)` on success, or a `QueryRouterResult`
-/// error code. `priority_jump` is `0.0` when no hint is present. This mirrors
-/// the standalone Dynamo preprocessor lift in `lib/llm/src/preprocessor.rs`
-/// so the GAIE/EPP path produces the same queue ordering as a non-EPP
-/// deployment.
+/// Returns `(token_ids, priority_jump, strict_priority, routing_constraints)` on success,
+/// or a `QueryRouterResult` error code. Queue priorities default to zero when
+/// absent. This mirrors the standalone Dynamo preprocessor lift in
+/// `lib/llm/src/preprocessor.rs` so the GAIE/EPP path produces the same queue
+/// ordering as a non-EPP deployment.
 unsafe fn preprocess_request(
     handles: &RouterHandles,
     request_json: *const c_char,
-) -> Result<(Vec<u32>, f64, RoutingConstraints), QueryRouterResult> {
+) -> Result<(Vec<u32>, f64, u32, RoutingConstraints), QueryRouterResult> {
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
@@ -1128,10 +1140,12 @@ unsafe fn preprocess_request(
         };
 
     let priority_jump = extract_priority_jump(&request);
+    let strict_priority = extract_strict_priority(&request);
     let routing_constraints = request
         .nvext
         .as_ref()
         .and_then(|nvext| nvext.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
         .unwrap_or_default();
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
@@ -1156,10 +1170,16 @@ unsafe fn preprocess_request(
         token_count = token_ids.len(),
         first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
         priority_jump,
+        strict_priority,
         "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
     );
 
-    Ok((token_ids, priority_jump, routing_constraints))
+    Ok((
+        token_ids,
+        priority_jump,
+        strict_priority,
+        routing_constraints,
+    ))
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
@@ -1245,7 +1265,7 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump, routing_constraints) =
+    let (tokens, priority_jump, strict_priority, routing_constraints) =
         match unsafe { preprocess_request(handles, request_json) } {
             Ok(t) => t,
             Err(code) => return code,
@@ -1258,9 +1278,9 @@ pub unsafe extern "C" fn route_prefill_request(
             .query_prefill_worker(
                 &tokens,
                 None,
-                false,
                 None,
                 priority_jump,
+                strict_priority,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -1273,6 +1293,7 @@ pub unsafe extern "C" fn route_prefill_request(
             prefill_dp_rank = prefill_dp_rank,
             token_count = tokens.len(),
             priority_jump,
+            strict_priority,
             "Routed prefill request"
         );
 
@@ -1325,7 +1346,7 @@ pub unsafe extern "C" fn route_decode_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump, routing_constraints) =
+    let (tokens, priority_jump, strict_priority, routing_constraints) =
         match unsafe { preprocess_request(handles, request_json) } {
             Ok(t) => t,
             Err(code) => return code,
@@ -1339,6 +1360,7 @@ pub unsafe extern "C" fn route_decode_request(
                 &tokens,
                 is_disaggregated,
                 priority_jump,
+                strict_priority,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -1350,6 +1372,7 @@ pub unsafe extern "C" fn route_decode_request(
             decode_dp_rank = decode_worker.dp_rank,
             token_count = tokens.len(),
             priority_jump,
+            strict_priority,
             "Routed decode request"
         );
 
@@ -1580,5 +1603,29 @@ mod tests {
             )
             .expect("test request must parse as chat completion");
         assert_eq!(extract_priority_jump(&req), 5.0);
+    }
+
+    #[test]
+    fn strict_priority_lifted_from_agent_hints() {
+        let req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"strict_priority": 7}}
+            }"#,
+            )
+            .expect("test request must parse as chat completion");
+        assert_eq!(extract_strict_priority(&req), 7);
+
+        let default_req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}]
+            }"#,
+            )
+            .expect("test request must parse as chat completion");
+        assert_eq!(extract_strict_priority(&default_req), 0);
     }
 }

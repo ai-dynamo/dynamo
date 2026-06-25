@@ -18,7 +18,7 @@ Integrate Dynamo with the Gateway API Inference Extension, also known as Inferen
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](../../recipes/qwen3-0.6b/vllm/agg/gaie).
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
@@ -314,18 +314,36 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 
 - When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
 - The FrontEnd must run with `--router-mode direct` so that it respects the EPP's routing decisions passed via request headers.
-- Use the `frontendSidecar` field on a worker service to have the operator automatically inject a fully configured frontend sidecar container with all required Dynamo env vars, probes, and ports:
+- In v1beta1 DGD manifests, set the `frontendSidecar` field on a worker
+  component to the name of a container in that component's pod template. The
+  operator merges the required Dynamo env vars, probes, and ports into that
+  sidecar container:
 
 ```yaml
-frontendSidecar:
-  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
-  args:
-    - --router-mode
-    - direct
-  envFromSecret: hf-token-secret
+frontendSidecar: sidecar-frontend
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+        command:
+          - /bin/sh
+          - -c
+        args:
+          - python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME
+      - name: sidecar-frontend
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+        args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+        envFrom:
+          - secretRef:
+              name: hf-token-secret
 ```
 
-- The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
+- The pre-selected workers (decode and prefill in case of disaggregated serving) are passed in request headers and injected into the request routing hints.
 - The `--router-mode direct` flag ensures the routing respects this selection.
 
 **Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
@@ -754,5 +772,5 @@ into the request body (`nvext.token_data`) so the frontend sidecar can skip redu
 
 | Header | Description | Set By |
 |--------|-------------|--------|
-| `x-worker-instance-id` | Primary worker ID (decode worker in disagg mode) | kv-aware-scorer |
-| `x-prefill-instance-id` | Prefill worker ID (disaggregated mode only) | kv-aware-scorer |
+| `x-dynamo-worker-instance-id` | Primary worker ID (decode worker in disagg mode) | kv-aware-scorer |
+| `x-dynamo-prefill-instance-id` | Prefill worker ID (disaggregated mode only) | kv-aware-scorer |

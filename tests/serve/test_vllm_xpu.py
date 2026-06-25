@@ -453,6 +453,9 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
+            pytest.mark.skip(
+                reason="flaky test, local video file downloading may fail due to network issues"
+            ),
             pytest.mark.xpu_1,
             pytest.mark.multimodal,
             pytest.mark.nightly,

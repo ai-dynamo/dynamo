@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Router Examples
+subtitle: Worked examples for the KvRouter Python API, Kubernetes deployments, and custom routing patterns.
 ---
 
 For quick start instructions, see the [Router README](README.md). This document provides further examples for using the Dynamo Router, including Python API usage, Kubernetes deployments, and custom routing patterns.
@@ -142,7 +143,7 @@ spec:
           value: "16"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
 ### Alternative: Using Command Args in K8s
@@ -152,7 +153,7 @@ You can also pass CLI arguments directly in the container command:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
     command:
       - /bin/sh
       - -c

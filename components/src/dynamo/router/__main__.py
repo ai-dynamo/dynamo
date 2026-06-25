@@ -197,6 +197,7 @@ async def worker(runtime: DistributedRuntime):
     logger.debug(
         f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
         f"overlap_score_credit={config.overlap_score_credit}, "
+        f"overlap_score_credit_decay={config.overlap_score_credit_decay}, "
         f"prefill_load_scale={config.prefill_load_scale}, "
         f"router_temperature={config.router_temperature}, "
         f"use_kv_events={config.use_kv_events}, "

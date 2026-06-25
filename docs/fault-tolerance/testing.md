@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Testing
+subtitle: Pytest framework for validating Dynamo's cancellation, migration, etcd HA, and hardware fault-injection paths under induced failures.
 ---
 
 This document describes the test infrastructure for validating Dynamo's fault tolerance mechanisms. The testing framework supports request cancellation, migration, etcd HA, and hardware fault injection scenarios.
@@ -189,6 +190,9 @@ pytest tests/fault_tolerance/etcd_ha/ -v
 ## Hardware Fault Injection
 
 The fault injection service enables testing under simulated hardware failures.
+
+> [!WARNING]
+> **Test harness only — never deploy in production.** The fault injection service ships with a `ClusterRole` (`fault-injection-api`) granting `patch` on nodes/pods/services, `create`/`delete` on `NetworkPolicy`, and full control on chaos-mesh CRDs (`NetworkChaos`, `PodChaos`, `StressChaos`, `IoChaos`). It also deploys a privileged kernel-mode `DaemonSet` capable of synthesizing GPU XID errors. Any caller reachable to the API can cause arbitrary pod kills, network partitions, IO faults, and GPU XID errors across the cluster. Deploy only into dedicated test clusters that you are willing to disrupt, never expose the API externally, and tear down with `kubectl delete -f deploy/` after each test run. See [`tests/fault_tolerance/hardware/fault_injection_service/README.md`](../../tests/fault_tolerance/hardware/fault_injection_service/README.md) for the full security posture.
 
 ### Fault Injection Service
 

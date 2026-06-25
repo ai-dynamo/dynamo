@@ -190,8 +190,6 @@ state and child pointers without taking `shape_gate` on the hot step, so it may
 observe adjacent tree shapes during a split and undercount. It must not panic or
 return a match past a valid reachable prefix.
 
-## Limitations Compared With `RadixTree`
+## Wire Compatibility
 
-- It does not support `expiration_duration` or frequency tracking.
-- It does not provide `new_with_frequency()`.
-- `find_matches` does not populate `OverlapScores.frequencies`.
+- `find_matches` leaves the legacy `OverlapScores.frequencies` field empty.
