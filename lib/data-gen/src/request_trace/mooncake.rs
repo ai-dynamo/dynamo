@@ -8,7 +8,20 @@ use super::load::RequestEntry;
 
 /// Each request becomes one independent row whose `timestamp` is its offset
 /// from the earliest request. See [`super::agentic`] for the DAG-aware lowering.
-pub fn build_mooncake_rows(mut requests: Vec<RequestEntry>) -> Result<(usize, Vec<MooncakeRow>)> {
+pub fn build_mooncake_rows(requests: Vec<RequestEntry>) -> Result<(usize, Vec<MooncakeRow>)> {
+    let mut rows = Vec::with_capacity(requests.len());
+    let trace_block_size = lower_mooncake_rows(requests, |_, row| {
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok((trace_block_size, rows))
+}
+
+/// Emits standard Mooncake rows in converter order without retaining them.
+pub fn lower_mooncake_rows<F>(mut requests: Vec<RequestEntry>, mut emit: F) -> Result<usize>
+where
+    F: FnMut(usize, MooncakeRow) -> Result<()>,
+{
     let global_start_ms = requests
         .iter()
         .map(|request| request.start_ms)
@@ -34,7 +47,6 @@ pub fn build_mooncake_rows(mut requests: Vec<RequestEntry>) -> Result<(usize, Ve
     });
 
     let mut mapper = RollingHashIdMapper::new(trace_block_size);
-    let mut rows = Vec::new();
     for request in requests {
         let hash_ids = mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
         let output_length = request.request.output_tokens.ok_or_else(|| {
@@ -43,20 +55,24 @@ pub fn build_mooncake_rows(mut requests: Vec<RequestEntry>) -> Result<(usize, Ve
                 request.request.request_id
             )
         })?;
-        rows.push(MooncakeRow {
-            session_id: None,
-            input_length: Some(request.replay.input_length),
-            output_length: Some(
-                usize::try_from(output_length).context("output length does not fit in usize")?,
-            ),
-            hash_ids: Some(hash_ids),
-            timestamp: Some((request.start_ms - global_start_ms) as f64),
-            delay: None,
-            ..Default::default()
-        });
+        emit(
+            trace_block_size,
+            MooncakeRow {
+                session_id: None,
+                input_length: Some(request.replay.input_length),
+                output_length: Some(
+                    usize::try_from(output_length)
+                        .context("output length does not fit in usize")?,
+                ),
+                hash_ids: Some(hash_ids),
+                timestamp: Some((request.start_ms - global_start_ms) as f64),
+                delay: None,
+                ..Default::default()
+            },
+        )?;
     }
 
-    Ok((trace_block_size, rows))
+    Ok(trace_block_size)
 }
 
 #[cfg(test)]
