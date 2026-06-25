@@ -434,6 +434,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		NodeName:           w.config.NodeName,
 		PodName:            params.Pod.Name,
 		PodNamespace:       params.Pod.Namespace,
+		PodIP:              params.Pod.Status.PodIP,
 		Clientset:          w.clientset,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
