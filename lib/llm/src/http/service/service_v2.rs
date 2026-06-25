@@ -981,15 +981,15 @@ mod tests {
     }
 
     /// `DYN_ENABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
-    /// flag. Unset → builder default wins (on). Truthy strings → on.
-    /// Falsey strings (`0` / `false` / `no` / `off`, case-insensitive) →
+    /// flag. Unset -> builder default wins (on). Truthy strings -> on.
+    /// Falsey strings (`0` / `false` / `no` / `off`, case-insensitive) ->
     /// off, regardless of what the builder asked for.
     #[test]
     #[serial_test::serial]
     fn test_dyn_enable_frontend_nvext_env_var_mirror() {
         use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
 
-        // Unset → builder default (true) wins.
+        // Unset -> builder default (true) wins.
         temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
             let svc = HttpService::builder().build().unwrap();
             assert!(
@@ -998,13 +998,13 @@ mod tests {
             );
         });
 
-        // Explicit truthy → on (builder default also on; env doesn't flip it off).
+        // Explicit truthy -> on (builder default also on; env doesn't flip it off).
         temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
             let svc = HttpService::builder().build().unwrap();
             assert!(svc.state.nvext_enabled(), "env=true + default builder = on");
         });
 
-        // Explicit falsey → off, even though the builder default is on.
+        // Explicit falsey -> off, even though the builder default is on.
         for falsey in ["false", "0", "no", "off", "FALSE"] {
             temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some(falsey), || {
                 let svc = HttpService::builder().build().unwrap();

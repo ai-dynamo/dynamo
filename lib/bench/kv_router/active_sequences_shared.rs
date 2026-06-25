@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-use dynamo_kv_router::{ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceRequest};
+use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
 use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
 use tokio::time::{Duration, Instant};
@@ -136,7 +136,7 @@ pub async fn generate_sequence_events(
 }
 
 /// Run the benchmark: replay sequence trace entries against a shared
-/// ActiveSequencesMultiWorker, measuring potential_blocks_and_tokens /
+/// ActiveSequencesMultiWorker, measuring project_worker_loads /
 /// add_request / mark_prefill_completed / free latency.
 pub async fn run_benchmark(
     traces: &[Vec<SequenceTrace>],
@@ -243,7 +243,7 @@ pub async fn run_benchmark(
     );
 
     println!(
-        "Ops Throughput: offered={} ops/s achieved={} ops/s (potential_blocks_and_tokens + add + prefill_complete + free)",
+        "Ops Throughput: offered={} ops/s achieved={} ops/s (project_worker_loads + add + prefill_complete + free)",
         run.results.offered_ops_throughput, run.results.ops_throughput
     );
     println!(
@@ -301,10 +301,7 @@ async fn apply_entry(
             isl,
             output_length,
         } => {
-            let _ = multi.potential_blocks_and_tokens::<false>(
-                Some(&block_hashes),
-                &PrefillTokenDeltas::uniform(isl),
-            );
+            let _ = multi.project_worker_loads(Some(&block_hashes), decay_now);
             let _ = multi.add_request(
                 SequenceRequest {
                     request_id,

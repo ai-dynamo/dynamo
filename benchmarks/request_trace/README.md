@@ -16,22 +16,25 @@ Open the output JSON in [Perfetto UI](https://ui.perfetto.dev/).
 Inputs may be `.jsonl`, `.jsonl.gz`, a directory containing trace shards, or a
 glob pattern. The converter emits Chrome Trace Event JSON:
 
-- one session per Perfetto process
-- one trajectory lane per Perfetto thread
+- one request trace per Perfetto process
+- one session lane per Perfetto thread
 - one LLM request slice per Dynamo `request_end`
 - prefill wait, prefill, and decode stage slices stacked under the request by
   default
 - one tool slice per harness `tool_end`/`tool_error`; explicit
   `started_at_unix_ms`/`ended_at_unix_ms` are preferred, then `duration_ms`,
   then paired `tool_start` timing when both records are present
+- inferred tool slices from request `finish_reason_metadata.tool_calls` when
+  no matching tool event was traced; when the next request in the same session
+  starts after the tool-call response, the slice spans that gap, otherwise the
+  converter emits a short `duration_unknown` synthetic slice at the response
+  end, including when there is no following request in the same session
 - finish metadata on request slices, including final finish reason, backend
   finish reason, stop reason, per-choice finish summaries, and complete
   tool-call names
 - optional first-token markers with `--include-markers`
 
-Use `--no-stages` for a compact request-only view. Use
-`--separate-stage-tracks` to place stage slices on adjacent stage tracks when
-debugging Perfetto nesting or label rendering.
+Use `--no-stages` for a compact request-only view.
 
 Stage slice boundaries are normalized to avoid same-thread overlap caused by
 independent metric rounding. Raw timing fields remain available in event args.
@@ -57,7 +60,7 @@ during conversion.
 
 Context-free `dynamo.request.trace.v1` rows convert to ordinary Mooncake rows.
 Rows with `agent_context` can be converted with `--agentic`; context-free rows
-are rejected with `--agentic` because the converter cannot infer trajectories.
+are rejected with `--agentic` because the converter cannot infer sessions.
 
 Mooncake replay intentionally ignores non-replay request fields such as
 `finish_reason_metadata`. Use the Perfetto converter when you want to inspect

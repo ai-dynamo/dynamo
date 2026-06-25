@@ -10,28 +10,13 @@ use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use uuid::Uuid;
 
+use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
-use crate::protocols::openai::nvext::AgentContext;
-
-/// Router-specific parameters carried via `nvext.router`.
-///
-/// Consumed by router implementations such as the global router for
-/// hierarchical pool selection. Unknown to engines/backends.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct RouterParams {
-    /// Target time-to-first-token in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttft_target: Option<f64>,
-
-    /// Target inter-token latency in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub itl_target: Option<f64>,
-}
 
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine
@@ -91,11 +76,6 @@ pub struct RoutingHints {
     /// Request routing constraints used for worker compatibility and soft preference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_constraints: Option<RoutingConstraints>,
-
-    /// Session control for subagent KV isolation and sticky routing.
-    /// Contains session_id (for affinity) and optional action (open/close).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -108,6 +88,11 @@ pub struct BootstrapInfo {
 
     /// Unique room ID for this request's KV transfer session
     pub bootstrap_room: u64,
+
+    /// Stable mocker lifecycle identity. Role, backend, and wire version are
+    /// validated by the bootstrap registration and framing protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_id: Option<Uuid>,
 }
 
 /// Directional pointer to a predecessor worker's `engine.generate` span.
@@ -146,6 +131,11 @@ pub struct MmRoutingInfo {
     /// Block-level multimodal metadata aligned with routing_token_ids blocks.
     /// Use `None` entries for blocks without multimodal objects.
     pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
+
+    /// Unpadded expanded prompt length. Use instead of `routing_token_ids.len()`
+    /// (which includes block-padding) when a real token count is needed.
+    #[serde(default)]
+    pub expanded_prompt_len: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -379,6 +369,29 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_info_carries_only_stable_handoff_identity() {
+        let handoff_id = Uuid::from_u128(42);
+        let info = BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 1234,
+            bootstrap_room: 7,
+            handoff_id: Some(handoff_id),
+        };
+
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["handoff_id"], handoff_id.to_string());
+        assert!(value.get("mocker_handoff_protocol_version").is_none());
+        assert!(value.get("mocker_handoff_role").is_none());
+        assert!(value.get("mocker_handoff_engine_type").is_none());
+        assert_eq!(
+            serde_json::from_value::<BootstrapInfo>(value)
+                .unwrap()
+                .handoff_id,
+            Some(handoff_id)
+        );
+    }
 
     /// Covers the `is_probe` serde contract end-to-end: `rename = "_HEALTH_CHECK"`,
     /// `default`, and `skip_serializing_if`. Each assertion targets a distinct
