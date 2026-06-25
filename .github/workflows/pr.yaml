@@ -873,7 +873,7 @@ jobs:
       VCLUSTER_NAME: vc-smoke-${{ github.run_id }}-${{ github.run_attempt }}-dev01
       VCLUSTER_NAMESPACE: dynamo-deploy-test
       VCLUSTER_K8S_VERSION: v1.32.13
-      VCLUSTER_PROBE_IMAGE: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dockerhub/busybox:1.37
+      VCLUSTER_PROBE_IMAGE: public.ecr.aws/docker/library/busybox:1.37
       VCLUSTER_HOST_PRIORITY_CLASS: ci-nightly-high-priority
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1133,7 +1133,7 @@ jobs:
       VCLUSTER_NAME: vc-smoke-${{ github.run_id }}-${{ github.run_attempt }}-dev02
       VCLUSTER_NAMESPACE: dynamo-deploy-test
       VCLUSTER_K8S_VERSION: v1.32.13
-      VCLUSTER_PROBE_IMAGE: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dockerhub/busybox:1.37
+      VCLUSTER_PROBE_IMAGE: public.ecr.aws/docker/library/busybox:1.37
       VCLUSTER_HOST_PRIORITY_CLASS: ci-nightly-high-priority
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
