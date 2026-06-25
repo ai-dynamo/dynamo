@@ -19,6 +19,7 @@ from compliance.generators.common import (
     read_harvested_license,
     render_notices,
     spdx_license_text,
+    subtract_baseline,
     write_cyclonedx,
     write_merged_csv,
 )
@@ -269,6 +270,22 @@ def test_write_merged_csv_notes_only_for_non_permissive(tmp_path):
     # Permissive packages carry no note.
     assert rows[("python", "accelerate")]["notes"] == ""
     assert rows[("rust", "serde")]["notes"] == ""
+
+
+def test_subtract_baseline_normalizes_python_name_separators():
+    comps = [
+        Component("python", "arctic_inference", "0.1.1", "UNKNOWN", None),
+        Component("python", "vllm_test_utils", "0.1", "UNKNOWN", None),
+        Component("python", "keep_me", "1.0.0", "MIT", None),
+    ]
+    baseline = {
+        ("arctic-inference", "0.1.1"),
+        ("vllm-test-utils", "0.1"),
+    }
+
+    kept = subtract_baseline(comps, baseline)
+
+    assert [(c.name, c.version) for c in kept] == [("keep_me", "1.0.0")]
 
 
 def test_write_cyclonedx_is_valid_delta_sbom(tmp_path):

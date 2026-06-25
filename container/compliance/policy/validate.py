@@ -256,7 +256,11 @@ class Violation:
 def validate_row(
     policy: Policy, ecosystem: str, name: str, version: str, spdx: str
 ) -> Violation | None:
+    extra_allow = _exception_allow_set(policy, ecosystem, name, version)
+
     if not spdx or spdx == "UNKNOWN":
+        if "UNKNOWN" in extra_allow:
+            return None
         if policy.unknown_action == "deny":
             return Violation(
                 ecosystem,
@@ -267,7 +271,6 @@ def validate_row(
             )
         return None
 
-    extra_allow = _exception_allow_set(policy, ecosystem, name, version)
     # Exceptions override BOTH the deny list and the not-in-allow case for
     # this specific (ecosystem, name): "denied unless explicitly excepted".
     # An auditor who has reviewed bash@5.2 and confirmed it's GPL-3.0-or-later
