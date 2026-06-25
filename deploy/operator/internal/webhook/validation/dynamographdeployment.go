@@ -99,36 +99,41 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 }
 
 func (v *dynamoGraphDeploymentValidation) validate(ctx context.Context) (admission.Warnings, error) {
+	if v.deployment == nil {
+		return nil, fmt.Errorf("DynamoGraphDeployment is nil")
+	}
+
+	var errs []error
 	components, err := betaComponentsByName(v.deployment)
 	if err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
-	if len(components) == 0 {
-		return nil, fmt.Errorf("spec.components must have at least one component")
+	if len(v.deployment.Spec.Components) == 0 {
+		errs = append(errs, fmt.Errorf("spec.components must have at least one component"))
 	}
 
 	if err := v.validateAnnotations(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateRestart(components); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validatePriorityClassName(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateTopologyConstraints(ctx, components); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateKvTransferPolicy(ctx); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateFailoverRequiresDiscoveryMode(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	var allWarnings admission.Warnings
 	alphaWarnings, err := v.validateAlphaCompatibility()
 	if err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	allWarnings = append(allWarnings, alphaWarnings...)
 
@@ -136,12 +141,12 @@ func (v *dynamoGraphDeploymentValidation) validate(ctx context.Context) (admissi
 		component := &v.deployment.Spec.Components[i]
 		warnings, err := v.validateComponent(ctx, component)
 		if err != nil {
-			return nil, err
+			errs = append(errs, err)
 		}
 		allWarnings = append(allWarnings, warnings...)
 	}
 
-	return allWarnings, nil
+	return allWarnings, errors.Join(errs...)
 }
 
 // validateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
@@ -151,30 +156,41 @@ func (v *dynamoGraphDeploymentValidation) validateUpdate(
 	operatorPrincipal string,
 ) (admission.Warnings, error) {
 	var warnings admission.Warnings
+	var errs []error
+
+	if old == nil {
+		errs = append(errs, fmt.Errorf("old DynamoGraphDeployment is nil"))
+	}
+	if v.deployment == nil {
+		errs = append(errs, fmt.Errorf("new DynamoGraphDeployment is nil"))
+	}
+	if len(errs) > 0 {
+		return warnings, errors.Join(errs...)
+	}
 
 	oldComponents, err := betaComponentsByName(old)
 	if err != nil {
-		return warnings, err
+		errs = append(errs, err)
 	}
 	newComponents, err := betaComponentsByName(v.deployment)
 	if err != nil {
-		return warnings, err
+		errs = append(errs, err)
 	}
 
 	if err := v.validateImmutableFields(old, oldComponents, newComponents, &warnings); err != nil {
-		return warnings, err
+		errs = append(errs, err)
 	}
 	if err := v.validateComponentTopology(oldComponents, newComponents); err != nil {
-		return warnings, err
+		errs = append(errs, err)
 	}
 	if err := v.validateReplicasChanges(oldComponents, newComponents, userInfo, operatorPrincipal); err != nil {
-		return warnings, err
+		errs = append(errs, err)
 	}
 	if err := v.validateNoRestartDuringRollingUpdate(old); err != nil {
-		return warnings, err
+		errs = append(errs, err)
 	}
 
-	return warnings, nil
+	return warnings, errors.Join(errs...)
 }
 
 func (v *dynamoGraphDeploymentValidation) validateImmutableFields(
@@ -1101,43 +1117,44 @@ func NewDynamoGraphDeploymentSharedSpecValidator(
 }
 
 func (v *DynamoGraphDeploymentSharedSpecValidator) Validate(ctx context.Context) (admission.Warnings, error) {
+	var errs []error
 	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
-		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
+		errs = append(errs, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath))
 	}
 	if err := v.validateMinAvailable(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validatePodTemplate(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateCompilationCache(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateSharedMemorySize(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateCheckpointConfig(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateGMSClientContainerNames(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validatePodTemplateAnnotations(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateEPPConfig(ctx); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateGPUMemoryService(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateFailover(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	if err := v.validateSnapshotWithGPUMemoryService(); err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
-	return nil, nil
+	return nil, errors.Join(errs...)
 }
 
 func (v *DynamoGraphDeploymentSharedSpecValidator) validateMinAvailable() error {

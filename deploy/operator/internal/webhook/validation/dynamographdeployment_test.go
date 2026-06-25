@@ -200,6 +200,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	}
 }
 
+func TestDynamoGraphDeploymentValidator_ValidateAggregatesErrors(t *testing.T) {
+	deployment := betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+		spec.Restart = &nvidiacomv1beta1.Restart{}
+		spec.Components[0].Replicas = k8sptr.To(int32(-1))
+		spec.Components[1].Replicas = k8sptr.To(int32(-2))
+		spec.Components[1].CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{}
+	})
+	deployment.Annotations = map[string]string{
+		consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver",
+		consts.KubeAnnotationDynamoKubeDiscoveryMode:     "bad-mode",
+	}
+
+	validator := NewDynamoGraphDeploymentValidator(nil, true)
+	_, err := validator.Validate(context.Background(), deployment)
+	for _, wantErr := range []string{
+		"annotation nvidia.com/dynamo-operator-origin-version has invalid value",
+		"annotation nvidia.com/dynamo-kube-discovery-mode has invalid value",
+		"spec.restart.id is required",
+		"spec.components[frontend].replicas must be non-negative",
+		"spec.components[worker].replicas must be non-negative",
+		"spec.components[worker].compilationCache.pvcName is required",
+	} {
+		assertBetaValidationError(t, err, wantErr)
+	}
+}
+
 func TestDynamoGraphDeploymentValidator_ValidateAlphaCompatibility(t *testing.T) {
 	tests := []struct {
 		name    string
