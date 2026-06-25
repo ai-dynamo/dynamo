@@ -107,46 +107,6 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     return config.model
 
 
-def _engine_args_use_fp8(engine_args: Any) -> bool:
-    quantization = getattr(engine_args, "quantization", None)
-    if quantization is not None and str(quantization).lower() == "fp8":
-        return True
-    kv_cache_dtype = getattr(engine_args, "kv_cache_dtype", None)
-    return kv_cache_dtype is not None and str(kv_cache_dtype).lower().startswith("fp8")
-
-
-def _maybe_init_mx_refit_fp8(engine_args: Any) -> bool:
-    """Apply Dynamo-owned FP8 refit patches before vLLM builds the engine."""
-    if os.environ.get("DYN_MX_REFIT_ENABLED") != "1":
-        return False
-    if not _engine_args_use_fp8(engine_args):
-        return False
-
-    from dynamo.vllm.mx_refit.fp8 import init_fp8
-
-    quantization = getattr(engine_args, "quantization", None)
-    kv_cache_dtype = getattr(engine_args, "kv_cache_dtype", None) or "auto"
-    tensor_parallel_size = int(getattr(engine_args, "tensor_parallel_size", 1) or 1)
-    use_deep_gemm = os.environ.get("VLLM_USE_DEEP_GEMM", "0") == "1"
-    init_fp8(
-        {
-            "precision": "fp8" if str(quantization).lower() == "fp8" else "",
-            "kv_cache_dtype": str(kv_cache_dtype),
-            "async_engine": True,
-            "use_deep_gemm": use_deep_gemm,
-        },
-        str(getattr(engine_args, "model", "")),
-        model_parallel_size=tensor_parallel_size,
-    )
-    logger.info(
-        "[mx-refit-fp8] enabled model=%s tp=%d kv_cache_dtype=%s",
-        getattr(engine_args, "model", ""),
-        tensor_parallel_size,
-        kv_cache_dtype,
-    )
-    return True
-
-
 def build_headless_namespace(config: Config) -> argparse.Namespace:
     """Build an argparse Namespace from engine_args for vLLM's run_headless().
 
@@ -610,41 +570,6 @@ def setup_vllm_engine(
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
-
-    if engine_args.load_format in ("mx-source", "mx-target"):
-        try:
-            from modelexpress import register_modelexpress_loaders
-
-            # Ensure the ModelExpress server URL env var is set for the model loader
-            if config.model_express_url:
-                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
-            register_modelexpress_loaders()
-            # Use wrapper worker to ensure loaders are registered in spawned worker processes
-            engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
-        except ImportError as e:
-            raise ImportError(
-                f"ModelExpress package required for --load-format={engine_args.load_format}. "
-                "Install with: pip install modelexpress"
-            ) from e
-
-    # ModelExpress v2 mid-training weight refit. Opted into via env var
-    # DYN_MX_REFIT_ENABLED=1 (set by nrl-k8s when the trainer uses
-    # cluster.weight_sync.method=mx). Injects MxRefitWorkerExtension into
-    # vLLM's Worker base classes so its methods become callable via
-    # AsyncLLM.collective_rpc; see components/src/dynamo/vllm/mx_refit/.
-    if os.environ.get("DYN_MX_REFIT_ENABLED") == "1":
-        existing_ext = getattr(engine_args, "worker_extension_cls", None)
-        mx_ext = "dynamo.vllm.mx_refit.extension.MxRefitWorkerExtension"
-        if existing_ext and existing_ext != mx_ext:
-            logger.warning(
-                "[mx-refit] worker_extension_cls already set to %r; "
-                "overriding to %r. Stacking extensions is not supported.",
-                existing_ext,
-                mx_ext,
-            )
-        engine_args.worker_extension_cls = mx_ext
-        logger.info("[mx-refit] enabled; worker_extension_cls=%s", mx_ext)
-        _maybe_init_mx_refit_fp8(engine_args)
 
     # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
     # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.

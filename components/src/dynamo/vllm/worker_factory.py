@@ -422,23 +422,6 @@ class WorkerFactory:
                 ]
             )
 
-        # ModelExpress v2 mid-training weight refit endpoints. Activated by
-        # the same env var the launcher uses in main.py:setup_vllm_engine to
-        # inject MxRefitWorkerExtension as worker_extension_cls. We read the
-        # env directly rather than checking engine_args because worker_factory
-        # runs BEFORE setup_vllm_engine — the attribute isn't set yet.
-        mx_refit_enabled = os.environ.get("DYN_MX_REFIT_ENABLED") == "1"
-        if mx_refit_enabled:
-            mx_refit_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.update_weights_via_mx"
-            )
-            prepare_refit_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.prepare_refit_info"
-            )
-            shutdown_endpoints.extend(
-                [mx_refit_endpoint, prepare_refit_endpoint]
-            )
-
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
@@ -502,14 +485,6 @@ class WorkerFactory:
             encode_worker_client=encode_worker_client,
         )
         handler.add_temp_dir(prometheus_temp_dir)
-
-        # ModelExpress v2 refit driver: the trainer POSTs synchronously to
-        # /engine/update_weights_via_mx on each worker (registered below).
-        # The receiver-side polling thread is gone — it was the workaround
-        # for not having a trainer driver, but it had a silent stale-weights
-        # failure mode (DEBUGGING_POSTMORTEM §15) and races the synchronous
-        # path. MxRefitWorkerExtension.start_mx_refit_poller is kept on
-        # the extension class but no longer invoked.
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -670,20 +645,6 @@ class WorkerFactory:
                         ),
                         list_loras_endpoint.serve_endpoint(
                             handler.list_loras,
-                            metrics_labels=model_metrics_labels,
-                        ),
-                    ]
-                )
-
-            if mx_refit_enabled:
-                serve_tasks.extend(
-                    [
-                        mx_refit_endpoint.serve_endpoint(
-                            handler.update_weights_via_mx,
-                            metrics_labels=model_metrics_labels,
-                        ),
-                        prepare_refit_endpoint.serve_endpoint(
-                            handler.prepare_refit_info,
                             metrics_labels=model_metrics_labels,
                         ),
                     ]
@@ -970,22 +931,6 @@ class WorkerFactory:
             rl_routes,
             enable_dispatch=handler.config.enable_rl,
         )
-
-        # MX refit cycle: trainer-driven pause → update → flush → resume,
-        # POST'd to /engine/<route> over HTTP on each worker's system port.
-        # Gated on DYN_MX_REFIT_ENABLED so the routes are inert when MX
-        # isn't in use.
-        if os.environ.get("DYN_MX_REFIT_ENABLED") == "1":
-            runtime.register_engine_route(
-                "pause_generation", handler.pause_generation
-            )
-            runtime.register_engine_route(
-                "resume_generation", handler.resume_generation
-            )
-            runtime.register_engine_route("flush_cache", handler.flush_cache)
-            runtime.register_engine_route(
-                "update_weights_via_mx", handler.update_weights_via_mx_engine
-            )
 
         logger.info(
             "Registered engine routes: control/sleep, control/wake_up, "
