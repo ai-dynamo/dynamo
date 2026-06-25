@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
 use llm_multimodal::{
-    ModelMetadata, ModelRegistry, PreProcessorConfig, VisionPreProcessor, VisionProcessorRegistry,
+    ImagePreProcessor, ImageProcessorRegistry, ModelMetadata, ModelRegistry, PreProcessorConfig,
 };
 use llm_tokenizer::traits::Tokenizer;
 use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTokens};
@@ -68,14 +68,14 @@ impl Tokenizer for NullTokenizer {
 
 // Both registries borrow processor refs that callers hold across requests,
 // so they must outlive every consumer — `LazyLock` gives them `'static`.
-static REGISTRY: LazyLock<VisionProcessorRegistry> =
-    LazyLock::new(VisionProcessorRegistry::with_defaults);
+static REGISTRY: LazyLock<ImageProcessorRegistry> =
+    LazyLock::new(ImageProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
 /// Maps `(width, height) → num_image_tokens` for a single model using the
 /// model's HF `preprocessor_config.json`.
 pub struct LightseekMmCounter {
-    processor: &'static dyn VisionPreProcessor,
+    processor: &'static dyn ImagePreProcessor,
     config: PreProcessorConfig,
     model_id: String,
 }
