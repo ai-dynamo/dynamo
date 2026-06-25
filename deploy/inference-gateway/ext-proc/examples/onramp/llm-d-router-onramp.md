@@ -1,6 +1,5 @@
-# llm-d Router on-ramp (raw vLLM workers, no extra control plane)
 
-## Example progression from vLLM to vLLM + llm-d + GAIE
+# Example progression from vLLM to vLLM + llm-d + GAIE
 
 ### Initial Deployment
 
@@ -214,7 +213,7 @@ Install:
 
 ```bash
 helm upgrade -i qwen-router \
-  /home/atchernych/code/gaie/llm-d-router/config/charts/llm-d-router-gateway \
+  llm-d-router/config/charts/llm-d-router-gateway \
   -n <ns> \
   -f values-llmd-gateway.yaml
 ```
