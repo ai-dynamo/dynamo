@@ -1,5 +1,6 @@
+# llm-d Router on-ramp (raw vLLM workers, no extra control plane)
 
-# Example progression from vLLM to vLLM + llm-d + GAIE
+## Example progression from vLLM to vLLM + llm-d + GAIE
 
 ### Initial Deployment
 
@@ -47,7 +48,12 @@ spec:
 
 Set up a Gateway-API gateway + Inference Extension (GAIE) if you don't have one yet. Follow the instructions for your gateway (e.g. AgentGateway) and Inference Extension.
 
-Create the HuggingFace token secret.
+Choose tokenization mode first:
+
+- **Option A (EPP-local tokenizer sidecar):** create `llm-d-hf-token`.
+- **Option B (tokenize through existing vLLM/render endpoint):** no EPP HF secret required.
+
+Create the secret only for Option A:
 
 ```bash
 kubectl create secret generic llm-d-hf-token --from-literal=HF_TOKEN=<your-token>
@@ -131,11 +137,26 @@ Required alignment:
 - vLLM `--block-size` must match `tokenProcessorConfig.blockSize`.
 - vLLM KV topic should match `kvEventsConfig.topicFilter` (default prefix `kv@`).
 
+
 ### 4. Add llm-d EPP to your deployment
 
 Deploy llm-d Router in gateway mode with a precise-prefix config.
 
-Create `values-llmd-gateway.yaml`:
+llm-d provides NO guide how to upgrade existing vLLM workers. They need to consult many docs:
+Chart defaults (gateway chart):
+https://github.com/llm-d/llm-d-router/blob/main/config/charts/llm-d-router-gateway/values.yaml
+Shared routerlib defaults:
+https://github.com/llm-d/llm-d-router/blob/main/config/charts/routerlib/values.yaml
+Precise prefix plugin example:
+https://github.com/llm-d/llm-d-router/blob/main/deploy/config/epp-precise-prefix-cache-config.yaml
+Tokenizer + vLLM URL example:
+https://github.com/llm-d/llm-d-router/blob/main/deploy/config/sim-epp-tokenizer-vllm-http-config.yaml
+
+If I were to add this guide I would do the following:
+
+Create `values-llmd-gateway.yaml` in your real deployment repo (for example in
+the same repo where your Helm release values live). The YAML below is a
+template example you should copy and customize.
 
 ```yaml
 router:
@@ -161,7 +182,6 @@ router:
         - type: endpoint-notification-source
         - type: metrics-data-source
         - type: core-metrics-extractor
-        - type: decode-filter
         - type: precise-prefix-cache-producer
           parameters:
             tokenProcessorConfig:
@@ -188,7 +208,6 @@ router:
         schedulingProfiles:
         - name: default
           plugins:
-          - pluginRef: decode-filter
           - pluginRef: prefix-cache-scorer
             weight: 2
           - pluginRef: kv-cache-utilization-scorer
@@ -209,13 +228,54 @@ provider:
   name: none
 ```
 
-Install:
+The config above is **Option A** (EPP-local tokenizer sidecar).
+For **Option B** (reuse an existing render endpoint), apply these changes:
+
+```yaml
+router:
+  tokenizer:
+    enabled: false
+  epp:
+    pluginsCustomConfig:
+      precise-prefix-config.yaml: |
+        apiVersion: llm-d.ai/v1alpha1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: token-producer
+          parameters:
+            modelName: "Qwen/Qwen3-32B"
+            vllm:
+              url: "http://vllm-render.<ns>.svc.cluster.local:8000"
+        # keep the rest of the plugin config unchanged
+```
+
+Customize this template for your deployment:
+
+- `router.modelServers.matchLabels`: set to labels on your vLLM worker pods.
+- `router.modelServers.targetPorts[].number`: set to your worker serving port.
+- `httpRoute.inferenceGatewayName`: set to your gateway name.
+- `token-producer.parameters.modelName`: set to the exact served model id.
+- `tokenProcessorConfig.blockSize`: must match worker `--block-size`.
+- `kvEventsConfig.podDiscoveryConfig.socketPort`: must match worker KV event port.
+- Keep `decode-filter` out for aggregated serving (this example is aggregated).
+
+Install (local chart path):
 
 ```bash
 helm upgrade -i qwen-router \
-  llm-d-router/config/charts/llm-d-router-gateway \
+  /home/atchernych/code/gaie/llm-d-router/config/charts/llm-d-router-gateway \
   -n <ns> \
   -f values-llmd-gateway.yaml
+```
+
+Install (OCI chart):
+
+```bash
+helm upgrade -i qwen-router \
+  oci://ghcr.io/llm-d/charts/llm-d-router-gateway-dev \
+  -n <ns> \
+  -f values-llmd-gateway.yaml \
+  --version <router-chart-version>
 ```
 
 If `InferencePool` and `HTTPRoute` are already managed separately, set:
@@ -249,6 +309,9 @@ curl --max-time 120 -sS "http://localhost:8000/v1/chat/completions" \
 - worker KV topic matches `kvEventsConfig.topicFilter`.
 - worker `--block-size` == `tokenProcessorConfig.blockSize`.
 - `token-producer.parameters.modelName` matches the served model/tokenizer.
+- Aggregated serving: do not include `decode-filter` in the plugin chain.
+- Option A: create `llm-d-hf-token` for tokenizer sidecar.
+- Option B: set `router.tokenizer.enabled=false` and point `token-producer.parameters.vllm.url` at your existing render endpoint.
 
 ## Final vLLM workers deployment
 
@@ -292,7 +355,7 @@ spec:
           - name: kv-events            # NEW: KV event port the llm-d EPP subscribes to
             containerPort: 5557
         env:
-          - name: HF_TOKEN             # NEW: lets worker pull gated/private models
+          - name: HF_TOKEN             # NEW (optional): needed only for gated/private models
             valueFrom:
               secretKeyRef:
                 name: llm-d-hf-token
