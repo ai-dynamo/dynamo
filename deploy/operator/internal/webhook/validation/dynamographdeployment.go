@@ -125,11 +125,13 @@ func (v *dynamoGraphDeploymentValidation) validate(ctx context.Context) (admissi
 	if err := v.validateFailoverRequiresDiscoveryMode(); err != nil {
 		return nil, err
 	}
-	if err := v.validateAlphaCompatibility(); err != nil {
+	var allWarnings admission.Warnings
+	alphaWarnings, err := v.validateAlphaCompatibility()
+	if err != nil {
 		return nil, err
 	}
+	allWarnings = append(allWarnings, alphaWarnings...)
 
-	var allWarnings admission.Warnings
 	for i := range v.deployment.Spec.Components {
 		component := &v.deployment.Spec.Components[i]
 		warnings, err := v.validateComponent(ctx, component)
@@ -863,16 +865,16 @@ func (v *dynamoGraphDeploymentValidation) validateFailoverRequiresDiscoveryMode(
 	return nil
 }
 
-func (v *dynamoGraphDeploymentValidation) validateAlphaCompatibility() error {
+func (v *dynamoGraphDeploymentValidation) validateAlphaCompatibility() (admission.Warnings, error) {
 	// Reconstruct the v1alpha1 view so alpha-only fields preserved by
 	// conversion still get the webhook validation they had before the DGD
 	// webhook moved to v1beta1.
 	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err := alpha.ConvertFrom(v.deployment); err != nil {
-		return fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: failed to reconstruct compatibility view: %w", err)
+		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: failed to reconstruct compatibility view: %w", err)
 	}
 	if !hasAlphaCompatibilityFields(alpha) {
-		return nil
+		return nil, nil
 	}
 
 	return validateAlphaCompatibility(alpha)
@@ -886,8 +888,16 @@ func hasAlphaCompatibilityFields(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) b
 		if service == nil {
 			return true
 		}
+		hasDeprecatedAutoscaling := false
+		//nolint:staticcheck // SA1019: Intentionally checking deprecated field to preserve v1alpha1 warnings.
+		if service.Autoscaling != nil {
+			hasDeprecatedAutoscaling = true
+		}
 		if service.Ingress != nil ||
 			len(service.Annotations) > 0 ||
+			service.DynamoNamespace != nil ||
+			hasDeprecatedAutoscaling ||
+			len(service.VolumeMounts) > 0 ||
 			service.SharedMemory != nil ||
 			service.FrontendSidecar != nil ||
 			(service.GPUMemoryService != nil && !service.GPUMemoryService.Enabled) {
@@ -897,7 +907,8 @@ func hasAlphaCompatibilityFields(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) b
 	return false
 }
 
-func validateAlphaCompatibility(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+func validateAlphaCompatibility(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (admission.Warnings, error) {
+	var warnings admission.Warnings
 	var errs []error
 
 	if err := validateAlphaCompatibilityPVCs(dgd.Spec.PVCs); err != nil {
@@ -909,12 +920,36 @@ func validateAlphaCompatibility(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) er
 			errs = append(errs, fmt.Errorf("%s must not be null", fieldPath))
 			continue
 		}
+		warnings = append(warnings, alphaCompatibilityWarningsForService(dgd, fieldPath, service)...)
 		if err := validateAlphaCompatibilityService(fieldPath, service); err != nil {
 			errs = append(errs, err)
 		}
 	}
 
-	return errors.Join(errs...)
+	return warnings, errors.Join(errs...)
+}
+
+func alphaCompatibilityWarningsForService(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	fieldPath string,
+	service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+) admission.Warnings {
+	var warnings admission.Warnings
+	if service.DynamoNamespace != nil && *service.DynamoNamespace != "" {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s.dynamoNamespace is deprecated and ignored. Value '%s' will be replaced with '%s'. "+
+				"Remove this field from your configuration",
+			fieldPath, *service.DynamoNamespace, dgd.GetDynamoNamespaceForService(service)))
+	}
+
+	//nolint:staticcheck // SA1019: Intentionally checking deprecated field to warn users.
+	if service.Autoscaling != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter "+
+				"with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
+			fieldPath))
+	}
+	return warnings
 }
 
 func validateAlphaCompatibilityPVCs(pvcs []nvidiacomv1alpha1.PVC) error {
@@ -955,6 +990,9 @@ func validateAlphaCompatibilityService(
 		errs = append(errs, fmt.Errorf("%s.ingress.host is required when ingress is enabled", fieldPath))
 	}
 	if err := validateAlphaCompatibilityServiceAnnotations(fieldPath, service.Annotations); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateAlphaCompatibilityVolumeMounts(fieldPath, service.VolumeMounts); err != nil {
 		errs = append(errs, err)
 	}
 	if service.SharedMemory != nil && !service.SharedMemory.Disabled && service.SharedMemory.Size.IsZero() {
@@ -1001,6 +1039,21 @@ func validateAlphaCompatibilityFrontendSidecar(
 		}
 	}
 	return nil
+}
+
+func validateAlphaCompatibilityVolumeMounts(
+	fieldPath string,
+	volumeMounts []nvidiacomv1alpha1.VolumeMount,
+) error {
+	var errs []error
+	for i := range volumeMounts {
+		volumeMount := &volumeMounts[i]
+		if !volumeMount.UseAsCompilationCache && volumeMount.MountPoint == "" {
+			errs = append(errs, fmt.Errorf("%s.volumeMounts[%d].mountPoint is required when useAsCompilationCache is false",
+				fieldPath, i))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func validateAlphaCompatibilityGMSClientContainerNames(
