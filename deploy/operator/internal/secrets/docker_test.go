@@ -146,6 +146,64 @@ func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 	}
 }
 
+func TestDockerSecretIndexer_RefreshIndexSkipsMalformedSecrets(t *testing.T) {
+	mockSecrets := []corev1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "bad-auth-key",
+				Namespace: "default",
+			},
+			Type: corev1.SecretTypeDockerConfigJson,
+			Data: map[string][]byte{
+				// The auth key is a stray command instead of a registry host,
+				// which fails URL host parsing. The valid key must still index.
+				".dockerconfigjson": []byte(`{"auths":{"pip install torch --index-url https:":{}, "good-registry.io/team":{}}}`),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "bad-json",
+				Namespace: "default",
+			},
+			Type: corev1.SecretTypeDockerConfigJson,
+			Data: map[string][]byte{
+				".dockerconfigjson": []byte(`not-json`),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "valid-secret",
+				Namespace: "default",
+			},
+			Type: corev1.SecretTypeDockerConfigJson,
+			Data: map[string][]byte{
+				".dockerconfigjson": []byte(`{"auths":{"good-registry.io/other":{}}}`),
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(&mockSecrets[0], &mockSecrets[1], &mockSecrets[2]).
+		Build()
+
+	i := NewDockerSecretIndexer(fakeClient, "")
+	// A malformed secret must not fail the whole refresh.
+	if err := i.RefreshIndex(t.Context()); err != nil {
+		t.Fatalf("DockerSecretIndexer.RefreshIndex() error = %v, want nil", err)
+	}
+
+	// The valid auth key in the otherwise-malformed secret is still indexed,
+	// alongside the fully valid secret.
+	secrets, err := i.GetSecrets("default", "good-registry.io")
+	if err != nil {
+		t.Fatalf("DockerSecretIndexer.GetSecrets() error = %v", err)
+	}
+	if got, want := secrets, []string{"bad-auth-key", "valid-secret"}; !slices.Equal(got, want) {
+		t.Fatalf("DockerSecretIndexer.GetSecrets() = %v, want %v", got, want)
+	}
+}
+
 func TestDockerSecretIndexer_RefreshIndexRespectsNamespaceScope(t *testing.T) {
 	mockSecrets := []corev1.Secret{
 		{

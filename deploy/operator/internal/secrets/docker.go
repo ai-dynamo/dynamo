@@ -10,6 +10,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type DockerSecretIndexer struct {
@@ -50,6 +51,7 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 		}
 		return 0
 	})
+	logger := log.FromContext(ctx)
 	tmpSecrets := make(map[string]map[string][]string)
 	for _, secret := range secrets.Items {
 		if secret.Type == corev1.SecretTypeDockerConfigJson {
@@ -58,7 +60,11 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 				Auths map[string]any `json:"auths"`
 			}{}
 			if err := json.Unmarshal(secret.Data[corev1.DockerConfigJsonKey], dockerConfig); err != nil {
-				return fmt.Errorf("unable to unmarshal docker config json for secret %s: %w", secret.Name, err)
+				// A single malformed secret must not block indexing of every
+				// other docker secret, so skip it instead of failing the refresh.
+				logger.Error(err, "skipping docker secret with invalid docker config json",
+					"secret", secret.Name, "namespace", secret.Namespace)
+				continue
 			}
 			namespace := secret.Namespace
 			if _, ok := tmpSecrets[namespace]; !ok {
@@ -68,7 +74,11 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 				// retrieve the registry host
 				registry, err := common.GetHost(auth)
 				if err != nil {
-					return fmt.Errorf("unable to get host for registry %s for secret %s: %w", auth, secret.Name, err)
+					// Skip the malformed registry key but keep indexing the
+					// remaining valid auths in this and other secrets.
+					logger.Error(err, "skipping malformed registry auth key in docker secret",
+						"secret", secret.Name, "namespace", secret.Namespace, "authKey", auth)
+					continue
 				}
 				tmpSecrets[namespace][registry] = append(tmpSecrets[namespace][registry], secret.Name)
 			}
