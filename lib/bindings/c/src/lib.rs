@@ -12,9 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::{
-    config::{
-        KvRouterConfig, RouterConfigOverride, apply_deprecated_overlap_score_weight_override,
-    },
+    config::{RouterConfigOverride, kv_router_config_from_dynamo_env},
     protocols::*,
 };
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -625,85 +623,6 @@ pub enum QueryRouterResult {
     ErrBackpressure = 7,
 }
 
-/// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.
-fn kv_router_config_from_env() -> KvRouterConfig {
-    let mut cfg = KvRouterConfig::default();
-
-    fn env_f64(key: &str) -> Option<f64> {
-        std::env::var(key).ok().and_then(|v| v.parse().ok())
-    }
-    fn env_bool(key: &str) -> Option<bool> {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| match v.to_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => Some(true),
-                "false" | "0" | "no" | "off" => Some(false),
-                _ => None,
-            })
-    }
-
-    if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
-        cfg.overlap_score_credit = v;
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_PREFILL_LOAD_SCALE") {
-        cfg.prefill_load_scale = v;
-    }
-    for key in [
-        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
-        "DYN_OVERLAP_SCORE_WEIGHT",
-    ] {
-        if let Some(v) = env_f64(key) {
-            tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
-            apply_deprecated_overlap_score_weight_override(
-                v,
-                &mut cfg.overlap_score_credit,
-                &mut cfg.prefill_load_scale,
-            );
-            break;
-        }
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
-        cfg.router_temperature = v;
-    }
-    if let Some(v) = env_bool("DYN_USE_KV_EVENTS") {
-        cfg.use_kv_events = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_REPLICA_SYNC") {
-        cfg.router_replica_sync = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_ACTIVE_BLOCKS") {
-        cfg.router_track_active_blocks = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
-        cfg.router_track_output_blocks = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_PREFILL_TOKENS") {
-        cfg.router_track_prefill_tokens = v;
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
-        cfg.router_queue_threshold = Some(v);
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_PREDICTED_TTL_SECS") {
-        cfg.router_predicted_ttl_secs = Some(v);
-    }
-    tracing::info!(
-        overlap_score_credit = cfg.overlap_score_credit,
-        prefill_load_scale = cfg.prefill_load_scale,
-        router_temperature = cfg.router_temperature,
-        use_kv_events = cfg.use_kv_events,
-        router_replica_sync = cfg.router_replica_sync,
-        router_track_active_blocks = cfg.router_track_active_blocks,
-        router_track_output_blocks = cfg.router_track_output_blocks,
-        router_track_prefill_tokens = cfg.router_track_prefill_tokens,
-        router_queue_threshold = ?cfg.router_queue_threshold,
-        router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
-        queue_depth_tiers_unbounded = cfg.router_queue_by_incoming_missing_isl.is_unbounded(),
-        "KvRouterConfig initialized (DYN_* env overrides applied)"
-    );
-
-    cfg
-}
-
 /// Create router handles for query-only routing
 ///
 /// This function waits for at least one decode worker to be discovered before returning.
@@ -790,7 +709,7 @@ pub unsafe extern "C" fn create_routers(
             );
         }
 
-        let mut kv_router_config = kv_router_config_from_env();
+        let mut kv_router_config = kv_router_config_from_dynamo_env();
         kv_router_config.skip_initial_worker_wait = true;
 
         // Build endpoint using the actual namespace discovered from workers,
@@ -1533,10 +1452,10 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
+                        // Prefill workers are identified by `worker_type`.
+                        // Skip any card that is not a Prefill worker.
+                        use dynamo_llm::worker_type::WorkerType;
+                        if card.worker_type != Some(WorkerType::Prefill) {
                             continue;
                         }
 
@@ -1568,7 +1487,7 @@ fn spawn_prefill_discovery_watcher(
 ///
 /// This function:
 /// 1. Lists all models via discovery
-/// 2. Finds the first model in the target namespace (decode workers only)
+/// 2. Finds the first model in the target namespace (Decode or Aggregated only)
 /// 3. Downloads the model config (tokenizer files) if needed
 /// 4. Creates an OpenAIPreprocessor from the model card
 /// 5. Returns the preprocessor, the model card, and the resolved worker namespace
@@ -1583,7 +1502,10 @@ async fn fetch_preprocessor_from_discovery(
     // List all models
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-    // Find first model card in the target namespace (decode workers only).
+    // Find first model card in the target namespace. We want a worker that
+    // owns the OpenAI surface (tokenizer + chat/completions), which is
+    // Decode or Aggregated — Prefill and Encode workers register cards with
+    // no engine and an empty OpenAI surface and must be skipped.
     // Use prefix matching because workers may append a rolling-update hash
     // suffix to the base namespace (e.g. "ns-dgd-58908edc" vs "ns-dgd").
     let mut model_card: Option<(ModelDeploymentCard, String)> = None;
@@ -1597,11 +1519,11 @@ async fn fetch_preprocessor_from_discovery(
             let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    // Skip prefill-only workers, we want decode workers for routing
-                    if card.model_type.supports_prefill()
-                        && !card.model_type.supports_chat()
-                        && !card.model_type.supports_completions()
-                    {
+                    use dynamo_llm::worker_type::WorkerType;
+                    if matches!(
+                        card.worker_type,
+                        Some(WorkerType::Prefill) | Some(WorkerType::Encode)
+                    ) {
                         continue;
                     }
                     model_card = Some((card, actual_namespace));

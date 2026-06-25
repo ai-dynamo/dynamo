@@ -57,6 +57,19 @@ fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> Lo
     }
 }
 
+/// sglang's `MultimodalItem._compute_pad_value` constants — must track upstream;
+/// if they drift, MM routing silently degrades to text-prefix. Pinned by
+/// `pad_value_matches_sglang_protocol`.
+pub const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
+pub const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
+
+/// Canonical per-image pad_value from a routing-side `mm_hash`, called by both
+/// the frontend and the kv-router so request- and event-side hashes agree.
+/// Keeps the low 30 bits only (sglang's limit).
+pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
+    (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
+}
+
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata
 /// and LoRA adapter identity.
 ///
@@ -217,6 +230,10 @@ pub enum KvTransferEnforcement {
     Preferred,
 }
 
+/// Request-level taint constraints evaluated against each worker's published taints.
+///
+/// Topology-aware routing uses the same fields with canonical taints such as
+/// `dynamo.topology/zone=us-east-1a`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RoutingConstraints {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
@@ -1012,12 +1029,14 @@ impl TokensWithHashes {
     /// Adds multimodal extra info for blocks.
     pub fn with_mm_infos(mut self, infos: Vec<Option<BlockExtraInfo>>) -> Self {
         self.block_mm_infos = Some(infos);
+        self.invalidate_hashes();
         self
     }
 
     /// Sets the LoRA adapter name for hash computation.
     pub fn with_lora_name(mut self, name: String) -> Self {
         self.lora_name = Some(name);
+        self.invalidate_hashes();
         self
     }
 
@@ -1035,6 +1054,10 @@ impl TokensWithHashes {
         }
 
         self.is_eagle = is_eagle;
+        self.invalidate_hashes();
+    }
+
+    fn invalidate_hashes(&mut self) {
         self.block_hashes = None;
         self.seq_hashes = None;
     }
@@ -1111,6 +1134,28 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use serde_json;
+
+    /// Pin the sglang pad_value constants and formula against upstream
+    /// `MultimodalItem._compute_pad_value`. If sglang bumps a constant, this
+    /// fails — otherwise routing-side pad_value would silently diverge from
+    /// sglang's `BlockStored` bytes and MM-routing would degrade to text-prefix.
+    #[test]
+    fn pad_value_matches_sglang_protocol() {
+        assert_eq!(MM_PAD_SHIFT_VALUE, 1_000_000);
+        assert_eq!(MM_PAD_HASH_MASK, (1u64 << 30) - 1);
+        assert_eq!(pad_value_for_mm_hash(0), MM_PAD_SHIFT_VALUE as u32);
+        let fits = (1u64 << 30) - 1;
+        assert_eq!(
+            pad_value_for_mm_hash(fits),
+            (MM_PAD_SHIFT_VALUE + fits) as u32
+        );
+        let overflow = (1u64 << 30) | 0xCAFE;
+        assert_eq!(
+            pad_value_for_mm_hash(overflow),
+            (MM_PAD_SHIFT_VALUE + 0xCAFE) as u32,
+            "high bits above the 30-bit mask must be discarded"
+        );
+    }
 
     #[test]
     fn test_router_event_new() {
@@ -1245,6 +1290,63 @@ mod tests {
         for (b, l) in base_hashes.iter().zip(lora_hashes.iter()) {
             assert_ne!(b, l);
         }
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_lora_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..8).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 4);
+        let base_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_lora_name("my-adapter".to_string());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, base_sequence_hashes);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_mm_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let mm_infos = vec![
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![(0, 1)],
+                }],
+            }),
+            None,
+        ];
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 2);
+        let text_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_mm_infos(mm_infos.clone());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                block_mm_infos: Some(&mm_infos),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, text_sequence_hashes);
     }
 
     #[test]

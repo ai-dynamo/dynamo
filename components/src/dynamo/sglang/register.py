@@ -21,14 +21,20 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     register_model,
 )
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig
-from dynamo.sglang.capacity import local_dp_rank_bounds, runtime_capacity
+from dynamo.sglang.capacity import (
+    get_spec_decode_runtime_data,
+    model_card_dp_rank_bounds,
+    runtime_capacity,
+)
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
 def _build_media_decoder_and_fetcher():
@@ -55,6 +61,9 @@ async def _register_model_with_runtime_config(
     dynamo_args: DynamoConfig,
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
+    *,
+    worker_type: WorkerType,
+    needs: Optional[List[List[WorkerType]]] = None,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -65,6 +74,11 @@ async def _register_model_with_runtime_config(
         dynamo_args: Dynamo-specific configuration.
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
+        worker_type: Topology role of this worker (Prefill/Decode/Encode/Aggregated).
+            Required (keyword-only); the Rust binding rejects a missing `worker_type`.
+        needs: DNF list of peer roles this worker requires to serve. Empty (or
+            `None`) means no peer dependency, which is the correct value for
+            Aggregated workers.
 
     Returns:
         True if registration succeeded, False otherwise.
@@ -94,12 +108,13 @@ async def _register_model_with_runtime_config(
             endpoint,
             server_args.model_path,
             server_args.served_model_name,
-            context_length=server_args.context_length,
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
             media_decoder=media_decoder,
             media_fetcher=media_fetcher,
+            worker_type=worker_type,
+            needs=needs,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -261,25 +276,31 @@ async def _get_runtime_config(
         ModelRuntimeConfig with extracted values, or None if extraction fails.
     """
     runtime_config = ModelRuntimeConfig()
+    runtime_config.context_length = server_args.context_length
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
+    runtime_config.set_structural_tag_mode(
+        "on" if dynamo_args.dyn_enable_structural_tag else "off"
+    )
+    runtime_config.set_structural_tag_scope(dynamo_args.dyn_structural_tag_scope)
+    runtime_config.set_structural_tag_schema(dynamo_args.dyn_structural_tag_schema)
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
 
-    start_dp_rank, end_dp_rank = local_dp_rank_bounds(server_args)
-    local_dp_size = end_dp_rank - start_dp_rank
+    start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
+    registered_dp_size = end_dp_rank - start_dp_rank
     runtime_config.data_parallel_start_rank = start_dp_rank
-    runtime_config.data_parallel_size = local_dp_size
-    if local_dp_size > 1:
+    runtime_config.data_parallel_size = registered_dp_size
+    if registered_dp_size > 1:
         logging.info(
-            "Registering with local data_parallel rank range [%s, %s)",
+            "Registering with routable data_parallel rank range [%s, %s)",
             start_dp_rank,
             end_dp_rank,
         )
@@ -323,6 +344,22 @@ async def _get_runtime_config(
 
     if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
         runtime_config.enable_eagle = True
+
+    spec_decode_runtime_data = get_spec_decode_runtime_data(server_args)
+    if spec_decode_runtime_data is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SPEC_DECODE_RUNTIME_KEY,
+                json.dumps(spec_decode_runtime_data),
+            )
+            logging.info(
+                "Published SGLang spec decode runtime metadata: %s",
+                spec_decode_runtime_data,
+            )
+        except Exception as e:
+            logging.warning(
+                f"Failed to attach SGLang spec decode runtime metadata: {e}"
+            )
 
     mooncake_runtime_data = _get_mooncake_runtime_data(server_args)
     if mooncake_runtime_data is not None:
@@ -382,6 +419,9 @@ async def register_model_with_readiness_gate(
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
+    *,
+    worker_type: WorkerType,
+    needs: Optional[List[List[WorkerType]]] = None,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -393,6 +433,8 @@ async def register_model_with_readiness_gate(
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
         readiness_gate: Optional event to signal when registration completes.
+        worker_type: Topology role; see `_register_model_with_runtime_config`.
+        needs: DNF peer requirements; see `_register_model_with_runtime_config`.
 
     Raises:
         RuntimeError: If model registration fails.
@@ -404,6 +446,8 @@ async def register_model_with_readiness_gate(
         dynamo_args,
         input_type,
         output_type,
+        worker_type=worker_type,
+        needs=needs,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")
@@ -465,6 +509,11 @@ async def register_image_diffusion_model(
             endpoint,
             server_args.model_path,
             model_name,
+            # Diffusion has no prefill/decode split: a single worker owns the
+            # whole pipeline, so it always advertises as Aggregated with no
+            # peer dependencies.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
         )
         logging.info(f"Successfully registered diffusion model: {model_name}")
     except Exception as e:
@@ -506,6 +555,10 @@ async def register_video_generation_model(
             endpoint,
             server_args.model_path,
             model_name,
+            # See `register_image_diffusion_model` — diffusion is always
+            # Aggregated.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
         )
         logging.info(f"Successfully registered video generation model: {model_name}")
     except Exception as e:

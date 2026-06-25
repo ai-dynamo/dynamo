@@ -20,6 +20,7 @@ use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
+use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::kv};
@@ -170,15 +171,9 @@ impl PromptFormatterArtifact {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptContextMixin {
-    /// Support OAI Chat Messages and Tools
-    OaiChat,
-
-    /// Enables templates with `{{datetime}}` to be rendered with the current date and time.
-    Llama3DateTime,
-}
+// `PromptContextMixin` is owned by the `dynamo-renderer` crate (it drives
+// chat-template rendering); the MDC's `prompt_context` field is typed with it.
+use dynamo_renderer::PromptContextMixin;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -677,8 +672,10 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_context: Option<Vec<PromptContextMixin>>,
 
-    /// Max context (in number of tokens) this model can handle
-    pub context_length: u32,
+    /// Architectural context maximum derived from model or tokenizer metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub architectural_max_context_length: Option<u32>,
 
     /// Size of a KV cache block.
     /// Passed to the engine, KV router, and trace replay hash path.
@@ -699,12 +696,13 @@ pub struct ModelDeploymentCard {
     /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
     /// Orthogonal to `model_type` (which describes endpoints exposed).
     ///
-    /// Every worker is expected to set this explicitly; `None` means the
-    /// worker has not declared a role and is treated as misconfiguration
-    /// (workers not ready). A temporary shim in `Model::ws_role_and_needs`
-    /// softens this while backends are being migrated — see
-    /// `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]` is
-    /// kept so pre-field cards still deserialize.
+    /// Every worker must set this explicitly. `None` means the worker has
+    /// not declared a role and is treated as misconfiguration:
+    /// `Model::ws_role_and_needs` returns `None`, the serving-readiness
+    /// gate refuses to vouch for the namespace, and `register_model`
+    /// rejects such cards outright. The `Option<>` type and
+    /// `#[serde(default)]` are kept so older cards still deserialize, but
+    /// downstream readers treat them as not-ready.
     #[serde(default)]
     pub worker_type: Option<crate::worker_type::WorkerType>,
 
@@ -729,6 +727,11 @@ pub struct ModelDeploymentCard {
 
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
+
+    /// Tensor model configuration for tensor-serving protocols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub tensor_model_config: Option<TensorModelConfig>,
 
     /// Media decoding configuration
     #[serde(default)]
@@ -821,6 +824,14 @@ impl ModelDeploymentCard {
         &self.slug
     }
 
+    /// Effective serving context: runtime engine limit, then architectural maximum.
+    pub fn effective_context_length(&self) -> u32 {
+        self.runtime_config
+            .context_length
+            .or(self.architectural_max_context_length)
+            .unwrap_or(0)
+    }
+
     /// Serialize the model deployment card to a JSON string
     pub fn to_json(&self) -> Result<String, anyhow::Error> {
         Ok(serde_json::to_string(self)?)
@@ -877,7 +888,7 @@ impl ModelDeploymentCard {
                     // fine. If the debug representation changes that only happens in a new release.
                     bytes_to_hash.extend(format!("{prompt_context_vec:?}").as_bytes());
                 }
-                bytes_to_hash.extend(self.context_length.to_be_bytes());
+                bytes_to_hash.extend(self.effective_context_length().to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
                 // Topology fields participate in the checksum so that a rolling
@@ -942,6 +953,11 @@ impl ModelDeploymentCard {
     ///   tokenizations at special-token boundaries (massive speed-up for shared chat
     ///   prefixes; default off, zero cost when unset)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
+    /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
+    ///   (when the cache is enabled) a partial hit also caches the new suffix so each
+    ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
+    ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
+    ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER") {
             Ok(v) if v == "fastokens" => true,
@@ -964,6 +980,11 @@ impl ModelDeploymentCard {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(50 * 1024 * 1024);
+        // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
+        let cache_extend = !matches!(
+            std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
+            Some("0")
+        );
 
         let inner: Arc<dyn crate::tokenizers::traits::Tokenizer> = match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
@@ -975,7 +996,7 @@ impl ModelDeploymentCard {
                 // extracting special-token strings. `FastTokenizer` does not re-expose
                 // `get_added_tokens_decoder`, so we must capture specials from the raw
                 // HF tokenizer before any swap.
-                let hf = HfTokenizer::from_file(p)
+                let mut hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
                             && let Ok(contents) = std::fs::read_to_string(p)
@@ -985,13 +1006,26 @@ impl ModelDeploymentCard {
                     })
                     .map_err(anyhow::Error::msg)
                     .with_context(|| p.display().to_string())?;
-
+                // Apply the tokenizer_config.json special-token merge eagerly so
+                // `extract_hf_special_tokens` below sees the same specials the
+                // wrapped tokenizer will use. Without this the L1 prefix cache's
+                // boundary list would diverge from the actual tokenizer
+                // (e.g. Qwen2-VL's `<|image_pad|>` would be in the tokenizer
+                // but missing from the cache specials), letting chat prefixes
+                // straddle a special-token boundary and reducing hit rate.
+                if let Some(model_dir) = p.parent() {
+                    crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
+                }
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
                 } else {
                     Vec::new()
                 };
+
+                // Merge already applied above; just wrap.
+                let wrap_hf =
+                    |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
 
                 // Pick the inner backend.
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
@@ -1006,9 +1040,7 @@ impl ModelDeploymentCard {
                                     %e,
                                     "Failed to load fastokens, falling back to HuggingFace"
                                 );
-                                Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(
-                                    hf,
-                                ))
+                                Arc::new(wrap_hf(hf))
                             }
                         }
                     } else {
@@ -1016,20 +1048,22 @@ impl ModelDeploymentCard {
                             path = %p.display(),
                             "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                         );
-                        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                        Arc::new(wrap_hf(hf))
                     }
                 } else {
-                    Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                    Arc::new(wrap_hf(hf))
                 };
 
                 if cache_enabled {
                     tracing::info!(
                         cache_bytes,
+                        cache_extend,
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
                     Arc::new(
                         crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
+                            .with_extend(cache_extend)
                             .with_observer(
                                 Arc::new(|| {
                                     dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
@@ -1067,6 +1101,7 @@ impl ModelDeploymentCard {
                     );
                     Arc::new(
                         crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
+                            .with_extend(cache_extend)
                             .with_observer(
                                 Arc::new(|| {
                                     dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
@@ -1389,7 +1424,7 @@ impl ModelDeploymentCard {
         let local_path = local_path.as_ref();
 
         // This is usually the right choice
-        let context_length =
+        let architectural_max_context_length =
             crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
                 // But sometimes this is
                 .or_else(|_| {
@@ -1398,8 +1433,8 @@ impl ModelDeploymentCard {
                         "model_max_length",
                     )
                 })
-                // If neither of those are present let the engine default it
-                .unwrap_or(0);
+                .ok()
+                .filter(|context_length| *context_length > 0);
 
         let is_mistral_model = is_exclusively_mistral_model(local_path);
 
@@ -1454,7 +1489,7 @@ impl ModelDeploymentCard {
             prompt_formatter,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
-            context_length,
+            architectural_max_context_length,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
             model_type: Default::default(),  // set later
@@ -1464,6 +1499,7 @@ impl ModelDeploymentCard {
             lora: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            tensor_model_config: None,
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
@@ -2260,7 +2296,7 @@ mod tests {
         assert!(!dest.exists(), "dest must not exist after cancel");
     }
 
-    /// Brings in the sibling that `lightseek-mm` needs.
+    /// Brings in the sibling that `mm-routing` needs.
     #[test]
     fn harvest_brings_in_non_weight_siblings() -> anyhow::Result<()> {
         let snap = tempfile::tempdir()?;
@@ -2334,6 +2370,48 @@ mod tests {
         );
         assert!(slug.path().join("special_tokens_map.json").exists());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn effective_context_prefers_runtime_then_architecture_then_unknown() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(card.effective_context_length(), 0);
+
+        card.architectural_max_context_length = Some(32_768);
+        assert_eq!(card.effective_context_length(), 32_768);
+
+        card.runtime_config.context_length = Some(8_192);
+        assert_eq!(card.effective_context_length(), 8_192);
+
+        card.runtime_config.context_length = Some(0);
+        assert_eq!(card.effective_context_length(), 0);
+    }
+
+    #[test]
+    fn tensor_config_serializes_at_card_top_level() {
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.tensor_model_config = Some(TensorModelConfig {
+            name: "tensor".to_string(),
+            ..Default::default()
+        });
+
+        let value = serde_json::to_value(&card).unwrap();
+        assert_eq!(value["tensor_model_config"]["name"], "tensor");
+        assert!(value["runtime_config"].get("tensor_model_config").is_none());
+
+        let parsed: ModelDeploymentCard = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed
+                .tensor_model_config
+                .as_ref()
+                .map(|config| config.name.as_str()),
+            Some("tensor")
+        );
     }
 }
 

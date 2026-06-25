@@ -9,8 +9,11 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use crate::protocols::tensor;
 use dynamo_kv_router::protocols::KvTransferEnforcement;
+
+/// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
+/// directly without type duplication.
+pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
@@ -21,6 +24,24 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// `dynamo.topology/zone=us-east-1a`.
 pub fn topology_taint(domain: &str, value: &str) -> String {
     format!("{TOPOLOGY_TAINT_PREFIX}{domain}={value}")
+}
+
+/// Master switch for structural tag guided decoding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralTagMode {
+    #[default]
+    Off,
+    On,
+}
+
+/// Controls when structural tags are activated based on `tool_choice`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralTagScope {
+    #[default]
+    Auto,
+    Always,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -34,7 +55,17 @@ pub struct DisaggregatedEndpoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
 #[validate(schema(function = "validate_model_runtime_config"))]
+/// Runtime-resolved metadata published by a worker after its engine starts.
+///
+/// NOTE: This type is intended for facts that can only be known authoritatively at
+/// runtime, such as the effective engine context limit, capacity, data-parallel
+/// placement, and resolved service endpoints. Some legacy fields do not yet follow
+/// this ownership boundary; avoid adding declarative model metadata here.
 pub struct ModelRuntimeConfig {
+    /// Effective context limit enforced by the running engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+
     pub total_kv_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
@@ -44,6 +75,18 @@ pub struct ModelRuntimeConfig {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// Whether structural tag guided decoding is enabled for tool calls.
+    #[serde(default)]
+    pub structural_tag_mode: StructuralTagMode,
+
+    /// Controls when structural tags are activated based on tool_choice.
+    #[serde(default)]
+    pub structural_tag_scope: StructuralTagScope,
+
+    /// Controls whether tools get real or generic schemas in structural tags.
+    #[serde(default)]
+    pub structural_tag_schema: StructuralTagSchemaMode,
 
     /// When true, strip tool definitions from the chat template when tool_choice is "none".
     #[serde(default = "default_exclude_tools_when_tool_choice_none")]
@@ -64,16 +107,6 @@ pub struct ModelRuntimeConfig {
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
-
-    // Provide tensor model config in the case where the model type is Tensor.
-    // Currently use JSON object for convinence, the programmatic way is to
-    // define the model config struct as part of the tensor protocol and
-    // import it here.
-    // [gluo TODO] switch to ModelConfig if desired and workout a way to
-    // prepare it in a convinent way, the protobuf library used by tonic
-    // doesn't provide JSON parsing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tensor_model_config: Option<tensor::TensorModelConfig>,
 
     /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,17 +179,20 @@ const fn default_eagle() -> bool {
 impl Default for ModelRuntimeConfig {
     fn default() -> Self {
         Self {
+            context_length: None,
             total_kv_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            structural_tag_mode: StructuralTagMode::Off,
+            structural_tag_scope: StructuralTagScope::Auto,
+            structural_tag_schema: StructuralTagSchemaMode::Auto,
             exclude_tools_when_tool_choice_none: default_exclude_tools_when_tool_choice_none(),
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             runtime_data: HashMap::new(),
-            tensor_model_config: None,
             disaggregated_endpoint: None,
             enable_eagle: false,
             taints: HashSet::new(),
@@ -440,6 +476,7 @@ mod tests {
         let cfg = ModelRuntimeConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("stable_routing_id"));
+        assert!(!json.contains("context_length"));
     }
 
     #[test]

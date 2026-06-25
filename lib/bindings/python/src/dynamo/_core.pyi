@@ -108,6 +108,10 @@ def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
 
+def run_slot_tracker(args: List[str]) -> None:
+    """Run the KV router slot tracker with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -123,6 +127,9 @@ class DistributedRuntime:
         event_loop: Any,
         discovery_backend: str,
         request_plane: str,
+        enable_nats: Optional[bool] = None,
+        *,
+        event_plane: Optional[str] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -131,6 +138,8 @@ class DistributedRuntime:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp" or "nats")
+            enable_nats: Deprecated; NATS enablement is inferred from runtime config
+            event_plane: Event plane transport ("nats" or "zmq")
         """
         ...
 
@@ -215,6 +224,35 @@ class Endpoint:
         """
         ...
 
+    async def serve_bidirectional_endpoint(
+        self,
+        handler: Callable[..., AsyncIterator[JsonLike]],
+        graceful_shutdown: bool = True,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
+        """
+        Serve a bidirectional (streaming-input, streaming-output) endpoint.
+
+        The handler is an async generator function — `async def
+        generate(request_stream)` or `async def generate(request_stream,
+        context)` — so calling it returns an async iterator of response frames
+        directly (it is not awaited). `request_stream` is a
+        `PyAsyncRequestStream` yielding inbound frames as JSON-like Python
+        objects; the generator yields response frames as JSON-like Python
+        objects.
+
+        Request-stream end (when `__anext__` raises `StopAsyncIteration`)
+        is not a cancellation signal: the caller has merely stopped sending
+        input. The engine must keep yielding response chunks until it
+        chooses to return or observes `context.is_stopped()`.
+
+        Args:
+            handler: The async generator factory described above
+            graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
+            metrics_labels: Optional list of metrics labels to add to the metrics
+        """
+        ...
+
     async def client(self, router_mode: Optional[RouterMode] = None) -> Client:
         """
         Create a `Client` capable of calling served instances of this endpoint.
@@ -258,6 +296,21 @@ class Endpoint:
         and should start receiving requests.
         """
         ...
+
+class PyAsyncRequestStream:
+    """
+    Python-visible inbound iterator handed to bidirectional engine
+    handlers as the first positional argument. Yields request frames as
+    JSON-like Python objects.
+
+    Request-stream end is not a cancellation signal: when this iterator
+    raises `StopAsyncIteration`, the caller has merely stopped sending
+    input. The engine should keep yielding response chunks until it
+    chooses to return or observes `context.is_stopped()`.
+    """
+
+    def __aiter__(self) -> "PyAsyncRequestStream": ...
+    async def __anext__(self) -> JsonLike: ...
 
 class Client:
     """
@@ -664,6 +717,7 @@ class ModelRuntimeConfig:
     A model runtime configuration is a collection of runtime information
     """
 
+    context_length: int | None
     total_kv_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
@@ -681,7 +735,6 @@ class ModelRuntimeConfig:
     kv_transfer_domain: str | None
     kv_transfer_enforcement: str | None
     kv_transfer_preferred_weight: float | None
-    tensor_model_config: Any | None
     bootstrap_host: str | None
     bootstrap_port: int | None
 
@@ -695,20 +748,24 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
+    def set_structural_tag_mode(self, mode: str) -> None:
+        """Set structural tag mode ("off" or "on")."""
+        ...
+
+    def set_structural_tag_scope(self, scope: str) -> None:
+        """Set structural tag scope ("auto" or "always")."""
+        ...
+
+    def set_structural_tag_schema(self, schema: str) -> None:
+        """Set structural tag schema mode ("auto" or "strict")."""
+        ...
+
     def set_disaggregated_endpoint(
             self,
             bootstrap_host: str | None = None,
             bootstrap_port: int | None = None,
         ) -> None:
         """Set the disaggregated endpoint for the model"""
-        ...
-
-    def set_tensor_model_config(self, tensor_model_config: Dict[str, Any]) -> None:
-        """Set the tensor model configuration from a dictionary."""
-        ...
-
-    def get_tensor_model_config(self) -> Any | None:
-        """Get the tensor model configuration."""
         ...
 
 class RoutingConstraints:
@@ -956,6 +1013,8 @@ class KvEventPublisher:
         enable_local_indexer: bool = False,
         zmq_endpoint: Optional[str] = None,
         zmq_topic: Optional[str] = None,
+        batching_timeout_ms: Optional[int] = None,
+        image_token_id: Optional[int] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1308,7 +1367,9 @@ class KserveGrpcService:
         model: str,
         checksum: str,
         engine: PythonAsyncEngine,
-        runtime_config: Optional[ModelRuntimeConfig],
+        *,
+        runtime_config: Optional[ModelRuntimeConfig] = None,
+        tensor_model_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Register a tensor-based model with the service.
@@ -1317,6 +1378,8 @@ class KserveGrpcService:
             model: The model name
             checksum: The model checksum
             engine: The async engine to handle requests
+            runtime_config: Optional runtime-resolved worker metadata
+            tensor_model_config: Optional tensor protocol model metadata
         """
         ...
 
@@ -1397,11 +1460,17 @@ class ModelInput:
 
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime or Prefill"""
+    """What type of request this model supports: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime, or Empty (no OpenAI surface)"""
+    # No OpenAI surface — used by prefill / encode workers whose role is
+    # carried by WorkerType. Symmetric with the other ModelType.Foo members.
+    Empty: ModelType
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
+    # Legacy prefill marker (no OpenAI surface). Dual-emitted by new prefill
+    # workers for cross-version compat so an old frontend still detects them;
+    # the role is otherwise carried by WorkerType.Prefill. Compat window only.
     Prefill: ModelType
     Images: ModelType
     Audios: ModelType
@@ -1464,7 +1533,167 @@ class AicPerfConfig:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
     ) -> None:
+        ...
+
+class AicEngineConfig:
+    """AIC model/backend identity used by native forward-pass estimates."""
+
+    def __init__(
+        self,
+        model_name: str,
+        backend: str,
+        system_name: str = "h200_sxm",
+        backend_version: Optional[str] = None,
+        tp_size: int = 1,
+        pp_size: int = 1,
+        moe_tp_size: Optional[int] = None,
+        moe_ep_size: Optional[int] = None,
+        attention_dp_size: Optional[int] = None,
+        model_arch: Optional[str] = None,
+        weight_dtype: Optional[str] = None,
+        moe_dtype: Optional[str] = None,
+        activation_dtype: Optional[str] = None,
+        kv_cache_dtype: Optional[str] = None,
+        kv_block_size: Optional[int] = None,
+        extra: Optional[dict[str, str]] = None,
+    ) -> None:
+        ...
+
+class EnginePerfLimits:
+    """Engine limits used by engine-level helper queries and default correction bounds."""
+
+    max_num_batched_tokens: int
+    max_num_seqs: int
+    max_kv_tokens: int
+
+    def __init__(
+        self,
+        max_num_batched_tokens: int = 8192,
+        max_num_seqs: int = 512,
+        max_kv_tokens: int = 2000000,
+    ) -> None:
+        ...
+
+class RustEnginePerfOptions:
+    """Online tuning options for RustEnginePerfModel."""
+
+    def __init__(
+        self,
+        max_observations: int = 64,
+        min_observations: int = 5,
+        bucket_count: int = 16,
+        max_num_tokens: int = 8192,
+        max_batch_size: int = 512,
+        max_kv_tokens: int = 2000000,
+    ) -> None:
+        ...
+
+class OptimizationTarget:
+    Throughput: "OptimizationTarget"
+    Latency: "OptimizationTarget"
+
+class EngineCapacityRequest:
+    """Request shape and SLA policy for find_engine_capacity_rps."""
+
+    def __init__(
+        self,
+        isl: int,
+        osl: int,
+        ttft_sla_ms: Optional[float] = None,
+        itl_sla_ms: Optional[float] = None,
+        e2e_latency_sla_ms: Optional[float] = None,
+        kv_hit_rate: Optional[float] = None,
+        optimization_target: OptimizationTarget = OptimizationTarget.Throughput,
+    ) -> None:
+        ...
+
+class EngineCapacity:
+    """Per-engine capacity result."""
+
+    rps: float
+    ttft_ms: Optional[float]
+    itl_ms: Optional[float]
+    e2e_latency_ms: Optional[float]
+    eligible: bool
+
+class RustEnginePerfModel:
+    """Engine-level performance model backed by AIC forward-pass modeling."""
+
+    @staticmethod
+    def best_available(
+        *,
+        engine_args: Optional["MockEngineArgs"] = None,
+        aic_config: Optional[AicEngineConfig] = None,
+        worker_type: Optional[str] = None,
+        limits: Optional[EnginePerfLimits] = None,
+        options: Optional[RustEnginePerfOptions] = None,
+        bootstrap_fpms: Optional[Any] = None,
+    ) -> "RustEnginePerfModel":
+        """Build from all available inputs; explicit AIC config is preferred, then engine args, then regression-only."""
+        ...
+
+    @staticmethod
+    def from_regression(
+        *,
+        worker_type: str,
+        limits: EnginePerfLimits,
+        options: Optional[RustEnginePerfOptions] = None,
+        bootstrap_fpms: Optional[Any] = None,
+    ) -> "RustEnginePerfModel":
+        """Build a regression-only model that learns from observed FPM wall times."""
+        ...
+
+    @staticmethod
+    def from_native(
+        *,
+        aic_config: AicEngineConfig,
+        worker_type: str,
+        limits: EnginePerfLimits,
+        options: Optional[RustEnginePerfOptions] = None,
+        bootstrap_fpms: Optional[Any] = None,
+    ) -> "RustEnginePerfModel":
+        """Build a strict native AIC model; unsupported AIC configs raise an error."""
+        ...
+
+    def estimate_forward_pass_time(self, metrics_by_rank: Any) -> Optional[float]:
+        """Estimate one scheduled forward-pass iteration in seconds from current-version FPMs."""
+        ...
+
+    def tune_with_fpms(self, iterations: Any) -> None:
+        """Tune with current-version observed FPMs: outer list is iterations, inner list is attention-DP ranks."""
+        ...
+
+    def diagnostics(self) -> str:
+        """Return AIC diagnostics as a JSON string."""
+        ...
+
+    def get_min_correction_factor(self) -> Optional[float]:
+        """Return the minimum ready native correction factor, or None if no factor is ready."""
+        ...
+
+    def get_max_correction_factor(self) -> Optional[float]:
+        """Return the maximum ready native correction factor, or None if no factor is ready."""
+        ...
+
+    def get_avg_correction_factor(self) -> Optional[float]:
+        """Return the average ready native correction factor, or None if no factor is ready."""
+        ...
+
+    def get_queued_prefill_time(self, metrics_by_rank: Any) -> Optional[float]:
+        """Estimate queued prefill drain time; adjust queued tokens outside the shim for KV reuse."""
+        ...
+
+    def get_scheduled_decode_itl(self, metrics_by_rank: Any) -> Optional[float]:
+        """Estimate scheduled decode ITL in seconds; aggregated workers include scheduled or learned average prefill load."""
+        ...
+
+    def find_engine_capacity_rps(
+        self, request: EngineCapacityRequest
+    ) -> Optional[EngineCapacity]:
+        """Search sustainable per-engine RPS; inspect eligible to see whether eligible SLA metrics passed."""
         ...
 
 class KvRouterConfig:
@@ -1614,6 +1843,13 @@ class SglangArgs:
     ) -> None:
         ...
 
+class TrtllmArgs:
+    def __init__(
+        self,
+        capacity_scheduler_policy: Optional[str] = None,
+    ) -> None:
+        ...
+
 class MockEngineArgs:
     def __init__(
         self,
@@ -1638,8 +1874,12 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
+        aic_mtp_seed: int = 42,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
+        free_gpu_memory_fraction: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
@@ -1650,6 +1890,7 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
+        trtllm: Optional[TrtllmArgs] = None,
         num_g2_blocks: Optional[int] = None,
         num_g3_blocks: Optional[int] = None,
         offload_batch_size: Optional[int] = None,
@@ -1657,6 +1898,9 @@ class MockEngineArgs:
         bandwidth_g2_to_g1_gbps: Optional[float] = None,
         bandwidth_g2_to_g3_gbps: Optional[float] = None,
         bandwidth_g3_to_g2_gbps: Optional[float] = None,
+        enable_g4_storage: bool = False,
+        bandwidth_g2_to_g4_gbps: Optional[float] = None,
+        bandwidth_g4_to_g2_gbps: Optional[float] = None,
     ) -> None:
         ...
 
@@ -1718,6 +1962,15 @@ class MockEngineArgs:
     def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
+    def enable_g4_storage(self) -> bool: ...
+
+    @property
+    def bandwidth_g2_to_g4_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g4_to_g2_gbps(self) -> Optional[float]: ...
+
+    @property
     def aic_backend(self) -> Optional[str]: ...
 
     @aic_backend.setter
@@ -1766,6 +2019,24 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_nextn(self) -> Optional[int]: ...
+
+    @aic_nextn.setter
+    def aic_nextn(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_nextn_accept_rates(self) -> Optional[str]: ...
+
+    @aic_nextn_accept_rates.setter
+    def aic_nextn_accept_rates(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_mtp_seed(self) -> int: ...
+
+    @aic_mtp_seed.setter
+    def aic_mtp_seed(self, value: int) -> None: ...
+
+    @property
     def gpu_memory_utilization(self) -> Optional[float]: ...
 
     @gpu_memory_utilization.setter
@@ -1776,6 +2047,12 @@ class MockEngineArgs:
 
     @mem_fraction_static.setter
     def mem_fraction_static(self, value: Optional[float]) -> None: ...
+
+    @property
+    def free_gpu_memory_fraction(self) -> Optional[float]: ...
+
+    @free_gpu_memory_fraction.setter
+    def free_gpu_memory_fraction(self, value: Optional[float]) -> None: ...
 
     @property
     def worker_type(self) -> str: ...
@@ -1802,8 +2079,12 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
+        aic_mtp_seed: Optional[int] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
+        free_gpu_memory_fraction: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...
@@ -1817,8 +2098,6 @@ class WorkerType:
     (a list of alternative AND-sets) — for example, an encode worker that
     needs (Prefill AND Decode) OR a single Aggregated peer is expressed as
     `[[WorkerType.Prefill, WorkerType.Decode], [WorkerType.Aggregated]]`.
-
-    See `docs/proposals/health-disagg-readiness.md`.
     """
 
     Prefill: "WorkerType"
@@ -1835,17 +2114,18 @@ async def register_model(
     endpoint: Endpoint,
     model_path: str,
     model_name: Optional[str] = None,
-    context_length: Optional[int] = None,
+    *,
+    worker_type: WorkerType,
     kv_cache_block_size: Optional[int] = None,
     router_mode: Optional[RouterMode] = None,
     runtime_config: Optional[ModelRuntimeConfig] = None,
+    tensor_model_config: Optional[Dict[str, Any]] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
     media_decoder: Optional[MediaDecoder] = None,
     media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
-    worker_type: Optional[WorkerType] = None,
     needs: Optional[List[List[WorkerType]]] = None,
 ) -> None:
     """
@@ -1858,15 +2138,13 @@ async def register_model(
 
     For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
     and a minimal model card is registered directly. Use model_path as the display name
-    for these models.
+    for these models. Pass tensor protocol metadata through `tensor_model_config`.
 
-    Topology readiness:
+    Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and
         peer dependencies. `needs` is a DNF list — each inner list is an
-        AND-set, the outer list is OR. When omitted, the card is registered
-        with `worker_type = None` and `needs = []`; readers apply a
-        temporary missing-field shim. Backends are expected to declare
-        these literally at each call site.
+        AND-set, the outer list is OR. `worker_type` is required; backends
+        declare it literally at each call site.
     """
     ...
 
@@ -1883,6 +2161,14 @@ async def unregister_model(
 
 def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
+    ...
+
+def resolve_routing_image_token_id(model_id: str, model_dir: str) -> Optional[int]:
+    """Routing-side image-placeholder token id for a model, resolved with the
+    same per-family logic the frontend's MM-aware KV routing uses. Returns None
+    when the model isn't in the MM-routing registry or its config can't be read.
+    Only present when the bindings are built with the ``mm-routing`` feature.
+    """
     ...
 
 class LoRADownloader:
@@ -2282,6 +2568,7 @@ class KvRouter:
         multi_modal_data: Optional[JsonLike] = None,
         mm_routing_info: Optional[JsonLike] = None,
         routing_constraints: Optional[RoutingConstraints] = None,
+        response_buffer_size: int = 100,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -2311,6 +2598,9 @@ class KvRouter:
                             (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
                             used by router selection without changing execution token_ids.
             routing_constraints: Optional request routing constraints used to constrain or prefer tainted workers.
+            response_buffer_size: Maximum number of responses buffered by the Python
+                                  adapter. Set to 0 for demand-driven direct Python
+                                  consumption; negative values are rejected.
 
         Returns:
             An async iterator yielding generation responses
@@ -2327,11 +2617,14 @@ class KvRouter:
     async def generate_from_request(
         self,
         request: JsonLike,
+        response_buffer_size: int = 100,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate from a preprocessed request dict (PreprocessedRequest format).
 
         Accepts a full request dict with token_ids, model, stop_conditions, etc.
+        Set response_buffer_size to 0 for demand-driven direct Python consumption;
+        negative values are rejected.
         Returns an async iterator yielding generation responses.
         """
         ...
@@ -2488,7 +2781,6 @@ class EntrypointArgs:
         model_path: Optional[str] = None,
         model_name: Optional[str] = None,
         endpoint_id: Optional[str] = None,
-        context_length: Optional[int] = None,
         template_file: Optional[str] = None,
         router_config: Optional[RouterConfig] = None,
         kv_cache_block_size: Optional[int] = None,
@@ -2503,6 +2795,7 @@ class EntrypointArgs:
         namespace: Optional[str] = None,
         namespace_prefix: Optional[str] = None,
         is_prefill: bool = False,
+        is_decode: bool = False,
         migration_limit: int = 0,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
@@ -2515,7 +2808,6 @@ class EntrypointArgs:
             model_path: Path to the model directory on disk
             model_name: Model name or dynamo endpoint (e.g. 'dyn://namespace.component.endpoint')
             endpoint_id: Optional endpoint ID
-            context_length: Optional context length override
             template_file: Optional path to a prompt template file
             router_config: Optional router configuration
             kv_cache_block_size: Optional KV cache block size
@@ -2530,6 +2822,7 @@ class EntrypointArgs:
             namespace: Dynamo namespace for model discovery scoping
             namespace_prefix: Optional namespace prefix
             is_prefill: Whether this is a prefill worker
+            is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
@@ -2649,8 +2942,8 @@ class backend:
     class DisaggregationMode:
         # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
         # this on the WorkerConfig to switch their per-mode protocol behavior;
-        # the Rust Worker reads it for registration (Prefill→ModelType::Prefill,
-        # Decode→disable local indexer).
+        # the Rust Worker reads it for registration (Prefill → ModelType.Empty
+        # + WorkerType.Prefill, Decode → disable local indexer).
         Aggregated: "backend.DisaggregationMode"
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
@@ -2724,6 +3017,9 @@ class backend:
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
             health_check_payload: Optional[Dict[str, Any]] = None,
+            structural_tag_mode: str = ...,
+            structural_tag_scope: str = ...,
+            structural_tag_schema: str = ...,
         ) -> None: ...
 
     class Worker:

@@ -85,7 +85,7 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform
 
-Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
+Follow the [Dynamo Kubernetes Installation Guide](../kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
 
 > **Note:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode for new deployments.
 
@@ -121,7 +121,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           env:
             - name: POD_UID
               valueFrom:
@@ -145,7 +145,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           workingDir: /workspace
           command:
             - /bin/sh
@@ -210,7 +210,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           env:
             - name: POD_UID
               valueFrom:
@@ -237,7 +237,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           workingDir: /workspace
           command:
             - /bin/sh
@@ -442,7 +442,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: benchmark
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
         securityContext:
           runAsUser: 0  # Required: apt-get and pip install need root in ephemeral benchmark pod
         command:

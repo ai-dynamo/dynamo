@@ -169,11 +169,7 @@ async fn detect_and_parse_tool_call_with_recovery_options(
         }
         ParserConfig::Xml(c) => {
             let mut c = c.clone();
-            // Strict-match families opt out — flipping recovery here would
-            // contradict their per-spec strictness.
-            if !c.strict_match {
-                c.allow_eof_recovery = true;
-            }
+            c.allow_eof_recovery = true;
             ParserConfig::Xml(c)
         }
         ParserConfig::Dsml(c) if recover_dsml_eof => {
@@ -188,6 +184,7 @@ async fn detect_and_parse_tool_call_with_recovery_options(
     };
     let cfg = ToolCallConfig {
         parser_config: recovery_config,
+        structural_tag_builder: None,
     };
     try_tool_call_parse(message, &cfg, tools).await
 }
@@ -440,6 +437,7 @@ mod tests {
                     tool_call_end_tokens: vec!["".to_string()],
                     ..Default::default()
                 }),
+                structural_tag_builder: None,
             },
             None,
         )
@@ -788,6 +786,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -1236,6 +1235,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -2119,7 +2119,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =============================================================================
-    // 1. NEMOTRON/DECI TOOL PARSER FORMAT (JSON Array in XML tags)
+    // 1. NEMOTRON/DECI TOOL-CALL FORMAT (JSON Array in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -2175,7 +2175,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =================================================
-    // 2. QWEN3CODER TOOL PARSER FORMAT (XML-style tags)
+    // 2. QWEN3CODER TOOL-CALL FORMAT (XML-style tags)
     // =================================================
 
     #[tokio::test]
@@ -2216,7 +2216,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 3. xLAM TOOL PARSER FORMAT (Pure JSON Array) - Testing via mistral parser
+    // 3. xLAM TOOL-CALL FORMAT (Pure JSON Array) - Testing via mistral parser
     // =============================================================================
 
     #[tokio::test]
@@ -2247,7 +2247,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 4. MINIMAX TOOL PARSER FORMAT (Multi-line JSON in XML tags)
+    // 4. MINIMAX TOOL-CALL FORMAT (Multi-line JSON in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -2274,7 +2274,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 5. HARMONY TOOL PARSER FORMAT (Multiple Tool Calls with Harmony Encoding)
+    // 5. HARMONY TOOL-CALL FORMAT (Multiple Tool Calls with Harmony Encoding)
     // =============================================================================
 
     #[tokio::test]
@@ -2934,14 +2934,14 @@ mod detect_parser_tests {
     }
 
     // DeepSeek V3
-    #[test]
-    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3() {
+    #[test] // A bare inner call (no outer wrapper) is jailed so it can be recovered, matching deepseek_v3_2/v4.
+    fn test_e2e_detect_bare_tool_call_start_deepseek_v3() {
         let text = r#"<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
 {"location": "Tokyo"}
 ```<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -2955,11 +2955,11 @@ mod detect_parser_tests {
     }
 
     // DeepSeek V3.1
-    #[test]
-    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
+    #[test] // A bare inner call (no outer wrapper) is jailed so it can be recovered, matching deepseek_v3_2/v4.
+    fn test_e2e_detect_bare_tool_call_start_deepseek_v3_1() {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -3131,6 +3131,7 @@ fahrenheit
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -3169,6 +3170,7 @@ true
                     "enabled": {"type": "bool"},
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3291,6 +3293,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, content) =
             detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
@@ -3347,6 +3350,7 @@ weather forecasting
                     }
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("qwen3_coder"), Some(&tools))
             .await
@@ -3398,6 +3402,7 @@ weather forecasting
                     "query_list": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3490,6 +3495,7 @@ weather forecasting
                     "enabled": {"type": "boolean"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
@@ -3516,6 +3522,7 @@ weather forecasting
                     "items": {"type": "array"}
                 }
             })),
+            strict: None,
         }];
         let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
