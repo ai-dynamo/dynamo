@@ -205,7 +205,7 @@ type KaiSchedulerConfiguration struct {
 
 // VolcanoSchedulerConfiguration holds Volcano scheduler settings.
 type VolcanoSchedulerConfiguration struct {
-	// Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
+	// EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
 	Enabled *bool `json:"enabled,omitempty"`
 }
 

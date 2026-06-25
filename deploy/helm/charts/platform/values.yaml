@@ -40,7 +40,7 @@ global:
     enabled: false
 
   volcano-scheduler:
-    # -- Whether to enable Volcano scheduler integration for Grove PodCliqueSets.
+    # -- EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets.
     # Set to true when Volcano is available in the cluster and Grove is configured
     # with Volcano scheduler support. The operator uses this to inject schedulerName
     # and map nvidia.com/volcano-queue to Grove's Volcano queue annotation.

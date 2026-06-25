@@ -3438,7 +3438,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled controls Volcano scheduler integration for Grove PodCliqueSets. |  |  |
+| `enabled` _boolean_ | EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove<br />PodCliqueSets. |  |  |
 
 
 #### WebhookServer
