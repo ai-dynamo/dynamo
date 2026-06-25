@@ -5,16 +5,21 @@ title: Gateway API Inference Extension (GAIE)
 subtitle: Choose how to run Dynamo routing behind Kubernetes Gateway API Inference Extension.
 ---
 
-Use Gateway API Inference Extension (GAIE) when the Kubernetes Gateway should select the
-serving endpoint before the request reaches a model server. Dynamo integrates with GAIE through
-an Endpoint Picker Plugin (EPP) that performs KV cache aware routing at the gateway layer.
+Dynamo supports two request-entry patterns for Kubernetes deployments. The Dynamo-native path routes
+traffic through the Dynamo Frontend, where Dynamo selects a worker and forwards the request. The
+Kubernetes-native path integrates with [Gateway API Inference Extension
+(GAIE)](https://gateway-api-inference-extension.sigs.k8s.io/): Gateway API owns the request entry
+point and asks Dynamo for endpoint selection before forwarding traffic to a model server. Dynamo
+integrates with GAIE through an Endpoint Picker Plugin (EPP) that uses Dynamo routing logic,
+including KV cache aware routing when KV events are available.
 
-## What GAIE Adds
+## How GAIE Fits
 
 Gateway API gives Kubernetes a standard `Gateway` and `HTTPRoute` model for exposing traffic. GAIE
-adds inference-specific endpoint selection: the gateway calls an Endpoint Picker Plugin before it
-forwards the request. Dynamo's EPP uses Dynamo routing logic to choose the model endpoint, including
-KV cache aware routing when KV events are available.
+adds inference-specific endpoint selection to that model: the gateway calls an Endpoint Picker
+Plugin before it forwards the request. With Dynamo, that moves the routing decision into the
+Gateway API path instead of the Dynamo-native Frontend path. The choice is about integration
+boundaries, not routing power.
 
 Use GAIE when your platform wants the Kubernetes Gateway to be the entry point for inference traffic,
 policy, and observability. Use the standard Dynamo Kubernetes quickstart when you want the Dynamo
@@ -51,7 +56,7 @@ Frontend to be the entry point and do not need Gateway API integration.
 | Capability | Vanilla vLLM On-ramp | Full Dynamo |
 |---|---|---|
 | Model servers | Stock `vLLM serve` pods.<br /><br />**You miss:** Dynamo-managed worker lifecycle, backend abstraction, and SGLang or TensorRT-LLM workers. | Dynamo workers for vLLM, SGLang, or TensorRT-LLM.<br /><br />**You gain:** One Dynamo deployment model across supported backends. |
-| Routing location | Dynamo routing logic is embedded in the EPP.<br /><br />**You miss:** The normal Dynamo Frontend as the request-routing owner. | EPP selects workers; Dynamo Frontend sidecars forward in direct mode.<br /><br />**You gain:** Gateway-level worker selection while keeping Dynamo request handling on the selected worker path. |
+| Routing location | Dynamo routing logic is embedded in the EPP.<br /><br />**You miss:** The Dynamo-native Frontend as the request-routing owner. | EPP selects workers; Dynamo Frontend sidecars forward in direct mode.<br /><br />**You gain:** Gateway-level worker selection while keeping Dynamo request handling on the selected worker path. |
 | Worker discovery | EPP watches vLLM pods by label selector.<br /><br />**You miss:** Dynamo discovery metadata and operator-managed component identity. | Dynamo discovery through the operator-managed runtime.<br /><br />**You gain:** Workers, services, EPP resources, and InferencePools stay aligned through the Dynamo control plane. |
 | KV events | EPP subscribes to per-pod vLLM ZMQ events.<br /><br />**You miss:** Durable delivery, replay, and gap recovery through the Dynamo event plane. | Dynamo event plane with NATS/JetStream for durable routing state.<br /><br />**You gain:** Routing state can survive EPP restarts and temporary disconnects. |
 | Startup state | EPP warms its KV index from live traffic after startup.<br /><br />**You miss:** There is no startup snapshot; the EPP index starts empty on every start. | Dynamo initializes routing state from worker cache state.<br /><br />**You gain:** The EPP receives a full index snapshot immediately on every start. |

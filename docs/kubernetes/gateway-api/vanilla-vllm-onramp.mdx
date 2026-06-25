@@ -7,8 +7,8 @@ subtitle: Add Dynamo EPP routing to stock vLLM pods without the Dynamo operator.
 ---
 
 Use this path when you already run, or want to evaluate, GAIE with stock `vLLM serve` pods. The
-Dynamo EPP becomes the GAIE EndpointPicker and embeds the routing logic that the Dynamo Frontend
-normally owns in full Dynamo deployments.
+Dynamo EPP becomes the GAIE EndpointPicker and embeds routing logic from the Dynamo-native Frontend
+path.
 
 > [!WARNING]
 > This on-ramp is for adopting Dynamo routing in an existing GAIE + vLLM stack. It does not install
@@ -272,9 +272,9 @@ terminal.
 
 ## Configure the EPP Router Mode
 
-In a normal Dynamo deployment, the Dynamo Frontend performs request routing. In this on-ramp, the EPP
-embeds the relevant frontend routing logic so GAIE can ask the EPP to choose a vLLM endpoint. The
-literal switch is `DYN_EPP_MODE=router-only`, set on the EPP container in the example manifest.
+In the Dynamo-native deployment path, the Dynamo Frontend performs request routing. In this on-ramp,
+the EPP embeds the relevant Frontend routing logic so GAIE can ask the EPP to choose a vLLM endpoint.
+The literal switch is `DYN_EPP_MODE=router-only`, set on the EPP container in the example manifest.
 
 For related routing behavior, see the [Frontend Guide](../../components/frontend/frontend-guide.md)
 and [Router Guide](../../components/router/router-guide.md).
