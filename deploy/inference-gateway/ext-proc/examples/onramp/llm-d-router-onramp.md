@@ -1,4 +1,4 @@
-# llm-d Router on-ramp (raw vLLM workers, no extra control plane)
+# llm-d Router on-ramp
 
 ## Example progression from vLLM to vLLM + llm-d + GAIE
 
@@ -71,7 +71,7 @@ Point the `InferencePool` at your vLLM workers:
 apiVersion: inference.networking.k8s.io/v1
 kind: InferencePool
 metadata:
-  name: qwen-pool
+  name: qwen-router
 spec:
   selector:
     matchLabels:
@@ -91,7 +91,7 @@ Attach your `HTTPRoute` to the gateway and target the pool:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: qwen-route
+  name: qwen-router
 spec:
   parentRefs:
   - group: gateway.networking.k8s.io
@@ -101,7 +101,7 @@ spec:
   - backendRefs:
     - group: inference.networking.k8s.io
       kind: InferencePool
-      name: qwen-pool
+      name: qwen-router
 ```
 
 ### 3. Update vLLM deployment
@@ -274,20 +274,23 @@ helm upgrade -i qwen-router \
   --version <router-chart-version>
 ```
 
-Rendered YAMLs from the Helm chart:
+Rendered YAMLs from the Helm chart (example, precise-prefix KV-aware + load-aware config):
 
 ```bash
 helm template qwen-router \
   llm-d-router/config/charts/llm-d-router-gateway \
   --namespace default \
-  --set router.modelServers.matchLabels.app=vllm-qwen \
-  --set httpRoute.create=true \
-  --set httpRoute.inferenceGatewayName=inference-gateway \
+  -f values-llmd-gateway.yaml \
   -s templates/epp.yaml \
   -s templates/httproute.yaml
 ```
 
-Rendered `ConfigMap` (default plugin config):
+The only differences in Option A vs B are in two resources:
+
+- `ConfigMap`: `token-producer.parameters.vllm.url`
+- `Deployment`: sidecar presence (`vllm-render`), HF token env (Option A), and related sidecar cache volume
+
+Rendered `ConfigMap` (shows precise-prefix KV-aware scorer + load scorers):
 
 ```yaml
 apiVersion: v1
@@ -296,28 +299,51 @@ metadata:
   name: qwen-router-epp
   namespace: default
 data:
-  default-plugins.yaml: |
+  precise-prefix-config.yaml: |
     apiVersion: llm-d.ai/v1alpha1
     kind: EndpointPickerConfig
     plugins:
-    - type: queue-scorer
-    - type: kv-cache-utilization-scorer
-    - type: prefix-cache-scorer
-    - type: metrics-data-source
+    - type: token-producer
       parameters:
-        scheme: "http"
-        path: "/metrics"
-        insecureSkipVerify: true
+        modelName: "Qwen/Qwen3-32B"
+        vllm:
+          url: "http://localhost:8000" # option A; for option B use http://vllm-render.<ns>.svc.cluster.local:8000
+    - type: endpoint-notification-source
+    - type: metrics-data-source
     - type: core-metrics-extractor
+    - type: precise-prefix-cache-producer
+      parameters:
+        tokenProcessorConfig:
+          blockSize: 64
+        kvEventsConfig:
+          topicFilter: "kv@"
+          discoverPods: true
+          podDiscoveryConfig:
+            socketPort: 5557
+    - type: prefix-cache-scorer
+      parameters:
+        prefixMatchInfoProducerName: precise-prefix-cache-producer
+    - type: kv-cache-utilization-scorer
+    - type: queue-scorer
+    - type: max-score-picker
+    dataLayer:
+      sources:
+      - pluginRef: metrics-data-source
+        extractors:
+        - pluginRef: core-metrics-extractor
+      - pluginRef: endpoint-notification-source
+        extractors:
+        - pluginRef: precise-prefix-cache-producer
     schedulingProfiles:
     - name: default
       plugins:
-      - pluginRef: queue-scorer
+      - pluginRef: prefix-cache-scorer
         weight: 2
       - pluginRef: kv-cache-utilization-scorer
-        weight: 2
-      - pluginRef: prefix-cache-scorer
-        weight: 3
+        weight: 1
+      - pluginRef: queue-scorer
+        weight: 1
+      - pluginRef: max-score-picker
 ```
 
 Rendered `Service`:
@@ -344,7 +370,7 @@ spec:
   type: ClusterIP
 ```
 
-Rendered `Deployment`:
+Rendered `Deployment` (Option A shown: EPP-local tokenizer sidecar):
 
 ```yaml
 apiVersion: apps/v1
@@ -381,13 +407,42 @@ spec:
             - --zap-encoder
             - "json"
             - --config-file
-            - "/config/default-plugins.yaml"
+            - "/config/precise-prefix-config.yaml"
             - --grpc-health-port
             - "9003"
             - --tracing=false
+          volumeMounts:
+            - name: plugins-config-volume
+              mountPath: "/config"
+        - name: vllm-render # This is for option A, remove for option B
+          image: docker.io/vllm/vllm-openai-cpu:v0.19.1
+          command:
+            - vllm
+            - launch
+            - render
+          args:
+            - "Qwen/Qwen3-32B"
+            - "--port=8000"
+          env:
+            - name: HF_TOKEN # This is for option A, remove for option B
+              valueFrom:
+                secretKeyRef:
+                  name: llm-d-hf-token
+                  key: HF_TOKEN
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+      volumes:
+        - name: model-cache
+          emptyDir: {}
+        - name: plugins-config-volume
+          configMap:
+            name: qwen-router-epp
 ```
 
 Rendered `InferencePool`:
+
+Note: these names match the manual examples above because the Helm release name (`qwen-router`) is used for the `InferencePool`/`HTTPRoute` and `qwen-router-epp` for the EPP resources.
 
 ```yaml
 apiVersion: inference.networking.k8s.io/v1
