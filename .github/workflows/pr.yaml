@@ -1054,8 +1054,31 @@ jobs:
             exit 1
           fi
 
-          kubectl --kubeconfig="${VKUBECONFIG}" -n default wait \
-            --for=condition=complete "job/${PROBE_NAME}" --timeout=5m
+          for _ in $(seq 1 150); do
+            HOST_PHASE=$(kubectl -n "${VCLUSTER_NAMESPACE}" get pod "${HOST_POD}" \
+              -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            if [ "${HOST_PHASE}" = "Succeeded" ]; then
+              echo "Host pod ${HOST_POD} completed"
+              break
+            fi
+            if [ "${HOST_PHASE}" = "Failed" ]; then
+              echo "::error::Host pod ${HOST_POD} failed"
+              kubectl -n "${VCLUSTER_NAMESPACE}" describe pod "${HOST_POD}" || true
+              kubectl -n "${VCLUSTER_NAMESPACE}" logs "${HOST_POD}" --all-containers --tail=80 || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [ "${HOST_PHASE:-}" != "Succeeded" ]; then
+            echo "::error::Host pod ${HOST_POD} did not complete within 5m"
+            kubectl -n "${VCLUSTER_NAMESPACE}" get pod "${HOST_POD}" -o wide || true
+            kubectl -n "${VCLUSTER_NAMESPACE}" describe pod "${HOST_POD}" || true
+            kubectl -n "${VCLUSTER_NAMESPACE}" logs "${HOST_POD}" --all-containers --tail=80 || true
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default get job,pod -o wide || true
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default describe job "${PROBE_NAME}" || true
+            exit 1
+          fi
 
           echo "### AWS dev-01 vCluster smoke PASSED" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "- Namespace: \`${VCLUSTER_NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
@@ -1291,8 +1314,31 @@ jobs:
             exit 1
           fi
 
-          kubectl --kubeconfig="${VKUBECONFIG}" -n default wait \
-            --for=condition=complete "job/${PROBE_NAME}" --timeout=5m
+          for _ in $(seq 1 150); do
+            HOST_PHASE=$(kubectl -n "${VCLUSTER_NAMESPACE}" get pod "${HOST_POD}" \
+              -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            if [ "${HOST_PHASE}" = "Succeeded" ]; then
+              echo "Host pod ${HOST_POD} completed"
+              break
+            fi
+            if [ "${HOST_PHASE}" = "Failed" ]; then
+              echo "::error::Host pod ${HOST_POD} failed"
+              kubectl -n "${VCLUSTER_NAMESPACE}" describe pod "${HOST_POD}" || true
+              kubectl -n "${VCLUSTER_NAMESPACE}" logs "${HOST_POD}" --all-containers --tail=80 || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [ "${HOST_PHASE:-}" != "Succeeded" ]; then
+            echo "::error::Host pod ${HOST_POD} did not complete within 5m"
+            kubectl -n "${VCLUSTER_NAMESPACE}" get pod "${HOST_POD}" -o wide || true
+            kubectl -n "${VCLUSTER_NAMESPACE}" describe pod "${HOST_POD}" || true
+            kubectl -n "${VCLUSTER_NAMESPACE}" logs "${HOST_POD}" --all-containers --tail=80 || true
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default get job,pod -o wide || true
+            kubectl --kubeconfig="${VKUBECONFIG}" -n default describe job "${PROBE_NAME}" || true
+            exit 1
+          fi
 
           echo "### AWS dev-02 vCluster smoke PASSED" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "- Namespace: \`${VCLUSTER_NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
