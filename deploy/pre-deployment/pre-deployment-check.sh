@@ -145,8 +145,12 @@ check_cluster_resources() {
         -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}' \
         2>/dev/null || true)
 
+    # Only consider nodes with a positive integer GPU count
+    local valid_gpu_nodes
+    valid_gpu_nodes=$(echo "$allocatable_gpu_nodes" | awk '$2 ~ /^[1-9][0-9]*$/')
+
     local allocatable_count
-    allocatable_count=$(echo "$allocatable_gpu_nodes" | awk '$2 != "" && $2 != "0"' | wc -l | tr -d ' ')
+    allocatable_count=$(echo "$valid_gpu_nodes" | grep -c . || true)
 
     if [[ $allocatable_count -gt 0 ]]; then
         ALLOCATABLE_GPU_DETECTED=true
@@ -154,7 +158,7 @@ check_cluster_resources() {
         print_status $GREEN "✅ Found ${allocatable_count} GPU node(s) via allocatable GPU resources"
         print_status $BLUE "Allocatable NVIDIA GPU resources detected (GPU Operator labels not present)"
 
-        echo "$allocatable_gpu_nodes" | awk '$2 != "" && $2 != "0"' | while read -r node gpu_count; do
+        echo "$valid_gpu_nodes" | while read -r node gpu_count; do
             print_status $GREEN "  - ${node}: ${gpu_count} GPU(s)"
         done
 
