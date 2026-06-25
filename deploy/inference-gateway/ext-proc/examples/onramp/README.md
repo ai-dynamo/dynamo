@@ -11,7 +11,7 @@ pods. It does not install the Dynamo operator, create a `DynamoGraphDeployment`,
 NATS/JetStream event plane.
 
 For the user-facing walkthrough, start with
-[Vanilla vLLM GAIE On-ramp](../../../../../docs/kubernetes/gateway-api/vanilla-vllm-onramp.mdx).
+[Experimental: Vanilla vLLM GAIE On-ramp](../../../../../docs/kubernetes/gateway-api/vanilla-vllm-onramp.mdx).
 That page shows the Gateway API, GAIE, agentgateway, Istio, credentials, deployment, verification,
 and cleanup steps in order.
 
