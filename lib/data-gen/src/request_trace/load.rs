@@ -119,6 +119,9 @@ pub enum RequestTraceMode {
 
 impl LoadedAgentTrace {
     pub fn mode(&self) -> Result<RequestTraceMode> {
+        if self.requests.is_empty() {
+            bail!("Dynamo request trace contains no requests");
+        }
         let contextual_requests = self
             .requests
             .iter()

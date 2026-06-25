@@ -247,7 +247,8 @@ Dynamo request traces embed their trace block size. DynoSim derives it when
 
 The dedicated DynoSim CLI exposes:
 
-- either one or more positional trace files, or all of `--input-tokens`,
+- either positional trace files (`--trace-format dynamo` accepts one or more;
+  other formats require exactly one), or all of `--input-tokens`,
   `--output-tokens`, and `--request-count`
 - `--replay-mode offline|online`
 - `--router-mode round_robin|kv_router`

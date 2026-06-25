@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn single_turn_mooncake_trace_uses_request_path() {
+    fn single_turn_request_trace_formats_use_request_path() {
         let trace = Trace {
             block_size: 4,
             sessions: vec![
@@ -1510,17 +1510,19 @@ mod tests {
             ],
         };
 
-        let requests = single_turn_mooncake_requests(TraceFileFormat::Mooncake, &trace)
-            .unwrap()
-            .expect("single-turn Mooncake traces should become request traces");
+        for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::Dynamo] {
+            let requests = single_turn_mooncake_requests(trace_format, &trace)
+                .unwrap()
+                .expect("single-turn traces should become request traces");
 
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].arrival_timestamp_ms, Some(0.0));
-        assert_eq!(requests[1].arrival_timestamp_ms, Some(0.0));
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].arrival_timestamp_ms, Some(0.0));
+            assert_eq!(requests[1].arrival_timestamp_ms, Some(0.0));
+        }
     }
 
     #[test]
-    fn single_turn_mooncake_trace_without_timestamps_is_rejected() {
+    fn single_turn_request_trace_formats_without_timestamps_are_rejected() {
         let trace = Trace {
             block_size: 4,
             sessions: vec![SessionTrace {
@@ -1536,12 +1538,14 @@ mod tests {
             }],
         };
 
-        let err = single_turn_mooncake_requests(TraceFileFormat::Mooncake, &trace)
-            .expect_err("missing first_arrival_timestamp_ms must error before reaching the timestamped request path");
-        assert!(
-            err.to_string().contains("first_arrival_timestamp_ms"),
-            "expected validation error to mention first_arrival_timestamp_ms, got {err}",
-        );
+        for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::Dynamo] {
+            let err = single_turn_mooncake_requests(trace_format, &trace)
+                .expect_err("missing first_arrival_timestamp_ms must error before reaching the timestamped request path");
+            assert!(
+                err.to_string().contains("first_arrival_timestamp_ms"),
+                "expected validation error to mention first_arrival_timestamp_ms, got {err}",
+            );
+        }
     }
 
     #[test]

@@ -2363,7 +2363,9 @@ def run_mocker_trace_replay(
     trace_format: Literal[
         "mooncake",
         "mooncake-delta",
+        "mooncake_delta",
         "agentic_mooncake",
+        "agentic-mooncake",
         "applied_compute_agentic",
         "dynamo",
     ] = "mooncake",
@@ -2376,7 +2378,9 @@ def run_mocker_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay mocker trace files and return the simulation report for aggregated vLLM or SGLang configs.
+    """Replay mocker trace files and return the simulation report.
+
+    Supports aggregated or disaggregated engine configurations.
 
     When ``report_jsonl_path`` is provided (offline disagg replay only), one
     JSON object per request is written to that path. Each line includes
