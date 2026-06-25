@@ -25,6 +25,8 @@ export VLLM_TARGET_DEVICE=xpu
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
 # Parse ZE_AFFINITY_MASK (comma-separated) into per-worker device indices
 IFS=',' read -ra _GPU_IDS <<< "${ZE_AFFINITY_MASK:-0,1}"
@@ -53,6 +55,8 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT1 \
 ZE_AFFINITY_MASK=$GPU_WORKER1 python3 -m dynamo.vllm \
     --model $MODEL \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size $BLOCK_SIZE \
     ${GPU_MEM_ARGS:---gpu-memory-utilization 0.75} \
     --kv-events-config '{"enable_kv_cache_events": false}' &
@@ -61,6 +65,8 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT2 \
 ZE_AFFINITY_MASK=$GPU_WORKER2 python3 -m dynamo.vllm \
     --model $MODEL \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size $BLOCK_SIZE \
     ${GPU_MEM_ARGS:---gpu-memory-utilization 0.75} \
     --kv-events-config '{"enable_kv_cache_events": false}' &
