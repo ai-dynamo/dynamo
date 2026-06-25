@@ -4,26 +4,29 @@
 //! Worker-side index from a model metadata file's identity to its
 //! on-disk path. When a worker self-hosts metadata, it registers each
 //! file here and rewrites the MDC's `CheckedFile.path` to a
-//! `/v1/metadata/{slug}/{suffix}/{filename}` URL on its own
-//! `system_status_server`. The route handler reads paths back out by
-//! the same key and streams the bytes to the frontend, which
+//! `/v1/metadata/{namespace}/{component}/{endpoint}/{slug}/{suffix}/{filename}`
+//! URL on its own `system_status_server`. The route handler reads paths
+//! back out by the same key and streams the bytes to the frontend, which
 //! blake3-verifies them against the MDC.
 //!
-//! `suffix` is the LoRA slug (or `"_base"` for non-LoRA). It scopes
-//! each registration so detaching a LoRA doesn't unregister the base
-//! model's files (or vice versa).
+//! The endpoint triple in the key disambiguates multiple `LocalModel`
+//! instances coexisting on one DRT (e.g. different roles attaching the
+//! same base model). `suffix` is the LoRA slug (or `"_base"` for
+//! non-LoRA), scoping each registration so detaching a LoRA doesn't
+//! unregister the base model's files.
 //!
 //! Each entry also stores its `Owner = (instance_id, lora_slug)` so
 //! `unregister_for_owner` can clean up on detach without the caller
-//! threading the model slug. Each `(slug, suffix, filename)` key must
-//! have at most one owner — `register` panics on collision with a
-//! different owner.
+//! threading the model slug. `register` returns
+//! `Err(CollisionError)` on conflict — the caller propagates and the
+//! worker fails to start.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use thiserror::Error;
 
 /// Sentinel `suffix` for non-LoRA registrations. LoRA suffixes are
 /// `Slug::slugify` outputs (`[a-z0-9_-]+`); a name that slugifies to
@@ -33,7 +36,19 @@ pub const BASE_SUFFIX: &str = "_base";
 /// `(instance_id, lora_slug)`. `None` lora_slug = base model.
 pub type Owner = (u64, Option<String>);
 
-type Key = (String, String, String);
+/// `(namespace, component, endpoint, slug, suffix, filename)`.
+type Key = (String, String, String, String, String, String);
+
+/// Registration collided with a different owner — programmer error.
+#[derive(Debug, Error)]
+#[error(
+    "metadata-registry collision on key {key:?}: prior_owner={prior:?}, new_owner={new:?}"
+)]
+pub struct CollisionError {
+    pub key: Key,
+    pub prior: Owner,
+    pub new: Owner,
+}
 
 /// Cloning shares the underlying map.
 #[derive(Clone, Debug, Default)]
@@ -46,25 +61,69 @@ impl MetadataArtifactRegistry {
         Self::default()
     }
 
-    /// Panics on owner collision — two `LocalModel` instances attaching the
-    /// same (slug, suffix, filename) in one process would let detach-#1
-    /// wipe files detach-#2 still needs. Same-owner re-register is fine
-    /// (path update).
-    pub fn register(&self, owner: &Owner, slug: &str, suffix: &str, filename: &str, path: PathBuf) {
-        let key = (slug.to_string(), suffix.to_string(), filename.to_string());
+    /// Returns `Err(CollisionError)` if a different owner already
+    /// registered this key. Same-owner re-register updates the path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register(
+        &self,
+        owner: &Owner,
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        slug: &str,
+        suffix: &str,
+        filename: &str,
+        path: PathBuf,
+    ) -> Result<(), CollisionError> {
+        let key = (
+            namespace.to_string(),
+            component.to_string(),
+            endpoint.to_string(),
+            slug.to_string(),
+            suffix.to_string(),
+            filename.to_string(),
+        );
         let mut entries = self.entries.write();
         if let Some((_, prior)) = entries.get(&key) {
-            assert_eq!(
-                prior, owner,
-                "metadata-registry collision on {key:?}: prior={prior:?}, new={owner:?}",
-            );
+            if prior != owner {
+                return Err(CollisionError {
+                    key,
+                    prior: prior.clone(),
+                    new: owner.clone(),
+                });
+            }
         }
         entries.insert(key, (path, owner.clone()));
-        tracing::debug!(slug, suffix, filename, "registered metadata artifact");
+        tracing::debug!(
+            namespace,
+            component,
+            endpoint,
+            slug,
+            suffix,
+            filename,
+            "registered metadata artifact",
+        );
+        Ok(())
     }
 
-    pub fn get(&self, slug: &str, suffix: &str, filename: &str) -> Option<PathBuf> {
-        let key = (slug.to_string(), suffix.to_string(), filename.to_string());
+    #[allow(clippy::too_many_arguments)]
+    pub fn get(
+        &self,
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        slug: &str,
+        suffix: &str,
+        filename: &str,
+    ) -> Option<PathBuf> {
+        let key = (
+            namespace.to_string(),
+            component.to_string(),
+            endpoint.to_string(),
+            slug.to_string(),
+            suffix.to_string(),
+            filename.to_string(),
+        );
         self.entries.read().get(&key).map(|(p, _)| p.clone())
     }
 
@@ -99,38 +158,78 @@ mod tests {
     fn register_get_roundtrip() {
         let reg = MetadataArtifactRegistry::new();
         let p = PathBuf::from("/tmp/tokenizer.json");
-        reg.register(&base(), "llama-3-8b", "_base", "tokenizer.json", p.clone());
+        reg.register(
+            &base(),
+            "ns",
+            "comp",
+            "ep",
+            "llama-3-8b",
+            "_base",
+            "tokenizer.json",
+            p.clone(),
+        )
+        .unwrap();
 
-        assert_eq!(reg.get("llama-3-8b", "_base", "tokenizer.json"), Some(p));
-        assert!(reg.get("llama-3-8b", "_base", "missing.json").is_none());
-        assert!(reg.get("llama-3-8b", "lora-v1", "tokenizer.json").is_none());
+        assert_eq!(
+            reg.get("ns", "comp", "ep", "llama-3-8b", "_base", "tokenizer.json"),
+            Some(p)
+        );
+        assert!(
+            reg.get("ns", "comp", "ep", "llama-3-8b", "_base", "missing.json")
+                .is_none()
+        );
+        assert!(
+            reg.get("ns", "comp", "ep", "llama-3-8b", "lora-v1", "tokenizer.json")
+                .is_none()
+        );
     }
 
     #[test]
     fn unregister_for_owner_clears_only_that_owner() {
         let reg = MetadataArtifactRegistry::new();
         let lora_owner = lora("lora-v1");
-        reg.register(&base(), "m", "_base", "config.json", PathBuf::from("/m/c"));
         reg.register(
             &base(),
+            "ns",
+            "comp",
+            "ep",
+            "m",
+            "_base",
+            "config.json",
+            PathBuf::from("/m/c"),
+        )
+        .unwrap();
+        reg.register(
+            &base(),
+            "ns",
+            "comp",
+            "ep",
             "m",
             "_base",
             "tokenizer.json",
             PathBuf::from("/m/t"),
-        );
+        )
+        .unwrap();
         reg.register(
             &lora_owner,
+            "ns",
+            "comp",
+            "ep",
             "m",
             "lora-v1",
             "adapter.json",
             PathBuf::from("/m/a"),
-        );
+        )
+        .unwrap();
 
         reg.unregister_for_owner(&lora_owner);
 
-        assert!(reg.get("m", "lora-v1", "adapter.json").is_none());
+        assert!(
+            reg.get("ns", "comp", "ep", "m", "lora-v1", "adapter.json")
+                .is_none()
+        );
         assert_eq!(
-            reg.get("m", "_base", "config.json"),
+            reg.get("ns", "comp", "ep", "m", "_base", "config.json"),
             Some(PathBuf::from("/m/c"))
         );
         // Idempotent — second call is a no-op.
@@ -139,22 +238,102 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "metadata-registry collision")]
-    fn register_panics_on_owner_collision() {
+    fn register_returns_err_on_owner_collision() {
         let reg = MetadataArtifactRegistry::new();
         let owner_a = (1, None);
         let owner_b = (2, None);
-        reg.register(&owner_a, "m", "_base", "config.json", PathBuf::from("/a"));
-        reg.register(&owner_b, "m", "_base", "config.json", PathBuf::from("/b"));
+        reg.register(
+            &owner_a,
+            "ns",
+            "comp",
+            "ep",
+            "m",
+            "_base",
+            "config.json",
+            PathBuf::from("/a"),
+        )
+        .unwrap();
+        let err = reg
+            .register(
+                &owner_b,
+                "ns",
+                "comp",
+                "ep",
+                "m",
+                "_base",
+                "config.json",
+                PathBuf::from("/b"),
+            )
+            .unwrap_err();
+        assert_eq!(err.prior, owner_a);
+        assert_eq!(err.new, owner_b);
     }
 
     #[test]
     fn register_same_owner_updates_path() {
         let reg = MetadataArtifactRegistry::new();
-        reg.register(&base(), "m", "_base", "config.json", PathBuf::from("/a"));
-        reg.register(&base(), "m", "_base", "config.json", PathBuf::from("/b"));
+        reg.register(
+            &base(),
+            "ns",
+            "comp",
+            "ep",
+            "m",
+            "_base",
+            "config.json",
+            PathBuf::from("/a"),
+        )
+        .unwrap();
+        reg.register(
+            &base(),
+            "ns",
+            "comp",
+            "ep",
+            "m",
+            "_base",
+            "config.json",
+            PathBuf::from("/b"),
+        )
+        .unwrap();
         assert_eq!(
-            reg.get("m", "_base", "config.json"),
+            reg.get("ns", "comp", "ep", "m", "_base", "config.json"),
+            Some(PathBuf::from("/b"))
+        );
+    }
+
+    #[test]
+    fn different_endpoints_coexist() {
+        let reg = MetadataArtifactRegistry::new();
+        let owner_a = (1, None);
+        let owner_b = (2, None);
+        reg.register(
+            &owner_a,
+            "ns",
+            "comp",
+            "ep-a",
+            "m",
+            "_base",
+            "config.json",
+            PathBuf::from("/a"),
+        )
+        .unwrap();
+        // Same (slug, suffix, filename) but different endpoint → no collision.
+        reg.register(
+            &owner_b,
+            "ns",
+            "comp",
+            "ep-b",
+            "m",
+            "_base",
+            "config.json",
+            PathBuf::from("/b"),
+        )
+        .unwrap();
+        assert_eq!(
+            reg.get("ns", "comp", "ep-a", "m", "_base", "config.json"),
+            Some(PathBuf::from("/a"))
+        );
+        assert_eq!(
+            reg.get("ns", "comp", "ep-b", "m", "_base", "config.json"),
             Some(PathBuf::from("/b"))
         );
     }

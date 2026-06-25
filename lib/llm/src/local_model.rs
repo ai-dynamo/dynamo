@@ -507,7 +507,7 @@ impl LocalModel {
         );
 
         if self.self_host_metadata {
-            self.move_to_self_host(endpoint.drt(), model_suffix.as_deref())
+            self.move_to_self_host(endpoint, model_suffix.as_deref())
                 .context("move_to_self_host")?;
         }
 
@@ -550,9 +550,13 @@ impl LocalModel {
     /// (recorded as `BASE_SUFFIX` in the registry).
     fn move_to_self_host(
         &mut self,
-        drt: &dynamo_runtime::DistributedRuntime,
+        endpoint: &Endpoint,
         model_suffix: Option<&str>,
     ) -> anyhow::Result<()> {
+        let drt = endpoint.drt();
+        let namespace = endpoint.component().namespace().name().to_string();
+        let component = endpoint.component().name().to_string();
+        let endpoint_name = endpoint.name().to_string();
         let Some(base_url) = self_host_base_url(drt)? else {
             tracing::warn!(
                 model_slug = %self.card.slug(),
@@ -616,9 +620,20 @@ impl LocalModel {
             };
 
             let url = url::Url::parse(&format!(
-                "{base_url}/v1/metadata/{model_slug}/{suffix}/{filename}"
+                "{base_url}/v1/metadata/{namespace}/{component}/{endpoint_name}/{model_slug}/{suffix}/{filename}"
             ))?;
-            registry.register(&owner, &model_slug, suffix, &filename, absolute);
+            registry
+                .register(
+                    &owner,
+                    &namespace,
+                    &component,
+                    &endpoint_name,
+                    &model_slug,
+                    suffix,
+                    &filename,
+                    absolute,
+                )
+                .context("registering metadata artifact")?;
             cf.move_to_url(url);
             rewritten += 1;
         }
