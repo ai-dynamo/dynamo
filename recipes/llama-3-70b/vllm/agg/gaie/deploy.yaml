@@ -57,7 +57,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
   - name: VllmDecodeWorker
     type: decode
     replicas: 1
@@ -86,7 +86,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           resources:
             limits:
               nvidia.com/gpu: "4"
@@ -105,7 +105,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
         volumes:
         - name: model-cache
           persistentVolumeClaim:

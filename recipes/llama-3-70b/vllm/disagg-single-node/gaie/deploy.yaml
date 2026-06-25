@@ -65,7 +65,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
   - name: VllmPrefillWorker
     type: prefill
     replicas: 2
@@ -106,7 +106,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           resources:
             limits:
               nvidia.com/gpu: "2"
@@ -125,7 +125,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -173,7 +173,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           resources:
             limits:
               nvidia.com/gpu: "4"
@@ -192,7 +192,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
