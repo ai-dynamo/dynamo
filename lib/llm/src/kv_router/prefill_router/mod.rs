@@ -26,7 +26,10 @@ use futures::stream::{self, StreamExt};
 use crate::{
     discovery::ModelManager,
     protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        extensions::{
+            AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId,
+        },
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
@@ -198,12 +201,26 @@ impl
         let engine_ctx = context.context();
         let session_affinity = context
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
-            .ok()
-            .map(|session_affinity| session_affinity.as_ref().clone());
-        let session_cache_key = session_affinity
+            .ok();
+        let context_agent_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .ok();
+        let agent_context = context_agent_context
             .as_ref()
-            .map(|session_affinity| session_affinity.as_str().to_string())
-            .or_else(|| metadata.get(SESSION_AFFINITY_CONTEXT_KEY).cloned());
+            .map(|agent_context| agent_context.as_ref())
+            .or(req.agent_context.as_ref());
+        let session_cache_key = session_kv_cache_key(
+            session_affinity
+                .as_ref()
+                .map(|session_affinity| session_affinity.as_ref()),
+            metadata
+                .get(SESSION_AFFINITY_CONTEXT_KEY)
+                .map(String::as_str),
+            metadata
+                .get(AGENT_CONTEXT_CONTEXT_KEY)
+                .map(String::as_str),
+            agent_context,
+        );
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -587,6 +604,23 @@ fn build_decode_router_override(
     override_config
 }
 
+fn session_kv_cache_key(
+    session_affinity: Option<&SessionAffinityId>,
+    metadata_session_affinity: Option<&str>,
+    metadata_agent_session: Option<&str>,
+    agent_context: Option<&AgentContext>,
+) -> Option<String> {
+    // D->P KV handles need a stable logical session key. Explicit hard-affinity
+    // routing remains the strongest signal, but native/aiperf session headers
+    // can still enable bidirectional KV bookkeeping through AgentContext
+    // without also enabling sticky routing.
+    session_affinity
+        .map(|session_affinity| session_affinity.as_str().to_string())
+        .or_else(|| metadata_session_affinity.map(str::to_string))
+        .or_else(|| metadata_agent_session.map(str::to_string))
+        .or_else(|| agent_context.map(|agent_context| agent_context.session_id.clone()))
+}
+
 fn merge_decode_topology_constraints(
     request: &mut PreprocessedRequest,
     topology_constraints: RoutingConstraints,
@@ -792,6 +826,71 @@ mod tests {
                 "remote_block_ids": [1, 2],
             }))
         );
+    }
+
+    #[test]
+    fn session_kv_cache_key_prefers_explicit_affinity() {
+        let affinity = SessionAffinityId::new("affinity-session");
+        let agent_context = AgentContext {
+            session_id: "agent-session".to_string(),
+            parent_session_id: None,
+            session_final: None,
+            kv_hints: None,
+        };
+
+        assert_eq!(
+            session_kv_cache_key(
+                Some(&affinity),
+                Some("metadata-session"),
+                Some("metadata-agent-session"),
+                Some(&agent_context)
+            ),
+            Some("affinity-session".to_string())
+        );
+    }
+
+    #[test]
+    fn session_kv_cache_key_uses_agent_context_when_affinity_is_missing() {
+        let agent_context = AgentContext {
+            session_id: "agent-session".to_string(),
+            parent_session_id: None,
+            session_final: None,
+            kv_hints: None,
+        };
+
+        assert_eq!(
+            session_kv_cache_key(None, None, None, Some(&agent_context)),
+            Some("agent-session".to_string())
+        );
+    }
+
+    #[test]
+    fn session_kv_cache_key_uses_metadata_agent_session_when_typed_context_is_missing() {
+        assert_eq!(
+            session_kv_cache_key(None, None, Some("metadata-agent-session"), None),
+            Some("metadata-agent-session".to_string())
+        );
+    }
+
+    #[test]
+    fn session_kv_cache_key_accepts_aiperf_x_session_id_via_agent_context() {
+        use axum::http::HeaderMap;
+
+        use crate::protocols::common::extensions::agent_context_from_headers;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-ID", "aiperf-session".parse().unwrap());
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+
+        assert_eq!(
+            session_kv_cache_key(None, None, None, Some(&agent_context)),
+            Some("aiperf-session".to_string())
+        );
+    }
+
+    #[test]
+    fn session_kv_cache_key_is_none_without_session_identity() {
+        assert_eq!(session_kv_cache_key(None, None, None, None), None);
     }
 
     fn make_test_router(enforce_disagg: bool) -> Arc<PrefillRouter> {

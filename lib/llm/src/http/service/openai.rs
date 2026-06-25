@@ -506,9 +506,16 @@ fn context_from_headers<T: Send + Sync + 'static>(
             session_affinity.as_str().to_string(),
         );
     }
+    let agent_context = agent_context_from_headers(headers);
+    if let Some(agent_context) = agent_context.as_ref() {
+        metadata.insert(
+            AGENT_CONTEXT_CONTEXT_KEY.to_string(),
+            agent_context.session_id.clone(),
+        );
+    }
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some(agent_context) = agent_context_from_headers(headers) {
+    if let Some(agent_context) = agent_context {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
     if let Some(session_affinity) = session_affinity {
@@ -3175,7 +3182,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::agents::HEADER_DYNAMO_SESSION_ID;
+    use crate::protocols::agents::{HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_SESSION_ID};
     use crate::protocols::common::extensions::NvExt;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
@@ -3268,6 +3275,37 @@ mod tests {
                 .get(SESSION_AFFINITY_CONTEXT_KEY)
                 .map(String::as_str),
             Some("session-123")
+        );
+    }
+
+    #[test]
+    fn test_context_from_headers_preserves_agent_session_without_session_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_OPENCODE_SESSION_ID, "aiperf-session".parse().unwrap());
+
+        let request = context_from_headers((), "req-1".to_string(), &headers).unwrap();
+
+        let agent_context = request
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context copied to typed context");
+        assert_eq!(agent_context.session_id, "aiperf-session");
+        assert_eq!(
+            request
+                .metadata()
+                .get(AGENT_CONTEXT_CONTEXT_KEY)
+                .map(String::as_str),
+            Some("aiperf-session")
+        );
+        assert!(
+            request
+                .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                .is_err()
+        );
+        assert!(
+            request
+                .metadata()
+                .get(SESSION_AFFINITY_CONTEXT_KEY)
+                .is_none()
         );
     }
 
