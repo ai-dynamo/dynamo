@@ -180,6 +180,19 @@ spec:
         # decode-side P/D routing sidecar -------------------------
         - name: pd-router-sidecar
           image: "<your-registry>/dynamo-pd-sidecar:dev"
+          resources:
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+            requests:
+              cpu: "100m"
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
       tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
