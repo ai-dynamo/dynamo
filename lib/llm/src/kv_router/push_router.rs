@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
@@ -35,6 +38,70 @@ mod selection;
 use cancellation::{cancel_on_stop, cancelled_error};
 use request_guard::RequestGuard;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
+
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+struct BackendStreamTrace {
+    span: tracing::Span,
+    start: Instant,
+    saw_first_item: bool,
+    chunks: u64,
+    data_chunks: u64,
+    error_chunks: u64,
+    completed: bool,
+}
+
+impl BackendStreamTrace {
+    fn new(span: tracing::Span) -> Self {
+        Self {
+            span,
+            start: Instant::now(),
+            saw_first_item: false,
+            chunks: 0,
+            data_chunks: 0,
+            error_chunks: 0,
+            completed: false,
+        }
+    }
+
+    fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
+        if !self.saw_first_item {
+            self.saw_first_item = true;
+            self.span.record("first_item_ms", elapsed_ms(self.start));
+        }
+        self.chunks += 1;
+        if item.data.is_some() {
+            self.data_chunks += 1;
+        }
+        if item.is_error() {
+            self.error_chunks += 1;
+        }
+    }
+
+    fn finish(&mut self, cancelled: bool) {
+        self.completed = true;
+        self.record_summary(cancelled);
+    }
+
+    fn record_summary(&self, cancelled: bool) {
+        self.span.record("chunks", self.chunks);
+        self.span.record("data_chunks", self.data_chunks);
+        self.span.record("error_chunks", self.error_chunks);
+        self.span.record("completed", self.completed);
+        self.span.record("cancelled", cancelled);
+        self.span.record("elapsed_ms", elapsed_ms(self.start));
+    }
+}
+
+impl Drop for BackendStreamTrace {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.record_summary(true);
+        }
+    }
+}
 
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
@@ -277,6 +344,11 @@ impl KvPushRouter {
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
+        let selected_worker_id = selection.instance_id;
+        let selected_dp_rank = selection.dp_rank;
+        let overlap_blocks = selection.overlap_amount;
+        let effective_overlap_blocks = selection.effective_overlap_blocks;
+        let cached_tokens = selection.cached_tokens;
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
@@ -300,10 +372,13 @@ impl KvPushRouter {
             dispatch.instrument(tracing::info_span!(
                 "kv_router.route_request",
                 request_id = %context_id,
-                worker_id = selection.instance_id,
-                dp_rank = selection.dp_rank,
-                overlap_blocks = selection.overlap_amount,
+                worker_id = selected_worker_id,
+                dp_rank = selected_dp_rank,
+                overlap_blocks,
+                effective_overlap_blocks,
+                cached_tokens,
                 phase = ?phase,
+                exact,
             )),
         )
         .await
@@ -319,8 +394,27 @@ impl KvPushRouter {
         guard.mark_dispatched();
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
+        let backend_stream_span = tracing::info_span!(
+            "kv_router.backend_stream",
+            request_id = %context_id,
+            worker_id = selected_worker_id,
+            dp_rank = selected_dp_rank,
+            phase = %phase_label,
+            overlap_blocks,
+            effective_overlap_blocks,
+            cached_tokens,
+            first_item_ms = tracing::field::Empty,
+            chunks = tracing::field::Empty,
+            data_chunks = tracing::field::Empty,
+            error_chunks = tracing::field::Empty,
+            completed = tracing::field::Empty,
+            cancelled = tracing::field::Empty,
+            elapsed_ms = tracing::field::Empty,
+        );
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut guard = guard;
+            let mut stream_trace = BackendStreamTrace::new(backend_stream_span);
+            let mut cancelled = false;
 
             loop {
                 tokio::select! {
@@ -328,6 +422,7 @@ impl KvPushRouter {
 
                     _ = context_for_monitoring.stopped() => {
                         tracing::debug!("Request {context_id} cancelled, ending stream");
+                        cancelled = true;
                         break;
                     }
 
@@ -335,6 +430,7 @@ impl KvPushRouter {
                         let Some(item) = item else {
                             break;
                         };
+                        stream_trace.on_item(&item);
                         guard.on_item(&item).await;
                         yield item;
                     }
@@ -342,6 +438,7 @@ impl KvPushRouter {
             }
 
             guard.finish().await;
+            stream_trace.finish(cancelled);
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }

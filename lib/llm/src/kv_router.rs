@@ -478,18 +478,43 @@ where
         };
 
         let isl_tokens = tokens.len();
+        let request_id_for_trace = context_id.unwrap_or("");
+        let has_mm_routing = block_mm_infos.is_some();
+        let has_lora = lora_name.is_some();
+        let allowed_worker_count = allowed_worker_ids.as_ref().map(HashSet::len).unwrap_or(0);
+        let pinned_worker_id = pinned_worker.as_ref().map(|worker| worker.worker_id);
+        let pinned_dp_rank = pinned_worker.as_ref().map(|worker| worker.dp_rank);
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name: lora_name.as_deref(),
             is_eagle: Some(self.is_eagle),
         };
 
-        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
+        let compute_block_hashes_span = tracing::info_span!(
+            "kv_router.compute_block_hashes",
+            request_id = request_id_for_trace,
+            isl_tokens,
+            block_size = self.block_size,
+            has_mm_routing,
+            has_lora,
+            block_count = tracing::field::Empty,
+        );
+        let block_hashes = compute_block_hashes_span
             .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
+        compute_block_hashes_span.record("block_count", block_hashes.len());
         log_routing_input_hashes(context_id, self.block_size, tokens, &block_hashes);
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
-        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
+        let compute_seq_hashes_span = tracing::info_span!(
+            "kv_router.compute_seq_hashes",
+            request_id = request_id_for_trace,
+            isl_tokens,
+            block_size = self.block_size,
+            block_count = block_hashes.len(),
+            computed = tracing::field::Empty,
+            seq_hash_count = tracing::field::Empty,
+        );
+        let maybe_seq_hashes = compute_seq_hashes_span.in_scope(|| {
             self.kv_router_config.compute_seq_hashes_for_tracking(
                 tokens,
                 self.block_size,
@@ -498,10 +523,15 @@ where
                 Some(&block_hashes),
             )
         });
+        compute_seq_hashes_span.record("computed", maybe_seq_hashes.is_some());
+        if let Some(seq_hashes) = maybe_seq_hashes.as_ref() {
+            compute_seq_hashes_span.record("seq_hash_count", seq_hashes.len());
+        }
         let seq_hash_elapsed = start.elapsed();
 
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
+        let block_count = block_hashes.len();
 
         let TieredLookupResult {
             tiered_matches,
@@ -540,6 +570,32 @@ where
         // scheduling returns, since `overlap_blocks` isn't known until then.
         let num_blocks = isl_tokens / self.block_size as usize;
         let sc_hits_for_metrics = shared_cache_hits.clone();
+        let schedule_span = tracing::info_span!(
+            "kv_router.schedule",
+            request_id = request_id_for_trace,
+            isl_tokens,
+            block_size = self.block_size,
+            block_count,
+            update_states,
+            return_routing_hashes,
+            supports_overlap_refresh,
+            retain_block_hashes,
+            priority_jump,
+            strict_priority,
+            has_policy_class = policy_class.is_some(),
+            has_expected_output_tokens = expected_output_tokens.is_some(),
+            expected_output_tokens = expected_output_tokens.unwrap_or(0),
+            has_pinned_worker = pinned_worker_id.is_some(),
+            pinned_worker_id = pinned_worker_id.unwrap_or(0),
+            pinned_dp_rank = pinned_dp_rank.unwrap_or(0),
+            allowed_worker_count,
+            selected_worker_id = tracing::field::Empty,
+            selected_dp_rank = tracing::field::Empty,
+            overlap_blocks = tracing::field::Empty,
+            cached_tokens = tracing::field::Empty,
+            pending_count = tracing::field::Empty,
+            pending_isl_tokens = tracing::field::Empty,
+        );
 
         let response = match self
             .scheduler
@@ -560,15 +616,23 @@ where
                 routing_constraints,
                 shared_cache_hits,
             })
-            .instrument(tracing::info_span!("kv_router.schedule"))
+            .instrument(schedule_span.clone())
             .await
         {
             Ok(response) => response,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
+                schedule_span.record("pending_count", self.pending_count());
+                schedule_span.record("pending_isl_tokens", self.pending_isl_tokens());
                 return Ok(FindBestMatchOutcome::QueueRejected { rejection });
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
+        schedule_span.record("selected_worker_id", response.best_worker.worker_id);
+        schedule_span.record("selected_dp_rank", response.best_worker.dp_rank);
+        schedule_span.record("overlap_blocks", response.effective_overlap_blocks);
+        schedule_span.record("cached_tokens", response.cached_tokens);
+        schedule_span.record("pending_count", self.pending_count());
+        schedule_span.record("pending_isl_tokens", self.pending_isl_tokens());
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
 

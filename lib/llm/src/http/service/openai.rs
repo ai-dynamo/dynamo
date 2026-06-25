@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -80,6 +80,103 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+struct ChatSseStreamTrace {
+    span: tracing::Span,
+    start: Instant,
+    saw_first_backend_chunk: bool,
+    saw_first_sse_event: bool,
+    backend_chunks: u64,
+    empty_chunks: u64,
+    sse_events: u64,
+    tool_dispatch_events: u64,
+    reasoning_dispatch_events: u64,
+    error_events: u64,
+    completed: bool,
+}
+
+impl ChatSseStreamTrace {
+    fn new(span: tracing::Span) -> Self {
+        Self {
+            span,
+            start: Instant::now(),
+            saw_first_backend_chunk: false,
+            saw_first_sse_event: false,
+            backend_chunks: 0,
+            empty_chunks: 0,
+            sse_events: 0,
+            tool_dispatch_events: 0,
+            reasoning_dispatch_events: 0,
+            error_events: 0,
+            completed: false,
+        }
+    }
+
+    fn on_backend_chunk(&mut self) {
+        if !self.saw_first_backend_chunk {
+            self.saw_first_backend_chunk = true;
+            self.span
+                .record("first_backend_chunk_ms", elapsed_ms(self.start));
+        }
+        self.backend_chunks += 1;
+    }
+
+    fn on_empty_chunk(&mut self) {
+        self.empty_chunks += 1;
+    }
+
+    fn add_tool_dispatch_events(&mut self, count: usize) {
+        self.tool_dispatch_events += count as u64;
+    }
+
+    fn add_reasoning_dispatch_events(&mut self, count: usize) {
+        self.reasoning_dispatch_events += count as u64;
+    }
+
+    fn add_sse_events(&mut self, count: usize) {
+        if count > 0 && !self.saw_first_sse_event {
+            self.saw_first_sse_event = true;
+            self.span
+                .record("first_sse_event_ms", elapsed_ms(self.start));
+        }
+        self.sse_events += count as u64;
+    }
+
+    fn on_error_event(&mut self) {
+        self.error_events += 1;
+    }
+
+    fn finish(&mut self) {
+        self.completed = true;
+        self.record_summary(false);
+    }
+
+    fn record_summary(&self, cancelled: bool) {
+        self.span.record("backend_chunks", self.backend_chunks);
+        self.span.record("empty_chunks", self.empty_chunks);
+        self.span.record("sse_events", self.sse_events);
+        self.span
+            .record("tool_dispatch_events", self.tool_dispatch_events);
+        self.span
+            .record("reasoning_dispatch_events", self.reasoning_dispatch_events);
+        self.span.record("error_events", self.error_events);
+        self.span.record("completed", self.completed);
+        self.span.record("cancelled", cancelled);
+        self.span.record("elapsed_ms", elapsed_ms(self.start));
+    }
+}
+
+impl Drop for ChatSseStreamTrace {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.record_summary(true);
+        }
+    }
+}
 
 use super::error::{SanitizedError, overload_status_code};
 
@@ -1758,6 +1855,24 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let chat_stream_span = tracing::info_span!(
+            "openai.chat_completions.sse_stream",
+            request_id = %request_id,
+            model = %model,
+            tool_dispatch_enabled,
+            reasoning_dispatch_enabled,
+            first_backend_chunk_ms = tracing::field::Empty,
+            first_sse_event_ms = tracing::field::Empty,
+            backend_chunks = tracing::field::Empty,
+            empty_chunks = tracing::field::Empty,
+            sse_events = tracing::field::Empty,
+            tool_dispatch_events = tracing::field::Empty,
+            reasoning_dispatch_events = tracing::field::Empty,
+            error_events = tracing::field::Empty,
+            completed = tracing::field::Empty,
+            cancelled = tracing::field::Empty,
+            elapsed_ms = tracing::field::Empty,
+        );
 
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -1765,27 +1880,34 @@ async fn chat_completions(
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
+            let mut stream_trace = ChatSseStreamTrace::new(chat_stream_span);
 
             while let Some(response) = stream.next().await {
+                stream_trace.on_backend_chunk();
                 events.clear();
 
                 // Drop empty chunks from multi-byte token assembly.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
+                    stream_trace.on_empty_chunk();
                     continue;
                 }
                 if tool_dispatch_enabled {
+                    let before = events.len();
                     streaming_tool_dispatch_events(
                         &response,
                         &mut dispatched_tool_ids,
                         &mut events,
                     );
+                    stream_trace.add_tool_dispatch_events(events.len() - before);
                 }
                 if reasoning_dispatch_enabled {
+                    let before = events.len();
                     accumulate_reasoning_dispatch(
                         &response,
                         &mut reasoning_buffer,
                         &mut events,
                     );
+                    stream_trace.add_reasoning_dispatch_events(events.len() - before);
                 }
 
                 // Convert to SSE event (this consumes the response).
@@ -1800,14 +1922,20 @@ async fn chat_completions(
                 match sse_result {
                     Ok(Some(ev)) => events.push(Ok(ev)),
                     Ok(None) => {}
-                    Err(e) => events.push(Err(e)),
+                    Err(e) => {
+                        stream_trace.on_error_event();
+                        events.push(Err(e));
+                    }
                 }
+                stream_trace.add_sse_events(events.len());
 
                 events.reverse();
                 while let Some(event) = events.pop() {
                     yield event;
                 }
             }
+
+            stream_trace.finish();
         };
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 

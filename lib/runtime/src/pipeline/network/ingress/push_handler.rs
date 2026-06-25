@@ -18,6 +18,10 @@ use std::time::Instant;
 use tracing::Instrument;
 use tracing::info_span;
 
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
 pub struct WorkHandlerMetrics {
@@ -153,14 +157,28 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         U: Data + Serialize + MaybeError + std::fmt::Debug,
     {
         let context = stream.context();
+        let span = tracing::Span::current();
+        let start = Instant::now();
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
+        let mut chunks = 0_u64;
+        let mut error_chunks = 0_u64;
+        let mut response_bytes = 0_u64;
+        let mut publish_failed = false;
+        let mut complete_final_sent = false;
+        let mut saw_first_response = false;
         while let Some(resp) = stream.next().await {
+            if !saw_first_response {
+                saw_first_response = true;
+                span.record("first_response_ms", elapsed_ms(start));
+            }
+            chunks += 1;
             tracing::trace!("Sending response: {:?}", resp);
             let is_error = resp.err().is_some();
             if is_error {
+                error_chunks += 1;
                 saw_error_response = true;
             }
             let resp_wrapper = NetworkStreamWrapper {
@@ -169,11 +187,13 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
             };
             let resp_bytes = serde_json::to_vec(&resp_wrapper)
                 .expect("fatal error: invalid response object - this should never happen");
+            response_bytes += resp_bytes.len() as u64;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
             if (publisher.send(resp_bytes.into()).await).is_err() {
                 send_complete_final = false;
+                publish_failed = true;
                 if context.is_stopped() {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
                     // 1. context.stop_generating (other) -> publisher.send failure (this)
@@ -212,10 +232,12 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
             };
             let resp_bytes = serde_json::to_vec(&resp_wrapper)
                 .expect("fatal error: invalid response object - this should never happen");
+            response_bytes += resp_bytes.len() as u64;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
             if (publisher.send(resp_bytes.into()).await).is_err() {
+                publish_failed = true;
                 tracing::error!(
                     "Failed to publish complete final for stream {}",
                     context.id()
@@ -233,7 +255,15 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
             ) {
                 notifier.notify_one();
             }
+            complete_final_sent = !publish_failed;
         }
+        span.record("chunks", chunks);
+        span.record("error_chunks", error_chunks);
+        span.record("response_bytes", response_bytes);
+        span.record("saw_error_response", saw_error_response);
+        span.record("publish_failed", publish_failed);
+        span.record("complete_final_sent", complete_final_sent);
+        span.record("elapsed_ms", elapsed_ms(start));
     }
 
     /// Decode the wire envelope into its [`RequestControlMessage`] and the
@@ -528,7 +558,14 @@ where
             request,
             response_connection_info,
             frontend_send_ts_ns,
-        } = self.parse_and_build_request(payload).await?;
+        } = self
+            .parse_and_build_request(payload)
+            .instrument(info_span!(
+                "request_plane.worker.parse_request",
+                request_id = request_id.as_deref().unwrap_or(""),
+            ))
+            .await?;
+        let parsed_request_id = request.context().id().to_string();
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -544,6 +581,10 @@ where
             response_connection_info,
             self.metrics().map(|m| m.cancellation_total.clone()),
         )
+        .instrument(info_span!(
+            "request_plane.worker.open_response_stream",
+            request_id = %parsed_request_id,
+        ))
         .await
         .map_err(|e| {
             if let Some(m) = self.metrics() {
@@ -560,6 +601,10 @@ where
             .get()
             .expect("segment not set")
             .generate(request)
+            .instrument(info_span!(
+                "request_plane.worker.generate",
+                request_id = %parsed_request_id,
+            ))
             .await
             .map_err(|e| {
                 if let Some(m) = self.metrics() {
@@ -575,7 +620,14 @@ where
         let stream = match stream {
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");
-                let _result = publisher.send_prologue(None).await;
+                let _result = publisher
+                    .send_prologue(None)
+                    .instrument(info_span!(
+                        "request_plane.worker.send_prologue",
+                        request_id = %parsed_request_id,
+                        is_error = false,
+                    ))
+                    .await;
                 WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
                     .observe(start_time.elapsed().as_secs_f64());
                 stream
@@ -595,12 +647,32 @@ where
                     tracing::error!("Failed to generate response stream: {error_string}");
                 }
 
-                let _result = publisher.send_prologue(Some(error_string)).await;
+                let _result = publisher
+                    .send_prologue(Some(error_string))
+                    .instrument(info_span!(
+                        "request_plane.worker.send_prologue",
+                        request_id = %parsed_request_id,
+                        is_error = true,
+                    ))
+                    .await;
                 Err(e)?
             }
         };
 
-        self.pump_response_stream(stream, &publisher).await;
+        self.pump_response_stream(stream, &publisher)
+            .instrument(info_span!(
+                "request_plane.worker.pump_response_stream",
+                request_id = %parsed_request_id,
+                first_response_ms = tracing::field::Empty,
+                chunks = tracing::field::Empty,
+                error_chunks = tracing::field::Empty,
+                response_bytes = tracing::field::Empty,
+                saw_error_response = tracing::field::Empty,
+                publish_failed = tracing::field::Empty,
+                complete_final_sent = tracing::field::Empty,
+                elapsed_ms = tracing::field::Empty,
+            ))
+            .await;
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
@@ -637,7 +709,16 @@ where
         payload: Bytes,
         request_id: Option<String>,
     ) -> Result<(), PipelineError> {
-        self.handle_payload_shared(payload, request_id).await
+        let request_id_label = request_id.as_deref().unwrap_or("").to_string();
+        let payload_bytes = payload.len();
+        self.handle_payload_shared(payload, request_id)
+            .instrument(info_span!(
+                "request_plane.worker.handle_payload",
+                request_id = %request_id_label,
+                payload_bytes,
+                shape = "single_in",
+            ))
+            .await
     }
 }
 
@@ -668,6 +749,15 @@ where
         payload: Bytes,
         request_id: Option<String>,
     ) -> Result<(), PipelineError> {
-        self.handle_payload_shared(payload, request_id).await
+        let request_id_label = request_id.as_deref().unwrap_or("").to_string();
+        let payload_bytes = payload.len();
+        self.handle_payload_shared(payload, request_id)
+            .instrument(info_span!(
+                "request_plane.worker.handle_payload",
+                request_id = %request_id_label,
+                payload_bytes,
+                shape = "many_in",
+            ))
+            .await
     }
 }

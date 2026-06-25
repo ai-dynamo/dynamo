@@ -43,6 +43,94 @@ use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+struct ResponseDecodeTrace {
+    span: tracing::Span,
+    start: Instant,
+    saw_first_response: bool,
+    frames: u64,
+    data_frames: u64,
+    error_frames: u64,
+    decode_errors: u64,
+    response_bytes: u64,
+    complete_final: bool,
+    completed: bool,
+    finalized: bool,
+}
+
+impl ResponseDecodeTrace {
+    fn new(span: tracing::Span, start: Instant) -> Self {
+        Self {
+            span,
+            start,
+            saw_first_response: false,
+            frames: 0,
+            data_frames: 0,
+            error_frames: 0,
+            decode_errors: 0,
+            response_bytes: 0,
+            complete_final: false,
+            completed: false,
+            finalized: false,
+        }
+    }
+
+    fn on_bytes(&mut self, len: usize) {
+        if !self.saw_first_response {
+            self.saw_first_response = true;
+            self.span
+                .record("first_response_ms", elapsed_ms(self.start));
+        }
+        self.frames += 1;
+        self.response_bytes += len as u64;
+    }
+
+    fn on_data(&mut self, is_error: bool) {
+        self.data_frames += 1;
+        if is_error {
+            self.error_frames += 1;
+        }
+    }
+
+    fn on_decode_error(&mut self) {
+        self.decode_errors += 1;
+    }
+
+    fn on_complete_final(&mut self) {
+        self.complete_final = true;
+    }
+
+    fn finish(&mut self, disconnected: bool, cancelled: bool) {
+        self.completed = !disconnected && !cancelled;
+        self.finalized = true;
+        self.record_summary(disconnected, cancelled);
+    }
+
+    fn record_summary(&self, disconnected: bool, cancelled: bool) {
+        self.span.record("frames", self.frames);
+        self.span.record("data_frames", self.data_frames);
+        self.span.record("error_frames", self.error_frames);
+        self.span.record("decode_errors", self.decode_errors);
+        self.span.record("response_bytes", self.response_bytes);
+        self.span.record("complete_final", self.complete_final);
+        self.span.record("completed", self.completed);
+        self.span.record("disconnected", disconnected);
+        self.span.record("cancelled", cancelled);
+        self.span.record("elapsed_ms", elapsed_ms(self.start));
+    }
+}
+
+impl Drop for ResponseDecodeTrace {
+    fn drop(&mut self) {
+        if !self.finalized {
+            self.record_summary(false, true);
+        }
+    }
+}
+
 /// Stream transformation helper that:
 /// - decodes a response byte stream from network into the fully-shaped `ManyOut<U>`
 /// - emits TTFT and transport-roundtrip metrics on first response
@@ -54,6 +142,7 @@ fn decode_response_stream<U>(
     queue_start: Instant,
     tx_start: Instant,
     inflight_guard: InflightGuard,
+    decode_span: tracing::Span,
 ) -> ManyOut<U>
 where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
@@ -61,8 +150,10 @@ where
     let engine_ctx_for_stream = engine_ctx.clone();
     let mut is_complete_final = false;
     let mut first_response = true;
+    let mut trace = ResponseDecodeTrace::new(decode_span, tx_start);
     let stream = StreamNotifyClose::new(ReceiverStream::new(response_rx)).filter_map(move |res| {
         if let Some(res_bytes) = res {
+            trace.on_bytes(res_bytes.len());
             if first_response {
                 first_response = false;
                 REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(tx_start.elapsed().as_secs_f64());
@@ -80,8 +171,10 @@ where
                 Ok(item) => {
                     is_complete_final = item.complete_final;
                     if let Some(data) = item.data {
+                        trace.on_data(data.is_err());
                         Some(data)
                     } else if is_complete_final {
+                        trace.on_complete_final();
                         None
                     } else {
                         let err =
@@ -90,15 +183,18 @@ where
                     }
                 }
                 Err(err) => {
+                    trace.on_decode_error();
                     let json_str = String::from_utf8_lossy(&res_bytes);
                     tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
                     Some(U::from_err(DynamoError::msg(err.to_string())))
                 }
             }
         } else if is_complete_final {
+            trace.finish(false, false);
             None
         } else if engine_ctx_for_stream.is_stopped() {
             tracing::debug!("Request cancelled and then trying to read a response");
+            trace.finish(false, true);
             None
         } else {
             let err = DynamoError::builder()
@@ -106,6 +202,7 @@ where
                 .message("Stream ended before generation completed")
                 .build();
             tracing::debug!("{err}");
+            trace.finish(true, false);
             Some(U::from_err(err))
         }
     });
@@ -464,6 +561,10 @@ impl AddressedPushRouter {
         U: Data + for<'de> Deserialize<'de> + MaybeError,
     {
         let engine_ctx = context.context();
+        let request_id = context.id().to_string();
+        let transport = self.req_client.transport_name();
+        let target_instance_id = instance.map(|inst| inst.instance_id).unwrap_or(0);
+        let has_target_instance = instance.is_some();
 
         let queue_start = Instant::now();
         REQUEST_PLANE_INFLIGHT.inc();
@@ -478,6 +579,14 @@ impl AddressedPushRouter {
         // watcher (instance dropped), so no cleanup is owed.
         let (send_registered, recv_registered) = self
             .register_streams(engine_ctx.clone(), enable_request_stream, true)
+            .instrument(tracing::info_span!(
+                "request_plane.frontend.register_streams",
+                request_id = %request_id,
+                transport,
+                has_request_stream = enable_request_stream,
+                has_target_instance,
+                target_instance_id,
+            ))
             .await?;
         let recv_registered = recv_registered.ok_or_else(|| {
             anyhow::anyhow!("response stream registration missing despite enable_response_stream")
@@ -508,16 +617,39 @@ impl AddressedPushRouter {
             ));
         }
 
-        let buffer = build_request_envelope(
-            context,
-            recv_registered.connection_info.clone(),
-            send_registered.as_ref().map(|r| r.connection_info.clone()),
-            request,
-        )?;
+        let build_envelope_span = tracing::info_span!(
+            "request_plane.frontend.build_envelope",
+            request_id = %request_id,
+            has_request_payload = request.is_some(),
+            has_request_stream = send_registered.is_some(),
+            buffer_bytes = tracing::field::Empty,
+        );
+        let buffer = build_envelope_span.in_scope(|| {
+            build_request_envelope(
+                context,
+                recv_registered.connection_info.clone(),
+                send_registered.as_ref().map(|r| r.connection_info.clone()),
+                request,
+            )
+        })?;
+        build_envelope_span.record("buffer_bytes", buffer.len());
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
+        let send_span = tracing::info_span!(
+            "request_plane.frontend.send_request",
+            request_id = %request_id,
+            transport,
+            has_target_instance,
+            target_instance_id,
+            buffer_bytes = buffer.len(),
+            ack_bytes = tracing::field::Empty,
+        );
         let tx_start = Instant::now();
-        let request_plane_response = self.dispatch_buffer(address, buffer, context.id()).await?;
+        let request_plane_response = self
+            .dispatch_buffer(address, buffer, &request_id)
+            .instrument(send_span.clone())
+            .await?;
+        send_span.record("ack_bytes", request_plane_response.len());
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         // A worker rejection surfaces on the request-plane ACK, not the response
@@ -526,7 +658,7 @@ impl AddressedPushRouter {
         // `inflight_guard` (their Drop cleans up).
         if let Some(err) = detect_worker_rejection_response(&request_plane_response) {
             tracing::warn!(
-                request_id = context.id(),
+                request_id = %request_id,
                 worker_response = %err.to_string(),
                 "Request rejected by worker"
             );
@@ -548,14 +680,24 @@ impl AddressedPushRouter {
         }
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
-        tracing::trace!(request_id = context.id(), "awaiting transport handshake");
+        tracing::trace!(request_id = %request_id, "awaiting transport handshake");
 
         // Disarms the recv-side cleanup; see the holding rationale above.
         let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
+        let wait_response_span = tracing::info_span!(
+            "request_plane.frontend.wait_response_stream",
+            request_id = %request_id,
+            transport,
+            has_target_instance,
+            target_instance_id,
+        );
 
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
-        let response_stream = match response_stream_provider.await {
+        let response_stream = match response_stream_provider
+            .instrument(wait_response_span)
+            .await
+        {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
                 // generate() failed before any response bytes; migrate via
@@ -592,6 +734,24 @@ impl AddressedPushRouter {
             queue_start,
             tx_start,
             inflight_guard,
+            tracing::info_span!(
+                "request_plane.frontend.decode_response_stream",
+                request_id = %request_id,
+                transport,
+                has_target_instance,
+                target_instance_id,
+                first_response_ms = tracing::field::Empty,
+                frames = tracing::field::Empty,
+                data_frames = tracing::field::Empty,
+                error_frames = tracing::field::Empty,
+                decode_errors = tracing::field::Empty,
+                response_bytes = tracing::field::Empty,
+                complete_final = tracing::field::Empty,
+                completed = tracing::field::Empty,
+                disconnected = tracing::field::Empty,
+                cancelled = tracing::field::Empty,
+                elapsed_ms = tracing::field::Empty,
+            ),
         ))
     }
 

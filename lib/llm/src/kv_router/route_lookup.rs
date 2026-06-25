@@ -89,19 +89,33 @@ async fn query_retained(
     ),
     KvRouterError,
 > {
+    let block_count = block_hashes.len();
     let Some(shared_cache) = shared_cache else {
         let t = Instant::now();
         let tiered = indexer
             .find_matches_by_tier_ref(block_hashes)
-            .instrument(tracing::info_span!("kv_router.find_matches"))
+            .instrument(tracing::info_span!(
+                "kv_router.find_matches",
+                block_count,
+                block_size,
+                retained = true,
+                shared_cache = false,
+            ))
             .await?;
         return Ok((tiered, None, t.elapsed(), None));
     };
 
-    let indexer_fut = indexer
-        .find_matches_by_tier_ref(block_hashes)
-        .instrument(tracing::info_span!("kv_router.find_matches"));
-    join_indexer_and_shared_cache(indexer_fut, shared_cache, tokens, block_size).await
+    let indexer_fut =
+        indexer
+            .find_matches_by_tier_ref(block_hashes)
+            .instrument(tracing::info_span!(
+                "kv_router.find_matches",
+                block_count,
+                block_size,
+                retained = true,
+                shared_cache = true,
+            ));
+    join_indexer_and_shared_cache(indexer_fut, shared_cache, tokens, block_size, block_count).await
 }
 
 async fn query_owned(
@@ -119,19 +133,32 @@ async fn query_owned(
     ),
     KvRouterError,
 > {
+    let block_count = block_hashes.len();
     let Some(shared_cache) = shared_cache else {
         let t = Instant::now();
         let tiered = indexer
             .find_matches_by_tier(block_hashes)
-            .instrument(tracing::info_span!("kv_router.find_matches"))
+            .instrument(tracing::info_span!(
+                "kv_router.find_matches",
+                block_count,
+                block_size,
+                retained = false,
+                shared_cache = false,
+            ))
             .await?;
         return Ok((tiered, None, t.elapsed(), None));
     };
 
     let indexer_fut = indexer
         .find_matches_by_tier(block_hashes)
-        .instrument(tracing::info_span!("kv_router.find_matches"));
-    join_indexer_and_shared_cache(indexer_fut, shared_cache, tokens, block_size).await
+        .instrument(tracing::info_span!(
+            "kv_router.find_matches",
+            block_count,
+            block_size,
+            retained = false,
+            shared_cache = true,
+        ));
+    join_indexer_and_shared_cache(indexer_fut, shared_cache, tokens, block_size, block_count).await
 }
 
 async fn join_indexer_and_shared_cache<I>(
@@ -139,6 +166,7 @@ async fn join_indexer_and_shared_cache<I>(
     shared_cache: &dyn SharedKvCache,
     tokens: &[u32],
     block_size: u32,
+    block_count: usize,
 ) -> Result<
     (
         TieredMatchDetails,
@@ -153,7 +181,12 @@ where
 {
     let shared_fut = shared_cache
         .check_blocks(tokens, block_size)
-        .instrument(tracing::info_span!("kv_router.shared_cache_check"));
+        .instrument(tracing::info_span!(
+            "kv_router.shared_cache_check",
+            token_count = tokens.len(),
+            block_count,
+            block_size,
+        ));
 
     let indexer_timed = async {
         let t = Instant::now();
