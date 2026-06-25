@@ -767,19 +767,9 @@ class TestConsolidatorRouterE2E:
             model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
 
             # Fixed cache tier sizes
-            block_size = 16  # Standard vLLM block size in tokens
             g1_gpu_blocks = 10  # Very small GPU cache to force evictions
             g2_cpu_blocks = 5  # Smaller than GPU but large enough to retain blocks
             g3_disk_blocks = 5  # Smaller than GPU but large enough to retain blocks
-
-            # Since vLLM 0.20.1, an explicit --num-gpu-blocks-override is validated
-            # against the model's max sequence length at engine init: the GPU KV
-            # cache must hold at least one full max_model_len request. With only
-            # g1_gpu_blocks of cache, the default max_model_len (40960) needs far
-            # more KV memory than exists, so EngineCore raises ValueError and the
-            # worker never registers. Cap the sequence limit to the GPU cache
-            # budget (same approach as tests/kvbm_integration/common.py).
-            max_model_len = g1_gpu_blocks * block_size
 
             # Compute optimal test parameters for this configuration
             test_params = compute_deduplication_test_params(
@@ -804,10 +794,6 @@ class TestConsolidatorRouterE2E:
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",
                     str(g1_gpu_blocks),
-                    "--block-size",
-                    str(block_size),
-                    "--max-model-len",
-                    str(max_model_len),
                 ]
             else:  # trtllm
                 # Create TensorRT-LLM config file with KVBM connector
@@ -877,18 +863,6 @@ class TestConsolidatorRouterE2E:
                 )
 
                 if not worker_registered:
-                    # The registration poll only sees the frontend health
-                    # endpoint, not why the worker never appeared. Surface the
-                    # worker's (and frontend's) own log tail so the init error is
-                    # visible directly in the captured pytest output.
-                    for label, lp in (("WORKER", worker_log), ("FRONTEND", frontend_log)):
-                        try:
-                            tail = "".join(
-                                open(lp, encoding="utf-8", errors="ignore").readlines()[-60:]
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            tail = f"(could not read {lp}: {exc})"
-                        logger.error("===== %s LOG TAIL (%s) =====\n%s", label, lp, tail)
                     pytest.fail(
                         f"{engine.upper()} worker failed to register with frontend"
                     )
