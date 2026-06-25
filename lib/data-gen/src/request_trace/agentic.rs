@@ -95,18 +95,19 @@ where
     let mut explicit_tool_by_child = HashMap::new();
     let mut background_sessions = HashSet::new();
     for tool in &loaded.tools {
-        if let Some(mode) = tool.execution_mode.as_deref()
-            && !matches!(mode, "blocking" | "background")
-        {
+        let Some(claude) = tool.claude.as_ref() else {
+            continue;
+        };
+        if !matches!(claude.execution_mode.as_str(), "blocking" | "background") {
             bail!(
                 "tool {} has unsupported execution_mode {}",
                 tool.tool_call_id,
-                mode
+                claude.execution_mode
             );
         }
         for request_id in [
-            tool.source_request_id.as_deref(),
-            tool.consumer_request_id.as_deref(),
+            Some(claude.source_request_id.as_str()),
+            claude.consumer_request_id.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -126,7 +127,7 @@ where
                 );
             }
         }
-        let Some(child_session_id) = tool.child_session_id.as_deref() else {
+        let Some(child_session_id) = claude.child_session_id.as_deref() else {
             continue;
         };
         if !session_to_indices.contains_key(child_session_id) {
@@ -138,7 +139,7 @@ where
         {
             bail!("multiple tool events reference child session {child_session_id}");
         }
-        if tool.execution_mode.as_deref() == Some("background") {
+        if claude.execution_mode == "background" {
             background_sessions.insert(child_session_id.to_string());
         }
     }
@@ -185,9 +186,12 @@ where
                     ))
             })
             .expect("child session is non-empty");
-        if let Some(tool) = explicit_tool_by_child.get(session_id)
-            && let Some(source_request_id) = tool.source_request_id.as_deref()
-        {
+        if let Some(tool) = explicit_tool_by_child.get(session_id) {
+            let claude = tool
+                .claude
+                .as_ref()
+                .expect("explicit child tool has Claude metadata");
+            let source_request_id = claude.source_request_id.as_str();
             let parent_spawn_idx = id_to_index[source_request_id];
             if !parent_indices.contains(&parent_spawn_idx) {
                 bail!(
@@ -201,7 +205,7 @@ where
             push_unique(&mut wait_for[first_child_idx], parent_request_id);
             let child_request_id = loaded.requests[first_child_idx].request.request_id.clone();
             push_unique(&mut branches[parent_spawn_idx], child_request_id);
-            if let Some(consumer_request_id) = tool.consumer_request_id.as_deref() {
+            if let Some(consumer_request_id) = claude.consumer_request_id.as_deref() {
                 let parent_join_idx = id_to_index[consumer_request_id];
                 if !parent_indices.contains(&parent_join_idx) {
                     bail!(
@@ -378,11 +382,14 @@ fn collect_tools_in_window<'a>(
     let mut contributing: Vec<&ToolEntry> = Vec::new();
     let mut intervals = Vec::new();
     for tool in tools {
-        if let Some(consumer_request_id) = tool.consumer_request_id.as_deref() {
+        let claude = tool.claude.as_ref();
+        if let Some(consumer_request_id) =
+            claude.and_then(|metadata| metadata.consumer_request_id.as_deref())
+        {
             if consumer_request_id != request_id {
                 continue;
             }
-        } else if tool.execution_mode.as_deref() == Some("background")
+        } else if claude.is_some_and(|metadata| metadata.execution_mode == "background")
             || tool.end_ms <= event_start_ms
             || tool.end_ms > end_ms
         {
@@ -421,10 +428,6 @@ fn tool_entry_to_event(entry: &ToolEntry) -> AgenticToolEvent {
     AgenticToolEvent {
         tool_call_id: entry.tool_call_id.clone(),
         tool_class: entry.tool_class.clone(),
-        source_request_id: entry.source_request_id.clone(),
-        consumer_request_id: entry.consumer_request_id.clone(),
-        child_session_id: entry.child_session_id.clone(),
-        execution_mode: entry.execution_mode.clone(),
         started_at_unix_ms: entry.start_ms.max(0) as u64,
         ended_at_unix_ms: entry.end_ms.max(0) as u64,
         duration_ms: entry.duration_ms,
@@ -486,8 +489,8 @@ fn validate_dependency_dag(
 mod tests {
     use super::*;
     use crate::request_trace::load::{
-        AgentContextFields, RequestEntry, RequestTraceReplayMetrics, RequestTraceRequestMetrics,
-        ToolEntry,
+        AgentContextFields, ClaudeToolReplayMetrics, RequestEntry, RequestTraceReplayMetrics,
+        RequestTraceRequestMetrics, ToolEntry,
     };
 
     fn request(
@@ -544,10 +547,7 @@ mod tests {
             end_ms,
             tool_call_id: tool_call_id.to_string(),
             tool_class: tool_class.to_string(),
-            source_request_id: None,
-            consumer_request_id: None,
-            child_session_id: None,
-            execution_mode: None,
+            claude: None,
             status: "succeeded".to_string(),
             duration_ms: (end_ms - start_ms).max(0) as f64,
             output_bytes: None,
@@ -647,10 +647,12 @@ mod tests {
     #[test]
     fn explicit_background_agent_causality_allows_parent_work_until_join() {
         let mut agent_tool = tool("root", "agent-call", "Agent", 1_100, 1_800);
-        agent_tool.source_request_id = Some("parent-1".to_string());
-        agent_tool.consumer_request_id = Some("parent-3".to_string());
-        agent_tool.child_session_id = Some("child".to_string());
-        agent_tool.execution_mode = Some("background".to_string());
+        agent_tool.claude = Some(ClaudeToolReplayMetrics {
+            source_request_id: "parent-1".to_string(),
+            consumer_request_id: Some("parent-3".to_string()),
+            child_session_id: Some("child".to_string()),
+            execution_mode: "background".to_string(),
+        });
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("parent-1", "root", None, 1_000, 1_100, vec![11]),
@@ -678,19 +680,17 @@ mod tests {
         assert_eq!(by_id["parent-3"].tool_wait_ms, Some(100.0));
         assert_eq!(by_id["parent-3"].delay, Some(50.0));
         assert_eq!(by_id["parent-3"].tool_events.len(), 1);
-        assert_eq!(
-            by_id["parent-3"].tool_events[0].execution_mode.as_deref(),
-            Some("background")
-        );
     }
 
     #[test]
     fn explicit_causality_rejects_cycles() {
         let mut agent_tool = tool("root", "agent-call", "Agent", 1_100, 1_200);
-        agent_tool.source_request_id = Some("parent-2".to_string());
-        agent_tool.consumer_request_id = Some("parent-1".to_string());
-        agent_tool.child_session_id = Some("child".to_string());
-        agent_tool.execution_mode = Some("background".to_string());
+        agent_tool.claude = Some(ClaudeToolReplayMetrics {
+            source_request_id: "parent-2".to_string(),
+            consumer_request_id: Some("parent-1".to_string()),
+            child_session_id: Some("child".to_string()),
+            execution_mode: "background".to_string(),
+        });
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("parent-1", "root", None, 1_000, 1_100, vec![11]),
@@ -707,10 +707,12 @@ mod tests {
     #[test]
     fn missing_child_trace_replays_as_external_background_tool() {
         let mut agent_tool = tool("root", "agent-call", "Agent", 1_100, 1_250);
-        agent_tool.source_request_id = Some("parent-1".to_string());
-        agent_tool.consumer_request_id = Some("parent-2".to_string());
-        agent_tool.child_session_id = Some("missing-child".to_string());
-        agent_tool.execution_mode = Some("background".to_string());
+        agent_tool.claude = Some(ClaudeToolReplayMetrics {
+            source_request_id: "parent-1".to_string(),
+            consumer_request_id: Some("parent-2".to_string()),
+            child_session_id: Some("missing-child".to_string()),
+            execution_mode: "background".to_string(),
+        });
         let rows = lower_rows(LoadedAgentTrace {
             requests: vec![
                 contextual_request("parent-1", "root", None, 1_000, 1_100, vec![11]),

@@ -61,28 +61,12 @@ pub(crate) struct RequestTraceReplayMetrics {
     pub(crate) input_sequence_hashes: Vec<u64>,
 }
 
-/// Tool fields used only to reconstruct an offline replay DAG.
-///
-/// Historical exporters may know the exact launch, child, completion consumer,
-/// and blocking mode even when timestamps overlap. These optional JSON fields
-/// preserve that evidence without extending the live `RequestTraceToolEvent`
-/// Rust API. When absent, agentic lowering retains its timestamp-based fallback.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RequestTraceToolEventMetrics {
     pub(crate) tool_call_id: String,
     pub(crate) tool_class: String,
-    /// Request that emitted the tool call.
     #[serde(default)]
-    pub(crate) source_request_id: Option<String>,
-    /// Later request that consumed the terminal result.
-    #[serde(default)]
-    pub(crate) consumer_request_id: Option<String>,
-    /// Child agent session launched by the tool, when present in the export.
-    #[serde(default)]
-    pub(crate) child_session_id: Option<String>,
-    /// Whether parent execution blocked or continued in the background.
-    #[serde(default)]
-    pub(crate) execution_mode: Option<String>,
+    pub(crate) claude: Option<ClaudeToolReplayMetrics>,
     #[serde(default)]
     pub(crate) started_at_unix_ms: Option<u64>,
     #[serde(default)]
@@ -97,6 +81,25 @@ pub(crate) struct RequestTraceToolEventMetrics {
     pub(crate) output_tokens: Option<u64>,
     #[serde(default)]
     pub(crate) error_type: Option<String>,
+}
+
+/// Claude-only evidence used to disambiguate an offline replay DAG.
+///
+/// A completed session reveals the future request that consumed a tool result;
+/// live ZMQ tool producers do not have that information. Missing metadata is
+/// expected and leaves agentic lowering on its timestamp-based fallback.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClaudeToolReplayMetrics {
+    /// Request that emitted the tool call.
+    pub(crate) source_request_id: String,
+    /// Later request that consumed the terminal result.
+    #[serde(default)]
+    pub(crate) consumer_request_id: Option<String>,
+    /// Child agent session launched by the tool, when present in the export.
+    #[serde(default)]
+    pub(crate) child_session_id: Option<String>,
+    /// Whether parent execution blocked or continued in the background.
+    pub(crate) execution_mode: String,
 }
 
 #[derive(Debug, Clone)]
@@ -115,10 +118,7 @@ pub struct ToolEntry {
     pub(crate) end_ms: i64,
     pub(crate) tool_call_id: String,
     pub(crate) tool_class: String,
-    pub(crate) source_request_id: Option<String>,
-    pub(crate) consumer_request_id: Option<String>,
-    pub(crate) child_session_id: Option<String>,
-    pub(crate) execution_mode: Option<String>,
+    pub(crate) claude: Option<ClaudeToolReplayMetrics>,
     pub(crate) status: String,
     pub(crate) duration_ms: f64,
     pub(crate) output_bytes: Option<u64>,
@@ -323,10 +323,7 @@ fn tool_entry(record: RequestTraceRecord, terminal_event: String) -> Option<Tool
         end_ms,
         tool_call_id: tool.tool_call_id,
         tool_class: tool.tool_class,
-        source_request_id: tool.source_request_id,
-        consumer_request_id: tool.consumer_request_id,
-        child_session_id: tool.child_session_id,
-        execution_mode: tool.execution_mode,
+        claude: tool.claude,
         status,
         duration_ms,
         output_bytes: tool.output_bytes,
@@ -462,7 +459,7 @@ mod tests {
         .unwrap();
         writeln!(
             file,
-            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","source_request_id":"req-1","consumer_request_id":"req-2","child_session_id":"child","execution_mode":"background","started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","claude":{{"source_request_id":"req-1","consumer_request_id":"req-2","child_session_id":"child","execution_mode":"background"}},"started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
         )
         .unwrap();
 
@@ -480,15 +477,10 @@ mod tests {
         assert_eq!(loaded.tools.len(), 1);
         assert_eq!(loaded.tools[0].tool_call_id, "tool-1");
         assert_eq!(loaded.tools[0].tool_class, "search");
-        assert_eq!(loaded.tools[0].source_request_id.as_deref(), Some("req-1"));
-        assert_eq!(
-            loaded.tools[0].consumer_request_id.as_deref(),
-            Some("req-2")
-        );
-        assert_eq!(loaded.tools[0].child_session_id.as_deref(), Some("child"));
-        assert_eq!(
-            loaded.tools[0].execution_mode.as_deref(),
-            Some("background")
-        );
+        let claude = loaded.tools[0].claude.as_ref().expect("Claude metadata");
+        assert_eq!(claude.source_request_id, "req-1");
+        assert_eq!(claude.consumer_request_id.as_deref(), Some("req-2"));
+        assert_eq!(claude.child_session_id.as_deref(), Some("child"));
+        assert_eq!(claude.execution_mode, "background");
     }
 }

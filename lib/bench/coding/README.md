@@ -80,7 +80,7 @@ The exporter:
 - skips local command wrapper noise such as `<local-command-caveat>`, `<local-command-stdout>`, and command wrapper rows
 - preserves top-level tool-use and tool-result structure in hashed text form
 - emits matched `tool_end` / `tool_error` events with Claude-observed timing
-- records each tool's source request, consuming request, child session, and blocking/background execution mode when Claude provides that evidence
+- records each tool's source request, consuming request, child session, and blocking/background execution mode under the Claude-only `tool.claude` replay metadata
 - treats an asynchronous Agent launch result as an acknowledgement; the tool completes at its matching queued completion notification and joins the first later parent request
 - mines `progress` rows for text-free sidecar metrics only
 
@@ -95,4 +95,4 @@ The exporter:
 - Rows are written incrementally as turns are merged across sessions.
 - Every export runs a source-to-output fidelity verifier. Request cardinality/order/timing, usage, tool classes/errors, child links, cached-prefix hashes, and forward causal references fail the export on mismatch.
 - The verifier always prints non-fatal source limitations: synthetic KV hashes, unmatched tools, missing background completions, unresolved child sessions, and `ai-title` rows that lack enough timing/usage data to replay as requests.
-- Tool causal fields are optional offline replay extensions, not requirements for live request-trace producers. Data-gen uses exact source/consumer/child/mode evidence when present and retains timestamp-based inference for existing traces.
+- `tool.claude` is exporter-only replay evidence, not a requirement for live request-trace or ZMQ tool-event producers. Data-gen consumes it during lowering and retains timestamp-based inference when it is absent.

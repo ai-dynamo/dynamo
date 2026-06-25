@@ -55,6 +55,21 @@ pub struct FidelityReport {
     pub unresolved_child_sessions: usize,
 }
 
+/// Claude-only evidence used to reconstruct tool scheduling after export.
+///
+/// Live tool events cannot know their future consumer request. Claude's saved
+/// session can, so the exporter stores that post-hoc evidence under
+/// `tool.claude` without extending the live request-trace tool API.
+#[derive(Serialize)]
+struct ClaudeToolReplayMetadata {
+    source_request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consumer_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    child_session_id: Option<String>,
+    execution_mode: String,
+}
+
 impl FidelityReport {
     pub fn render(&self) -> String {
         format!(
@@ -605,6 +620,14 @@ where
             } else {
                 "tool_end"
             };
+            let claude = ClaudeToolReplayMetadata {
+                source_request_id: request_id.clone(),
+                consumer_request_id: tool
+                    .consumer_turn_index
+                    .map(|turn_index| canonical_request_id(&turn.export_session_id, turn_index)),
+                child_session_id: tool.child_session_id.clone(),
+                execution_mode: tool.execution_mode.clone(),
+            };
             let tool_row = json!({
                 "timestamp": nonnegative_ms(tool.ended_at_ms - trace_start_ms),
                 "event": {
@@ -616,10 +639,7 @@ where
                     "tool": {
                         "tool_call_id": tool.tool_call_id,
                         "tool_class": tool.tool_class,
-                        "source_request_id": request_id,
-                        "consumer_request_id": tool.consumer_turn_index.map(|turn_index| canonical_request_id(&turn.export_session_id, turn_index)),
-                        "child_session_id": tool.child_session_id,
-                        "execution_mode": tool.execution_mode,
+                        "claude": claude,
                         "started_at_unix_ms": nonnegative_ms(tool.started_at_ms),
                         "ended_at_unix_ms": nonnegative_ms(tool.ended_at_ms),
                         "duration_ms": (tool.ended_at_ms - tool.started_at_ms).max(0) as f64,
