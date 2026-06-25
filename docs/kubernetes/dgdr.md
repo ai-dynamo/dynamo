@@ -316,7 +316,7 @@ so it cannot be used to add a missing `Epp` service to a DGDR-generated
 deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
 For manifests, `frontendSidecar` configuration, direct routing, EPP routing
 variables such as `DYN_USE_KV_EVENTS`, and route setup, see
-[Gateway API Inference Extension](gateway-api/README.mdx).
+[GAIE Quickstart](gateway-api/quickstart.mdx).
 
 ### SKU Format
 
