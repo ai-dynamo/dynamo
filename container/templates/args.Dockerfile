@@ -15,11 +15,8 @@
 # ARCH_ALT (x86_64 / aarch64) is computed inline in RUN steps:
 #   ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 ARG DEVICE={{ device }}
-{% if device == "cuda" -%}
-{% set device_key = device + cuda_version -%}
-{% else -%}
-{% set device_key = device -%}
-{% endif %}
+{# device_key (e.g. "cuda12.9", "xpu") is provided by render.py so it
+   propagates to every included template, not just this one. #}
 
 # Python/CUDA configuration
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}

@@ -76,6 +76,17 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
     return mapped
 
 
+def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return None
+
+    context_length = runtime_config.get("context_length")
+    if type(context_length) is not int or context_length <= 0:
+        return None
+    return context_length
+
+
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
@@ -784,12 +795,22 @@ class EngineFactory:
         trust_remote_code = self.config.trust_remote_code
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
-        model_config = ModelConfig(
-            model=local_dir,
-            tokenizer_mode=tokenizer_mode,
-            config_format=config_format,
-            trust_remote_code=trust_remote_code,
-        )
+        model_config_kwargs = {
+            "model": local_dir,
+            "tokenizer_mode": tokenizer_mode,
+            "config_format": config_format,
+            "trust_remote_code": trust_remote_code,
+        }
+        context_length = _runtime_config_context_length(mdc)
+        if context_length:
+            os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+            model_config_kwargs["max_model_len"] = context_length
+            logger.info(
+                "vLLM frontend ModelConfig max_model_len=%d "
+                "from runtime_config.context_length",
+                context_length,
+            )
+        model_config = ModelConfig(**model_config_kwargs)
         # Use processor_only cache so tensor data persists across requests.
         # The default "lru" sender cache drops tensor data on cache hits
         # (designed for disagg where P1 holds tensors), but we need the

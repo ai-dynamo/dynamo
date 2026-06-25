@@ -4,20 +4,35 @@
 //! Engine-specific scheduling implementations.
 
 mod kv_event_sink;
+mod live_boundary;
 #[path = "sglang/mod.rs"]
 pub mod sglang;
+mod source_holds;
 pub mod vllm;
 
 pub use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{DirectRequest, FpmPublisher, KvEventPublishers, OutputSignal};
 use dynamo_kv_router::protocols::RouterEvent;
 pub(crate) use kv_event_sink::{
-    CapturedRouterEventBuffer, DeferredFpmBuffer, capture_deferred_kv_publish_sink,
-    capture_router_event_sink, publish_deferred_fpm, publish_deferred_kv_events,
+    CapturedRouterEventBuffer, capture_deferred_kv_publish_sink, capture_router_event_sink,
 };
-use tokio::sync::mpsc;
+pub(crate) use live_boundary::{LiveBoundaryCore, LiveEffectsPublisher};
+pub(crate) use source_holds::{
+    ActiveHandoffRequests, DestinationHolds, PendingDestinations, RemovedSource, SourceCompletion,
+    SourceHolds,
+};
+pub use source_holds::{
+    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent,
+};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+#[cfg(feature = "kvbm-offload")]
+pub(crate) struct OffloadTickEffects {
+    pub kv_events: Vec<RouterEvent>,
+    pub lifecycle_events: Vec<SchedulerLifecycleEvent>,
+}
 
 /// Welford's online algorithm for count / sum / population-variance.
 ///
@@ -147,6 +162,7 @@ pub(crate) struct EnginePassResult {
     pub(crate) completed_requests: usize,
     pub(crate) output_signals: Vec<OutputSignal>,
     pub(crate) admissions: Vec<AdmissionEvent>,
+    pub(crate) lifecycle_events: Vec<SchedulerLifecycleEvent>,
     pub(crate) mocker_metrics: MockerMetrics,
     /// Controls when replay/live schedulers should expose this pass's buffered
     /// KV events to the real router or publisher sink.
@@ -169,6 +185,36 @@ pub(crate) enum RouterEventVisibility {
     PassEnd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionStage {
+    Materialized,
+    PendingDestinationHead,
+    FreshKv,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AdmissionInvariant {
+    pending_destination: bool,
+}
+
+impl AdmissionInvariant {
+    pub(crate) fn new(pending_destination: bool) -> Self {
+        Self {
+            pending_destination,
+        }
+    }
+
+    pub(crate) fn stage_for(self, materialized: bool) -> AdmissionStage {
+        if materialized {
+            AdmissionStage::Materialized
+        } else if self.pending_destination {
+            AdmissionStage::PendingDestinationHead
+        } else {
+            AdmissionStage::FreshKv
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum EngineCore {
     Vllm(VllmCore),
@@ -187,6 +233,50 @@ impl EngineCore {
         match self {
             Self::Vllm(core) => core.is_empty(),
             Self::Sglang(core) => core.is_empty(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_drained(&self) -> bool {
+        match self {
+            Self::Vllm(core) => core.is_drained(),
+            Self::Sglang(core) => core.is_drained(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn apply_command(
+        &mut self,
+        command: SchedulerCommand,
+    ) -> anyhow::Result<SchedulerCommandResult> {
+        match self {
+            Self::Vllm(core) => core.apply_command(command),
+            Self::Sglang(core) => core.apply_command(command),
+        }
+    }
+
+    pub(crate) fn apply_command_effects(
+        &mut self,
+        command: SchedulerCommand,
+        allow_destination_admission: bool,
+    ) -> anyhow::Result<SchedulerCommandEffects> {
+        match self {
+            Self::Vllm(core) => core.apply_command_effects(command, allow_destination_admission),
+            Self::Sglang(core) => core.apply_command_effects(command, allow_destination_admission),
+        }
+    }
+
+    pub(crate) fn retry_pending_destinations(&mut self) -> Vec<SchedulerLifecycleEvent> {
+        match self {
+            Self::Vllm(core) => core.retry_pending_destinations(),
+            Self::Sglang(core) => core.retry_pending_destinations(),
+        }
+    }
+
+    pub(crate) fn drain_kv_events(&self) -> Vec<dynamo_kv_router::protocols::RouterEvent> {
+        match self {
+            Self::Vllm(core) => core.drain_kv_events(),
+            Self::Sglang(core) => core.drain_kv_events(),
         }
     }
 
@@ -216,10 +306,24 @@ impl EngineCore {
     }
 
     #[cfg(feature = "kvbm-offload")]
-    pub(crate) fn tick_offload_only(&mut self, now_ms: f64) -> Vec<RouterEvent> {
+    pub(crate) fn tick_offload_only(&mut self, now_ms: f64) -> OffloadTickEffects {
         match self {
             Self::Vllm(core) => core.tick_offload_only(now_ms),
-            Self::Sglang(_) => Vec::new(),
+            Self::Sglang(_) => OffloadTickEffects {
+                kv_events: Vec::new(),
+                lifecycle_events: Vec::new(),
+            },
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn tick_offload_transport_only(&mut self, now_ms: f64) -> OffloadTickEffects {
+        match self {
+            Self::Vllm(core) => core.tick_offload_transport_only(now_ms),
+            Self::Sglang(_) => OffloadTickEffects {
+                kv_events: Vec::new(),
+                lifecycle_events: Vec::new(),
+            },
         }
     }
 
@@ -299,6 +403,25 @@ impl SchedulerHandle for EngineScheduler {
             Self::Sglang(scheduler) => scheduler.metrics_receiver(),
         }
     }
+
+    fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
+        match self {
+            Self::Vllm(scheduler) => scheduler.command_sender(),
+            Self::Sglang(scheduler) => scheduler.command_sender(),
+        }
+    }
+
+    fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
+        match self {
+            Self::Vllm(scheduler) => scheduler.take_lifecycle_receiver(),
+            Self::Sglang(scheduler) => scheduler.take_lifecycle_receiver(),
+        }
+    }
+}
+
+pub struct SchedulerCommandEnvelope {
+    pub command: SchedulerCommand,
+    pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
 }
 
 /// Engine-agnostic scheduler interface.
@@ -314,6 +437,18 @@ pub trait SchedulerHandle: Send + Sync {
 
     /// Get a watch receiver for scheduler metrics (active decode blocks, etc.).
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics>;
+
+    /// Bounded lifecycle-control channel for disaggregated handoff sessions.
+    fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope>;
+
+    /// Take the single lifecycle-event stream owned by this DP-rank scheduler.
+    fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>>;
+}
+
+pub(crate) fn handoff_channel_capacity(args: &crate::common::protocols::MockEngineArgs) -> usize {
+    args.effective_handoff_capacity()
+        .checked_mul(2)
+        .expect("mocker handoff channel capacity overflow")
 }
 
 /// Attach a [`crate::kvbm_offload::MockOffloadEngine`] driven by
@@ -391,6 +526,44 @@ pub(crate) mod test_utils;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::handoff::HandoffId;
+    use crate::common::protocols::{EngineType, MockEngineArgs, WorkerType};
+
+    fn core(engine_type: EngineType, worker_type: WorkerType, blocks: usize) -> EngineCore {
+        let args = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(blocks)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(true)
+            .worker_type(worker_type)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        match engine_type {
+            EngineType::Vllm | EngineType::Trtllm => EngineCore::Vllm(VllmCore::new(args)),
+            EngineType::Sglang => EngineCore::Sglang(SglangCore::new(args)),
+        }
+    }
+
+    fn request(uuid: Uuid, tokens: Vec<u32>) -> DirectRequest {
+        DirectRequest {
+            tokens,
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    fn destination_reservation_attempts(core: &EngineCore) -> usize {
+        match core {
+            EngineCore::Vllm(core) => core.destination_reservation_attempts(),
+            EngineCore::Sglang(core) => core.destination_reservation_attempts(),
+        }
+    }
 
     #[test]
     fn welford_acc_empty() {
@@ -440,6 +613,508 @@ mod tests {
             "expected {expected}, got {}",
             acc.variance()
         );
+    }
+
+    #[test]
+    fn unavailable_destination_keeps_source_held_until_both_owners_are_cancelled() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut source = core(engine_type, WorkerType::Prefill, 8);
+            let mut destination = core(engine_type, WorkerType::Decode, 2);
+            let held_handoff = HandoffId::from(Uuid::from_u128(30_000 + case as u128));
+            let capacity_handoff = HandoffId::from(Uuid::from_u128(30_100 + case as u128));
+            let request_id = Uuid::from_u128(30_200 + case as u128);
+
+            assert!(matches!(
+                destination
+                    .apply_command(SchedulerCommand::ReserveDestination {
+                        handoff_id: capacity_handoff,
+                        request: request(
+                            Uuid::from_u128(30_300 + case as u128),
+                            (100..108).collect(),
+                        ),
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::DestinationAccepted { .. }
+            ));
+            source
+                .apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                    handoff_id: held_handoff,
+                    request: request(request_id, (0..8).collect()),
+                })
+                .unwrap();
+            let mut now_ms = 0.0;
+            for _ in 0..8 {
+                let pass = source.execute_hidden_pass(now_ms);
+                now_ms = pass.end_ms;
+                if source.is_empty() {
+                    break;
+                }
+            }
+            assert!(source.is_empty());
+            assert!(!source.is_drained());
+
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::ReserveDestination {
+                        handoff_id: held_handoff,
+                        request: request(request_id, (0..4).collect()),
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::DestinationAccepted { request_id }
+            );
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination {
+                        handoff_id: held_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination {
+                        handoff_id: capacity_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(
+                source
+                    .apply_command(SchedulerCommand::CancelSource {
+                        handoff_id: held_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert!(source.is_empty());
+            assert!(source.is_drained());
+            assert!(destination.is_empty());
+            assert!(destination.is_drained());
+        }
+    }
+
+    #[test]
+    fn destination_cancellation_retries_the_blocked_fifo_head() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut destination = core(engine_type, WorkerType::Decode, 2);
+            let first_handoff = HandoffId::from(Uuid::from_u128(35_000 + case as u128));
+            let second_handoff = HandoffId::from(Uuid::from_u128(35_100 + case as u128));
+            let second_request = Uuid::from_u128(35_200 + case as u128);
+
+            let first = destination
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: first_handoff,
+                        request: request(
+                            Uuid::from_u128(35_300 + case as u128),
+                            (100..108).collect(),
+                        ),
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!(matches!(
+                first.lifecycle_events.as_slice(),
+                [SchedulerLifecycleEvent::DestinationReserved {
+                    handoff_id,
+                    ..
+                }] if *handoff_id == first_handoff
+            ));
+
+            let second = destination
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: second_handoff,
+                        request: request(second_request, (200..204).collect()),
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!(second.lifecycle_events.is_empty());
+
+            let canceled = destination
+                .apply_command_effects(
+                    SchedulerCommand::CancelDestination {
+                        handoff_id: first_handoff,
+                    },
+                    true,
+                )
+                .unwrap();
+            assert_eq!(canceled.result, SchedulerCommandResult::Applied);
+            assert!(matches!(
+                canceled.lifecycle_events.as_slice(),
+                [SchedulerLifecycleEvent::DestinationReserved {
+                    handoff_id,
+                    request_id,
+                    ..
+                }] if *handoff_id == second_handoff && *request_id == second_request
+            ));
+        }
+    }
+
+    #[test]
+    fn blocked_destination_head_prevents_fresh_kv_admission_without_spinning() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut destination = core(engine_type, WorkerType::Decode, 4);
+            let owner_handoff = HandoffId::from(Uuid::from_u128(36_000 + case as u128));
+            let blocked_handoff = HandoffId::from(Uuid::from_u128(36_100 + case as u128));
+            let owner_request = Uuid::from_u128(36_200 + case as u128);
+            let fresh_request = Uuid::from_u128(36_400 + case as u128);
+
+            let owner = destination
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: owner_handoff,
+                        request: request(owner_request, (100..108).collect()),
+                    },
+                    true,
+                )
+                .unwrap();
+            assert_eq!(owner.lifecycle_events.len(), 1);
+            let occupied_before = match &destination {
+                EngineCore::Vllm(core) => core.mocker_metrics().active_decode_blocks,
+                EngineCore::Sglang(core) => core.mocker_metrics().active_decode_blocks,
+            };
+            assert!(occupied_before > 0);
+
+            let blocked = destination
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: blocked_handoff,
+                        request: request(
+                            Uuid::from_u128(36_300 + case as u128),
+                            (200..212).collect(),
+                        ),
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!(blocked.lifecycle_events.is_empty());
+            assert!(destination.is_empty());
+            assert!(!destination.is_drained());
+            let pending_only = destination.execute_hidden_pass(0.0);
+            assert_eq!(pending_only.end_ms, 0.0);
+            assert!(pending_only.admissions.is_empty());
+            assert!(pending_only.output_signals.is_empty());
+
+            destination.receive(request(fresh_request, (300..304).collect()));
+            let pass = destination.execute_hidden_pass(0.0);
+            assert!(pass.admissions.is_empty());
+            assert!(pass.output_signals.is_empty());
+            assert_eq!(pass.end_ms, 0.0);
+            assert_eq!(destination.num_requests(), 1);
+            let occupied_after = match &destination {
+                EngineCore::Vllm(core) => core.mocker_metrics().active_decode_blocks,
+                EngineCore::Sglang(core) => core.mocker_metrics().active_decode_blocks,
+            };
+            assert_eq!(occupied_after, occupied_before);
+
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::ActivateDestination {
+                        handoff_id: owner_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            let materialized = destination.execute_hidden_pass(0.0);
+            assert!(
+                materialized
+                    .admissions
+                    .iter()
+                    .any(|admission| admission.uuid == owner_request)
+            );
+            assert!(
+                materialized
+                    .admissions
+                    .iter()
+                    .all(|admission| admission.uuid != fresh_request)
+            );
+
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination {
+                        handoff_id: blocked_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination {
+                        handoff_id: owner_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            let fresh = destination.execute_hidden_pass(1.0);
+            assert!(
+                fresh
+                    .admissions
+                    .iter()
+                    .any(|admission| admission.uuid == fresh_request)
+            );
+        }
+    }
+
+    #[test]
+    fn unchanged_capacity_generation_does_not_reprobe_pending_destination() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut destination = core(engine_type, WorkerType::Decode, 2);
+            let owner_handoff = HandoffId::from(Uuid::from_u128(36_500 + case as u128));
+            let pending_handoff = HandoffId::from(Uuid::from_u128(36_600 + case as u128));
+            let pending_request = Uuid::from_u128(36_700 + case as u128);
+
+            let owner = destination
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: owner_handoff,
+                        request: request(Uuid::from_u128(36_800 + case as u128), (0..8).collect()),
+                    },
+                    true,
+                )
+                .unwrap();
+            assert_eq!(owner.lifecycle_events.len(), 1);
+            let pending = destination
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: pending_handoff,
+                        request: request(pending_request, (100..104).collect()),
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!(pending.lifecycle_events.is_empty());
+
+            let attempts_after_initial_failure = destination_reservation_attempts(&destination);
+            for _ in 0..3 {
+                assert!(destination.retry_pending_destinations().is_empty());
+            }
+            assert_eq!(
+                destination_reservation_attempts(&destination),
+                attempts_after_initial_failure
+            );
+
+            let cancellation = destination
+                .apply_command_effects(
+                    SchedulerCommand::CancelDestination {
+                        handoff_id: owner_handoff,
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!(matches!(
+                cancellation.lifecycle_events.as_slice(),
+                [SchedulerLifecycleEvent::DestinationReserved {
+                    handoff_id,
+                    request_id,
+                    ..
+                }] if *handoff_id == pending_handoff && *request_id == pending_request
+            ));
+            assert_eq!(
+                destination_reservation_attempts(&destination),
+                attempts_after_initial_failure + 1
+            );
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination {
+                        handoff_id: pending_handoff,
+                    })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+        }
+    }
+
+    #[test]
+    fn vllm_prebuilt_waiting_request_runs_before_blocked_pending_destination() {
+        let mut destination = core(EngineType::Vllm, WorkerType::Decode, 4);
+        let ready_handoff = HandoffId::from(Uuid::from_u128(36_900));
+        let pending_handoff = HandoffId::from(Uuid::from_u128(36_901));
+        let ready_request = Uuid::from_u128(36_902);
+        let pending_request = Uuid::from_u128(36_903);
+        let fresh_request = Uuid::from_u128(36_904);
+
+        destination.receive(request(fresh_request, (200..204).collect()));
+
+        assert_eq!(
+            destination
+                .apply_command(SchedulerCommand::ReserveDestination {
+                    handoff_id: ready_handoff,
+                    request: request(ready_request, (0..8).collect()),
+                })
+                .unwrap(),
+            SchedulerCommandResult::DestinationAccepted {
+                request_id: ready_request
+            }
+        );
+        assert_eq!(
+            destination
+                .apply_command(SchedulerCommand::ActivateDestination {
+                    handoff_id: ready_handoff,
+                })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        let pending = destination
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id: pending_handoff,
+                    request: request(pending_request, (100..112).collect()),
+                },
+                true,
+            )
+            .unwrap();
+        assert!(pending.lifecycle_events.is_empty());
+
+        let first_pass = destination.execute_hidden_pass(0.0);
+        assert!(
+            first_pass
+                .admissions
+                .iter()
+                .any(|admission| admission.uuid == ready_request)
+        );
+        assert!(
+            first_pass
+                .admissions
+                .iter()
+                .all(|admission| admission.uuid != fresh_request)
+        );
+
+        let mut reservation_events = Vec::new();
+        for now_ms in 1..=4 {
+            destination.execute_hidden_pass(f64::from(now_ms));
+            reservation_events.extend(destination.retry_pending_destinations());
+            if !reservation_events.is_empty() {
+                break;
+            }
+        }
+        assert!(matches!(
+            reservation_events.as_slice(),
+            [SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id,
+                request_id,
+                ..
+            }] if *handoff_id == pending_handoff && *request_id == pending_request
+        ));
+        assert_eq!(
+            destination
+                .apply_command(SchedulerCommand::CancelDestination {
+                    handoff_id: pending_handoff,
+                })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+    }
+
+    #[test]
+    fn activated_waiting_destination_cancels_without_consuming_the_running_slot() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut destination = core(engine_type, WorkerType::Decode, 16);
+            let handoff_id = HandoffId::from(Uuid::from_u128(38_000 + case as u128));
+            let request_id = Uuid::from_u128(38_100 + case as u128);
+            let reserved = destination
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id,
+                        request: request(request_id, (0..8).collect()),
+                    },
+                    true,
+                )
+                .unwrap();
+            assert_eq!(reserved.lifecycle_events.len(), 1);
+            let reserved_occupancy = match &destination {
+                EngineCore::Vllm(core) => core.mocker_metrics().active_decode_blocks,
+                EngineCore::Sglang(core) => core.mocker_metrics().active_decode_blocks,
+            };
+            assert!(reserved_occupancy > 0);
+
+            destination.receive(DirectRequest {
+                tokens: (100..108).collect(),
+                max_output_tokens: 8,
+                uuid: Some(Uuid::from_u128(38_200 + case as u128)),
+                ..Default::default()
+            });
+            let pass = destination.execute_hidden_pass(0.0);
+            assert_eq!(pass.admissions.len(), 1);
+            let before_activation = match &destination {
+                EngineCore::Vllm(core) => core.mocker_metrics().active_decode_blocks,
+                EngineCore::Sglang(core) => core.mocker_metrics().active_decode_blocks,
+            };
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::ActivateDestination { handoff_id })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            let activated_occupancy = match &destination {
+                EngineCore::Vllm(core) => core.mocker_metrics().active_decode_blocks,
+                EngineCore::Sglang(core) => core.mocker_metrics().active_decode_blocks,
+            };
+            assert_eq!(activated_occupancy, before_activation);
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination { handoff_id })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(
+                destination
+                    .apply_command(SchedulerCommand::CancelDestination { handoff_id })
+                    .unwrap(),
+                SchedulerCommandResult::Noop
+            );
+            assert_eq!(destination.num_requests(), 1);
+        }
+    }
+
+    #[test]
+    fn preterminal_source_cancel_removes_scheduled_request_once() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut source = core(engine_type, WorkerType::Prefill, 8);
+            let handoff_id = HandoffId::from(Uuid::from_u128(40_000 + case as u128));
+            let request_id = Uuid::from_u128(40_100 + case as u128);
+            source
+                .apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                    handoff_id,
+                    request: request(request_id, (0..8).collect()),
+                })
+                .unwrap();
+            assert_eq!(source.num_requests(), 1);
+
+            assert_eq!(
+                source
+                    .apply_command(SchedulerCommand::CancelSource { handoff_id })
+                    .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert!(source.is_empty());
+            assert!(source.is_drained());
+            assert_eq!(
+                source
+                    .apply_command(SchedulerCommand::CancelSource { handoff_id })
+                    .unwrap(),
+                SchedulerCommandResult::Noop
+            );
+        }
     }
 }
 

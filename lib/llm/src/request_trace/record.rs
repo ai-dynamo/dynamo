@@ -209,9 +209,10 @@ mod tests {
             event_time_unix_ms: 2_000,
             event_source: Some(RequestTraceEventSource::Harness),
             agent_context: Some(AgentContext {
-                trajectory_id: "root".to_string(),
-                parent_trajectory_id: None,
-                trajectory_final: None,
+                session_id: "root".to_string(),
+                parent_session_id: None,
+                session_final: None,
+                kv_hints: None,
             }),
             request: None,
             tool: Some(RequestTraceToolEvent {
