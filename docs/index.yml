@@ -46,8 +46,8 @@ tabs:
 navigation:
   - tab: home
     layout:
-      - page: Introduction
-        path: getting-started/introduction.mdx
+      - page: Welcome
+        path: welcome.mdx
 
   - tab: getting-started
     layout:
@@ -55,7 +55,7 @@ navigation:
       - section: Getting Started
         contents:
           - page: About
-            path: getting-started/about.md
+            path: getting-started/introduction.mdx
           - section: Deploy your first Model in Kubernetes
             collapsed: true
             #TODO: condense this section into installation and model deployment guides.
