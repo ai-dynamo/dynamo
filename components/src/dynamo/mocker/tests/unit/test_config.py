@@ -482,6 +482,7 @@ def test_replay_engine_args_forwards_aic_kv_cache_dtype(monkeypatch):
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
+                "num_g2_blocks": 8192,
                 "num_g3_blocks": 16384,
                 "aic_model_path": "/models/mock",
                 "aic_kv_cache_dtype": "fp8",
