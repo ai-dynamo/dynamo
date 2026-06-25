@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: vLLM-Omni
+subtitle: vLLM-Omni serves text-to-image, text-to-video, image-to-video, and text-to-speech models through OpenAI-compatible endpoints.
 ---
 
 Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-image, text-to-video, image-to-video, and text-to-audio (TTS) capabilities via OpenAI-compatible API endpoints.

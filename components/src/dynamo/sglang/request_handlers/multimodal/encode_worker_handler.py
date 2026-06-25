@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import hashlib
 import json
 import logging
 from typing import Any, AsyncIterator, Dict, Optional
 
 import torch
+from blake3 import blake3
 
 # MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
 try:
@@ -26,6 +26,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.llm import MultimodalEmbeddingCachePublisher
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     MultiModalGroup,
@@ -69,10 +70,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         self,
         config: Config,
         pd_worker_client: Client,
+        cache_publisher: MultimodalEmbeddingCachePublisher | None = None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.pd_worker_client = pd_worker_client
+        self._cache_publisher = cache_publisher
         self.model = config.server_args.model_path
 
         if MMEncoder is None:
@@ -129,13 +132,27 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             self._embedding_cache = MultimodalEmbeddingCacheManager(capacity_bytes)
             logger.info("Multimodal embedding cache enabled: %.2f GB", capacity_gb)
 
+    def _publish_cache_delta(
+        self, added_keys: list[str], removed_keys: list[str]
+    ) -> None:
+        if self._cache_publisher is None or (not added_keys and not removed_keys):
+            return
+        try:
+            self._cache_publisher.publish_delta(added_keys, removed_keys)
+        except Exception:
+            logger.warning(
+                "Failed to publish embedding cache delta; "
+                "routing cache state may be stale",
+                exc_info=True,
+            )
+
     def cleanup(self) -> None:
         pass
 
     @staticmethod
     def _url_hash(url: str) -> str:
-        """Stable blake2b hash of an image URL, used as embedding cache key."""
-        return hashlib.blake2b(url.encode(), digest_size=32).hexdigest()
+        """Stable blake3 hash of an image URL, used as embedding cache key."""
+        return blake3(url.encode()).hexdigest()
 
     def _resolve_mm_token_id(
         self, token_str: Optional[str], preferred_token: Optional[str] = None
@@ -266,7 +283,10 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     tensor=tensor.contiguous(),
                     image_grid_thw=grid_thw,
                 )
-                self._embedding_cache.set(self._url_hash(url), entry)
+                mutation = self._embedding_cache.set_with_delta(
+                    self._url_hash(url), entry
+                )
+                self._publish_cache_delta(mutation.added_keys, mutation.removed_keys)
                 new_entries[orig_idx] = entry
 
         # Reassemble results in original URL order

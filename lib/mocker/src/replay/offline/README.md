@@ -19,7 +19,7 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 
 `offline/mod.rs` chooses between three implementations:
 
-- `lib/mocker/src/replay/offline/single.rs` for the special case `num_workers == 1` with the vLLM engine
+- `lib/mocker/src/replay/offline/single.rs` for aggregated replay with `num_workers == 1`
 - `lib/mocker/src/replay/offline/agg.rs` for everything else, including aggregated multi-worker replay and `kv_router` replay
 - `lib/mocker/src/replay/offline/disagg.rs` for offline disaggregated prefill/decode replay
 
@@ -28,7 +28,7 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 - `lib/mocker/src/replay/offline/mod.rs`
   Chooses single-worker fast path vs multi-worker harness.
 - `lib/mocker/src/replay/offline/single.rs`
-  Minimal replay loop for one vLLM worker.
+  Minimal replay loop for one aggregated worker.
 - `lib/mocker/src/replay/offline/agg.rs`
   General offline cluster simulator for multi-worker replay and KV-router replay.
 - `lib/mocker/src/replay/offline/disagg.rs`
@@ -53,10 +53,8 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 
 ## Single-Worker Fast Path
 
-The single-worker path is intentionally simple and only used when:
-
-- `num_workers == 1`
-- engine type is `vllm`
+The single-worker path is intentionally simple and used when `num_workers == 1`
+for vLLM, SGLang, and TRT-LLM engine modes.
 
 That path avoids the cluster event queue and router machinery entirely, but it now supports both:
 
@@ -242,8 +240,10 @@ Both single and multi harnesses support two admission modes:
 
 - Concurrency mode
   - ignores original first-turn spacing
-  - keeps up to `max_in_flight` requests resident in the cluster
-  - for workloads, still unlocks follow-up turns only after completion plus inter-turn delay
+  - single-turn request lists: keeps up to `max_in_flight` requests in flight
+  - multi-turn session traces: `max_in_flight` caps active **sessions**, and a session holds
+    its slot across all its turns and inter-turn think-time (i.e. a new session starts only
+    when an active one finishes).
   - stamps synthetic arrival times as requests are admitted
 
 This split is why `lib/mocker/src/replay/offline/mod.rs` exposes both:

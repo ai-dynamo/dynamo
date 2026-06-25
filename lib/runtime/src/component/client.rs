@@ -33,6 +33,13 @@ impl RoutingOccupancyState {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        instance_ids
+            .iter()
+            .min_by_key(|&&id| self.load(id))
+            .copied()
+    }
+
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
 
@@ -61,6 +68,35 @@ impl RoutingOccupancyState {
         let id = selected?;
         self.increment(id);
         Some(id)
+    }
+
+    /// Least-loaded selection without the increment. Same tie-break policy as
+    /// [`Self::select_exact_min_and_increment`] so peek and select share a
+    /// distribution.
+    pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform; matches select_exact_min_and_increment.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        selected
     }
 
     pub(crate) fn decrement(&self, instance_id: u64) {
@@ -258,6 +294,19 @@ impl RoutingInstances {
         )
     }
 
+    /// Add a single instance to the overloaded set (immediate
+    /// backpressure mark). Short-lived: the next metric-driven
+    /// `set_overloaded` recompute overwrites the whole set.
+    fn mark_overloaded(&self, instance_id: u64) -> Self {
+        let mut overloaded_ids = self.overloaded_ids.clone();
+        overloaded_ids.insert(instance_id);
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            overloaded_ids,
+        )
+    }
+
     fn clear_overloaded_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
         let mut overloaded_ids = self.overloaded_ids.clone();
         overloaded_ids.retain(|id| !removed_ids.contains(id));
@@ -366,6 +415,15 @@ impl RoutingInstancesState {
         let next = Arc::new(current.set_overloaded(overloaded_ids));
         self.snapshot.store(next);
         true
+    }
+
+    fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.update(
+            move |current| current.mark_overloaded(instance_id),
+            // Routable set is unchanged — only the derived free set shrinks —
+            // so there's no need to republish routable_ids.
+            false,
+        );
     }
 
     fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -526,6 +584,19 @@ impl Client {
     pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
         self.routing_instances
             .set_overloaded_instances(overloaded_instance_ids)
+    }
+
+    /// Mark an instance overloaded immediately. A worker returning
+    /// `ResourceExhausted` is busy ("queue full, retry later"), not faulted, so
+    /// this is the overload path, NOT `report_instance_down`. Short-lived: the
+    /// next `set_overloaded_instances` recompute overwrites the overloaded set.
+    pub fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.routing_instances
+            .mark_overloaded_immediate(instance_id);
+        tracing::debug!(
+            instance_id,
+            "marking instance overloaded (backpressure); next metric event will re-evaluate"
+        );
     }
 
     pub fn clear_overloaded_instances_for_removed(&self, removed_instance_ids: &[u64]) {

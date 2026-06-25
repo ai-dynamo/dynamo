@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: llama-3-3-70b
+title: Llama-3.3-70B FP8
+page: recipes/llama-3-3-70b.mdx
+provider: meta
+model:
+  name: Llama-3.3-70B-Instruct
+  hf_id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
+  precision: FP8-dynamic
+status: validated
+targets:
+- id: vllm-agg
+  recommended: false
+  hardware:
+    gpu: H100/H200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+  topology: aggregated
+  techniques:
+  - tp4
+  workload:
+    type: static-synthetic
+    traffic: ISL 8192 / OSL 1024, 64 total concurrency (16/GPU), 10x request count
+  deploy:
+    asset: recipes/llama-3-70b/vllm/agg/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/llama-3-70b/vllm/agg/perf.yaml
+  expected_performance:
+    available: false
+    summary: no published numbers; topology comparison on benchmark page
+- id: vllm-disagg-single-node
+  recommended: true
+  hardware:
+    gpu: H100/H200
+    count: 8
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - 2x-tp2-prefill
+  - tp4-decode
+  - nixl
+  workload:
+    type: static-synthetic
+    traffic: ISL 8192 / OSL 1024, 128 total concurrency (16/GPU)
+  deploy:
+    asset: recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-multi-node
+  recommended: false
+  hardware:
+    gpu: H100/H200
+    count: 16
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - tp8-prefill
+  - tp8-decode
+  - nixl
+  workload:
+    type: static-synthetic
+    traffic: ISL 8192 / OSL 1024, 256 total concurrency (16/GPU)
+  deploy:
+    asset: recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml
+  expected_performance:
+    available: false
+related_benchmarks:
+- llama-3-70b-topology
+maintainer: null
+gaps:
+- no expected performance numbers in source — section omitted
+- maintainer unknown
