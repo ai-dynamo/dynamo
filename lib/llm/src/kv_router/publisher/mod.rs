@@ -17,6 +17,7 @@ use dynamo_runtime::config::environment_names::nats as env_nats;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
     component::Component,
+    transports::event_plane::EventPublisher,
     transports::nats::{NatsQueue, Slug},
 };
 
@@ -194,6 +195,50 @@ impl KvEventPublisher {
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
+        Self::new_internal(
+            component,
+            worker_id,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+            None,
+        )
+    }
+
+    pub fn new_with_shared_event_publisher(
+        component: Component,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+        event_publisher: Arc<EventPublisher>,
+    ) -> Result<Self> {
+        Self::new_internal(
+            component,
+            None,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+            Some(event_publisher),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_internal(
+        component: Component,
+        worker_id: Option<WorkerId>,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+        event_publisher: Option<Arc<EventPublisher>>,
+    ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
             .filter(|&ms| {
@@ -274,19 +319,20 @@ impl KvEventPublisher {
             tracing::info!("Using event plane for KV event publishing (local_indexer mode)");
             let component_clone = component.clone();
             component.drt().runtime().secondary().spawn(async move {
-                let event_publisher =
-                    match dynamo_runtime::transports::event_plane::EventPublisher::for_component(
-                        &component_clone,
-                        KV_EVENT_SUBJECT,
-                    )
-                    .await
-                    {
-                        Ok(publisher) => publisher,
-                        Err(e) => {
-                            tracing::error!("Failed to create event publisher: {}", e);
-                            return;
+                let event_publisher = match event_publisher {
+                    Some(publisher) => publisher,
+                    None => {
+                        match EventPublisher::for_component(&component_clone, KV_EVENT_SUBJECT)
+                            .await
+                        {
+                            Ok(publisher) => Arc::new(publisher),
+                            Err(e) => {
+                                tracing::error!("Failed to create event publisher: {}", e);
+                                return;
+                            }
                         }
-                    };
+                    }
+                };
 
                 start_event_processor(
                     EventPlanePublisher(event_publisher),

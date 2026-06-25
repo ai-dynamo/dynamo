@@ -7,20 +7,22 @@
 //!
 //! - [`KvEventPublisher`] (per dp_rank) — wired from the engine's
 //!   [`KvEventSource`] declarations. Engine pushes stored/removed events
-//!   to the publisher; framework relays to NATS.
+//!   to the publisher; framework relays to the configured event plane.
 //! - [`SnapshotPublisher`] — single per-worker handle for per-rank
 //!   `ComponentSnapshot` writes. Engine pushes; publisher atomically
 //!   updates the Rust `ComponentGauges` (for /metrics) AND the
-//!   per-rank `WorkerMetricsPublisher` (for KV router NATS signal)
+//!   per-rank `WorkerMetricsPublisher` (for KV router load signal)
 //!   inline.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dynamo_llm::kv_router::publisher::{
-    KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher,
+use dynamo_llm::kv_router::{
+    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
+    publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher},
 };
 use dynamo_runtime::component::Component;
+use dynamo_runtime::transports::event_plane::EventPublisher;
 
 use crate::engine::KvEventSource;
 use crate::error::{BackendError, DynamoError, ErrorType};
@@ -36,21 +38,28 @@ pub(crate) struct PublisherHandles {
     /// Stashed so the engine's `Arc<SnapshotPublisher>` reference stays
     /// valid for the worker's lifetime. Engines drop their copy when
     /// they shut down; we keep ours so the `WorkerMetricsPublisher`s
-    /// inside don't drop their NATS endpoints prematurely.
+    /// inside don't drop their event-plane endpoints prematurely.
     #[allow(dead_code)]
     snapshot_publisher: Option<Arc<SnapshotPublisher>>,
 }
 
-// Sync — `KvEventPublisher::new_with_local_indexer` doesn't await. The
-// snapshot router-publisher construction below is async because
-// `create_endpoint` does.
-fn setup_kv_publishers(
+async fn setup_kv_publishers(
     component: &Component,
     sources: Vec<KvEventSource>,
     kv_cache_block_size: u32,
     enable_local_indexer: bool,
 ) -> Result<Vec<Arc<KvEventPublisher>>, DynamoError> {
     let mut publishers = Vec::with_capacity(sources.len());
+    let shared_event_publisher = if enable_local_indexer {
+        Some(Arc::new(
+            EventPublisher::for_component(component, KV_EVENT_SUBJECT)
+                .await
+                .map_err(|e| publisher_err(format!("shared kv event publisher setup: {e}")))?,
+        ))
+    } else {
+        None
+    };
+
     for source in sources {
         let dp_rank = source.dp_rank();
         let (source_config, on_ready) = match source {
@@ -66,14 +75,26 @@ fn setup_kv_publishers(
             ),
             KvEventSource::Push { on_ready, .. } => (None, Some(on_ready)),
         };
-        let publisher = KvEventPublisher::new_with_local_indexer(
-            component.clone(),
-            kv_cache_block_size,
-            source_config,
-            enable_local_indexer,
-            dp_rank,
-            None,
-        )
+        let publisher = if let Some(event_publisher) = shared_event_publisher.clone() {
+            KvEventPublisher::new_with_shared_event_publisher(
+                component.clone(),
+                kv_cache_block_size,
+                source_config,
+                enable_local_indexer,
+                dp_rank,
+                None,
+                event_publisher,
+            )
+        } else {
+            KvEventPublisher::new_with_local_indexer(
+                component.clone(),
+                kv_cache_block_size,
+                source_config,
+                enable_local_indexer,
+                dp_rank,
+                None,
+            )
+        }
         .map_err(|e| publisher_err(format!("kv publisher setup (dp_rank={dp_rank}): {e}")))?;
         let publisher = Arc::new(publisher);
         if let Some(on_ready) = on_ready {
@@ -91,20 +112,26 @@ fn setup_kv_publishers(
 }
 
 /// Build one `WorkerMetricsPublisher` per declared dp_rank. Each owns a
-/// NATS endpoint advertising the rank's `kv_used_blocks` signal to the
-/// KV router. Constructed eagerly so the `SnapshotPublisher` can route
-/// per-rank writes inline.
+/// watch channel advertising the rank's `kv_used_blocks` signal to the
+/// KV router. The underlying event-plane publisher is shared per worker
+/// because discovery identifies event channels by worker instance/topic.
 async fn build_router_publishers(
     component: &Component,
     dp_ranks: &[u32],
 ) -> Result<HashMap<u32, Arc<WorkerMetricsPublisher>>, DynamoError> {
     let mut out = HashMap::with_capacity(dp_ranks.len());
+    let event_publisher = Arc::new(
+        EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT)
+            .await
+            .map_err(|e| publisher_err(format!("shared metrics publisher setup: {e}")))?,
+    );
+
     for &dp_rank in dp_ranks {
         let publisher = WorkerMetricsPublisher::new().map_err(|e| {
             publisher_err(format!("metrics publisher new (dp_rank={dp_rank}): {e}"))
         })?;
         publisher
-            .create_endpoint(component.clone())
+            .create_endpoint_with_event_publisher(component.clone(), event_publisher.clone())
             .await
             .map_err(|e| {
                 publisher_err(format!(
@@ -117,7 +144,7 @@ async fn build_router_publishers(
 }
 
 fn publisher_err(message: String) -> DynamoError {
-    // Publisher construction errors are almost always NATS-reach related.
+    // Publisher construction errors are almost always transport/discovery reach related.
     DynamoError::builder()
         .error_type(ErrorType::Backend(BackendError::CannotConnect))
         .message(message)
@@ -137,7 +164,7 @@ pub(crate) async fn setup_publishers(
     // router can't translate token IDs into cache blocks. Snapshot publisher
     // is independent — load reporting works regardless of cache structure.
     let kv_publishers = if let Some(block_size) = kv_cache_block_size {
-        setup_kv_publishers(component, kv_sources, block_size, enable_local_indexer)?
+        setup_kv_publishers(component, kv_sources, block_size, enable_local_indexer).await?
     } else {
         if !kv_sources.is_empty() {
             tracing::warn!(

@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
+use std::sync::Arc;
 
+use anyhow::Result;
 use dynamo_kv_router::protocols::{ActiveLoad, DpRank};
 use dynamo_runtime::component::{Component, Namespace};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -56,11 +57,29 @@ impl WorkerMetricsPublisher {
 
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
         let worker_id = component.drt().connection_id();
-        self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
+        self.start_event_metrics_publishing_with_namespace(
+            component.namespace().clone(),
+            worker_id,
+        );
         Ok(())
     }
 
+    pub async fn create_endpoint_with_event_publisher(
+        &self,
+        component: Component,
+        event_publisher: Arc<EventPublisher>,
+    ) -> Result<()> {
+        let worker_id = component.drt().connection_id();
+        self.start_event_metrics_publishing(worker_id, event_publisher);
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "integration"))]
     pub(super) fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: u64) {
+        self.start_event_metrics_publishing_with_namespace(namespace, worker_id);
+    }
+
+    fn start_event_metrics_publishing_with_namespace(&self, namespace: Namespace, worker_id: u64) {
         let nats_rx = self.rx.clone();
 
         tokio::spawn(async move {
@@ -73,51 +92,66 @@ impl WorkerMetricsPublisher {
                     }
                 };
 
-            let mut rx = nats_rx;
-            let mut last_metrics: Option<WorkerMetrics> = None;
-            let mut pending_publish: Option<WorkerMetrics> = None;
-            let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
-            tokio::pin!(publish_timer);
+            run_metrics_publishing_loop(worker_id, nats_rx, Arc::new(event_publisher)).await;
+        });
+    }
 
-            loop {
-                tokio::select! {
-                    result = rx.changed() => {
-                        if result.is_err() {
-                            tracing::debug!(
-                                "Metrics publisher sender dropped, stopping NATS background task"
-                            );
-                            break;
-                        }
+    fn start_event_metrics_publishing(&self, worker_id: u64, event_publisher: Arc<EventPublisher>) {
+        let rx = self.rx.clone();
 
-                        let metrics = rx.borrow_and_update().clone();
-                        if last_metrics.as_ref() == Some(&metrics) {
-                            continue;
-                        }
+        tokio::spawn(async move {
+            run_metrics_publishing_loop(worker_id, rx, event_publisher).await;
+        });
+    }
+}
 
-                        pending_publish = Some(metrics.clone());
-                        last_metrics = Some(metrics);
-                        publish_timer.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + tokio::time::Duration::from_millis(1)
-                        );
-                    }
-                    _ = &mut publish_timer, if pending_publish.is_some() => {
-                        if let Some(metrics) = pending_publish.take() {
-                            let active_load = ActiveLoad {
-                                worker_id,
-                                dp_rank: metrics.dp_rank,
-                                active_decode_blocks: metrics.active_decode_blocks,
-                                active_prefill_tokens: None,
-                                kv_used_blocks: metrics.kv_used_blocks,
-                            };
+async fn run_metrics_publishing_loop(
+    worker_id: u64,
+    mut rx: tokio::sync::watch::Receiver<WorkerMetrics>,
+    event_publisher: Arc<EventPublisher>,
+) {
+    let mut last_metrics: Option<WorkerMetrics> = None;
+    let mut pending_publish: Option<WorkerMetrics> = None;
+    let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
+    tokio::pin!(publish_timer);
 
-                            if let Err(e) = event_publisher.publish(&active_load).await {
-                                tracing::warn!("Failed to publish metrics: {}", e);
-                            }
-                        }
+    loop {
+        tokio::select! {
+            result = rx.changed() => {
+                if result.is_err() {
+                    tracing::debug!(
+                        "Metrics publisher sender dropped, stopping event-plane background task"
+                    );
+                    break;
+                }
+
+                let metrics = rx.borrow_and_update().clone();
+                if last_metrics.as_ref() == Some(&metrics) {
+                    continue;
+                }
+
+                pending_publish = Some(metrics.clone());
+                last_metrics = Some(metrics);
+                publish_timer.as_mut().reset(
+                    tokio::time::Instant::now()
+                        + tokio::time::Duration::from_millis(1)
+                );
+            }
+            _ = &mut publish_timer, if pending_publish.is_some() => {
+                if let Some(metrics) = pending_publish.take() {
+                    let active_load = ActiveLoad {
+                        worker_id,
+                        dp_rank: metrics.dp_rank,
+                        active_decode_blocks: metrics.active_decode_blocks,
+                        active_prefill_tokens: None,
+                        kv_used_blocks: metrics.kv_used_blocks,
+                    };
+
+                    if let Err(e) = event_publisher.publish(&active_load).await {
+                        tracing::warn!("Failed to publish metrics: {}", e);
                     }
                 }
             }
-        });
+        }
     }
 }

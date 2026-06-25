@@ -14,7 +14,7 @@ use dynamo_runtime::transports::nats::NatsQueue;
 
 use crate::kv_router::KV_EVENT_SUBJECT;
 
-pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
+pub(super) struct EventPlanePublisher(pub(super) Arc<EventPublisher>);
 
 impl RouterEventSink for EventPlanePublisher {
     fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
