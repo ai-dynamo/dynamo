@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Strict FlashInfer-only vLLM collective guard for snapshot mode."""
+"""Snapshot-safe vLLM collective guards.
+
+The production snapshot path uses the no-NCCL guard to prevent vLLM from
+creating or using NCCL-backed CUDA communication state.  The stricter
+FlashInfer-only guard remains available as an explicit diagnostic mode.
+"""
 
 from __future__ import annotations
 
@@ -51,6 +56,7 @@ _BLOCKED_CUDA_COLLECTIVES = (
     "send",
     "batch_isend_irecv",
 )
+_NO_NCCL_CUDA_COLLECTIVES = ("all_reduce", *_BLOCKED_CUDA_COLLECTIVES)
 _TORCH_DISTRIBUTED_COLLECTIVES = (
     "all_reduce",
     "broadcast",
@@ -112,9 +118,14 @@ def configure_flashinfer_only_collectives(
 ) -> bool:
     """Configure vLLM for strict FlashInfer-only CUDA collectives.
 
-    This is intentionally opt-in for the FlashInfer snapshot E2E. It mutates
-    the already-created vLLM config before ``AsyncLLM`` construction and
-    installs a guard that rejects NCCL/PyNCCL/custom-allreduce fallbacks.
+    This legacy diagnostic mode is intentionally opt-in. The normal snapshot
+    runtime should prefer ``DYN_VLLM_NO_NCCL_SNAPSHOT=1`` so Dynamo avoids
+    NCCL state without globally blocking every CUDA tensor use of
+    ``torch.distributed``.
+
+    When enabled, this mutates the already-created vLLM config before
+    ``AsyncLLM`` construction and installs a guard that rejects
+    NCCL/PyNCCL/custom-allreduce fallbacks.
 
     Args:
         engine_args: vLLM engine arguments used to build ``vllm_config``.
@@ -355,9 +366,57 @@ def _install_no_nccl_cuda_communicator_guard() -> bool:
         original_init,
     )
     communicator_cls.__init__ = init_without_nccl
+    _install_no_nccl_cuda_collective_guards(communicator_cls)
     setattr(communicator_cls, _NO_NCCL_CUDA_GUARD_INSTALLED_ATTR, True)
-    logger.info("Installed Dynamo no-NCCL vLLM CUDA communicator guard.")
+    logger.info(
+        "Installed Dynamo no-NCCL vLLM CUDA communicator guard "
+        "(blocked methods: %s).",
+        ", ".join(
+            name
+            for name in _NO_NCCL_CUDA_COLLECTIVES
+            if hasattr(communicator_cls, name)
+        ),
+    )
     return True
+
+
+def _install_no_nccl_cuda_collective_guards(communicator_cls: Any) -> None:
+    if getattr(communicator_cls, _GUARD_INSTALLED_ATTR, False):
+        return
+
+    for method_name in _NO_NCCL_CUDA_COLLECTIVES:
+        original = getattr(communicator_cls, method_name, None)
+        if original is None:
+            continue
+        setattr(
+            communicator_cls,
+            f"{_ORIGINAL_COLLECTIVE_PREFIX}no_nccl_{method_name}",
+            original,
+        )
+        setattr(
+            communicator_cls,
+            method_name,
+            _make_no_nccl_blocked_cuda_collective(method_name, original),
+        )
+
+
+def _make_no_nccl_blocked_cuda_collective(
+    method_name: str, original: Callable[..., Any]
+) -> Callable[..., Any]:
+    @functools.wraps(original)
+    def blocked(self: Any, *args: Any, **kwargs: Any) -> Any:
+        world_size = _as_int(getattr(self, "world_size", 1), default=1)
+        if world_size <= 1:
+            if method_name == "batch_isend_irecv":
+                return None
+            return args[0] if args else None
+        raise RuntimeError(
+            "Dynamo no-NCCL vLLM snapshot mode blocked CUDA communicator "
+            f"{method_name} because it can initialize or use checkpoint-unsafe "
+            f"NCCL/PyNCCL communication state. {_communicator_details(self)}"
+        )
+
+    return blocked
 
 
 def _install_no_nccl_torch_backend_guard() -> bool:

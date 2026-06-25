@@ -253,7 +253,7 @@ result = {
     ),
     "blocked": {},
 }
-for method_name in ("send", "recv", "broadcast", "gather"):
+for method_name in ("all_reduce", "send", "recv", "broadcast", "gather"):
     try:
         getattr(comm, method_name)(object())
     except RuntimeError as exc:
@@ -277,9 +277,16 @@ print(json.dumps(result, sort_keys=True))
 
     result = json.loads(completed.stdout)
     assert result["guard_installed"] is True
-    assert set(result["blocked"]) == {"send", "recv", "broadcast", "gather"}
-    for message in result["blocked"].values():
-        assert message is None
+    assert set(result["blocked"]) == {
+        "all_reduce",
+        "send",
+        "recv",
+        "broadcast",
+        "gather",
+    }
+    for method_name, message in result["blocked"].items():
+        assert method_name in message
+        assert "Dynamo no-NCCL vLLM snapshot mode blocked" in message
 
 
 def test_snapshot_worker_sleep_rolls_back_when_base_sleep_fails(

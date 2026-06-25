@@ -538,6 +538,48 @@ def test_no_nccl_torch_guard_blocks_default_backend_with_cuda_device_id(
     assert [call[0] for call in distributed.calls] == ["init_process_group"]
 
 
+def test_no_nccl_cuda_guard_blocks_communicator_collectives(monkeypatch):
+    monkeypatch.setenv(DYN_VLLM_NO_NCCL_SNAPSHOT, "1")
+    CudaCommunicator = _install_fake_cuda_communicator(monkeypatch)
+
+    assert install_no_nccl_snapshot_guard() is True
+
+    comm = CudaCommunicator()
+    comm.world_size = 2
+    comm.unique_name = "tp:0"
+    comm.rank = 0
+    comm.rank_in_group = 0
+    comm.use_flashinfer_allreduce = False
+    tensor = _FakeTensor()
+
+    for method_name, args in (
+        ("all_reduce", (tensor,)),
+        ("all_gather", (tensor,)),
+        ("all_gatherv", (tensor,)),
+        ("broadcast", (tensor,)),
+        ("gather", (tensor,)),
+        ("reduce_scatter", (tensor,)),
+        ("reduce_scatterv", (tensor,)),
+        ("recv", (tensor,)),
+        ("send", (tensor,)),
+        ("batch_isend_irecv", ([],)),
+    ):
+        with pytest.raises(RuntimeError, match=method_name):
+            getattr(comm, method_name)(*args)
+
+    comm.world_size = 1
+    assert comm.all_reduce(tensor) is tensor
+    assert comm.all_gather(tensor) is tensor
+    assert comm.all_gatherv(tensor) is tensor
+    assert comm.broadcast(tensor) is tensor
+    assert comm.gather(tensor) is tensor
+    assert comm.reduce_scatter(tensor) is tensor
+    assert comm.reduce_scatterv(tensor) is tensor
+    assert comm.recv(tensor) is tensor
+    assert comm.send(tensor) is tensor
+    assert comm.batch_isend_irecv([]) is None
+
+
 def test_backend_patch_is_noop_outside_strict_mode(monkeypatch):
     current_platform = _install_fake_vllm_platform(monkeypatch, backend="nccl")
 

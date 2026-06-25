@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import inspect
 import sys
 import types
 from types import SimpleNamespace
@@ -137,6 +138,30 @@ def test_patch_is_idempotent(monkeypatch):
     assert snapshot_compat.patch_vllm_quantized_kv_cache_wake_up() is True
 
     assert gpu_model_runner.init_fp8_kv_scales is patched
+
+
+def test_patch_skips_when_vllm_already_handles_nested_kv_caches(monkeypatch):
+    _install_fake_torch(monkeypatch)
+    gpu_model_runner = _install_fake_gpu_model_runner(monkeypatch)
+    snapshot_compat = importlib.import_module("dynamo.vllm.snapshot_compat")
+
+    original_method = gpu_model_runner.init_fp8_kv_scales
+    source = """
+def init_fp8_kv_scales(self):
+    def zero_kv_cache_tensors(kv_cache):
+        if isinstance(kv_cache, (list, tuple)):
+            for cache_entry in kv_cache:
+                zero_kv_cache_tensors(cache_entry)
+        elif kv_cache is not None:
+            kv_cache.zero_()
+    for cache_entry in self.kv_caches:
+        zero_kv_cache_tensors(cache_entry)
+"""
+    monkeypatch.setattr(inspect, "getsource", lambda method: source)
+
+    assert snapshot_compat.patch_vllm_quantized_kv_cache_wake_up() is True
+
+    assert gpu_model_runner.init_fp8_kv_scales is original_method
 
 
 def test_patch_leaves_non_fp8_cache_path_unchanged(monkeypatch):

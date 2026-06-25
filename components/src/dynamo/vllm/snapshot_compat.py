@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 from collections.abc import Iterator
 from typing import Any
@@ -42,6 +43,15 @@ def patch_vllm_quantized_kv_cache_wake_up() -> bool:
             continue
 
         if getattr(method, _PATCH_SENTINEL, False):
+            patched_any = True
+            continue
+
+        if _method_handles_nested_kv_caches(method):
+            logger.info(
+                "Skipping %s.GPUModelRunner.init_fp8_kv_scales patch because "
+                "the installed vLLM already handles nested quantized KV caches.",
+                module_name,
+            )
             patched_any = True
             continue
 
@@ -86,6 +96,18 @@ def _wrap_init_fp8_kv_scales(method: Any) -> Any:
             self.kv_caches = original_kv_caches
 
     return _patched_init_fp8_kv_scales
+
+
+def _method_handles_nested_kv_caches(method: Any) -> bool:
+    try:
+        source = inspect.getsource(inspect.unwrap(method))
+    except (OSError, TypeError):
+        return False
+
+    return (
+        "zero_kv_cache_tensors" in source
+        and "isinstance(kv_cache, (list, tuple))" in source
+    )
 
 
 def _is_quantized_kv_cache_dtype(cache_dtype: Any) -> bool:
