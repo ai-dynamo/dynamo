@@ -346,7 +346,8 @@ def subtract_baseline(
     dropped = 0
     for c in components:
         if (c.name, c.version) in baseline_keys or (
-            _norm_name(c.name), c.version
+            _norm_name(c.name),
+            c.version,
         ) in normalized_baseline_keys:
             dropped += 1
             continue
