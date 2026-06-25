@@ -54,6 +54,8 @@ git clone https://github.com/sgl-project/sglang.git
 cd sglang && uv pip install -e "python"
 ```
 
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
+
 This is the ideal way for agents to develop. You can provide the path to both repos and the virtual environment and have it rerun these commands as it makes changes
 </Accordion>
 

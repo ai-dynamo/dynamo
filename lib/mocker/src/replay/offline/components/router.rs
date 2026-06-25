@@ -324,6 +324,13 @@ impl OfflineReplayRouter {
         })
     }
 
+    /// Cancel a request that has not yet been assigned to a worker.
+    pub(crate) fn cancel_pending(&mut self, uuid: Uuid) -> bool {
+        let before = self.pending.pending_count();
+        self.pending.retain(|request| request.uuid != uuid);
+        self.pending.pending_count() != before
+    }
+
     /// Drain queued requests that can now be admitted (e.g. after a new worker
     /// becomes available).
     pub(crate) fn try_drain_pending(&mut self, now_ms: f64) -> Result<RouterEffects> {
@@ -367,6 +374,17 @@ impl OfflineReplayRouter {
     pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
+        Ok(())
+    }
+
+    /// Drop the retained topology/cache state after the engine confirms that
+    /// the draining worker no longer owns any request lifecycle state.
+    pub(crate) fn finalize_worker_removal(&mut self, worker_id: usize) -> Result<()> {
+        let wid = worker_id as WorkerId;
+        self.slots
+            .unregister_worker(wid)
+            .map_err(anyhow::Error::from)?;
+        self.indexer.tree.remove_worker(wid);
         Ok(())
     }
 
@@ -832,6 +850,37 @@ mod tests {
     }
 
     #[test]
+    fn canceled_pending_request_is_not_admitted_after_capacity_frees() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+
+        assert_eq!(
+            router
+                .on_request_arrival(&request(1, 7), None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1
+        );
+        assert!(
+            router
+                .on_request_arrival(&request(2, 8), None, 0.0)
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        assert!(router.cancel_pending(Uuid::from_u128(2)));
+        assert!(!router.cancel_pending(Uuid::from_u128(2)));
+        assert_eq!(router.pending_count(), 0);
+
+        let effects = router
+            .on_request_completed(Uuid::from_u128(1), 1.0)
+            .unwrap();
+        assert!(effects.admissions.is_empty());
+    }
+
+    #[test]
     fn policy_mapping_and_model_selection_use_shared_replay_queue_logic() {
         let path =
             std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
@@ -1183,6 +1232,31 @@ policy_classes:
                 isl_blocks: 1,
             }]
         );
+    }
+
+    #[test]
+    fn finalized_worker_removal_drops_retained_topology_and_cache_state() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                1,
+                hashes.local_block_hashes[0].0,
+                StorageTier::Device,
+            )])
+            .unwrap();
+        assert_eq!(router.debug_snapshot(0.0).indexer.total_cached_blocks, 1);
+
+        router.remove_worker(0).unwrap();
+        router.finalize_worker_removal(0).unwrap();
+        let snapshot = router.debug_snapshot(0.0);
+        assert!(snapshot.active_blocks_by_worker.is_empty());
+        assert!(snapshot.indexer.cached_blocks_by_worker.is_empty());
+        router.add_worker(0).unwrap();
     }
 
     #[test]

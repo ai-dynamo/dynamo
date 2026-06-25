@@ -1651,6 +1651,11 @@ class AicPerfConfig:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1990,13 +1995,20 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: int = 42,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
+        handoff_session_timeout_ms: int = 300000,
         kv_bytes_per_token: Optional[int] = None,
         kv_transfer_bandwidth: Optional[float] = None,
+        kv_transfer_timing_mode: str = "full_prompt",
         reasoning: Optional[ReasoningConfig] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
@@ -2052,6 +2064,15 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def handoff_session_timeout_ms(self) -> int: ...
+
+    @property
+    def kv_transfer_timing_mode(self) -> str: ...
+
+    @property
+    def engine_type(self) -> str: ...
 
     @property
     def num_g2_blocks(self) -> Optional[int]: ...
@@ -2132,6 +2153,36 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_gemm_dtype(self) -> Optional[str]: ...
+
+    @aic_gemm_dtype.setter
+    def aic_gemm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_moe_dtype(self) -> Optional[str]: ...
+
+    @aic_moe_dtype.setter
+    def aic_moe_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_fmha_dtype(self) -> Optional[str]: ...
+
+    @aic_fmha_dtype.setter
+    def aic_fmha_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_kv_cache_dtype(self) -> Optional[str]: ...
+
+    @aic_kv_cache_dtype.setter
+    def aic_kv_cache_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_comm_dtype(self) -> Optional[str]: ...
+
+    @aic_comm_dtype.setter
+    def aic_comm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
     def aic_nextn(self) -> Optional[int]: ...
 
     @aic_nextn.setter
@@ -2195,6 +2246,11 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: Optional[int] = None,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
@@ -2404,12 +2460,23 @@ def run_mocker_synthetic_trace_replay(
     num_prefix_groups: int = 0,
     inter_turn_delay_ms: float = 0.0,
     model_name: Optional[str] = None,
+    sla_ttft_ms: Optional[float] = None,
+    sla_itl_ms: Optional[float] = None,
+    sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a synthetic mocker workload without requiring a trace file."""
+    """Replay a synthetic mocker workload without requiring a trace file.
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+    (offline replay only); when any is set the report carries ``goodput_*`` keys
+    classifying SLA-satisfying requests.
+    """
     ...
 
 class PlannerReplayBridge:
-    """Step-based bridge for driving an offline replay with a Python planner."""
+    """Drives an offline replay to completion with a Python planner. The Rust
+    simulation owns the drive loop and calls back into ``planner`` once per
+    ``PlannerTick`` via ``run(planner)`` (``planner`` exposes
+    ``initial_tick_ms() -> float`` and ``on_tick(metrics: dict) -> dict``)."""
 
     def __init__(
         self,
@@ -2491,9 +2558,7 @@ class PlannerReplayBridge:
         sla_e2e_ms: Optional[float] = None,
     ) -> "PlannerReplayBridge": ...
 
-    def advance_to(self, until_ms: float) -> Dict[str, Any]: ...
-    def apply_scaling(self, target_prefill: int, target_decode: int) -> None: ...
-    def finalize(self) -> Dict[str, Any]: ...
+    def run(self, planner: Any) -> Dict[str, Any]: ...
 
 class Layer:
     """

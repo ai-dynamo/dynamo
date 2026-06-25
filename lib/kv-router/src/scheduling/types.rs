@@ -74,6 +74,11 @@ pub struct SchedulingResponse {
     pub cached_tokens: usize,
 }
 
+/// Actor-owned admission request.
+///
+/// After enqueue, the caller retains only the response receiver while the
+/// scheduler owns this request and its sender. Dropping the caller's selection
+/// future closes that receiver, but cannot retract the request from the actor.
 pub struct SchedulingRequest {
     // Request identity and payload.
     pub maybe_request_id: Option<String>,
@@ -103,6 +108,8 @@ pub struct SchedulingRequest {
 
     // Scheduling side effects and lifecycle controls.
     pub update_states: bool,
+    /// Sender half of the admission ownership handoff. For tracked requests,
+    /// the actor must book before sending and undo the booking if delivery fails.
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 

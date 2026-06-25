@@ -144,6 +144,9 @@ pub mod nats {
     /// NATS server address (e.g., "nats://localhost:4222")
     pub const NATS_SERVER: &str = "NATS_SERVER";
 
+    /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
+    pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
@@ -307,8 +310,8 @@ pub mod llm {
     /// Default `true`. Falsy values (`0` / `false` / `no` / `off`,
     /// case-insensitive) cause the frontend to drop `request.nvext` at
     /// handler entry, ignore the routing-override headers
-    /// (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
-    /// `x-prefill-dp-rank`), and silently ignore the response-side
+    /// (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`,
+    /// `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
     /// `extra_fields` opt-in.
     pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
 
@@ -656,6 +659,7 @@ mod tests {
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             // NATS
             nats::NATS_SERVER,
+            nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,

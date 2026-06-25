@@ -10,6 +10,7 @@ use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
@@ -87,6 +88,11 @@ pub struct BootstrapInfo {
 
     /// Unique room ID for this request's KV transfer session
     pub bootstrap_room: u64,
+
+    /// Stable mocker lifecycle identity. Role, backend, and wire version are
+    /// validated by the bootstrap registration and framing protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_id: Option<Uuid>,
 }
 
 /// Directional pointer to a predecessor worker's `engine.generate` span.
@@ -363,6 +369,29 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_info_carries_only_stable_handoff_identity() {
+        let handoff_id = Uuid::from_u128(42);
+        let info = BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 1234,
+            bootstrap_room: 7,
+            handoff_id: Some(handoff_id),
+        };
+
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["handoff_id"], handoff_id.to_string());
+        assert!(value.get("mocker_handoff_protocol_version").is_none());
+        assert!(value.get("mocker_handoff_role").is_none());
+        assert!(value.get("mocker_handoff_engine_type").is_none());
+        assert_eq!(
+            serde_json::from_value::<BootstrapInfo>(value)
+                .unwrap()
+                .handoff_id,
+            Some(handoff_id)
+        );
+    }
 
     /// Covers the `is_probe` serde contract end-to-end: `rename = "_HEALTH_CHECK"`,
     /// `default`, and `skip_serializing_if`. Each assertion targets a distinct

@@ -264,24 +264,15 @@ impl ActiveSequences {
 
         let _ = request_state.expected_output_tokens;
         let mut membership_delta = PromptMembershipDelta::default();
-        let mut first_absent_prompt_idx = None;
-        let prompt_hashes: Vec<_> = request_state
-            .prompt_blocks
-            .iter()
-            .map(|(hash, _)| *hash)
-            .collect();
+        let mut prompt_remove = Vec::new();
 
-        for (idx, (block_hash, rc)) in request_state.prompt_blocks.into_iter().enumerate() {
+        for (block_hash, rc) in request_state.prompt_blocks {
             drop(rc);
-            if self.blocks.try_remove_block(&block_hash) && first_absent_prompt_idx.is_none() {
-                first_absent_prompt_idx = Some(idx);
+            if self.blocks.try_remove_block(&block_hash) || !prompt_remove.is_empty() {
+                prompt_remove.push(block_hash);
             }
         }
-
-        if let Some(first_absent_prompt_idx) = first_absent_prompt_idx {
-            let prompt_remove = prompt_hashes[first_absent_prompt_idx..].to_vec();
-            membership_delta.push_remove(prompt_remove);
-        }
+        membership_delta.push_remove(prompt_remove);
 
         for (block_hash, rc) in request_state.output_blocks {
             drop(rc);

@@ -721,6 +721,13 @@ impl<
         self.book_and_respond(request, sequence_request, response);
     }
 
+    /// Completes the tracked-admission ownership handoff.
+    ///
+    /// A closed receiver means the actor-owned request was abandoned before
+    /// booking, so there is nothing to install. Otherwise booking precedes the
+    /// response: once delivery succeeds, the response channel no longer tracks
+    /// request lifetime and the caller must install its RAII cleanup owner. If
+    /// delivery loses that race, roll back the booking here.
     fn book_and_respond(
         &self,
         mut request: SchedulingRequest,

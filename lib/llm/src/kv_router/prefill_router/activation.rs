@@ -30,6 +30,7 @@ impl PrefillRouter {
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         enforce_disagg: bool,
+        session_affinity_ttl_secs: Option<u64>,
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
@@ -38,6 +39,7 @@ impl PrefillRouter {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             enforce_disagg,
+            session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -55,6 +57,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         enforce_disagg: bool,
+        session_affinity_ttl_secs: Option<u64>,
         model_name: String,
         namespace: String,
         is_eagle: bool,
@@ -70,6 +73,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
+            session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             prefill_load_estimator,
             model_name,
             namespace,
@@ -158,7 +162,11 @@ impl PrefillRouter {
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(push_router, kv_chooser)))
+            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(
+                push_router,
+                kv_chooser,
+                self.session_affinity_ttl,
+            )?))
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
@@ -174,7 +182,13 @@ impl PrefillRouter {
             )
             .await?;
 
-            InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
+            InnerPrefillRouter::SimpleRouter(Arc::new(
+                crate::session_affinity::SessionAffinityPushRouter::new(
+                    push_router,
+                    self.session_affinity_ttl,
+                    self.router_mode.is_direct_routing(),
+                )?,
+            ))
         };
 
         // Set the router (ignore error if already set).
