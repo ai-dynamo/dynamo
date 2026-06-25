@@ -1098,7 +1098,7 @@ def request_plane(request):
 
 
 @pytest.fixture
-def durable_kv_events(request):
+def durable_kv_events(request, monkeypatch):
     """
     Whether to use durable KV events via JetStream. Defaults to False (NATS Core mode).
 
