@@ -1,5 +1,7 @@
 {{- include "power-agent.validateImageTag" . -}}
 {{- include "power-agent.validateMutex" . -}}
+{{- include "power-agent.validateActuator" . -}}
+{{- include "power-agent.validateEnforce" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -61,7 +63,7 @@ spec:
       {{- end }}
       containers:
         - name: power-agent
-          image: "{{ include "power-agent.imageRef" (dict "repository" .Values.image.repository "tag" .Values.image.tag) }}"
+          image: {{ include "power-agent.imageRef" (dict "repository" .Values.image.repository "tag" .Values.image.tag "digest" .Values.image.digest) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - python
@@ -78,6 +80,12 @@ spec:
             - --namespace=$(POD_NAMESPACE)
             {{- end }}
             - --prometheus-port={{ .Values.agent.prometheusPort }}
+            - --actuator={{ .Values.agent.actuator }}
+            {{- if eq .Values.agent.actuator "dcgm" }}
+            - --dcgm-host={{ .Values.agent.dcgm.host }}
+            - --dcgm-port={{ .Values.agent.dcgm.port }}
+            - --dcgm-enforce={{ .Values.agent.dcgm.enforce }}
+            {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -98,7 +106,7 @@ spec:
           securityContext:
             # NVML power-cap writes require root, and the agent persists
             # managed-GPU UUID state to a hostPath — non-root images cannot
-            # write there. See plan §1.2 / power_agent.py:apply_cap.
+            # write there. See power_agent.py:apply_cap.
             privileged: true
             readOnlyRootFilesystem: false
             runAsUser: 0

@@ -29,6 +29,8 @@ def _make_agent(core_v1, device_count: int = 2) -> PowerAgent:
     agent.node_name = "node-under-test"
     agent.k8s_namespace = None  # exercise the list_pod_for_all_namespaces path
     agent.device_count = device_count
+    # reconcile_once ticks k8s_list_failures_total on the skip path.
+    agent.metrics = MagicMock()
     return agent
 
 

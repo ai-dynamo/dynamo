@@ -5,12 +5,24 @@
 
 image:
   repository: nvcr.io/nvidia/ai-dynamo/power-agent
-  # REQUIRED for DaemonSet mode (daemonset.enabled, the default). Pin to a
-  # release tag or sha256 digest. No default to avoid the `:latest`
-  # reproducibility footgun CodeRabbit flagged on PR #9682. `helm install`
-  # fails fast at template time if this is empty while daemonset.enabled.
-  # Dev-pod mode (dev.enabled) ignores this and uses dev.image.* instead.
+  # REQUIRED for DaemonSet mode (daemonset.enabled, the default): pin the
+  # image via `tag` OR `digest` — exactly one must be set. No default on
+  # `tag` to avoid the `:latest` reproducibility footgun CodeRabbit flagged
+  # on PR #9682. `helm install` fails fast at template time if both are
+  # empty (or both are set) while daemonset.enabled. Dev-pod mode
+  # (dev.enabled) ignores this and uses dev.image.* instead.
   tag: ""
+  # Optional. When set, the image is rendered as
+  # `{repository}@{digest}` (the canonical OCI digest form, e.g.
+  # `nvcr.io/nvidia/ai-dynamo/power-agent@sha256:abc...`). Use this
+  # for the strictest reproducibility — a digest is content-addressed
+  # so the same string always pulls the same bytes, while a tag can
+  # be re-pointed by the registry. Must look like `sha256:<hex>`.
+  # PR #9682 fixed an earlier mistake of accepting digest values
+  # via `image.tag` — that path renders `repo:sha256:...` which is
+  # an INVALID image reference (parses as repo + tag "sha256" with
+  # a stray suffix). Digests live on their own key for this reason.
+  digest: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -31,6 +43,60 @@ agent:
   # a dead knob. If a future power_agent.py revision adds a
   # --reconcile-interval flag, add the matching key here at that time.
   prometheusPort: 9100
+
+  # Power-cap actuator. Mutually exclusive — exactly one path is active
+  # per chart install.
+  #
+  #   nvml (default) — Power Agent calls nvmlDeviceSetPowerManagementLimit
+  #                    directly. Use on clusters where the GPU Operator
+  #                    runs with dcgm.enabled=false (the upstream
+  #                    default). No DCGM dependency, smaller image,
+  #                    PR #9682 behaviour exactly.
+  #
+  #   dcgm — Power Agent connects standalone-TCP to the
+  #          operator-managed nvidia-dcgm hostengine and routes cap
+  #          writes through dcgmConfigSet. Use on clusters where the
+  #          operator's dcgm.enabled=true (i.e. nvidia-dcgm pod is
+  #          already running). DO NOT install this chart in actuator:
+  #          dcgm mode on a cluster without nvidia-dcgm — agent.init()
+  #          will fail fast at startup.
+  #
+  # Operator warning: any secondary writer to nvmlDeviceSetPowerManagementLimit
+  # or dcgmConfigSet (regardless of which library it uses) will cause
+  # the cap to flap. The chart's mutex applies to Power Agent itself, not
+  # to third-party scripts; an operator script that calls
+  # `nvidia-smi -pl` on a Power Agent-managed node will fight with us
+  # regardless of which actuator we run.
+  actuator: nvml
+
+  # DCGM connection settings. Consulted only when actuator: dcgm.
+  dcgm:
+    # Defaults match the upstream GPU Operator's nvidia-dcgm Service:
+    #   metadata.name = "nvidia-dcgm"
+    #   metadata.namespace = "gpu-operator"
+    # If your operator install uses non-default values (different
+    # release name or namespace), override here. The hostengine
+    # must be reachable from this DaemonSet's pods (same cluster,
+    # no NetworkPolicy blocking egress to gpu-operator/*).
+    host: nvidia-dcgm.gpu-operator.svc.cluster.local
+    port: 5555
+    # When true, call dcgmConfigEnforce after every dcgmConfigSet.
+    # Registers the cap as DCGM's "target configuration" so the
+    # hostengine re-applies it automatically after a GPU reset or
+    # reinit (DcgmConfigManager.h:113-117). This is the ONLY
+    # automatic re-enforcement DCGM provides — there is no
+    # tick-driven re-enforce loop in DCGM source. Specifically:
+    #   - The cap does NOT survive Power Agent restart on either
+    #     enforce setting (SIGTERM restores default regardless).
+    #   - External `nvidia-smi -pl` clobbering is repaired only on
+    #     the Power Agent's next 15-s reconcile, same as NVML.
+    # Default false (set-and-forget; matches NVML's semantics) so
+    # operators moving from NVML to DCGM see identical observable
+    # behaviour by default. Set true on sites that see frequent GPU
+    # resets (XID-driven recovery, partition rebuilds, manual
+    # `nvidia-smi --gpu-reset`). Cost: one extra DCGM RPC per agent
+    # reconcile per GPU.
+    enforce: false
 
 # NVIDIA container toolkit needs both runtimeClassName: nvidia AND
 # NVIDIA_VISIBLE_DEVICES=all to inject libnvidia-ml.so AND expose every GPU
@@ -124,15 +190,22 @@ daemonset:
   affinity: {}
 
 # In-cluster dev-iteration mode. Renders a single Pod (not a DaemonSet)
-# that mounts power_agent.py from a ConfigMap. The caller is responsible
-# for creating the ConfigMap separately BEFORE `helm install`:
+# that mounts power_agent.py, actuator.py AND managed_state.py from a
+# ConfigMap. The caller is responsible for creating the ConfigMap
+# separately BEFORE `helm install`; all three files are required because
+# power_agent.py does `from actuator import ...` and `import managed_state`
+# at module load (actuator.py since chart v1.1.0+, managed_state.py since
+# chart v1.3.0+):
 #
 #   kubectl create configmap dynamo-power-agent-script \
 #     --from-file=power_agent.py=deploy/power-agent/power_agent.py \
+#     --from-file=actuator.py=deploy/power-agent/actuator.py \
+#     --from-file=managed_state.py=deploy/power-agent/managed_state.py \
 #     -n $NAMESPACE
 #
 # Without this ConfigMap the dev pod will stay Pending with a
-# `MountVolume.SetUp failed for volume "script"` event.
+# `MountVolume.SetUp failed for volume "script"` event; an incomplete
+# ConfigMap will start the pod but ImportError immediately.
 #
 # Mutually exclusive with daemonset.enabled (chart fails to render if both
 # are true). dev.nodeName is required when dev.enabled=true.
@@ -143,12 +216,21 @@ dev:
   #   kubectl get pods -n $NAMESPACE -l nvidia.com/dynamo-component-type=worker \
   #     -o jsonpath='{.items[*].spec.nodeName}'
   nodeName: ""
-  # Name of an externally-created ConfigMap holding power_agent.py at
-  # key "power_agent.py". See top-of-section recipe.
+  # Name of an externally-created ConfigMap holding power_agent.py,
+  # actuator.py AND managed_state.py at the matching key names (all three
+  # are required; see top-of-section recipe).
   scriptConfigMap: dynamo-power-agent-script
   # The dev pod uses vllm-runtime (already cached on every GPU node by
   # the quickstart DGDs) which ships with pynvml; the agent pip-installs
   # kubernetes + prometheus-client at container start.
+  #
+  # NVML actuator only. For DCGM dev mode (agent.actuator=dcgm),
+  # override repository + tag to the production power-agent image,
+  # which vendors the required pydcgm bindings and libdcgm.so:
+  #   --set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent
+  #   --set dev.image.tag=v1.2.0
+  # Script-iteration via the ConfigMap mount still works against the
+  # power-agent image (the /scripts mount overrides /app at runtime).
   image:
     repository: nvcr.io/nvidia/ai-dynamo/vllm-runtime
     tag: "1.0.1"

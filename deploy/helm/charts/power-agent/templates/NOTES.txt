@@ -19,7 +19,8 @@ Check Prometheus metrics (port {{ .Values.agent.prometheusPort }} on each pod):
   - dynamo_power_agent_applied_limit_watts{gpu="N"}             # cap applied per GPU
   - dynamo_power_agent_multi_pod_gpu_total{disposition=...}      # multi-pod conflict counts
   - dynamo_power_agent_safe_default_applied_total                # safe-default fallbacks
-  - dynamo_power_agent_apply_failures_total                      # NVML apply failures
+  - dynamo_power_agent_apply_failures_total                      # apply failures (cap NOT live)
+  - dynamo_power_agent_dcgm_enforce_failures_total               # DCGM Enforce-only failures (cap IS live)
 
 RBAC scope: {{ if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}namespace-scoped (Role + RoleBinding in {{ .Release.Namespace }}){{ else }}cluster-wide (ClusterRole + ClusterRoleBinding){{ end }}.
 
@@ -35,12 +36,17 @@ DEV MODE: a single Pod (not a DaemonSet) was created, pinned to node "{{ .Values
 │                                                                            │
 │     kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
 │       --from-file=power_agent.py=deploy/power-agent/power_agent.py \
+│       --from-file=actuator.py=deploy/power-agent/actuator.py \
+│       --from-file=managed_state.py=deploy/power-agent/managed_state.py \
 │       -n {{ .Release.Namespace }}
 │                                                                            │
-│   Update flow (after editing power_agent.py locally):                      │
+│   Update flow (after editing power_agent.py, actuator.py, or              │
+│   managed_state.py locally):                                               │
 │                                                                            │
 │     kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
 │       --from-file=power_agent.py=deploy/power-agent/power_agent.py \
+│       --from-file=actuator.py=deploy/power-agent/actuator.py \
+│       --from-file=managed_state.py=deploy/power-agent/managed_state.py \
 │       -n {{ .Release.Namespace }} --dry-run=client -o yaml \
 │       | kubectl apply -f -                                                 │
 │     kubectl delete pod {{ include "power-agent.fullname" . }}-dev -n {{ .Release.Namespace }}

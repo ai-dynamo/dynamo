@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Template-time validation of agent.dcgm.enforce. Mirrors the contract
+# of validateActuator: catch boolean typos at `helm install` time so
+# the operator doesn't lose an image-pull + container-start round-trip
+# discovering the typo through argparse's exit-with-error path.
+#
+# Guards the validateEnforce helper added in chart v1.1.0 (v1.7
+# review comment #7). The allowlist mirrors
+# `power_agent._parse_bool_strict` so the chart and the CLI agree on
+# what's accepted; if the CLI's allowlist ever changes, this test
+# file should change in lockstep.
+#
+# Assertion style: `contains` against the rendered `command:` YAML
+# list (not `matchRegex`, which helm-unittest 1.1.0 only supports on
+# string paths — array paths error with "expect '<path>' to be a
+# string"). See validate_actuator_test.yaml for the same pattern.
+
+suite: agent.dcgm.enforce validation
+templates:
+  - templates/daemonset.yaml
+release:
+  name: power-agent
+  namespace: dynamo-system
+set:
+  image.tag: v1.0.0
+  # All enforce-validation tests need actuator=dcgm because the
+  # validator only fires on that path (enforce is dead config when
+  # actuator=nvml).
+  agent.actuator: dcgm
+
+tests:
+  # --- Happy paths: every value in _parse_bool_strict's allowlist must render ---
+
+  - it: should accept enforce=true
+    set:
+      agent.dcgm.enforce: true
+    asserts:
+      - notFailedTemplate: {}
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-enforce=true
+
+  - it: should accept enforce=false (default)
+    set:
+      agent.dcgm.enforce: false
+    asserts:
+      - notFailedTemplate: {}
+      - contains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-enforce=false
+
+  - it: should accept enforce=1 (string)
+    set:
+      agent.dcgm.enforce: "1"
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should accept enforce=0 (string)
+    set:
+      agent.dcgm.enforce: "0"
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should accept enforce=yes
+    set:
+      agent.dcgm.enforce: "yes"
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should accept enforce=no
+    set:
+      agent.dcgm.enforce: "no"
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should accept enforce=on
+    set:
+      agent.dcgm.enforce: "on"
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should accept enforce=off
+    set:
+      agent.dcgm.enforce: "off"
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should accept enforce=TRUE (uppercase normalized via lower)
+    set:
+      agent.dcgm.enforce: "TRUE"
+    asserts:
+      - notFailedTemplate: {}
+
+  # --- Validation failures: typos must surface at template time ---
+
+  - it: should reject enforce=treu (the canonical typo from review comment #7)
+    set:
+      agent.dcgm.enforce: "treu"
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.dcgm.enforce must be one of"
+      - failedTemplate:
+          errorPattern: '"treu"'
+
+  - it: should reject enforce=enabled (sounds-right typo)
+    set:
+      agent.dcgm.enforce: "enabled"
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.dcgm.enforce must be one of"
+
+  - it: should reject enforce=2 (out-of-allowlist number)
+    set:
+      agent.dcgm.enforce: "2"
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.dcgm.enforce must be one of"
+
+  - it: should reject empty enforce string
+    set:
+      agent.dcgm.enforce: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "agent.dcgm.enforce must be one of"
+
+  # --- Cross-validator interaction ---
+
+  - it: should NOT validate enforce when actuator=nvml (flag is dead config there)
+    set:
+      agent.actuator: nvml
+      agent.dcgm.enforce: "treu"  # would be a typo, but actuator=nvml never renders it
+    asserts:
+      - notFailedTemplate: {}
+      # No --dcgm-enforce flag of ANY allowlisted value should appear
+      # when actuator=nvml — confirm each known-renderable form is
+      # absent. (notContains is exact-match-against-list-element.)
+      - notContains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-enforce=treu
+      - notContains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-enforce=true
+      - notContains:
+          path: spec.template.spec.containers[0].command
+          content: --dcgm-enforce=false

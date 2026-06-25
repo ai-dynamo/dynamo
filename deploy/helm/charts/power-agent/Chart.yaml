@@ -3,20 +3,52 @@
 apiVersion: v2
 name: power-agent
 description: |
-  Per-node NVML power-cap enforcement DaemonSet for Dynamo. Watches worker
+  Per-node GPU power-cap enforcement DaemonSet for Dynamo. Watches worker
   pods for the dynamo.nvidia.com/gpu-power-limit annotation, parses
-  /proc/{pid}/cgroup to recover pod UIDs, and calls
-  nvmlDeviceSetPowerManagementLimit per physical GPU.
+  /proc/{pid}/cgroup to recover pod UIDs, and applies per-GPU power caps
+  via one of two mutually-exclusive actuators selected at chart-install
+  time:
+    - NVML actuator (default): nvmlDeviceSetPowerManagementLimit. Used on
+      clusters where the GPU Operator runs with dcgm.enabled=false.
+    - DCGM actuator (opt-in via agent.actuator=dcgm): dcgmConfigSet via
+      the operator-managed nvidia-dcgm hostengine. Used on clusters where
+      the operator set dcgm.enabled=true.
+  Hardware action is byte-equivalent across actuators; selection affects
+  the write path (single-writer routing, audit logging) and, with
+  agent.dcgm.enforce=true, registers the cap as DCGM's "target
+  configuration" so it is auto-reapplied after GPU reset/reinit.
 
   Replaces the previous raw DaemonSet, RBAC, and dev-pod manifests.
 type: application
-version: 1.0.0
-appVersion: "1.0.0"
+# 1.1.0: adds DCGM actuator (agent.actuator + agent.dcgm.*) on top of the
+# 1.0.0 NVML-only chart. Minor bump per SemVer — new opt-in functionality,
+# default behaviour byte-identical to 1.0.0.
+# 1.2.0: PR9682 follow-up hardening — adds `image.digest` field (renders
+# canonical `repo@sha256:<64hex>`), tightens validateImageTag to reject
+# digest values on the tag field, whitespace anywhere, and digests that
+# aren't exactly 64 hex chars. Default behaviour preserved when only
+# image.tag is set; image.digest is purely additive. Minor bump per SemVer
+# (new opt-in field, no breaking change to existing tag-pinned installs).
+# 1.3.0: PR9790 — the agent's managed-GPU state moves into a standalone
+# `managed_state.py` module (shared by power_agent.py and actuator.py so the
+# `python /app/power_agent.py` __main__/import split can't fork it). The image
+# COPY now includes it, and the dev-pod script ConfigMap MUST add a
+# `managed_state.py` key. Minor bump per SemVer (additive module; dev-pod
+# users must extend their ConfigMap, see templates/dev-pod.yaml header).
+version: 1.3.0
+# appVersion tracks the agent image's runtime code. It stayed 1.1.0 across
+# chart 1.2.0 because that bump was values-only (image.digest field, no image
+# code change). Chart 1.3.0 adds managed_state.py to the image COPY, so the
+# image's runtime code changes and appVersion advances to 1.2.0. Pin
+# image.tag=v1.2.0 (or the matching digest): a v1.1.0 image predates
+# managed_state.py and CrashLoops with ModuleNotFoundError under chart 1.3.0.
+appVersion: "1.2.0"
 keywords:
   - nvidia
   - dynamo
   - power
   - nvml
+  - dcgm
   - gpu
 home: https://github.com/ai-dynamo/dynamo
 sources:

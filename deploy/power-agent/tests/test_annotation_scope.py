@@ -30,10 +30,6 @@ def _pod(uid: str, annotations):
     )
 
 
-def _proc(pid: int):
-    return types.SimpleNamespace(pid=pid)
-
-
 def _make_agent(device_count: int = 1) -> PowerAgent:
     """Build a PowerAgent without touching NVML / K8s (bypass __init__)."""
     agent = object.__new__(PowerAgent)
@@ -80,40 +76,39 @@ class TestReconcileScope(unittest.TestCase):
 
     def test_unannotated_gpu_active_pod_is_left_untouched(self):
         """A GPU whose only live process belongs to an unannotated pod gets
-        NO NVML write — not even the safe default."""
+        NO cap write — not even the safe default. Reconcile is actuator-routed
+        (v1.6), so the assertion is on the actuator, not raw NVML."""
         agent = _make_agent(device_count=1)
+        actuator = MagicMock()
+        actuator.list_running_pids.return_value = [1234]
+        agent._actuator = actuator
         pods = [_pod("bystander", {"team.example.com/foo": "bar"})]
         uid_to_annotation = agent._build_uid_to_annotation(pods)
 
-        with patch("power_agent.pynvml") as mock_nvml, patch(
+        with patch(
             "power_agent._extract_pod_uid_from_cgroup", return_value="bystander"
-        ), patch("power_agent._apply_cap") as mock_apply:
-            mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle-0"
-            mock_nvml.nvmlDeviceGetComputeRunningProcesses.return_value = [_proc(1234)]
-
+        ):
             agent._reconcile_gpu(0, uid_to_annotation)
 
-        mock_apply.assert_not_called()
+        # Not opted-in and not previously managed → no cap, no release write.
+        actuator.apply_cap.assert_not_called()
+        actuator.restore_default.assert_not_called()
 
     def test_annotated_gpu_active_pod_is_capped(self):
-        """Happy path still works: an annotated pod's GPU is capped to its value."""
+        """Happy path still works: an annotated pod's GPU is capped to its
+        value through the active actuator."""
         agent = _make_agent(device_count=1)
+        actuator = MagicMock()
+        actuator.list_running_pids.return_value = [1234]
+        agent._actuator = actuator
         pods = [_pod("worker", {POWER_ANNOTATION_KEY: "480"})]
         uid_to_annotation = agent._build_uid_to_annotation(pods)
 
-        with patch("power_agent.pynvml") as mock_nvml, patch(
-            "power_agent._extract_pod_uid_from_cgroup", return_value="worker"
-        ), patch("power_agent._apply_cap") as mock_apply:
-            mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle-0"
-            mock_nvml.nvmlDeviceGetComputeRunningProcesses.return_value = [_proc(1234)]
-
+        with patch("power_agent._extract_pod_uid_from_cgroup", return_value="worker"):
             agent._reconcile_gpu(0, uid_to_annotation)
 
-        mock_apply.assert_called_once()
-        # _apply_cap(handle, gpu_idx, cap_w, metrics)
-        args = mock_apply.call_args.args
-        self.assertEqual(args[1], 0)
-        self.assertEqual(args[2], 480)
+        # Cap write flows through the actuator at the annotated value.
+        actuator.apply_cap.assert_called_once_with(0, 480)
 
 
 class TestReleaseOnReuse(unittest.TestCase):
@@ -128,39 +123,35 @@ class TestReleaseOnReuse(unittest.TestCase):
         power_agent._managed_gpu_indices.clear()
         power_agent._previously_managed.clear()
 
-    def _run_reconcile_with_unannotated_pod(self, current_mw, default_mw):
+    def _run_reconcile_with_unannotated_pod(self, current_w, default_w):
         agent = _make_agent(device_count=1)
+        actuator = MagicMock()
+        actuator.list_running_pids.return_value = [1234]
+        actuator.get_uuid.return_value = "GPU-A"
+        actuator.default_w.return_value = default_w
+        actuator.current_w.return_value = current_w
+        agent._actuator = actuator
         pods = [_pod("bystander", {"team.example.com/foo": "bar"})]
         uid_to_annotation = agent._build_uid_to_annotation(pods)
 
-        with patch("power_agent.pynvml") as mock_nvml, patch(
+        with patch(
             "power_agent._extract_pod_uid_from_cgroup", return_value="bystander"
-        ), patch("power_agent._apply_cap") as mock_apply, patch(
-            "power_agent._persist_managed_gpus"
-        ):
-            mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle-0"
-            mock_nvml.nvmlDeviceGetComputeRunningProcesses.return_value = [_proc(1234)]
-            mock_nvml.nvmlDeviceGetPowerManagementDefaultLimit.return_value = default_mw
-            mock_nvml.nvmlDeviceGetPowerManagementLimit.return_value = current_mw
-            mock_nvml.nvmlDeviceGetUUID.return_value = "GPU-A"
-
+        ), patch("power_agent._persist_managed_gpus"):
             agent._reconcile_gpu(0, uid_to_annotation)
 
-        return mock_nvml, mock_apply
+        return actuator
 
     def test_previously_managed_gpu_is_released_to_default(self):
         power_agent._managed_gpu_indices.add(0)
         power_agent._previously_managed.add("GPU-A")
 
-        mock_nvml, mock_apply = self._run_reconcile_with_unannotated_pod(
-            current_mw=400_000, default_mw=700_000
+        actuator = self._run_reconcile_with_unannotated_pod(
+            current_w=400, default_w=700
         )
 
-        # Restored to default, never re-capped, and unmanaged.
-        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
-            "handle-0", 700_000
-        )
-        mock_apply.assert_not_called()
+        # Restored to default via the actuator, never re-capped, and unmanaged.
+        actuator.restore_default.assert_called_once_with(0)
+        actuator.apply_cap.assert_not_called()
         self.assertNotIn(0, power_agent._managed_gpu_indices)
         self.assertNotIn("GPU-A", power_agent._previously_managed)
 
@@ -171,37 +162,174 @@ class TestReleaseOnReuse(unittest.TestCase):
         # No _managed_gpu_indices entry (cleared on restart); only persisted UUID.
         power_agent._previously_managed.add("GPU-A")
 
-        mock_nvml, mock_apply = self._run_reconcile_with_unannotated_pod(
-            current_mw=400_000, default_mw=700_000
+        actuator = self._run_reconcile_with_unannotated_pod(
+            current_w=400, default_w=700
         )
 
-        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
-            "handle-0", 700_000
-        )
-        mock_apply.assert_not_called()
+        actuator.restore_default.assert_called_once_with(0)
+        actuator.apply_cap.assert_not_called()
         self.assertNotIn("GPU-A", power_agent._previously_managed)
 
     def test_never_managed_gpu_is_not_touched(self):
         # Neither in _managed_gpu_indices nor _previously_managed → not ours.
-        mock_nvml, mock_apply = self._run_reconcile_with_unannotated_pod(
-            current_mw=400_000, default_mw=700_000
+        actuator = self._run_reconcile_with_unannotated_pod(
+            current_w=400, default_w=700
         )
 
-        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_not_called()
-        mock_apply.assert_not_called()
+        actuator.restore_default.assert_not_called()
+        actuator.apply_cap.assert_not_called()
 
     def test_release_unmanages_even_if_already_at_default(self):
         """If the cap was already cleared externally, still drop it from the
-        managed set (no redundant NVML write)."""
+        managed set (no redundant restore write)."""
         power_agent._managed_gpu_indices.add(0)
         power_agent._previously_managed.add("GPU-A")
 
-        mock_nvml, _ = self._run_reconcile_with_unannotated_pod(
-            current_mw=700_000, default_mw=700_000
+        actuator = self._run_reconcile_with_unannotated_pod(
+            current_w=700, default_w=700
         )
 
-        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_not_called()
+        actuator.restore_default.assert_not_called()
         self.assertNotIn(0, power_agent._managed_gpu_indices)
+
+
+class _FakeDcgmActuator:
+    """Actuator exposing the dcgm-only ``managed_uuid_for_idx`` helper.
+
+    The MagicMock-based cases above stay on the NVML-equivalent branch because
+    ``MagicMock``'s *type* has no ``managed_uuid_for_idx`` attribute, so they
+    cannot exercise re-enumeration-aware pruning or the ``restore_default`` ->
+    ``False`` skip. This fake makes both branches reachable.
+    """
+
+    name = "dcgm"
+
+    def __init__(
+        self,
+        *,
+        current_uuid,
+        managed_uuid,
+        current_w,
+        default_w,
+        restore_result=True,
+    ):
+        self._current_uuid = current_uuid
+        self._managed_uuid = managed_uuid
+        self._current_w = current_w
+        self._default_w = default_w
+        self._restore_result = restore_result
+        self.list_running_pids = MagicMock(return_value=[1234])
+        self.apply_cap = MagicMock()
+        self.restore_calls = []
+
+    def get_uuid(self, gpu_idx):
+        return self._current_uuid
+
+    def managed_uuid_for_idx(self, gpu_idx):
+        return self._managed_uuid
+
+    def default_w(self, gpu_idx):
+        return self._default_w
+
+    def current_w(self, gpu_idx):
+        return self._current_w
+
+    def restore_default(self, gpu_idx):
+        self.restore_calls.append(gpu_idx)
+        return self._restore_result
+
+
+class TestReleaseDcgmReenumeration(unittest.TestCase):
+    """dcgm-path release correctness: a hostengine re-enumeration must not let
+    ``_release_managed_gpu`` prune the wrong UUID or drop retry state when the
+    actuator could not conclusively restore the cap (PR #9790 review)."""
+
+    def setUp(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def tearDown(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def _run(self, actuator):
+        agent = _make_agent(device_count=1)
+        agent._actuator = actuator
+        pods = [_pod("bystander", {"team.example.com/foo": "bar"})]
+        uid_to_annotation = agent._build_uid_to_annotation(pods)
+        persist = MagicMock()
+        with patch(
+            "power_agent._extract_pod_uid_from_cgroup", return_value="bystander"
+        ), patch("power_agent._persist_managed_gpus", persist):
+            agent._reconcile_gpu(0, uid_to_annotation)
+        return persist
+
+    def test_relocation_prunes_managed_uuid_not_current_occupant(self):
+        """idx 0 now hosts GPU-B (re-enumerated), but we capped GPU-A. The
+        successful restore must prune GPU-A — pruning the current occupant
+        GPU-B would strand GPU-A's cap in managed_gpus.json."""
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("GPU-A")
+        actuator = _FakeDcgmActuator(
+            current_uuid="GPU-B",
+            managed_uuid="GPU-A",
+            current_w=400,
+            default_w=700,
+            restore_result=True,
+        )
+
+        persist = self._run(actuator)
+
+        self.assertEqual(actuator.restore_calls, [0])
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+        self.assertNotIn("GPU-A", power_agent._previously_managed)
+        persist.assert_called_once()
+
+    def test_relocation_restores_even_when_current_index_at_default(self):
+        """idx 0 now hosts GPU-B sitting at default, but we capped GPU-A which
+        re-enumeration moved elsewhere (still live). The current-occupant watts
+        read "already at default", yet we MUST still call restore_default (it
+        relocates by UUID to GPU-A) before pruning GPU-A — otherwise GPU-A's
+        cap is stranded permanently."""
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("GPU-A")
+        actuator = _FakeDcgmActuator(
+            current_uuid="GPU-B",
+            managed_uuid="GPU-A",
+            current_w=700,
+            default_w=700,
+            restore_result=True,
+        )
+
+        persist = self._run(actuator)
+
+        # Restore attempted despite the current index reading at-default, then
+        # GPU-A (the relocated managed GPU) pruned — not GPU-B.
+        self.assertEqual(actuator.restore_calls, [0])
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+        self.assertNotIn("GPU-A", power_agent._previously_managed)
+        persist.assert_called_once()
+
+    def test_restore_skipped_keeps_ownership_for_retry(self):
+        """``restore_default`` returning False means the cap is still live but
+        could not be located. State must be preserved (not pruned/persisted) so
+        a later reconcile or startup orphan recovery retries."""
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("GPU-A")
+        actuator = _FakeDcgmActuator(
+            current_uuid="GPU-A",
+            managed_uuid="GPU-A",
+            current_w=400,
+            default_w=700,
+            restore_result=False,
+        )
+
+        persist = self._run(actuator)
+
+        self.assertEqual(actuator.restore_calls, [0])
+        self.assertIn(0, power_agent._managed_gpu_indices)
+        self.assertIn("GPU-A", power_agent._previously_managed)
+        persist.assert_not_called()
 
 
 if __name__ == "__main__":
