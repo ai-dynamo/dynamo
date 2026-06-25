@@ -26,6 +26,9 @@ from dynamo._core import ModelCardInstanceId as ModelCardInstanceId
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
+from dynamo._core import (
+    MultimodalEmbeddingCachePublisher as MultimodalEmbeddingCachePublisher,
+)
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
@@ -45,7 +48,13 @@ from dynamo._core import run_select_service as run_select_service
 from dynamo._core import run_slot_tracker as run_slot_tracker
 from dynamo._core import unregister_model as unregister_model
 
+try:
+    from dynamo._core import SelectionService as SelectionService
+except ImportError:
+    pass
+
 from .exceptions import HttpError
+from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 
 
 class RoutedEngine(Protocol):

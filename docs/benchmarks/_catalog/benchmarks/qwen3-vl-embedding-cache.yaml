@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-vl-embedding-cache
+title: Qwen3-VL Embedding Cache A/B
+page: benchmarks/qwen3-vl-embedding-cache.mdx
+claim: Enabling the multimodal embedding cache on one GB200 vLLM replica gives +16.4% output TPS, -27.7% TTFT avg, -13.4%
+  request latency on 80%-image-reuse traffic
+subtype: ab-test
+features:
+- multimodal-embedding-cache
+model:
+  name: Qwen3-VL-30B-A3B-Instruct FP8
+  hf_id: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+hardware:
+  gpu: GB200
+  count: 1
+traffic: 1,000 single-turn multimodal reqs, 1 image each, 200-image pool (80% reuse), 400 text tokens, concurrency 64, forced
+  150-token output
+arms:
+- role: treatment
+  name: Embedding cache ON (DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10)
+  deploy: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml
+  perf: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml
+- role: baseline
+  name: Embedding cache OFF (same manifest, cache=0)
+  deploy: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml
+  perf: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml
+results:
+  available: true
+  summary: +16.4% TPS, -27.7% TTFT avg, -30.1% TTFT p50, -8.8% ITL, -13.4% req latency — verified against README
+related_recipes: []
+maintainer: null
+gaps:
+- both arms share one deploy.yaml (cache toggled by env var); baseline has no distinct manifest
+- maintainer unknown
+promotion_candidate:
+  deferred_recipe_id: qwen3-vl-30b
+  note: winning arm is a recipe-promotion candidate; held back in R1, see deferred_recipes in recipes.yaml

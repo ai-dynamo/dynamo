@@ -218,11 +218,6 @@ impl<'a> RoutingEligibility<'a> {
             worker_id: pinned_worker.worker_id,
         })
     }
-
-    #[inline]
-    pub(crate) fn bypasses_capacity_check(&self) -> bool {
-        self.pinned_worker.is_none() && self.allowed_worker_ids.is_some()
-    }
 }
 
 fn worker_config_for_rank<C: WorkerConfigLike>(

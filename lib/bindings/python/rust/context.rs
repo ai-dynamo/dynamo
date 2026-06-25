@@ -569,7 +569,11 @@ fn py_to_otel_value(v: &Bound<'_, PyAny>) -> PyResult<opentelemetry::Value> {
     } else if let Ok(f) = v.downcast::<PyFloat>() {
         Ok(Value::F64(f.extract::<f64>()?))
     } else if let Ok(s) = v.downcast::<PyString>() {
-        Ok(Value::String(s.to_str()?.to_string().into()))
+        // `to_cow` (not `to_str`) for abi3 compatibility: enabling the
+        // `aic-forward-pass` feature pulls in aiconfigurator-core, which sets
+        // pyo3 `abi3-py39`; under the <3.10 limited API `PyString::to_str` is
+        // compiled out, while `to_cow` is always available. Same conversion.
+        Ok(Value::String(s.to_cow()?.into_owned().into()))
     } else {
         Ok(Value::String(v.repr()?.extract::<String>()?.into()))
     }

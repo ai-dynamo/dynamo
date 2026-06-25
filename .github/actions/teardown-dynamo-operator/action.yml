@@ -1,5 +1,5 @@
 name: 'Teardown Dynamo Operator'
-description: 'Delete a vCluster and its host namespace'
+description: 'Delete a vCluster and its dynamic host namespace'
 
 inputs:
   kubeconfig_base64:
@@ -89,19 +89,28 @@ runs:
           --wait=true \
           --timeout=300s || true
 
-        vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" || true
-        echo "::endgroup::"
+        if ! vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1; then
+          echo "::warning::vcluster delete failed; deleting vCluster resources directly"
+          kubectl delete statefulset "${VCLUSTER_NAME}" \
+            -n "${NAMESPACE}" \
+            --ignore-not-found 2>&1 || true
+          kubectl delete pvc,secret,svc,configmap \
+            -n "${NAMESPACE}" \
+            -l "release=${VCLUSTER_NAME}" \
+            --ignore-not-found 2>&1 || true
+        fi
 
-    - name: Delete host namespace
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.vcluster_namespace }}
-      run: |
-        echo "::group::Delete namespace $NAMESPACE"
-        set -euo pipefail
+        kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
+          --for=delete --timeout=120s 2>/dev/null || true
 
-        if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
-          echo "Namespace ${NAMESPACE} is already deleted"
+        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::vCluster ${VCLUSTER_NAME} still exists in ${NAMESPACE} after cleanup"
+          kubectl get pods,statefulsets -n "${NAMESPACE}" -l app=vcluster -o wide || true
+          exit 1
+        fi
+
+        if [ "${NAMESPACE}" = "dynamo-deploy-test" ]; then
+          echo "Preserving shared namespace ${NAMESPACE}"
           echo "::endgroup::"
           exit 0
         fi

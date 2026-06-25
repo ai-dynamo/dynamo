@@ -15,6 +15,7 @@ pub(super) struct PrefillFpmItem {
     pub(super) prefix_tokens: usize,
 }
 
+#[derive(Default)]
 pub(super) struct AdmitResult {
     pub(super) can_run: Vec<SglangRequest>,
     pub(super) admissions: Vec<AdmissionEvent>,
@@ -65,15 +66,12 @@ pub(super) fn get_new_batch_prefill(
     let mut total_isl = 0usize;
     let mut total_prefix = 0usize;
 
-    while let Some(mut req) = waiting.pop_front() {
+    let available_running_slots = config.max_running_requests.saturating_sub(running.len());
+    while can_run.len() < available_running_slots
+        && let Some(mut req) = waiting.pop_front()
+    {
         let extend_input = req.extend_input_len();
         if extend_input == 0 {
-            rejected.push_back(req);
-            break;
-        }
-
-        let total_needed = req.total_tokens_needed(config.clip_max_new_tokens) as f64;
-        if total_needed >= rem_total_tokens {
             rejected.push_back(req);
             break;
         }
@@ -90,6 +88,16 @@ pub(super) fn get_new_batch_prefill(
         };
 
         let charged_input_tokens = ceil_to_block(chunk_tokens, config.block_size) as f64;
+        let output_reserve = if chunk_tokens < extend_input {
+            0
+        } else {
+            req.remaining_output_tokens()
+                .min(config.clip_max_new_tokens)
+        };
+        if charged_input_tokens + output_reserve as f64 >= rem_total_tokens {
+            rejected.push_back(req);
+            break;
+        }
         if charged_input_tokens > rem_input_tokens || charged_input_tokens > rem_chunk_tokens {
             rejected.push_back(req);
             break;
@@ -138,14 +146,6 @@ pub(super) fn get_new_batch_prefill(
         req.materialized_tokens = chunk_end;
         req.allocated_tokens = ceil_to_block(chunk_end, config.block_size);
         req.debug_assert_invariants(config.block_size);
-
-        let is_truncated = chunk_end < req.current_sequence_len();
-        let output_reserve = if is_truncated {
-            0
-        } else {
-            req.remaining_output_tokens()
-                .min(config.clip_max_new_tokens)
-        };
 
         admissions.push(AdmissionEvent {
             uuid: req.uuid,

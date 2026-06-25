@@ -29,9 +29,9 @@ pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, PrefillResult, PreprocessedRequest,
 };
 pub use dynamo_llm::protocols::common::{
-    FinishReason, OutputOptions, SamplingOptions, StopConditions,
+    FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
 };
-pub use dynamo_protocols::types::CompletionUsage;
+pub use dynamo_protocols::types::{CompletionUsage, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
@@ -241,19 +241,20 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// scheduler to cancel compute early).
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Drain in-flight engine work before shutdown (optional, default no-op).
+    /// Whether in-flight KV transfers are done, so `cleanup` may release GPU
+    /// memory. The `Worker` polls this on prefill workers between the grace
+    /// period and [`cleanup`](LLMEngine::cleanup):
     ///
-    /// Called once during graceful shutdown after the discovery unregister
-    /// + grace-period sleep, but before [`cleanup`](LLMEngine::cleanup).
-    /// Use it for backend-side draining that must complete while the
-    /// distributed runtime (NATS / etcd) is still alive — e.g. waiting for
-    /// in-flight NIXL KV transfers on prefill workers (issue #7319), so
-    /// downstream decode workers don't observe a use-after-free on freed
-    /// GPU memory.
+    /// - `Ok(Some(true))`  — quiescent; exit the drain loop now.
+    /// - `Ok(Some(false))` — busy; poll again next tick.
+    /// - `Ok(None)`        — no introspection (default); poll until the drain
+    ///   budget expires, then cleanup. Never frees KV early.
+    /// - `Err(_)`          — logged and treated as `Ok(None)`.
     ///
-    /// Failures are logged and swallowed; shutdown proceeds regardless.
-    async fn drain(&self) -> Result<(), DynamoError> {
-        Ok(())
+    /// Aggregated/decode workers are never polled. Override only if the engine
+    /// can observe transfer completion (e.g. a connector or scheduler).
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
     }
 
     /// Release all engine resources. Called exactly once.
@@ -343,6 +344,45 @@ pub trait LLMEngine: Send + Sync + 'static {
             "message": format!("unsupported engine control: {control}"),
         }))
     }
+
+    /// Semantic engine updates this engine supports. Empty by default.
+    ///
+    /// Updates are a sibling surface to [`supported_controls`](LLMEngine::supported_controls)
+    /// for operations that mutate engine-managed assets (e.g. vLLM dynamic
+    /// LoRA load/unload/list) rather than the engine's serving lifecycle.
+    /// Keeping them separate avoids inflating the control surface. Engines
+    /// advertise update keys and implement them via [`LLMEngine::engine_update`];
+    /// the unified backend maps each key onto an `/engine/update/{key}` route.
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Handle one semantic engine-update request.
+    async fn engine_update(
+        &self,
+        update: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine update: {update}"),
+        }))
+    }
+
+    /// Hand the engine its runtime serving [`Endpoint`](dynamo_runtime::component::Endpoint),
+    /// exactly once, after it exists and before serving begins. Default no-op.
+    ///
+    /// Engines that publish their own discovery records (e.g. vLLM dynamic
+    /// LoRA via `register_model`) stash it here for later use from
+    /// [`engine_update`](LLMEngine::engine_update). Mirrors the
+    /// [`on_publisher_ready`](MetricsBindings::on_publisher_ready) handoff idiom.
+    /// Errors abort startup; `cleanup` runs on the partial state.
+    async fn on_endpoint_ready(
+        &self,
+        _endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
 }
 
 /// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].
@@ -383,10 +423,10 @@ pub trait RawEngine: Send + Sync + 'static {
     /// [`LLMEngine::abort`].
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Drain in-flight work before shutdown (optional, default no-op). See
-    /// [`LLMEngine::drain`].
-    async fn drain(&self) -> Result<(), DynamoError> {
-        Ok(())
+    /// See [`LLMEngine::is_quiescent`]. Raw engines are aggregated, so the
+    /// `Worker` never polls this; the default suffices.
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
     }
 
     /// Release all engine resources. Called exactly once; must be null-safe

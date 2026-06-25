@@ -21,6 +21,8 @@ resources:
 - bases/nvidia.com_dynamographdeployments.yaml
 - bases/nvidia.com_dynamomodels.yaml
 - bases/nvidia.com_dynamocheckpoints.yaml
+- bases/nvidia.com_podsnapshots.yaml
+- bases/nvidia.com_podsnapshotcontents.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
 
 patches: []

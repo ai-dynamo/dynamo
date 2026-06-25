@@ -4,6 +4,10 @@
 use axum::http::StatusCode;
 use thiserror::Error;
 
+pub(crate) fn overload_status_code() -> StatusCode {
+    StatusCode::from_u16(529).expect("529 is a valid HTTP status code")
+}
+
 /// Implementation of the Completion Engines served by the HTTP service should
 /// map their custom errors to to this error type if they wish to return error
 /// codes besides 500.
@@ -26,8 +30,10 @@ pub struct HttpError {
 pub enum SanitizedError {
     /// 499 Client Closed Request.
     Cancelled,
-    /// 503 Service Unavailable.
+    /// 529 Site Is Overloaded.
     Overloaded,
+    /// 503 Service Unavailable.
+    Unavailable,
     /// 500 Internal Server Error.
     Internal,
     /// Preserve a backend-reported 5xx status code while replacing the
@@ -67,7 +73,8 @@ impl SanitizedError {
         match self {
             // 499 is not IANA-registered but is widely used (nginx).
             SanitizedError::Cancelled => StatusCode::from_u16(499).unwrap(),
-            SanitizedError::Overloaded => StatusCode::SERVICE_UNAVAILABLE,
+            SanitizedError::Overloaded => overload_status_code(),
+            SanitizedError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             SanitizedError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             SanitizedError::PreserveServerError(code) => {
                 debug_assert!(
@@ -87,6 +94,7 @@ impl SanitizedError {
         match self {
             SanitizedError::Cancelled => "request_cancelled",
             SanitizedError::Overloaded => "overloaded_error",
+            SanitizedError::Unavailable => "overloaded_error",
             SanitizedError::Internal => "api_error",
             SanitizedError::PreserveServerError(status) => match status.as_u16() {
                 503 | 529 => "overloaded_error",
@@ -100,6 +108,7 @@ impl SanitizedError {
         match self {
             SanitizedError::Cancelled => "request_cancelled",
             SanitizedError::Overloaded => "service_unavailable",
+            SanitizedError::Unavailable => "service_unavailable",
             SanitizedError::Internal => "internal_server_error",
             SanitizedError::PreserveServerError(status) => match status.as_u16() {
                 503 | 529 => "service_unavailable",
@@ -121,6 +130,7 @@ impl std::fmt::Display for SanitizedError {
         match self {
             SanitizedError::Cancelled => f.write_str("Request cancelled"),
             SanitizedError::Overloaded => f.write_str("Service temporarily overloaded"),
+            SanitizedError::Unavailable => f.write_str("Service temporarily unavailable"),
             SanitizedError::Internal | SanitizedError::PreserveServerError(_) => {
                 f.write_str("Internal server error")
             }
@@ -131,6 +141,15 @@ impl std::fmt::Display for SanitizedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_statuses_distinguish_overload_from_unavailable() {
+        assert_eq!(SanitizedError::Overloaded.status().as_u16(), 529);
+        assert_eq!(
+            SanitizedError::Unavailable.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 
     #[test]
     fn preserve_server_error_503_maps_to_overload_types() {

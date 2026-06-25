@@ -33,6 +33,13 @@ impl RoutingOccupancyState {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        instance_ids
+            .iter()
+            .min_by_key(|&&id| self.load(id))
+            .copied()
+    }
+
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
 
@@ -61,6 +68,35 @@ impl RoutingOccupancyState {
         let id = selected?;
         self.increment(id);
         Some(id)
+    }
+
+    /// Least-loaded selection without the increment. Same tie-break policy as
+    /// [`Self::select_exact_min_and_increment`] so peek and select share a
+    /// distribution.
+    pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform; matches select_exact_min_and_increment.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        selected
     }
 
     pub(crate) fn decrement(&self, instance_id: u64) {

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler Examples
+subtitle: Complete DGDR profiling examples for dense and MoE models across rapid and thorough search strategies.
 ---
 
 Complete examples for profiling with DGDRs.
@@ -189,14 +190,14 @@ Profile SGLang workers at runtime via HTTP endpoints:
 
 ```bash
 # Start profiling
-curl -X POST http://localhost:9090/engine/start_profile \
+curl -X POST http://localhost:9090/engine/control/start_profile \
   -H "Content-Type: application/json" \
   -d '{"output_dir": "/tmp/profiler_output"}'
 
 # Run inference requests to generate profiling data...
 
 # Stop profiling
-curl -X POST http://localhost:9090/engine/stop_profile
+curl -X POST http://localhost:9090/engine/control/stop_profile
 ```
 
 A test script is provided at `examples/backends/sglang/test_sglang_profile.py`:
