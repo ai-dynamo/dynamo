@@ -146,7 +146,6 @@ impl<'a> OverlapAnalysis<'a> {
         }
     }
 
-    #[expect(clippy::too_many_arguments)]
     pub fn scores_response(
         &self,
         config_override: Option<&RouterConfigOverride>,
