@@ -215,18 +215,6 @@ pub struct ChoiceFinishReasonMetadata {
 pub struct RequestTraceToolEvent {
     pub tool_call_id: String,
     pub tool_class: String,
-    /// Request that emitted the tool call.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_request_id: Option<String>,
-    /// Later request that consumed the terminal result.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub consumer_request_id: Option<String>,
-    /// Child agent session launched by this tool, when applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub child_session_id: Option<String>,
-    /// Scheduling mode, currently `blocking` or `background`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at_unix_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

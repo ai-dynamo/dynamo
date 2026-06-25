@@ -61,16 +61,26 @@ pub(crate) struct RequestTraceReplayMetrics {
     pub(crate) input_sequence_hashes: Vec<u64>,
 }
 
+/// Tool fields used only to reconstruct an offline replay DAG.
+///
+/// Historical exporters may know the exact launch, child, completion consumer,
+/// and blocking mode even when timestamps overlap. These optional JSON fields
+/// preserve that evidence without extending the live `RequestTraceToolEvent`
+/// Rust API. When absent, agentic lowering retains its timestamp-based fallback.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RequestTraceToolEventMetrics {
     pub(crate) tool_call_id: String,
     pub(crate) tool_class: String,
+    /// Request that emitted the tool call.
     #[serde(default)]
     pub(crate) source_request_id: Option<String>,
+    /// Later request that consumed the terminal result.
     #[serde(default)]
     pub(crate) consumer_request_id: Option<String>,
+    /// Child agent session launched by the tool, when present in the export.
     #[serde(default)]
     pub(crate) child_session_id: Option<String>,
+    /// Whether parent execution blocked or continued in the background.
     #[serde(default)]
     pub(crate) execution_mode: Option<String>,
     #[serde(default)]

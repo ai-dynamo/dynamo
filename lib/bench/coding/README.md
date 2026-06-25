@@ -95,3 +95,4 @@ The exporter:
 - Rows are written incrementally as turns are merged across sessions.
 - Every export runs a source-to-output fidelity verifier. Request cardinality/order/timing, usage, tool classes/errors, child links, cached-prefix hashes, and forward causal references fail the export on mismatch.
 - The verifier always prints non-fatal source limitations: synthetic KV hashes, unmatched tools, missing background completions, unresolved child sessions, and `ai-title` rows that lack enough timing/usage data to replay as requests.
+- Tool causal fields are optional offline replay extensions, not requirements for live request-trace producers. Data-gen uses exact source/consumer/child/mode evidence when present and retains timestamp-based inference for existing traces.
